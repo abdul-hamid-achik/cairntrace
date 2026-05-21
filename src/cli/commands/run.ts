@@ -1,3 +1,4 @@
+import { isAbsolute as isAbsolutePath } from "node:path";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
@@ -83,7 +84,7 @@ async function runSingle(
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     }
   } catch (e) {
-    handleParseError(e as Error, format);
+    handleParseError(e as Error, format, specPath);
   } finally {
     await backend.close().catch(() => undefined);
   }
@@ -221,30 +222,38 @@ function colorEnabled(opts: RunCommandOptions): boolean {
   );
 }
 
-function handleParseError(err: Error, format: string): void {
-  if (format === "json") {
-    process.stdout.write(
-      JSON.stringify({
-        $schema: "https://cairntrace.dev/schemas/run.v1.json",
-        version: "1",
-        status: "errored",
-        error: { name: err.name, message: err.message },
-        exitCode: 2,
-      }),
-    );
+function handleParseError(err: Error, format: string, specPath: string): void {
+  // Errored runs go through the same synthesizeErroredResult path as
+  // mid-run failures so consumers see a schema-valid RunResult either way.
+  const result = synthesizeErroredResult(specPath, err);
+  if (format === "json" || format === "yaml") {
+    process.stdout.write(emit(format, result, renderRunMarkdown));
   } else {
     process.stderr.write(`cairn run: ${err.message}\n`);
   }
 }
 
-function synthesizeErroredResult(specPath: string, _err: Error): RunResult {
+export function synthesizeErroredResult(
+  specPath: string,
+  err: Error,
+): RunResult {
   const now = new Date().toISOString();
+  const runId = `errored_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const absoluteSpecPath = isAbsolutePath(specPath)
+    ? specPath
+    : `${process.cwd()}/${specPath}`;
   return {
     $schema: "https://cairntrace.dev/schemas/run.v1.json",
     version: "1",
-    runId: `errored_${Date.now()}`,
-    runDir: specPath,
-    spec: { name: specPath.split("/").pop() ?? specPath, path: specPath },
+    runId,
+    // runDir is the absolute anchor for all relative artifact paths in
+    // RunResult; use a synthetic dir under the artifact root so consumers
+    // joining paths don't crash. The dir itself is never written.
+    runDir: `${process.cwd()}/.cairntrace/errored/${runId}`,
+    spec: {
+      name: specPath.split("/").pop()?.replace(/\.ya?ml$/, "") ?? "errored",
+      path: absoluteSpecPath,
+    },
     environment: "local",
     backend: "agent-browser",
     coldStart: false,
@@ -253,7 +262,14 @@ function synthesizeErroredResult(specPath: string, _err: Error): RunResult {
     endedAt: now,
     durationMs: 0,
     outcomes: [],
-    steps: [],
+    steps: [
+      {
+        id: "parse",
+        status: "failed",
+        durationMs: 0,
+        error: err.message,
+      },
+    ],
     artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
     exitCode: 2,
   };
