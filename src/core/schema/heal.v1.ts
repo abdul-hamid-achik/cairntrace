@@ -73,8 +73,17 @@ export const HealResultSchema = z
     basedOnRunId: z.string().min(1),
     status: HealStatusSchema,
     /**
-     * If false, the failure is a real behavior regression, not UI drift.
-     * Heal will not produce a patch; exit code is 5 and the agent must escalate.
+     * Heuristic flag — heal does NOT re-run the spec to verify.
+     *
+     * - `true`: the snapshot supported at least one candidate fix (e.g. a
+     *    role+name match for a renamed locator), so heal believes this looks
+     *    like UI drift rather than a behavior regression. Treat as a hint, not
+     *    a guarantee — the proposed patch may still fail to make outcomes pass.
+     * - `false`: no candidate found, snapshot missing, or step index doesn't
+     *    map back to a known file. Exit code 5; the agent should escalate
+     *    rather than blindly applying anything.
+     *
+     * v1.x may add a `verified: boolean` field for the post-`--apply` re-run case.
      */
     outcomesStillReachable: z.boolean(),
     patch: PatchSchema.optional(),
