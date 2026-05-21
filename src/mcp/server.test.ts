@@ -48,7 +48,7 @@ describe("Cairntrace MCP server", () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_explain", arguments: {} });
     expect(r.structuredContent).toMatchObject({
-      $schema: "https://cairntrace.dev/schemas/explain.v1.json",
+      $schema: "urn:cairntrace.dev:explain:v1",
       version: "1",
       cairntrace: { version: expect.any(String) },
       commands: expect.any(Array),
@@ -90,7 +90,7 @@ steps:
     });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({
-      $schema: "https://cairntrace.dev/schemas/run.v1.json",
+      $schema: "urn:cairntrace.dev:run:v1",
       status: "passed",
       backend: "mock",
     });

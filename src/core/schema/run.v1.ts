@@ -67,8 +67,8 @@ export type RunSpecRef = z.infer<typeof RunSpecRefSchema>;
 export const RunResultSchema = z
   .object({
     $schema: z
-      .literal("https://cairntrace.dev/schemas/run.v1.json")
-      .default("https://cairntrace.dev/schemas/run.v1.json"),
+      .literal("urn:cairntrace.dev:run:v1")
+      .default("urn:cairntrace.dev:run:v1"),
     version: z.literal("1"),
     runId: z.string().min(1),
     runDir: AbsolutePathSchema,

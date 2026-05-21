@@ -175,7 +175,7 @@ async function runBatch(
     summary.failed > 0 ? 1 : summary.errored > 0 ? 2 : 0;
 
   const batch: BatchRunResult = {
-    $schema: "https://cairntrace.dev/schemas/run-batch.v1.json",
+    $schema: "urn:cairntrace.dev:run-batch:v1",
     version: "1",
     parallel,
     totalDurationMs,
@@ -233,7 +233,7 @@ export function synthesizeErroredResult(
     ? specPath
     : `${process.cwd()}/${specPath}`;
   return {
-    $schema: "https://cairntrace.dev/schemas/run.v1.json",
+    $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
     runId,
     // runDir is the absolute anchor for all relative artifact paths in

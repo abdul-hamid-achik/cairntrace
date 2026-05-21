@@ -104,7 +104,7 @@ export async function diffRuns(
   const newFailures = failuresB.filter((f) => !failureKeysA.has(keyOf(f)));
 
   return {
-    $schema: "https://cairntrace.dev/schemas/diff.v1.json",
+    $schema: "urn:cairntrace.dev:diff:v1",
     version: "1",
     a: {
       id: a.run.runId,

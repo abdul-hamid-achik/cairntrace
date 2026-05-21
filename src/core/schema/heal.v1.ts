@@ -66,8 +66,8 @@ export type HealSpecRef = z.infer<typeof HealSpecRefSchema>;
 export const HealResultSchema = z
   .object({
     $schema: z
-      .literal("https://cairntrace.dev/schemas/heal.v1.json")
-      .default("https://cairntrace.dev/schemas/heal.v1.json"),
+      .literal("urn:cairntrace.dev:heal:v1")
+      .default("urn:cairntrace.dev:heal:v1"),
     version: z.literal("1"),
     spec: HealSpecRefSchema,
     basedOnRunId: z.string().min(1),

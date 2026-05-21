@@ -25,7 +25,7 @@ export async function explainCommand(opts: ExplainOptions): Promise<void> {
  */
 export function buildExplain(): ExplainResult {
   return {
-    $schema: "https://cairntrace.dev/schemas/explain.v1.json",
+    $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
     cairntrace: { version: "0.10.0", binary: "/usr/local/bin/cairn" },
     commands: [
@@ -73,7 +73,7 @@ export function buildExplain(): ExplainResult {
           "3": "cold-start gate not satisfied",
           "6": "contract hash mismatch",
         },
-        outputSchema: "https://cairntrace.dev/schemas/run.v1.json",
+        outputSchema: "urn:cairntrace.dev:run:v1",
       },
       {
         name: "doctor",
@@ -107,7 +107,7 @@ export function buildExplain(): ExplainResult {
           },
         ],
         exitCodes: { "0": "success" },
-        outputSchema: "https://cairntrace.dev/schemas/explain.v1.json",
+        outputSchema: "urn:cairntrace.dev:explain:v1",
       },
       {
         name: "context",

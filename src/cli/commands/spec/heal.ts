@@ -52,7 +52,7 @@ export async function healCommand(
     if (format === "json") {
       process.stdout.write(
         JSON.stringify({
-          $schema: "https://cairntrace.dev/schemas/heal.v1.json",
+          $schema: "urn:cairntrace.dev:heal:v1",
           version: "1",
           status: "no-heal-possible",
           error: { name: err.name, message: err.message },
@@ -75,7 +75,7 @@ function toHealResult(o: HealOutput): HealResult {
       ? { format: "json-pointer-ops" as const, ops: o.ops }
       : undefined;
   return {
-    $schema: "https://cairntrace.dev/schemas/heal.v1.json",
+    $schema: "urn:cairntrace.dev:heal:v1",
     version: "1",
     spec: { path: o.specPath },
     basedOnRunId: o.basedOnRunId,

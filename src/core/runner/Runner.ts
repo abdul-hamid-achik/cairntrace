@@ -399,7 +399,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   };
 
   const result: RunResult = {
-    $schema: "https://cairntrace.dev/schemas/run.v1.json",
+    $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
     runId,
     runDir,

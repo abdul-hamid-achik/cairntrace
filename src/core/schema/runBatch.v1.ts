@@ -22,8 +22,8 @@ export type BatchSummary = z.infer<typeof BatchSummarySchema>;
 export const BatchRunResultSchema = z
   .object({
     $schema: z
-      .literal("https://cairntrace.dev/schemas/run-batch.v1.json")
-      .default("https://cairntrace.dev/schemas/run-batch.v1.json"),
+      .literal("urn:cairntrace.dev:run-batch:v1")
+      .default("urn:cairntrace.dev:run-batch:v1"),
     version: z.literal("1"),
     /** Worker concurrency the runner used; 1 means serial. */
     parallel: z.number().int().positive(),

@@ -104,8 +104,8 @@ export type ConfigDoc = z.infer<typeof ConfigDocSchema>;
 export const ExplainResultSchema = z
   .object({
     $schema: z
-      .literal("https://cairntrace.dev/schemas/explain.v1.json")
-      .default("https://cairntrace.dev/schemas/explain.v1.json"),
+      .literal("urn:cairntrace.dev:explain:v1")
+      .default("urn:cairntrace.dev:explain:v1"),
     version: z.literal("1"),
     cairntrace: z
       .object({

@@ -70,8 +70,8 @@ export type NetworkFailureEntry = z.infer<typeof NetworkFailureEntrySchema>;
 export const RunDiffSchema = z
   .object({
     $schema: z
-      .literal("https://cairntrace.dev/schemas/diff.v1.json")
-      .default("https://cairntrace.dev/schemas/diff.v1.json"),
+      .literal("urn:cairntrace.dev:diff:v1")
+      .default("urn:cairntrace.dev:diff:v1"),
     version: z.literal("1"),
     a: RunDiffRefSchema,
     b: RunDiffRefSchema,
