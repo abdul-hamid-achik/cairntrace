@@ -318,6 +318,73 @@ export function buildMcpServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "cairn_checkpoint_show",
+    {
+      title: "Inspect a saved checkpoint",
+      description:
+        "Return the metadata + first 400 bytes of a named checkpoint file.",
+      inputSchema: {
+        name: z
+          .string()
+          .regex(/^[a-z][a-z0-9-_]*$/i)
+          .describe("checkpoint name (letters, digits, hyphen, underscore)"),
+      },
+    },
+    async ({ name }) => {
+      const store = new CheckpointStore();
+      const summary = await store.show(name);
+      if (!summary) {
+        return {
+          content: [{ type: "text", text: `no checkpoint named "${name}"` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `${summary.name} — ${(summary.sizeBytes / 1024).toFixed(1)} KB — ${summary.modifiedAt.toISOString()}\n` +
+              `${summary.path}\n\n${summary.preview}`,
+          },
+        ],
+        structuredContent: {
+          name: summary.name,
+          path: summary.path,
+          sizeBytes: summary.sizeBytes,
+          modifiedAt: summary.modifiedAt.toISOString(),
+          preview: summary.preview,
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_checkpoint_delete",
+    {
+      title: "Delete a saved checkpoint",
+      description: "Remove a checkpoint by name from ~/.cairntrace/checkpoints/.",
+      inputSchema: {
+        name: z
+          .string()
+          .regex(/^[a-z][a-z0-9-_]*$/i)
+          .describe("checkpoint name"),
+      },
+    },
+    async ({ name }) => {
+      const store = new CheckpointStore();
+      const ok = await store.delete(name);
+      return {
+        content: [
+          { type: "text", text: ok ? `deleted ${name}` : `no checkpoint named "${name}"` },
+        ],
+        structuredContent: { name, deleted: ok },
+        isError: !ok,
+      };
+    },
+  );
+
   return server;
 }
 

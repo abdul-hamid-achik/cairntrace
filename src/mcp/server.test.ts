@@ -30,7 +30,9 @@ describe("Cairntrace MCP server", () => {
     const list = await c.listTools();
     const names = list.tools.map((t) => t.name).toSorted();
     expect(names).toEqual([
+      "cairn_checkpoint_delete",
       "cairn_checkpoint_list",
+      "cairn_checkpoint_show",
       "cairn_context",
       "cairn_doctor",
       "cairn_explain",
