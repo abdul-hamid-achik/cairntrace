@@ -7,6 +7,7 @@ import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
+import { buildExplain } from "../cli/commands/explain";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { computeContractHash } from "../core/contractHash";
 import { healSpec } from "../core/healer/Healer";
@@ -33,52 +34,27 @@ export function buildMcpServer(): McpServer {
     {
       title: "Explain Cairntrace surface",
       description:
-        "Returns the agent-facing surface: command list and verifier vocabulary. " +
-        "Call this once at session start to bootstrap your understanding of the tool set.",
+        "Returns the agent-facing surface: full command list with flags and " +
+        "exit codes, verifier vocabulary with parameters, rules, and config. " +
+        "Call this once at session start. Output matches the v1 ExplainResult " +
+        "schema (same as `cairn explain --json`).",
       inputSchema: {},
     },
     async () => {
-      const doc = {
-        cairntrace: { version: VERSION },
-        tools: [
-          "cairn_explain",
-          "cairn_doctor",
-          "cairn_run",
-          "cairn_context",
-          "cairn_spec_scaffold",
-          "cairn_spec_verify",
-          "cairn_spec_heal",
-          "cairn_checkpoint_list",
-        ],
-        verifiers: [
-          "text",
-          "notText",
-          "url",
-          "network",
-          "noFailedRequests",
-          "console",
-          "count",
-          "script",
-        ],
-        rules: {
-          contractImmutability:
-            "intent + outcomes are stamped via contractHash; spec heal won't change them",
-          coldStart:
-            "specs must replay from clean browser; --coldStart wipes cookies + storage",
-          evidenceBudget: { maxLines: 80, maxListItems: 20 },
-        },
-      };
+      // Use the same canonical doc the CLI emits so MCP and shell agents
+      // bootstrap with identical surface info.
+      const doc = buildExplain();
       return {
         content: [
           {
             type: "text",
             text:
-              `Cairntrace ${VERSION}\n` +
-              `Tools: ${doc.tools.join(", ")}\n` +
-              `Verifiers: ${doc.verifiers.join(", ")}`,
+              `Cairntrace ${doc.cairntrace.version}\n` +
+              `Commands: ${doc.commands.map((c) => c.name).join(", ")}\n` +
+              `Verifiers: ${doc.verifiers.map((v) => v.id).join(", ")}`,
           },
         ],
-        structuredContent: doc,
+        structuredContent: doc as unknown as Record<string, unknown>,
       };
     },
   );

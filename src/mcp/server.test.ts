@@ -42,17 +42,24 @@ describe("Cairntrace MCP server", () => {
     await c.close();
   });
 
-  it("cairn_explain returns structured surface data", async () => {
+  it("cairn_explain returns the v1 ExplainResult shape (parity with `cairn explain --json`)", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_explain", arguments: {} });
     expect(r.structuredContent).toMatchObject({
+      $schema: "https://cairntrace.dev/schemas/explain.v1.json",
+      version: "1",
       cairntrace: { version: expect.any(String) },
-      tools: expect.any(Array),
+      commands: expect.any(Array),
       verifiers: expect.any(Array),
+      rules: expect.any(Object),
+      config: expect.any(Object),
     });
-    expect(
-      (r.structuredContent as { verifiers: string[] }).verifiers,
-    ).toContain("text");
+    const verifiers = (
+      r.structuredContent as { verifiers: Array<{ id: string }> }
+    ).verifiers;
+    const ids = verifiers.map((v) => v.id);
+    expect(ids).toContain("text");
+    expect(ids).toContain("script");
     await c.close();
   });
 

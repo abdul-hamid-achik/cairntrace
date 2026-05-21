@@ -13,15 +13,21 @@ export interface ExplainOptions {
 export async function explainCommand(opts: ExplainOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
   const doc = buildExplain();
-  process.stdout.write(emit(format, doc, toMarkdown));
+  process.stdout.write(emit(format, doc, explainToMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 }
 
-function buildExplain(): ExplainResult {
+/**
+ * Build the canonical ExplainResult. Exported so the MCP server's
+ * `cairn_explain` tool returns the exact same structuredContent as
+ * `cairn explain --json` — agents bootstrapping via MCP get the same surface
+ * as agents shelling out, no schema drift.
+ */
+export function buildExplain(): ExplainResult {
   return {
     $schema: "https://cairntrace.dev/schemas/explain.v1.json",
     version: "1",
-    cairntrace: { version: "0.0.1", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "0.10.0", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
@@ -346,7 +352,8 @@ function buildExplain(): ExplainResult {
   };
 }
 
-function toMarkdown(e: ExplainResult): string {
+/** Markdown renderer for the explain doc. Exported for MCP reuse. */
+export function explainToMarkdown(e: ExplainResult): string {
   const lines: string[] = [
     `# Cairntrace ${e.cairntrace.version}`,
     "",
