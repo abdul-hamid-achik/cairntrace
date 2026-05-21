@@ -124,8 +124,16 @@ async function runBatch(
     );
   }
 
+  // Each worker gets its own session id so parallel runs don't share an
+  // agent-browser session (which would cross-contaminate cookies, storage,
+  // and network logs across specs). Playwright/Mock ignore the field but
+  // it's harmless for them.
+  const sessionRoot = `cairntrace-${process.pid}`;
   const results = await runPool(specs, parallel, async (specPath, idx) => {
-    const backend = createBackend(backendOpts(opts));
+    const backend = createBackend({
+      ...backendOpts(opts),
+      session: `${sessionRoot}-w${idx}`,
+    });
     try {
       const r = await runSpec({
         specPath,
