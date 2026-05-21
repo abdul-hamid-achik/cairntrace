@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  ConsoleErrorEntry as ConsoleError,
+  NetworkFailureEntry as NetworkFailure,
+  OutcomeFlip,
+  RunDiff,
+  StepFlip,
+  StepSlowdown,
+} from "../schema/diff.v1";
 import type { RunResult } from "../schema/run.v1";
-import type { OutcomeStatus, RunStatus, StepStatus } from "../schema/shared";
 
 /**
  * Structural diff between two Cairntrace runs. Designed for triage when a
@@ -9,73 +16,18 @@ import type { OutcomeStatus, RunStatus, StepStatus } from "../schema/shared";
  *
  * Inputs are run *directories* (containing run.json, console/, network/).
  * Either argument can be passed to the CLI as a run id or absolute path.
+ *
+ * The output shape is the v1 wire schema in `src/core/schema/diff.v1.ts`.
  */
-
-export interface RunRef {
-  id: string;
-  runDir: string;
-  status: RunStatus;
-  durationMs: number;
-}
-
-export interface OutcomeFlip {
-  id: string;
-  from: OutcomeStatus;
-  to: OutcomeStatus;
-}
-
-export interface StepFlip {
-  id: string;
-  from: StepStatus;
-  to: StepStatus;
-}
-
-export interface StepSlowdown {
-  id: string;
-  fromMs: number;
-  toMs: number;
-  factor: number;
-  deltaMs: number;
-}
-
-export interface ConsoleError {
-  type: string;
-  text: string;
-}
-
-export interface NetworkFailure {
-  url: string;
-  method: string;
-  status?: number;
-}
-
-export interface RunDiff {
-  $schema: "https://cairntrace.dev/schemas/diff.v1.json";
-  version: "1";
-  a: RunRef;
-  b: RunRef;
-  overall: {
-    statusChanged: boolean;
-    durationDeltaMs: number;
-  };
-  outcomes: {
-    flipped: OutcomeFlip[];
-    addedInB: string[];
-    removedInB: string[];
-  };
-  steps: {
-    flipped: StepFlip[];
-    slowdowns: StepSlowdown[];
-  };
-  console: {
-    errorCountDelta: number;
-    newErrors: ConsoleError[];
-  };
-  network: {
-    failureCountDelta: number;
-    newFailures: NetworkFailure[];
-  };
-}
+export type {
+  ConsoleErrorEntry as ConsoleError,
+  NetworkFailureEntry as NetworkFailure,
+  OutcomeFlip,
+  RunDiff,
+  RunDiffRef as RunRef,
+  StepFlip,
+  StepSlowdown,
+} from "../schema/diff.v1";
 
 export interface DiffOptions {
   /**

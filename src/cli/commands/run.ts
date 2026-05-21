@@ -93,20 +93,10 @@ async function runSingle(
 
 /* ----- multi-spec path ----- */
 
-export interface BatchRunResult {
-  $schema: "https://cairntrace.dev/schemas/run-batch.v1.json";
-  version: "1";
-  parallel: number;
-  totalDurationMs: number;
-  summary: {
-    total: number;
-    passed: number;
-    failed: number;
-    errored: number;
-  };
-  results: RunResult[];
-  exitCode: ExitCode;
-}
+// BatchRunResult is the v1 wire schema in src/core/schema/runBatch.v1.ts.
+// Re-export for convenience so callers don't need to know the file path.
+export type { BatchRunResult } from "../../core/schema/runBatch.v1";
+import type { BatchRunResult } from "../../core/schema/runBatch.v1";
 
 async function runBatch(
   specs: string[],
