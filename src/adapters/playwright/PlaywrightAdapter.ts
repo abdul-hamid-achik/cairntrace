@@ -6,7 +6,6 @@ import type {
   Locator as PlaywrightLocator,
   Page,
   Request,
-  Response,
 } from "playwright";
 import type { Locator, Step, WaitCondition } from "../../core/schema/spec.v1";
 import type {
@@ -46,9 +45,6 @@ export class PlaywrightAdapter implements BrowserBackend {
   private page: Page | undefined;
   private networkLog: NetworkEntry[] = [];
   private consoleLog: ConsoleEntry[] = [];
-  /** Resets to a fresh number per request so we can match request → response. */
-  private requestSeq = 0;
-  private requestById = new Map<string, NetworkEntry>();
 
   constructor(private readonly opts: PlaywrightAdapterOptions = {}) {}
 
@@ -161,7 +157,6 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   async clearNetworkLog(): Promise<void> {
     this.networkLog = [];
-    this.requestById.clear();
   }
 
   async getConsole(): Promise<ConsoleEntry[]> {
@@ -340,26 +335,25 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   private attachListeners(page: Page): void {
     page.on("request", (req: Request) => {
-      const id = `r${++this.requestSeq}`;
       const entry: NetworkEntry = {
-        id,
         url: req.url(),
         method: req.method(),
         resourceType: req.resourceType(),
         startedAt: new Date().toISOString(),
       };
-      this.requestById.set(id, entry);
       this.networkLog.push(entry);
-    });
-    page.on("response", (res: Response) => {
-      const url = res.url();
-      // Match newest request with this URL that doesn't have a status yet.
-      const pending = [...this.networkLog]
-        .toReversed()
-        .find((e) => e.url === url && e.status === undefined);
-      if (pending) {
-        pending.status = res.status();
-      }
+      // Pair *this* request with *its* response asynchronously. Previously we
+      // matched response→request by URL, which stamped the wrong status on the
+      // wrong entry whenever the same URL was hit more than once (login form
+      // retries, polling, identical asset URLs).
+      req
+        .response()
+        .then((res) => {
+          if (res) entry.status = res.status();
+        })
+        .catch(() => {
+          // Request was aborted / failed before a response — leave status undefined.
+        });
     });
     page.on("console", (msg: ConsoleMessage) => {
       const type = msg.type();
