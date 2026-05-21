@@ -6,6 +6,7 @@ import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { doctorCommand } from "./commands/doctor";
 import { explainCommand } from "./commands/explain";
+import { exportPlaywrightCommand } from "./commands/export";
 import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
 import { runCommand } from "./commands/run";
@@ -71,6 +72,22 @@ program
   .command("mcp")
   .description("Start the Cairntrace MCP server on stdio")
   .action(() => mcpCommand());
+
+const exportCmd = program
+  .command("export")
+  .description("Export a spec to another test framework");
+
+exportCmd
+  .command("playwright <spec>")
+  .description(
+    "Emit a @playwright/test .spec.ts from the given Cairntrace spec",
+  )
+  .option(
+    "--out <file>",
+    "where to write (defaults to <spec-dir>/<name>.spec.ts)",
+  )
+  .option("--stdout", "print to stdout instead of writing", false)
+  .action((p: string, opts) => exportPlaywrightCommand(p, opts));
 
 program
   .command("login <name>")

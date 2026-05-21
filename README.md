@@ -55,6 +55,7 @@ bun examples/demo-app/server.ts
 | `cairn checkpoint list / show / delete` | Manage saved checkpoints. |
 | `cairn login <name> --url ... [--wait-for text:\|url:]` | Open a headed browser, let the user log in, capture state into a checkpoint. |
 | `cairn mcp` | Start the MCP server on stdio for MCP-aware agents (Claude Code, Cursor, etc.). |
+| `cairn export playwright <spec> [--out <file>]` | Emit a real `@playwright/test` `.spec.ts` from a stable Cairntrace spec for CI lock-in. |
 
 Every agent-callable command supports `--format json|yaml|md` (or `--json`,
 `--yaml`, `--md` shorthand). Exit codes are stable across versions:
