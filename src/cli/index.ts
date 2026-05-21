@@ -4,6 +4,7 @@ import { deleteCheckpointCommand } from "./commands/checkpoint/delete";
 import { listCheckpointsCommand } from "./commands/checkpoint/list";
 import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
+import { diffCommand } from "./commands/diff";
 import { doctorCommand } from "./commands/doctor";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
@@ -67,6 +68,14 @@ program
   )
   .option("--path", "print the file path instead of contents", false)
   .action((run: string, opts) => contextCommand(run, opts));
+
+addFormatFlags(
+  program
+    .command("diff <runA> <runB>")
+    .description(
+      "Structurally compare two runs (outcomes / steps / console / network); each arg is a run id, absolute path, or 'latest'/'previous'",
+    ),
+).action((a: string, b: string, opts) => diffCommand(a, b, opts));
 
 program
   .command("mcp")
