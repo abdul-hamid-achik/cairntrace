@@ -170,4 +170,55 @@ steps:
     expect(result.steps[0]!.status).toBe("failed");
     expect(result.steps[0]!.error).toContain("selector");
   });
+
+  it("--cold-start wipes browser state before steps", async () => {
+    const specPath = await writeSpec(
+      "cold",
+      `version: 1
+name: cold_start_demo
+intent: prove the cold-start gate fires
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /home
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      coldStart: true,
+    });
+
+    expect(result.coldStart).toBe(true);
+    expect(backend.clearBrowserStateCalls).toBe(1);
+  });
+
+  it("cold-start defaults to off without CI=true", async () => {
+    const specPath = await writeSpec(
+      "default",
+      `version: 1
+name: default_demo
+intent: cold-start should default to off
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.coldStart).toBe(false);
+    expect(backend.clearBrowserStateCalls).toBe(0);
+  });
 });

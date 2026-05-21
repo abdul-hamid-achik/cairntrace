@@ -21,7 +21,9 @@ examples/
     ├── 03-network.yml                 network verifier (GET /api/inventory → 200)
     ├── 04-script.yml                  script escape hatch (counts DOM items via JS)
     ├── 05-detects-broken-api.yml      DELIBERATELY failing spec — proves 500 is detected
-    └── 06-drifted-link.yml            DELIBERATELY drifted spec for `cairn spec heal` demo
+    ├── 06-drifted-link.yml            DELIBERATELY drifted spec for `cairn spec heal` demo
+    ├── 07-config-driven.yml           uses cairntrace.config.yml for baseUrl + ${vars.X}
+    └── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
 ```
 
 ## Heal demo (`cairn spec heal`)

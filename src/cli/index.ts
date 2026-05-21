@@ -6,6 +6,7 @@ import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { doctorCommand } from "./commands/doctor";
 import { explainCommand } from "./commands/explain";
+import { loginCommand } from "./commands/login";
 import { runCommand } from "./commands/run";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
@@ -33,7 +34,7 @@ addFormatFlags(
     .command("run <spec>")
     .description("Run a behavioral spec")
     .option("--env <name>", "environment override")
-    .option("--cold-start", "force fresh browser profile", false)
+    .option("--cold-start", "force fresh browser profile (default: on in CI)")
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
     .option("--artifact-root <path>", "override artifact root directory")
@@ -63,6 +64,19 @@ program
   )
   .option("--path", "print the file path instead of contents", false)
   .action((run: string, opts) => contextCommand(run, opts));
+
+program
+  .command("login <name>")
+  .description(
+    "Open a headed browser at --url, let the user log in, then capture state into a checkpoint",
+  )
+  .requiredOption("--url <url>", "page to load in the headed browser")
+  .option(
+    "--wait-for <signal>",
+    "wait for text:<...> or url:<...> instead of an ENTER keypress",
+  )
+  .option("--timeout <ms>", "max wait time when --wait-for is set", "300000")
+  .action((name: string, opts) => loginCommand(name, opts));
 
 const spec = program.command("spec").description("Spec authoring helpers");
 

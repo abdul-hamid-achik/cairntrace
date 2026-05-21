@@ -1,0 +1,25 @@
+# Cairntrace example spec — when: conditional step.
+#
+# Demonstrates skipping a step based on the current page state. Useful in
+# checkpoint-resume specs where you want to log in only if the resume didn't
+# carry you past the login wall.
+#
+version: 1
+name: conditional_demo
+intent: nav step runs because we start at /; the redundant nav is skipped
+environment: local
+outcomes:
+  - id: ended_on_dashboard
+    description: ended on the dashboard
+    verify:
+      url:
+        endsWith: /dashboard.html
+steps:
+  - id: open_home
+    open: /
+  - id: nav_only_if_not_on_dashboard
+    open: /dashboard.html
+    when: urlNotContains:/dashboard.html
+  - id: redundant_nav_skipped
+    open: /dashboard.html
+    when: urlNotContains:/dashboard.html

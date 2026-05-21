@@ -154,6 +154,11 @@ export class MockBrowserBackend implements BrowserBackend {
   async loadState(_path: string): Promise<InvocationResult> {
     return success();
   }
+  /** Counter tests can assert against. */
+  public clearBrowserStateCalls = 0;
+  async clearBrowserState(): Promise<void> {
+    this.clearBrowserStateCalls++;
+  }
   async close(): Promise<InvocationResult> {
     return success();
   }

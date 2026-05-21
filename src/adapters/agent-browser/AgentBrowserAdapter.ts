@@ -164,6 +164,46 @@ export class AgentBrowserAdapter implements BrowserBackend {
     return this.invoke(["state", "load", path]);
   }
 
+  /* ----- direct wait helpers (used by `cairn login`) ----- */
+
+  async waitForText(
+    text: string,
+    timeoutMs: number,
+  ): Promise<InvocationResult> {
+    return this.invoke([
+      "wait",
+      "--text",
+      text,
+      "--timeout",
+      String(timeoutMs),
+    ]);
+  }
+
+  async waitForUrl(
+    pattern: string,
+    timeoutMs: number,
+  ): Promise<InvocationResult> {
+    return this.invoke([
+      "wait",
+      "--url",
+      pattern,
+      "--timeout",
+      String(timeoutMs),
+    ]);
+  }
+
+  /**
+   * Wipe cookies + localStorage + sessionStorage. Used by the Runner's
+   * --cold-start gate (plan §10.6).
+   */
+  async clearBrowserState(): Promise<void> {
+    await this.invoke(["cookies", "clear"]);
+    await this.invoke(["storage", "local", "clear"]);
+    // agent-browser's `storage session clear` isn't documented but is the
+    // natural counterpart; best-effort and ignore errors.
+    await this.invoke(["storage", "session", "clear"]);
+  }
+
   /* ----- batch ----- */
 
   /**

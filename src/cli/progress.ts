@@ -88,7 +88,9 @@ export function makeInteractiveListener(
             ? `${c.red}✗${c.reset}`
             : `${c.yellow}·${c.reset}`;
       const dur = `${c.dim}${formatMs(durationMs)}${c.reset}`;
-      out(`\r${c.clearEOL}  ${mark} ${stepId} ${dur}`);
+      const tail =
+        status === "skipped" ? ` ${c.dim}(skipped by when:)${c.reset}` : "";
+      out(`\r${c.clearEOL}  ${mark} ${stepId} ${dur}${tail}`);
       if (status === "failed" && error) {
         out(`\n    ${c.red}${truncate(error, 200)}${c.reset}`);
       }

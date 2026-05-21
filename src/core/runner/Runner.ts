@@ -5,6 +5,7 @@ import { ArtifactWriter } from "../artifacts/ArtifactWriter";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { loadConfig } from "../config/loader";
 import { parseSpec } from "../parser/parseSpec";
+import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
 import type { Spec, Step } from "../schema/spec.v1";
 import type {
@@ -127,6 +128,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   await safe(() => opts.backend.clearNetworkLog());
   await safe(() => opts.backend.clearConsole());
 
+  // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
+  // Resolves before checkpoint resume so the spec's own setup populates state
+  // *after* the wipe.
+  const coldStart = opts.coldStart ?? process.env["CI"] === "true";
+  if (coldStart) {
+    await safe(() => opts.backend.clearBrowserState());
+  }
+
   // Restore checkpoint if spec asks for it. The `resume` field accepts either
   // a literal path or a name registered with `cairn checkpoint capture-from-session`.
   if (spec.session?.resume) {
@@ -153,6 +162,51 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       stepId,
     });
     opts.listener?.onStepStart?.(i, step, stepId);
+
+    // Optional when: predicate — skip the step if the page doesn't match.
+    if ("when" in step && step.when) {
+      let conditionHolds = false;
+      try {
+        conditionHolds = await evaluateWhen(step.when, opts.backend);
+      } catch (e) {
+        // Treat parse errors as a step failure so they surface clearly.
+        const durationMs = Date.now() - stepStart;
+        stepResults.push({
+          id: stepId,
+          status: "failed",
+          durationMs,
+          error: `when: ${(e as Error).message}`,
+        });
+        opts.listener?.onStepFinish?.(
+          i,
+          stepId,
+          "failed",
+          durationMs,
+          `when: ${(e as Error).message}`,
+        );
+        break;
+      }
+      if (!conditionHolds) {
+        const durationMs = Date.now() - stepStart;
+        stepResults.push({ id: stepId, status: "skipped", durationMs });
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "step.finished",
+          stepId,
+          durationMs,
+          skipped: true,
+          when: step.when,
+        });
+        opts.listener?.onStepFinish?.(
+          i,
+          stepId,
+          "skipped",
+          durationMs,
+          undefined,
+        );
+        continue;
+      }
+    }
 
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
@@ -333,7 +387,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     },
     environment: env,
     backend: backendName as RunResult["backend"],
-    coldStart: opts.coldStart ?? false,
+    coldStart,
     status,
     startedAt,
     endedAt,

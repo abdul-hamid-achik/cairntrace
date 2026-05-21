@@ -95,6 +95,13 @@ export interface BrowserBackend {
   saveState(path: string): Promise<InvocationResult>;
   loadState(path: string): Promise<InvocationResult>;
 
+  /* ----- cold-start (§10.6) ----- */
+  /**
+   * Wipe cookies + localStorage + sessionStorage so the spec runs from a clean
+   * browser. Called by the Runner at the start of a run when `coldStart: true`.
+   */
+  clearBrowserState(): Promise<void>;
+
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;
 }
