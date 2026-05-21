@@ -241,7 +241,11 @@ export function synthesizeErroredResult(
     // joining paths don't crash. The dir itself is never written.
     runDir: `${process.cwd()}/.cairntrace/errored/${runId}`,
     spec: {
-      name: specPath.split("/").pop()?.replace(/\.ya?ml$/, "") ?? "errored",
+      name:
+        specPath
+          .split("/")
+          .pop()
+          ?.replace(/\.ya?ml$/, "") ?? "errored",
       path: absoluteSpecPath,
     },
     environment: "local",

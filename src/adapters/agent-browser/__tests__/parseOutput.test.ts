@@ -30,21 +30,17 @@ describe("parseEnvelope", () => {
   });
 
   it("returns [] when the inner key is missing", () => {
-    expect(parseEnvelope('{"success":true,"data":{}}', "requests")).toEqual(
-      [],
-    );
+    expect(parseEnvelope('{"success":true,"data":{}}', "requests")).toEqual([]);
     expect(
       parseEnvelope('{"success":true,"data":{"messages":[]}}', "requests"),
     ).toEqual([]);
   });
 
   it("returns [] when the envelope value is not an array (defensive)", () => {
-    expect(
-      parseEnvelope('{"data":{"requests":"oops"}}', "requests"),
-    ).toEqual([]);
-    expect(parseEnvelope('{"data":{"requests":null}}', "requests")).toEqual(
+    expect(parseEnvelope('{"data":{"requests":"oops"}}', "requests")).toEqual(
       [],
     );
+    expect(parseEnvelope('{"data":{"requests":null}}', "requests")).toEqual([]);
   });
 
   it("works for the console envelope key", () => {

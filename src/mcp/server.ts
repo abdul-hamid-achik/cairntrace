@@ -374,7 +374,8 @@ export function buildMcpServer(): McpServer {
     "cairn_checkpoint_delete",
     {
       title: "Delete a saved checkpoint",
-      description: "Remove a checkpoint by name from ~/.cairntrace/checkpoints/.",
+      description:
+        "Remove a checkpoint by name from ~/.cairntrace/checkpoints/.",
       inputSchema: {
         name: z
           .string()
@@ -387,7 +388,10 @@ export function buildMcpServer(): McpServer {
       const ok = await store.delete(name);
       return {
         content: [
-          { type: "text", text: ok ? `deleted ${name}` : `no checkpoint named "${name}"` },
+          {
+            type: "text",
+            text: ok ? `deleted ${name}` : `no checkpoint named "${name}"`,
+          },
         ],
         structuredContent: { name, deleted: ok },
         isError: !ok,

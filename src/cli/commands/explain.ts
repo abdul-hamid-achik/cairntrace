@@ -27,7 +27,7 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "0.10.0", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "1.0.0", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
