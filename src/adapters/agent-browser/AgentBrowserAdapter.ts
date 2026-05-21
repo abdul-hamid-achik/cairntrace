@@ -134,14 +134,27 @@ export class AgentBrowserAdapter implements BrowserBackend {
   }
 
   async getErrors(): Promise<ConsoleEntry[]> {
-    // `errors` returns page errors; we treat them as console entries with type "error".
-    const r = await this.invoke(["errors", "--json"]);
-    if (!r.ok) return [];
-    return parseEnvelope<ConsoleEntry>(r.stdout, "errors").map((e) => ({
-      ...e,
-      // agent-browser emits errors with no `type` field; normalize for verifiers.
-      type: e.type ?? "error",
-    }));
+    // Combine page errors (uncaught exceptions, network errors via `errors`)
+    // with `console.error()` calls so both backends agree on what counts as
+    // an error for the `console.errorsMax` verifier. Playwright includes both
+    // via its `pageerror` + `console` listeners; without this combination,
+    // agent-browser would only catch uncaught exceptions.
+    const [pageErrorsR, consoleR] = await Promise.all([
+      this.invoke(["errors", "--json"]),
+      this.invoke(["console", "--json"]),
+    ]);
+    const pageErrors: ConsoleEntry[] = pageErrorsR.ok
+      ? parseEnvelope<ConsoleEntry>(pageErrorsR.stdout, "errors").map((e) => ({
+          ...e,
+          type: e.type ?? "error",
+        }))
+      : [];
+    const consoleErrors: ConsoleEntry[] = consoleR.ok
+      ? parseEnvelope<ConsoleEntry>(consoleR.stdout, "messages").filter(
+          (e) => e.type === "error",
+        )
+      : [];
+    return [...pageErrors, ...consoleErrors];
   }
 
   /* ----- evaluation (script verifier escape hatch) ----- */

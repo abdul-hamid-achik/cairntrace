@@ -86,6 +86,15 @@ export interface BrowserBackend {
   /* ----- console ----- */
   getConsole(): Promise<ConsoleEntry[]>;
   clearConsole(): Promise<void>;
+  /**
+   * Return the union of:
+   *   - page-level uncaught exceptions (Playwright's `pageerror`, agent-browser's `errors`)
+   *   - console messages with type === "error"
+   *
+   * Both backends must agree on this set so the `console.errorsMax` verifier
+   * is portable. Backends that can only surface one of the two sources should
+   * say so explicitly in their docs.
+   */
   getErrors(): Promise<ConsoleEntry[]>;
 
   /* ----- script escape hatch ----- */
