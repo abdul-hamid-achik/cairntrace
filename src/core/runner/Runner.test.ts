@@ -1,0 +1,173 @@
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
+import type { RunResult } from "../schema/run.v1";
+import { runSpec } from "./Runner";
+
+let workDir: string;
+let artifactRoot: string;
+
+beforeAll(async () => {
+  workDir = await mkdtemp(join(tmpdir(), "cairntrace-runner-"));
+  artifactRoot = join(workDir, ".cairntrace", "runs");
+});
+
+afterAll(async () => {
+  // best-effort cleanup; tmp is fine to leak in tests
+});
+
+async function writeSpec(name: string, body: string): Promise<string> {
+  const p = join(workDir, `${name}.yml`);
+  await writeFile(p, body);
+  return p;
+}
+
+describe("runSpec e2e (mock backend)", () => {
+  it("produces a complete run dir with passing outcomes", async () => {
+    const specPath = await writeSpec(
+      "happy",
+      `version: 1
+name: happy
+intent: smoke test happy path
+environment: local
+outcomes:
+  - id: dashboard_url
+    description: url is correct after navigate
+    verify:
+      url: { endsWith: "/dashboard" }
+  - id: no_console_errors
+    description: console must be clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /dashboard
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/dashboard"); // initial value before any step runs
+
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.exitCode).toBe(0);
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes.every((o) => o.status === "passed")).toBe(true);
+
+    // Inspect the run dir
+    const runJson = JSON.parse(
+      await readFile(join(result.runDir, "run.json"), "utf8"),
+    ) as RunResult;
+    expect(runJson.spec.name).toBe("happy");
+    expect(runJson.status).toBe("passed");
+
+    const runYaml = await readFile(join(result.runDir, "run.yaml"), "utf8");
+    expect(runYaml).toContain("name: happy");
+
+    const runMd = await readFile(join(result.runDir, "run.md"), "utf8");
+    expect(runMd).toContain("# Run: happy");
+    expect(runMd).toContain("PASSED");
+
+    const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
+    expect(ctx).toContain("# Cairntrace Run Context");
+    expect(ctx).toContain("smoke test happy path");
+
+    // outcomes/results.*
+    const outcomesJson = JSON.parse(
+      await readFile(join(result.runDir, "outcomes/results.json"), "utf8"),
+    );
+    expect(outcomesJson.outcomes).toHaveLength(2);
+
+    // each outcome evidence file exists and matches §13b shape
+    for (const o of result.outcomes) {
+      const text = await readFile(join(result.runDir, o.evidence!), "utf8");
+      expect(text.startsWith(`# Outcome: ${o.id}`)).toBe(true);
+      expect(text).toContain("## Expected");
+      expect(text).toContain("## Actual");
+      expect(text).toContain("## Source");
+      const lines = text.split("\n");
+      expect(lines.length).toBeLessThanOrEqual(80);
+    }
+
+    const events = (
+      await readFile(join(result.runDir, "events.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(events.some((e) => e.type === "run.started")).toBe(true);
+    expect(events.some((e) => e.type === "run.passed")).toBe(true);
+
+    // spec.resolved.yml exists
+    const resolved = await stat(join(result.runDir, "spec.resolved.yml"));
+    expect(resolved.isFile()).toBe(true);
+  });
+
+  it("returns failed status when an outcome doesn't hold", async () => {
+    const specPath = await writeSpec(
+      "fails",
+      `version: 1
+name: fails_one_outcome
+intent: ensure failed outcomes mark the run failed
+outcomes:
+  - id: url_mismatch
+    description: this outcome won't be met
+    verify:
+      url: { equals: "https://example.com/never" }
+steps:
+  - id: nav
+    open: /somewhere-else
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/somewhere-else");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.exitCode).toBe(1);
+    expect(result.outcomes[0]!.status).toBe("failed");
+  });
+
+  it("stops on step failure and surfaces the error in the step result", async () => {
+    const specPath = await writeSpec(
+      "step_fail",
+      `version: 1
+name: step_fail
+intent: step failure should short-circuit and not run later steps
+outcomes:
+  - id: dummy
+    description: dummy
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: bad
+    click:
+      by: role
+      role: button
+      name: Submit
+  - id: never_runs
+    open: /unreachable
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("selector 'button[name=Submit]' not found");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    // First step failed → run is failed
+    expect(result.status).toBe("failed");
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.status).toBe("failed");
+    expect(result.steps[0]!.error).toContain("selector");
+  });
+});

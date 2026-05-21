@@ -1,0 +1,28 @@
+# Cairntrace example spec — proves noFailedRequests catches failures
+#
+# The page intentionally fetches /api/broken which returns 500.
+# The `noFailedRequests` outcome is therefore expected to FAIL —
+# run this and confirm it surfaces the 500 in the evidence file.
+#
+# Don't stamp this one — it's a demonstration of a *failing* spec.
+#
+version: 1
+name: detects_broken_api
+intent: confirm noFailedRequests surfaces 5xx responses on /api/broken
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: no_500s_from_api
+    description: nothing under /api/ should 5xx — this WILL fail by design
+    verify:
+      noFailedRequests:
+        urlContains: /api/
+steps:
+  - id: open_broken_page
+    open: http://localhost:8787/api-broken.html
+  - id: settle
+    wait:
+      text: Request failed
+      timeoutMs: 5000

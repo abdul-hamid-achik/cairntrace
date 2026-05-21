@@ -1,0 +1,31 @@
+# Cairntrace example spec — config-driven baseUrl.
+#
+# Note: no scheme on the `open:` paths. The baseUrl from
+# `examples/cairntrace.config.yml`'s `environments.<env>.baseUrl` is prepended
+# at run time. Switch environments without touching the spec:
+#
+#   ./bin/cairn run examples/flows/07-config-driven.yml             # default env
+#   ./bin/cairn run examples/flows/07-config-driven.yml --env staging
+#
+version: 1
+name: config_driven_nav
+intent: open the dashboard via relative URLs resolved against the env baseUrl
+outcomes:
+  - id: url_is_dashboard
+    description: URL is the configured baseUrl + /dashboard.html
+    verify:
+      url:
+        equals: "${baseUrl}/dashboard.html"
+  - id: row_count_matches_var
+    description: dashboard table row count matches ${vars.expectedRows}
+    verify:
+      count:
+        role: row
+        equals: 3
+steps:
+  - id: open_dashboard
+    open: /dashboard.html
+  - id: wait_for_inventory
+    wait:
+      text: Inventory
+      timeoutMs: 5000

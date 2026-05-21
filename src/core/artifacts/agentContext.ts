@@ -1,0 +1,79 @@
+import type { Spec } from "../schema/spec.v1";
+import type { RunResult } from "../schema/run.v1";
+
+/**
+ * Render the agent-neutral run context (plan §13 `agent_context.md`).
+ * No agent-specific phrasing — any agent that can read markdown can use this.
+ */
+export function renderAgentContext(spec: Spec, result: RunResult): string {
+  const passed = result.outcomes.filter((o) => o.status === "passed");
+  const failed = result.outcomes.filter((o) => o.status === "failed");
+  const lastSuccessfulStep = result.steps
+    .toReversed()
+    .find((s) => s.status === "passed");
+
+  const failureLines = failed.map(
+    (o) => `- ✗ ${o.id}${o.evidence ? ` — see ${o.evidence}` : ""}`,
+  );
+  const passLines = passed.map((o) => `- ✓ ${o.id}`);
+
+  const evidenceRefs: string[] = [];
+  for (const o of failed) {
+    if (o.evidence) evidenceRefs.push(`- ${o.evidence}`);
+    if (o.evidenceRaw) evidenceRefs.push(`- ${o.evidenceRaw}`);
+  }
+  if (result.artifacts.network)
+    evidenceRefs.push(`- ${result.artifacts.network}`);
+  if (result.artifacts.console)
+    evidenceRefs.push(`- ${result.artifacts.console}`);
+  if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
+
+  const lines: string[] = [
+    "# Cairntrace Run Context",
+    "",
+    "## Run",
+    `- spec: ${spec.name}`,
+    `- env: ${result.environment}`,
+    `- backend: ${result.backend}`,
+    `- status: ${result.status}`,
+    `- cold start: ${result.coldStart ? "yes" : "no"}`,
+    `- run id: ${result.runId}`,
+    "",
+    "## Intent",
+    spec.intent.trim(),
+    "",
+    "## Outcome results",
+    ...passLines,
+    ...failureLines,
+  ];
+
+  if (lastSuccessfulStep) {
+    lines.push(
+      "",
+      "## Last successful step",
+      `- step: ${lastSuccessfulStep.id}`,
+      `- duration: ${lastSuccessfulStep.durationMs}ms`,
+    );
+  }
+
+  if (evidenceRefs.length > 0) {
+    lines.push("", "## Failure evidence", ...evidenceRefs);
+  }
+
+  lines.push(
+    "",
+    "## Reproduce",
+    "```bash",
+    `cairn run ${result.spec.path} --env ${result.environment} --headed`,
+    "```",
+    "",
+    "## Suggested next steps",
+    failed.length === 0
+      ? "- All outcomes passed. If you arrived here from a bug report, double-check that the failing scenario is captured by an outcome."
+      : "- Read each failing outcome's evidence file (paths above). Each contains Expected/Actual/Source. Edit code, re-run.",
+    "- If steps failed because of UI drift rather than a real regression, run: cairn spec heal " +
+      `${result.spec.path}`,
+  );
+
+  return lines.join("\n") + "\n";
+}

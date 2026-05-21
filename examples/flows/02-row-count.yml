@@ -1,0 +1,30 @@
+# Cairntrace example spec — count verifier
+#
+# Demonstrates: open → count rows + no failed requests outcome.
+#
+version: 1
+name: row_count
+intent: dashboard inventory table shows exactly 3 rows and no requests failed
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: three_inventory_rows
+    description: the inventory table has exactly 3 rows
+    verify:
+      count:
+        role: row
+        equals: 3
+  - id: no_failed_requests
+    description: nothing on this page should 4xx/5xx
+    verify:
+      noFailedRequests:
+        urlContains: localhost:8787
+steps:
+  - id: open_dashboard
+    open: http://localhost:8787/dashboard.html
+  - id: wait_for_table
+    wait:
+      text: Inventory
+      timeoutMs: 5000

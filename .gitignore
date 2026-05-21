@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.cairntrace/
+*.log
+.DS_Store

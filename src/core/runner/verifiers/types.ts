@@ -1,0 +1,37 @@
+import type { BrowserBackend } from "../../../adapters/browserBackend";
+import type { Verifier } from "../../schema/verifier.v1";
+
+/**
+ * Common context passed into every verifier evaluator.
+ * The Source section of evidence files is built from these fields.
+ */
+export interface VerifierContext {
+  /** Last step id that ran successfully — used for the "last successful step" line in evidence. */
+  lastSuccessfulStep?: string;
+  /** Relative path to the most recent screenshot captured. */
+  latestScreenshot?: string;
+  /** Relative path to the most recent snapshot captured. */
+  latestSnapshot?: string;
+  /** Relative path to a trace artifact, if one was captured. */
+  trace?: string;
+}
+
+/**
+ * Outcome of a single verifier evaluation. Shapes the §13b evidence file —
+ * the artifact writer enforces the 80-line / 20-item caps when serializing.
+ */
+export interface VerifierEvaluation {
+  passed: boolean;
+  /** Short, concrete description of what the verifier was looking for. */
+  expected: string;
+  /** Short description of what was observed. Bullet list as a single string OK. */
+  actual: string;
+  /** Deep / unstructured data — written to outcomes/<id>.raw.json (script verifier only). */
+  raw?: unknown;
+}
+
+export type VerifierEvaluator = (
+  verifier: Verifier,
+  backend: BrowserBackend,
+  ctx: VerifierContext,
+) => Promise<VerifierEvaluation>;

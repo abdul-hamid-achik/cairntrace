@@ -1,0 +1,37 @@
+# Cairntrace example spec — network verifier
+#
+# Demonstrates: open page that fetches an API → assert the request happened with 200.
+#
+version: 1
+name: api_inventory_call
+intent: page must call /api/inventory and receive 2xx
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: inventory_request_succeeded
+    description: the GET /api/inventory call returns 2xx
+    verify:
+      network:
+        method: GET
+        urlContains: /api/inventory
+        status:
+          in: [200, 201]
+  - id: api_subtree_clean
+    description: no API call under /api/ should 4xx/5xx
+    verify:
+      noFailedRequests:
+        urlContains: /api/
+  - id: loaded_count_visible
+    description: page displays the "Loaded N items" status
+    verify:
+      text:
+        contains: Loaded
+steps:
+  - id: open_api_page
+    open: http://localhost:8787/api.html
+  - id: wait_loaded
+    wait:
+      text: Loaded
+      timeoutMs: 5000

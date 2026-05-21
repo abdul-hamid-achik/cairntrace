@@ -1,0 +1,32 @@
+# Cairntrace example spec — script escape hatch
+#
+# Demonstrates: page-evaluated JS returning { ok, evidence } for outcomes the
+# typed verifiers can't express directly. The script reads DOM state after the
+# fetch and asserts the count is exactly 3 — the assertion happens in-page.
+#
+version: 1
+name: dom_item_count
+intent: after fetch, the DOM contains exactly 3 [data-item] elements
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: three_data_items
+    description: exactly three [data-item] elements rendered after the fetch
+    verify:
+      script:
+        run: |
+          const items = document.querySelectorAll('[data-item]');
+          const ids = Array.from(items).map((el) => el.getAttribute('data-item'));
+          return {
+            ok: items.length === 3,
+            evidence: { count: items.length, ids }
+          };
+steps:
+  - id: open_api_page
+    open: http://localhost:8787/api.html
+  - id: wait_loaded
+    wait:
+      text: Loaded
+      timeoutMs: 5000

@@ -1,0 +1,40 @@
+# Cairntrace example spec — navigation + URL/text outcomes
+#
+# Demonstrates: open → click → wait → URL outcome + text outcome.
+# Run against the demo app served at http://localhost:8787 (see examples/README.md).
+#
+version: 1
+name: dashboard_nav
+intent: from the home page, follow "Open dashboard" and land on a working dashboard
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: url_is_dashboard
+    description: after clicking the link, URL ends with /dashboard.html
+    verify:
+      url:
+        endsWith: /dashboard.html
+  - id: dashboard_heading_visible
+    description: the page shows the "Dashboard" heading
+    verify:
+      text:
+        contains: Dashboard
+  - id: no_console_errors
+    description: the navigation produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - id: open_home
+    open: http://localhost:8787/
+  - id: click_open_dashboard
+    click:
+      by: role
+      role: link
+      name: Open dashboard
+  - id: wait_for_dashboard
+    wait:
+      text: Dashboard
+      timeoutMs: 5000

@@ -1,0 +1,24 @@
+# Cairntrace project config — see plan §12.
+#
+# Defines named environments so specs can use relative paths like `open: /home`
+# and Cairntrace prepends the right baseUrl per --env.
+#
+# Auto-discovered by walking up from a spec's directory. Override with
+# `cairn run <spec> --config path/to/config.yml`.
+#
+version: 1
+project: cairntrace-demo
+defaultEnvironment: local
+
+environments:
+  local:
+    baseUrl: http://localhost:8787
+    vars:
+      expectedRows: 3
+
+  staging:
+    # Pretend staging is something completely different; useful for demo
+    # of environment-swapping without rewriting specs.
+    baseUrl: http://localhost:8787
+    vars:
+      expectedRows: 3

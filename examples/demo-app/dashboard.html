@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Dashboard</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; }
+      th { background: #f8f8f8; }
+      .status { color: #1e7e34; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Dashboard</h1>
+      <p id="status" class="status">All systems normal</p>
+    </header>
+    <main>
+      <p>Inventory:</p>
+      <table aria-label="Inventory">
+        <thead>
+          <tr><th>Item</th><th>Total</th></tr>
+        </thead>
+        <tbody>
+          <tr role="row"><td>Apples</td><td>$1.00</td></tr>
+          <tr role="row"><td>Bread</td><td>$2.00</td></tr>
+          <tr role="row"><td>Cheese</td><td>$5.00</td></tr>
+        </tbody>
+      </table>
+    </main>
+    <script>
+      // intentionally empty — no console errors, no fetches
+    </script>
+  </body>
+</html>

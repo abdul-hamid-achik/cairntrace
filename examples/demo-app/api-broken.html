@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Broken API</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; }
+      .err { color: #b71c1c; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h1>Broken endpoint demo</h1>
+    <p>This page fetches <code>/api/broken</code>, which deliberately returns 500.</p>
+    <p id="status">Loading…</p>
+    <script>
+      (async () => {
+        try {
+          const res = await fetch("/api/broken");
+          if (!res.ok) {
+            document.getElementById("status").className = "err";
+            document.getElementById("status").textContent = "Request failed: " + res.status;
+            return;
+          }
+          document.getElementById("status").textContent = "(unexpected success)";
+        } catch (e) {
+          document.getElementById("status").className = "err";
+          document.getElementById("status").textContent = "Network error: " + e.message;
+        }
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — API</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      .status { color: #1e7e34; font-weight: 600; }
+      ul { list-style: none; padding: 0; }
+      li { padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; }
+      .item-name { font-weight: 600; }
+      .item-total { color: #555; margin-left: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Inventory (fetched from /api/inventory)</h1>
+      <p id="loading">Loading…</p>
+      <p id="ready" class="status" hidden>Loaded <span id="count">?</span> items</p>
+    </header>
+    <main>
+      <ul id="items" aria-label="Inventory items"></ul>
+    </main>
+    <script>
+      (async () => {
+        try {
+          const res = await fetch("/api/inventory");
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const ul = document.getElementById("items");
+          for (const item of data.items) {
+            const li = document.createElement("li");
+            li.setAttribute("data-item", String(item.id));
+            li.innerHTML =
+              '<span class="item-name">' + item.name + '</span>' +
+              '<span class="item-total">' + item.total + '</span>';
+            ul.appendChild(li);
+          }
+          document.getElementById("loading").hidden = true;
+          document.getElementById("count").textContent = String(data.items.length);
+          document.getElementById("ready").hidden = false;
+        } catch (e) {
+          document.getElementById("loading").textContent = "Failed: " + e.message;
+        }
+      })();
+    </script>
+  </body>
+</html>
