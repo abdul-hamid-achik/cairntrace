@@ -134,7 +134,17 @@ export function buildMcpServer(): McpServer {
       description:
         "Return the agent_context.md markdown for the given run id, or 'latest'.",
       inputSchema: {
-        runId: z.string().optional().describe("Run id; defaults to 'latest'"),
+        runId: z
+          .string()
+          // Reject `..` and other separators so the runId can't escape the
+          // ~/.cairntrace/runs/ root via path traversal. Real run ids are
+          // produced by generateRunId() and match this pattern.
+          .regex(
+            /^(?:latest|[A-Za-z0-9._-]+)$/,
+            "runId must be 'latest' or contain only letters, digits, dot, hyphen, underscore",
+          )
+          .optional()
+          .describe("Run id; defaults to 'latest'"),
       },
     },
     async ({ runId }) => {
