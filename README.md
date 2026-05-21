@@ -33,6 +33,9 @@ bun examples/demo-app/server.ts
 # Run an example spec end-to-end
 ./bin/cairn run examples/flows/01-dashboard-nav.yml
 
+# Or run via Playwright (after `bunx playwright install chromium`)
+./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright
+
 # Inspect what an agent would read after a run
 ./bin/cairn context latest
 ```
@@ -147,7 +150,8 @@ no per-agent code.
 - [**Oxlint**](https://oxc.rs/docs/guide/usage/linter.html) — lint (Vite+ stack)
 - [**Oxfmt**](https://oxc.rs/docs/guide/usage/formatter/quickstart) — format (Vite+ stack)
 - [**yaml**](https://eemeli.org/yaml/) — comment-preserving YAML
-- [**agent-browser**](https://agent-browser.dev) — execution backend
+- [**agent-browser**](https://agent-browser.dev) — default execution backend
+- [**Playwright**](https://playwright.dev) — alternate execution backend (run with `--backend playwright`)
 
 ## Development
 

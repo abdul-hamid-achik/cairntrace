@@ -21,6 +21,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
     "execa": "^9.5.1",
+    "playwright": "^1.60.0",
     "yaml": "^2.6.0",
     "zod": "^3.23.8"
   },

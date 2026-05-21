@@ -74,3 +74,45 @@ describe("findByRole", () => {
     expect(findByRole(els, "link")).toHaveLength(0);
   });
 });
+
+describe("parseSnapshot — Playwright ariaSnapshot format", () => {
+  const PLAYWRIGHT_SAMPLE = `- document:
+  - banner:
+    - heading "Cairntrace demo home" [level=1]
+  - main:
+    - paragraph: Tiny static app for testing.
+    - paragraph:
+      - link "Open dashboard":
+        - /url: /dashboard.html
+`;
+
+  it("strips trailing colons from role names", () => {
+    const els = parseSnapshot(PLAYWRIGHT_SAMPLE);
+    const banner = els.find((e) => e.role === "banner");
+    expect(banner).toBeDefined();
+    expect(banner?.role).toBe("banner");
+  });
+
+  it("captures heading + level from Playwright snapshot", () => {
+    const els = parseSnapshot(PLAYWRIGHT_SAMPLE);
+    const heading = els.find((e) => e.role === "heading");
+    expect(heading).toMatchObject({
+      role: "heading",
+      name: "Cairntrace demo home",
+    });
+    expect(heading?.attrs?.["level"]).toBe("1");
+  });
+
+  it("captures the link name even when followed by a colon", () => {
+    const els = parseSnapshot(PLAYWRIGHT_SAMPLE);
+    const link = findByRole(els, "link");
+    expect(link).toHaveLength(1);
+    expect(link[0]?.name).toBe("Open dashboard");
+  });
+
+  it("ignores leaf lines that start with /", () => {
+    const els = parseSnapshot(PLAYWRIGHT_SAMPLE);
+    // `/url: /dashboard.html` shouldn't show up as a node.
+    expect(els.find((e) => e.role.startsWith("/"))).toBeUndefined();
+  });
+});

@@ -1,12 +1,13 @@
 import { healSpec, type HealOutput } from "../../../core/healer/Healer";
 import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
-import { createBackend } from "../../backendFactory";
+import { type BackendChoice, createBackend } from "../../backendFactory";
 import { emit, resolveFormat } from "../../format";
 import { isInteractive } from "../../progress";
 
 export interface HealCommandOptions {
   apply?: boolean;
   mock?: boolean;
+  backend?: BackendChoice;
   headed?: boolean;
   format?: string;
   json?: boolean;
@@ -20,8 +21,9 @@ export async function healCommand(
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend({
-    mock: opts.mock,
-    headed: opts.headed,
+    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
+    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
+    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
   });
 
   let exitCode = 2;

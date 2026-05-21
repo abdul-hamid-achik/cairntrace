@@ -25,7 +25,12 @@ import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
  * tests typically omit it.
  */
 export interface ProgressListener {
-  onRunStart?(spec: Spec, runId: string, runDir: string): void;
+  onRunStart?(
+    spec: Spec,
+    runId: string,
+    runDir: string,
+    backendName: string,
+  ): void;
   onStepStart?(idx: number, step: Step, stepId: string): void;
   onStepFinish?(
     idx: number,
@@ -100,8 +105,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   });
 
   const env = envName;
-  const backendName =
-    opts.backend.name === "mock" ? "mock" : (spec.backend ?? "agent-browser");
+  // The actual backend that ran is authoritative — spec.backend is only
+  // advisory metadata that may not match the CLI's --backend choice.
+  const backendName = opts.backend.name;
   const artifactRoot =
     opts.artifactRoot ??
     config?.artifactRoot ??
@@ -121,7 +127,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     runId,
     spec: spec.name,
   });
-  opts.listener?.onRunStart?.(spec, runId, runDir);
+  opts.listener?.onRunStart?.(spec, runId, runDir, backendName);
 
   // Reset backend's network/console logs before the run so we don't pick up
   // leakage from a previous spec on the same session.

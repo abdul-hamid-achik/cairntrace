@@ -65,9 +65,9 @@ export function makeInteractiveListener(
   let stepCount = 0;
 
   return {
-    onRunStart(spec, runId, runDir) {
+    onRunStart(spec, runId, runDir, backendName) {
       out(
-        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${spec.environment ?? "local"}, backend=${spec.backend ?? "agent-browser"})${c.reset}\n`,
+        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${spec.environment ?? "local"}, backend=${backendName})${c.reset}\n`,
       );
       out(`${c.dim}Run id:${c.reset} ${runId}\n`);
       out(`${c.dim}Run dir:${c.reset} ${runDir}\n\n`);

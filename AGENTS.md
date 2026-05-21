@@ -79,8 +79,17 @@ per-agent code paths.
 
 ## Browser automation
 
-Cairntrace uses [`agent-browser`](https://agent-browser.dev) by default. Key
-quirks worth remembering when reading `AgentBrowserAdapter.ts`:
+Cairntrace has two backends; the spec doesn't have to know which one runs.
+
+- **`agent-browser`** (default) — AI-native browser CLI with semantic
+  locators and compact accessibility snapshots. See
+  `src/adapters/agent-browser/`.
+- **`playwright`** — full Playwright with native traces, video, and HAR. Pass
+  `--backend playwright` to `cairn run` or `cairn spec heal`. Install the
+  browser binary with `bunx playwright install chromium`. The adapter uses
+  `locator.ariaSnapshot()`, whose output the heal `snapshotParser` reads.
+
+### agent-browser quirks (when reading `AgentBrowserAdapter.ts`):
 
 - `--session <name>` is a global flag; the adapter stamps this on every call.
 - `navigate <url>` (not `open <url>`) is what we send for `OpenStep` — `open`

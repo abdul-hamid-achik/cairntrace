@@ -38,6 +38,7 @@ addFormatFlags(
     .option("--cold-start", "force fresh browser profile (default: on in CI)")
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
+    .option("--backend <name>", "agent-browser (default) | playwright | mock")
     .option("--artifact-root <path>", "override artifact root directory")
     .option(
       "--config <path>",
@@ -108,6 +109,7 @@ addFormatFlags(
     )
     .option("--apply", "write the patched spec back to disk", false)
     .option("--mock", "use the in-memory mock backend", false)
+    .option("--backend <name>", "agent-browser (default) | playwright | mock")
     .option("--headed", "show the browser window", false),
 ).action((p: string, opts) => healCommand(p, opts));
 

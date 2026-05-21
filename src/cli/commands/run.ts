@@ -1,6 +1,6 @@
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { runSpec } from "../../core/runner/Runner";
-import { createBackend } from "../backendFactory";
+import { type BackendChoice, createBackend } from "../backendFactory";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 
@@ -9,6 +9,7 @@ export interface RunCommandOptions {
   coldStart?: boolean;
   headed?: boolean;
   mock?: boolean;
+  backend?: BackendChoice;
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -25,8 +26,9 @@ export async function runCommand(
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend({
-    mock: opts.mock,
-    headed: opts.headed,
+    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
+    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
+    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
   });
 
   // Interactive progress only when emitting markdown to a real TTY. JSON/YAML
