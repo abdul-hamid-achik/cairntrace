@@ -34,20 +34,24 @@ export interface HealOutput {
 }
 
 /**
- * v0 heal — diagnose UI drift on a single `find role <X> --name <Y>` step.
+ * v0.4 heal — diagnose UI drift on a single click/fill/upload step.
  *
  * Algorithm:
  *   1. Run the spec.
  *   2. Find the first failed step. If none, the spec already passes — nothing to heal.
  *   3. Read the snapshot captured at that step (post-attempt page state).
- *   4. If the failed step uses a role+name locator, look for elements with the
- *      same role in the snapshot. If exactly one has a different name, propose
- *      a `replace /steps/<N>/click/name` (or fill/upload) op.
+ *   4. proposeOps tries, in order:
+ *        a. Name-drift heal — `by: role | label | text` → propose name/text replacement
+ *           against the closest snapshot candidate.
+ *        b. Wait-insertion — when no candidate exists and the previous step
+ *           isn't already a wait, insert a `wait: { text: <name>, timeoutMs: 5000 }`
+ *           step before the failed one.
  *   5. With `--apply`, rewrite the YAML in place via the yaml lib's parseDocument
  *      API so comments and formatting are preserved.
  *
  * Not yet handled: imports/`use:` step expansion, multi-step drift, role swaps,
- * wait insertion. Add as we observe real drift patterns.
+ * heal across multiple failing steps in one pass. Add as we observe real
+ * drift patterns.
  */
 export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   const specPathAbs = isAbsolute(opts.specPath)
@@ -131,7 +135,9 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   const snapshot = parseSnapshot(snapshotText);
 
   // Propose ops based on what kind of locator the failed step uses.
-  const ops = proposeOps(step, failedStepIdx, snapshot);
+  const ops = proposeOps(step, failedStepIdx, snapshot, {
+    allSteps: spec.steps,
+  });
 
   if (ops.length === 0) {
     return {
@@ -185,63 +191,172 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
 
 /* ----- core proposal logic ----- */
 
+export interface ProposeOpsContext {
+  /** The full step list, used by wait-insertion heuristic to detect existing waits. */
+  allSteps?: Step[];
+}
+
 export function proposeOps(
   step: Step,
   stepIdx: number,
   snapshot: SnapshotElement[],
+  ctx: ProposeOpsContext = {},
 ): PatchOp[] {
-  // Currently handles click / fill / upload with `by: role` locators.
-  const locatorOps: PatchOp[] = [];
+  /* 1) Name-drift heal — covers `by: role`, `by: label`, `by: text`. */
+  const locatorOp = tryLocatorDrift(step, stepIdx, snapshot);
+  if (locatorOp) return [locatorOp];
 
-  const tryLocator = (
-    key: "click" | "fill" | "upload",
-    locator: { by: string; role?: string; name?: string },
-  ): PatchOp | undefined => {
-    if (locator.by !== "role" || !locator.role || locator.name === undefined) {
-      return undefined;
-    }
-    const candidates = findByRole(snapshot, locator.role).filter(
+  /* 2) Wait-insertion heal — runs when no name candidate is found but the
+        step is a click/fill/upload and there isn't already a wait right
+        before it. Inserts a `wait: { text: <locator-name> }` step. */
+  const waitOp = tryWaitInsertion(step, stepIdx, ctx.allSteps);
+  if (waitOp) return [waitOp];
+
+  return [];
+}
+
+function tryLocatorDrift(
+  step: Step,
+  stepIdx: number,
+  snapshot: SnapshotElement[],
+): PatchOp | undefined {
+  // Find which locator key is on this step (click/fill/upload), and what kind
+  // of locator (role/label/text/selector).
+  const target = extractLocatorTarget(step);
+  if (!target) return undefined;
+  const { key, locator } = target;
+
+  const candidates = candidatesForLocator(locator, snapshot);
+  if (candidates.length === 0) return undefined;
+
+  // The drifted "field" is the name for role/label, the text for text-locator.
+  const current = locator.by === "text" ? locator.text : locator.name;
+  if (current === undefined) return undefined;
+
+  const exactMatch = candidates.find((c) => (c.name ?? "") === current);
+  if (exactMatch) return undefined;
+
+  const best =
+    candidates.length === 1
+      ? candidates[0]!
+      : candidates.toSorted(
+          (a, b) =>
+            stringDistance(a.name ?? "", current) -
+            stringDistance(b.name ?? "", current),
+        )[0]!;
+
+  const driftedField = locator.by === "text" ? "text" : "name";
+  const newValue = best.name ?? "";
+
+  return {
+    op: "replace",
+    path: `/steps/${stepIdx}/${key}/${driftedField}`,
+    from: current,
+    to: newValue,
+    reason: describeLocatorMatch(
+      locator,
+      best.role,
+      newValue,
+      candidates.length,
+    ),
+  };
+}
+
+function tryWaitInsertion(
+  step: Step,
+  stepIdx: number,
+  allSteps: Step[] | undefined,
+): PatchOp | undefined {
+  // Wait insertion is opt-in: only fires when the caller supplies allSteps
+  // (i.e., a real healSpec invocation). Unit tests that pass `proposeOps`
+  // bare locator drift cases shouldn't get spurious wait inserts.
+  if (!allSteps) return undefined;
+
+  const target = extractLocatorTarget(step);
+  if (!target) return undefined;
+  const { locator } = target;
+  const lookFor = locator.by === "text" ? locator.text : locator.name;
+  if (!lookFor) return undefined;
+
+  // If the previous step is already a wait, skip — repeating won't help.
+  const prev = allSteps[stepIdx - 1];
+  if (prev && "wait" in prev) return undefined;
+
+  return {
+    op: "insert",
+    path: `/steps/${stepIdx}`,
+    value: {
+      id: `wait_for_${slugify(lookFor)}`,
+      wait: { text: lookFor, timeoutMs: 5000 },
+    },
+    reason: `no name candidate matched — insert a wait for "${lookFor}" in case the element appears after async`,
+  };
+}
+
+interface LocatorTarget {
+  key: "click" | "fill" | "upload";
+  locator: {
+    by: string;
+    role?: string;
+    name?: string;
+    text?: string;
+    selector?: string;
+  };
+}
+
+function extractLocatorTarget(step: Step): LocatorTarget | undefined {
+  if ("click" in step) return { key: "click", locator: step.click };
+  if ("fill" in step) return { key: "fill", locator: step.fill };
+  if ("upload" in step) return { key: "upload", locator: step.upload };
+  return undefined;
+}
+
+/**
+ * Return snapshot elements that could plausibly be the target of this locator.
+ * - role+name: matching role only
+ * - label+name: any element with a name (labels in agent-browser snapshots
+ *   surface as the accessible name on form controls)
+ * - text:      any element with a name (text-locators bind to the accessible name)
+ * - selector:  unsupported in v0 (no good heuristic without a CSS engine)
+ */
+function candidatesForLocator(
+  locator: LocatorTarget["locator"],
+  snapshot: SnapshotElement[],
+): SnapshotElement[] {
+  if (locator.by === "role" && locator.role) {
+    return findByRole(snapshot, locator.role).filter(
       (e) => e.name !== undefined,
     );
-    if (candidates.length === 0) return undefined;
-
-    const exactMatch = candidates.find((c) => c.name === locator.name);
-    if (exactMatch) return undefined; // not a name drift — locator should have worked
-
-    // Heuristic: if exactly one candidate exists, propose that name.
-    // If multiple, find the closest by simple string distance.
-    const best =
-      candidates.length === 1
-        ? candidates[0]!
-        : candidates.toSorted(
-            (a, b) =>
-              stringDistance(a.name!, locator.name!) -
-              stringDistance(b.name!, locator.name!),
-          )[0]!;
-
-    return {
-      op: "replace",
-      path: `/steps/${stepIdx}/${key}/name`,
-      from: locator.name,
-      to: best.name!,
-      reason: `snapshot shows role=${locator.role} with name="${best.name}" (${candidates.length} candidate${
-        candidates.length === 1 ? "" : "s"
-      })`,
-    };
-  };
-
-  if ("click" in step) {
-    const op = tryLocator("click", step.click);
-    if (op) locatorOps.push(op);
-  } else if ("fill" in step) {
-    const op = tryLocator("fill", step.fill);
-    if (op) locatorOps.push(op);
-  } else if ("upload" in step) {
-    const op = tryLocator("upload", step.upload);
-    if (op) locatorOps.push(op);
   }
+  if (locator.by === "label" || locator.by === "text") {
+    return snapshot.filter((e) => e.name !== undefined && e.name.length > 0);
+  }
+  return [];
+}
 
-  return locatorOps;
+function describeLocatorMatch(
+  locator: LocatorTarget["locator"],
+  matchRole: string,
+  newValue: string,
+  candidateCount: number,
+): string {
+  const noun = candidateCount === 1 ? "candidate" : "candidates";
+  if (locator.by === "role") {
+    return `snapshot shows role=${locator.role} with name="${newValue}" (${candidateCount} ${noun})`;
+  }
+  if (locator.by === "label") {
+    return `snapshot shows ${matchRole} labeled "${newValue}" (${candidateCount} ${noun})`;
+  }
+  return `snapshot shows ${matchRole} with text "${newValue}" (${candidateCount} ${noun})`;
+}
+
+function slugify(s: string): string {
+  return (
+    s
+      .toLowerCase()
+      .replaceAll(/[^a-z0-9]+/g, "_")
+      .replaceAll(/^_|_$/g, "") || "el"
+  );
 }
 
 /* ----- helpers ----- */

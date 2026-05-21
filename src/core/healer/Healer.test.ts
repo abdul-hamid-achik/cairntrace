@@ -64,4 +64,75 @@ describe("proposeOps", () => {
       proposeOps({ click: { by: "selector", selector: "#missing" } }, 0, snap),
     ).toHaveLength(0);
   });
+
+  /* --- v0.4: label / text / wait-insertion --- */
+
+  it("heals by: label drift via name", () => {
+    const snap = parseSnapshot(`
+- main
+  - textbox "Email address" [ref=e1]
+`);
+    const step: Step = {
+      fill: { by: "label", name: "Email", value: "a@b.c" },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/fill/name",
+      from: "Email",
+      to: "Email address",
+    });
+  });
+
+  it("heals by: text drift via text", () => {
+    const snap = parseSnapshot(`
+- main
+  - link "Open dashboard"
+`);
+    const step: Step = {
+      click: { by: "text", text: "Open dash" },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/click/text",
+      from: "Open dash",
+      to: "Open dashboard",
+    });
+  });
+
+  it("proposes a wait insertion when no candidate matches and previous step isn't a wait", () => {
+    // Snapshot has no `link` at all.
+    const snap = parseSnapshot(`
+- main
+  - heading "Loading…"
+`);
+    const step: Step = {
+      click: { by: "role", role: "link", name: "Open dashboard" },
+    };
+    const ops = proposeOps(step, 1, snap, {
+      allSteps: [{ open: "/" }, step],
+    });
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "insert",
+      path: "/steps/1",
+    });
+    expect(
+      (ops[0] as { value: { wait: { text: string } } }).value.wait.text,
+    ).toBe("Open dashboard");
+  });
+
+  it("does not propose a wait insertion if previous step is already a wait", () => {
+    const snap = parseSnapshot(`- main\n  - heading "Loading…"`);
+    const step: Step = {
+      click: { by: "role", role: "link", name: "Open dashboard" },
+    };
+    const ops = proposeOps(step, 1, snap, {
+      allSteps: [{ wait: { text: "Anything" } }, step],
+    });
+    expect(ops).toHaveLength(0);
+  });
 });
