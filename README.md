@@ -50,6 +50,8 @@ bun examples/demo-app/server.ts
 | `cairn spec heal <spec> [--apply]` | Re-runs the spec, proposes selector-drift fixes from the accessibility-tree snapshot, optionally writes them back (preserves YAML comments). |
 | `cairn checkpoint capture-from-session <name> --session <ab-session>` | Saves the state of an existing agent-browser session as a named checkpoint. |
 | `cairn checkpoint list / show / delete` | Manage saved checkpoints. |
+| `cairn login <name> --url ... [--wait-for text:\|url:]` | Open a headed browser, let the user log in, capture state into a checkpoint. |
+| `cairn mcp` | Start the MCP server on stdio for MCP-aware agents (Claude Code, Cursor, etc.). |
 
 Every agent-callable command supports `--format json|yaml|md` (or `--json`,
 `--yaml`, `--md` shorthand). Exit codes are stable across versions:
@@ -157,6 +159,30 @@ bun run lint           # oxlint
 bun run format         # oxfmt
 bun run verify         # all of the above
 ```
+
+## MCP integration
+
+Cairntrace exposes its surface as an MCP server. Add it to your agent's MCP
+config (the example below is for Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "cairntrace": {
+      "command": "cairn",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Tools exposed: `cairn_explain`, `cairn_doctor`, `cairn_run`, `cairn_context`,
+`cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
+`cairn_checkpoint_list`. Each tool returns both `content` (text summary) and
+`structuredContent` (the canonical JSON matching the v1 wire schemas).
+
+Agents that don't speak MCP can use the same surface via the shell CLI — the
+output is identical.
 
 ## License
 

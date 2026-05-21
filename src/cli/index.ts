@@ -7,6 +7,7 @@ import { contextCommand } from "./commands/context";
 import { doctorCommand } from "./commands/doctor";
 import { explainCommand } from "./commands/explain";
 import { loginCommand } from "./commands/login";
+import { mcpCommand } from "./commands/mcp";
 import { runCommand } from "./commands/run";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
@@ -64,6 +65,11 @@ program
   )
   .option("--path", "print the file path instead of contents", false)
   .action((run: string, opts) => contextCommand(run, opts));
+
+program
+  .command("mcp")
+  .description("Start the Cairntrace MCP server on stdio")
+  .action(() => mcpCommand());
 
 program
   .command("login <name>")
