@@ -134,6 +134,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   await safe(() => opts.backend.clearNetworkLog());
   await safe(() => opts.backend.clearConsole());
 
+  // Start trace recording. Trace artifacts are best-effort: backends without
+  // trace support no-op, and a failed start is swallowed.
+  await safe(async () => opts.backend.startTrace?.());
+
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
   // Resolves before checkpoint resume so the spec's own setup populates state
   // *after* the wipe.
@@ -312,6 +316,18 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     true,
   );
 
+  // Stop trace recording and save to traces/<backend>-trace.zip.
+  const traceRelPath = `traces/${backendName}-trace.zip`;
+  let tracePath: string | undefined;
+  const traceResult = await safe(async () => {
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(writer.resolve("traces"), { recursive: true });
+    return opts.backend.stopTrace?.(writer.resolve(traceRelPath));
+  });
+  if (traceResult?.ok) {
+    tracePath = traceRelPath;
+  }
+
   // Evaluate outcomes.
   const ctx: VerifierContext = {
     lastSuccessfulStep: lastSuccessfulStep?.id,
@@ -379,6 +395,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     network: "network/failed_requests.ndjson",
     ...(latestScreenshot ? { screenshots: [latestScreenshot] } : {}),
     ...(latestSnapshot ? { snapshots: [latestSnapshot] } : {}),
+    ...(tracePath ? { trace: tracePath } : {}),
   };
 
   const result: RunResult = {

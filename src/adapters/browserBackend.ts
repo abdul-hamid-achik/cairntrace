@@ -102,6 +102,19 @@ export interface BrowserBackend {
    */
   clearBrowserState(): Promise<void>;
 
+  /* ----- tracing ----- */
+  /**
+   * Begin recording a trace of the run. Best-effort: backends without trace
+   * support no-op. Playwright writes a Trace Viewer-compatible .zip;
+   * agent-browser's trace also produces a .zip.
+   */
+  startTrace?(): Promise<void>;
+  /**
+   * Stop recording and save the trace to `path`. Returns whether the save
+   * succeeded so the runner can decide whether to record the artifact path.
+   */
+  stopTrace?(path: string): Promise<{ ok: boolean; path: string }>;
+
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;
 }

@@ -252,6 +252,36 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
   }
 
+  async startTrace(): Promise<void> {
+    await this.ensureBrowser();
+    if (!this.context) {
+      this.context = await this.browser!.newContext(
+        this.opts.initialStatePath
+          ? { storageState: this.opts.initialStatePath }
+          : {},
+      );
+    }
+    try {
+      await this.context.tracing.start({
+        screenshots: true,
+        snapshots: true,
+        sources: true,
+      });
+    } catch {
+      // tracing.start can throw if already started; ignore
+    }
+  }
+
+  async stopTrace(path: string): Promise<{ ok: boolean; path: string }> {
+    if (!this.context) return { ok: false, path };
+    try {
+      await this.context.tracing.stop({ path });
+      return { ok: true, path };
+    } catch {
+      return { ok: false, path };
+    }
+  }
+
   async close(): Promise<InvocationResult> {
     const start = Date.now();
     try {

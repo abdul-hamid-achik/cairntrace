@@ -192,6 +192,19 @@ export class AgentBrowserAdapter implements BrowserBackend {
     ]);
   }
 
+  /* ----- tracing ----- */
+
+  async startTrace(): Promise<void> {
+    // agent-browser's `trace start` works without an explicit path; we provide
+    // the destination at `stopTrace` time so the runner controls layout.
+    await this.invoke(["trace", "start"]);
+  }
+
+  async stopTrace(path: string): Promise<{ ok: boolean; path: string }> {
+    const r = await this.invoke(["trace", "stop", path]);
+    return { ok: r.ok, path };
+  }
+
   /**
    * Wipe cookies + localStorage + sessionStorage. Used by the Runner's
    * --cold-start gate (plan §10.6).

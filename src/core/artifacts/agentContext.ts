@@ -57,7 +57,9 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
   }
 
   if (evidenceRefs.length > 0) {
-    lines.push("", "## Failure evidence", ...evidenceRefs);
+    const heading =
+      failed.length > 0 ? "## Failure evidence" : "## Captured artifacts";
+    lines.push("", heading, ...evidenceRefs);
   }
 
   lines.push(
@@ -66,6 +68,21 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     "```bash",
     `cairn run ${result.spec.path} --env ${result.environment} --headed`,
     "```",
+  );
+
+  // Trace viewer hint — Playwright traces are viewable directly; agent-browser
+  // traces ship as a .zip in the same Trace Viewer format.
+  if (result.artifacts.trace) {
+    lines.push(
+      "",
+      "## View the trace",
+      "```bash",
+      `bunx playwright show-trace ${result.runDir}/${result.artifacts.trace}`,
+      "```",
+    );
+  }
+
+  lines.push(
     "",
     "## Suggested next steps",
     failed.length === 0
