@@ -87,6 +87,57 @@ steps:
     expect((r.resolved.steps![2] as { open: string }).open).toBe("/dashboard");
   });
 
+  it("tracks origins back to imported action files", async () => {
+    const actionPath = join(dir, "open_dashboard_action.yml");
+    await writeFile(
+      actionPath,
+      `version: 1
+name: open_dashboard
+steps:
+  - id: nav
+    open: /
+  - id: click_into
+    click:
+      by: role
+      role: link
+      name: Open dashboard
+`,
+    );
+    const specPath = join(dir, "uses_action_with_origins.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: uses_action_origins
+intent: confirm origins map back to the action file
+imports:
+  - ./open_dashboard_action.yml
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      url: { endsWith: "/dashboard" }
+steps:
+  - use: open_dashboard
+  - open: /dashboard
+`,
+    );
+    const r = await parseSpec(specPath);
+    // 2 from action (nav, click_into) + 1 inline (open /dashboard) = 3 origins
+    expect(r.origins).toHaveLength(3);
+    expect(r.origins[0]).toMatchObject({
+      filePath: actionPath,
+      fileStepIdx: 0,
+    });
+    expect(r.origins[1]).toMatchObject({
+      filePath: actionPath,
+      fileStepIdx: 1,
+    });
+    expect(r.origins[2]).toMatchObject({
+      filePath: specPath,
+      fileStepIdx: 1, // step 0 in spec is `use:`, step 1 is the inline open
+    });
+  });
+
   it("throws on unresolved `use:` references", async () => {
     const path = join(dir, "missing_action.yml");
     await writeFile(

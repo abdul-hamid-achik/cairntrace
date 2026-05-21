@@ -20,6 +20,30 @@ export interface ParseResult {
   path: string;
   /** True iff the spec had a `contractHash:` field that matched the computed value. */
   contractHashValid: boolean;
+  /**
+   * One entry per element of `resolved.steps` (after `use:` expansion + baseUrl
+   * substitution). Maps each resolved index back to the file the step came from
+   * — used by `cairn spec heal` to patch the right YAML when drift surfaces
+   * inside an imported action.
+   */
+  origins: StepOrigin[];
+  /** Actions loaded from `imports:`, keyed by action name. */
+  actionsByName: Map<string, LoadedAction>;
+}
+
+export interface LoadedAction {
+  action: ReusableAction;
+  /** Absolute path of the action YAML on disk. */
+  path: string;
+}
+
+export interface StepOrigin {
+  /** The step exactly as it appears in its source file (NOT baseUrl-substituted). */
+  step: Step;
+  /** Absolute path of the file containing this step. */
+  filePath: string;
+  /** Index of this step within that file's `steps` array. */
+  fileStepIdx: number;
 }
 
 export interface ParseOptions {
@@ -61,34 +85,46 @@ export async function parseSpec(
   const raw = await loadAndParse(absPath, env, vars, baseUrl);
   const spec = SpecSchema.parse(raw);
 
-  const actions = new Map<string, ReusableAction>();
+  const actionsByName = new Map<string, LoadedAction>();
   for (const importPath of spec.imports ?? []) {
     const resolvedImport = resolveImportPath(importPath, dirname(absPath));
     const importRaw = await loadAndParse(resolvedImport, env, vars, baseUrl);
     const action = ReusableActionSchema.parse(importRaw);
-    actions.set(action.name, action);
+    actionsByName.set(action.name, { action, path: resolvedImport });
   }
 
-  const resolvedSteps: Step[] = (spec.steps ?? []).flatMap((step) => {
+  // Walk spec.steps in order; expand `use:` while tracking origins so heal
+  // can map back from `resolved.steps[N]` to (file, file-step-idx).
+  const origins: StepOrigin[] = [];
+  const specSteps = spec.steps ?? [];
+  for (let i = 0; i < specSteps.length; i++) {
+    const step = specSteps[i]!;
     if ("use" in step) {
-      const action = actions.get(step.use);
-      if (!action) {
+      const loaded = actionsByName.get(step.use);
+      if (!loaded) {
         throw new UnresolvedActionError(step.use, spec.imports ?? []);
       }
-      return action.steps;
+      for (let j = 0; j < loaded.action.steps.length; j++) {
+        origins.push({
+          step: loaded.action.steps[j]!,
+          filePath: loaded.path,
+          fileStepIdx: j,
+        });
+      }
+    } else {
+      origins.push({ step, filePath: absPath, fileStepIdx: i });
     }
-    return [step];
-  });
+  }
 
   // Prepend baseUrl to relative-path `open:` steps so specs can be portable
-  // across environments without rewriting URLs by hand.
-  const stepsWithBaseUrl = baseUrl
-    ? resolvedSteps.map((step) =>
-        "open" in step && isRelativeUrl(step.open)
-          ? { ...step, open: joinUrl(baseUrl, step.open) }
-          : step,
-      )
-    : resolvedSteps;
+  // across environments without rewriting URLs by hand. This only affects
+  // `resolved.steps`; `origins[i].step` remains the raw file step so heal
+  // patches the file's actual content.
+  const stepsWithBaseUrl = origins.map(({ step }) =>
+    baseUrl && "open" in step && isRelativeUrl(step.open)
+      ? { ...step, open: joinUrl(baseUrl, step.open) }
+      : step,
+  );
 
   const resolved: Spec = { ...spec, steps: stepsWithBaseUrl };
 
@@ -101,7 +137,14 @@ export async function parseSpec(
     contractHashValid = true;
   }
 
-  return { spec, resolved, path: absPath, contractHashValid };
+  return {
+    spec,
+    resolved,
+    path: absPath,
+    contractHashValid,
+    origins,
+    actionsByName,
+  };
 }
 
 export class ContractHashMismatchError extends Error {

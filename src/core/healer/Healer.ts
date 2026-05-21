@@ -1,11 +1,12 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import { parse as parseYaml, parseDocument } from "yaml";
+import { parseDocument } from "yaml";
 import type { BrowserBackend } from "../../adapters/browserBackend";
+import { parseSpec } from "../parser/parseSpec";
 import { runSpec } from "../runner/Runner";
 import type { PatchOp } from "../schema/heal.v1";
 import type { ExitCode } from "../schema/shared";
-import { SpecSchema, type Step } from "../schema/spec.v1";
+import type { Step } from "../schema/spec.v1";
 import {
   findByRole,
   parseSnapshot,
@@ -92,25 +93,23 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     };
   }
 
-  // Re-parse the on-disk YAML for source-level patching (preserves original
-  // structure better than re-serializing the validated object).
-  const yamlText = await readFile(opts.specPath, "utf8");
-  const yamlObj = parseYaml(yamlText) as unknown;
-  const spec = SpecSchema.parse(yamlObj);
-  const step = spec.steps?.[failedStepIdx];
-  if (!step) {
+  // Re-parse the spec with origins so we can map the resolved-step index back
+  // to the file that owns it (main spec OR an imported action file).
+  const parsed = await parseSpec(opts.specPath);
+  const origin = parsed.origins[failedStepIdx];
+  if (!origin) {
     return {
       specPath: specPathAbs,
       basedOnRunId: result.runId,
       status: "no-heal-possible",
       outcomesStillReachable: false,
       ops: [],
-      summary: `step index ${failedStepIdx} not found in spec — heal cannot rewrite imports/use:`,
+      summary: `step index ${failedStepIdx} not in the resolved step list — spec may have changed since this run`,
       exitCode: 5,
     };
   }
 
-  // Read the snapshot agent-browser took at the failing step (post-attempt page).
+  // Read the snapshot the backend took at the failing step (post-attempt page).
   const failedStepResult = result.steps[failedStepIdx]!;
   const stepIdForFile = failedStepResult.id;
   const snapshotPath = join(
@@ -134,9 +133,12 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   }
   const snapshot = parseSnapshot(snapshotText);
 
-  // Propose ops based on what kind of locator the failed step uses.
-  const ops = proposeOps(step, failedStepIdx, snapshot, {
-    allSteps: spec.steps,
+  // Determine the "owning file" steps array — main spec or an imported action.
+  // Wait-insertion needs this so the inserted step lands in the right file.
+  const ownerSteps = stepsForFile(parsed, origin.filePath);
+
+  const ops = proposeOps(origin.step, origin.fileStepIdx, snapshot, {
+    allSteps: ownerSteps,
   });
 
   if (ops.length === 0) {
@@ -153,8 +155,10 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   }
 
   if (opts.apply) {
-    // parseDocument preserves comments + formatting; setIn mutates in place.
-    const doc = parseDocument(yamlText);
+    // parseDocument preserves comments + formatting on the OWNING file
+    // (which may be an imported action, not the main spec).
+    const ownerText = await readFile(origin.filePath, "utf8");
+    const doc = parseDocument(ownerText);
     for (const op of ops) {
       const path = jsonPointerToPath(op.path);
       if (op.op === "replace") {
@@ -165,15 +169,15 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
         doc.addIn(path, (op as { value: unknown }).value);
       }
     }
-    await writeFile(opts.specPath, String(doc));
+    await writeFile(origin.filePath, String(doc));
     return {
       specPath: specPathAbs,
       basedOnRunId: result.runId,
       status: "patch-applied",
       outcomesStillReachable: true,
       ops,
-      appliedPath: specPathAbs,
-      summary: `applied ${ops.length} op(s); re-run the spec to confirm`,
+      appliedPath: origin.filePath,
+      summary: `applied ${ops.length} op(s) to ${origin.filePath}; re-run the spec to confirm`,
       exitCode: 0,
     };
   }
@@ -184,9 +188,21 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     status: "patch-proposed",
     outcomesStillReachable: true,
     ops,
-    summary: `proposed ${ops.length} op(s); pass --apply to write them to the file`,
+    summary: `proposed ${ops.length} op(s) on ${origin.filePath}; pass --apply to write`,
     exitCode: 0,
   };
+}
+
+/** Steps array of the file that owns the failed step (main spec or action). */
+function stepsForFile(
+  parsed: Awaited<ReturnType<typeof parseSpec>>,
+  filePath: string,
+): Step[] {
+  if (filePath === parsed.path) return parsed.spec.steps ?? [];
+  for (const loaded of parsed.actionsByName.values()) {
+    if (loaded.path === filePath) return loaded.action.steps;
+  }
+  return [];
 }
 
 /* ----- core proposal logic ----- */

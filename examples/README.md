@@ -23,7 +23,8 @@ examples/
     ├── 05-detects-broken-api.yml      DELIBERATELY failing spec — proves 500 is detected
     ├── 06-drifted-link.yml            DELIBERATELY drifted spec for `cairn spec heal` demo
     ├── 07-config-driven.yml           uses cairntrace.config.yml for baseUrl + ${vars.X}
-    └── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
+    ├── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
+    └── 09-imported-drift.yml          drift inside an imported action; heal patches the action file
 ```
 
 ## Heal demo (`cairn spec heal`)

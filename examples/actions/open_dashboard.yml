@@ -1,0 +1,17 @@
+# Cairntrace reusable action — INTENTIONALLY DRIFTED.
+#
+# This action's click locator name is wrong ("Dashboard link" instead of the
+# real "Open dashboard"). Used by examples/flows/09-imported-drift.yml to
+# demonstrate that `cairn spec heal --apply` correctly patches the action
+# file rather than the importing spec.
+#
+version: 1
+name: open_dashboard
+steps:
+  - id: open_home
+    open: http://localhost:8787/
+  - id: click_link
+    click:
+      by: role
+      role: link
+      name: Dashboard link
