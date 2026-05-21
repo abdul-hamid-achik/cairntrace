@@ -18,6 +18,20 @@ for the design rationale.
 
 [plan-link]: #-the-design-doc
 
+## Requirements
+
+Cairntrace runs on [**Bun 1.3+**](https://bun.com). The `cairn` binary is a
+TypeScript file with a `#!/usr/bin/env bun` shebang — no separate compile
+step in v1. A compiled Node-compatible distribution may land in a later
+release; for now, `bun` must be on your `$PATH`.
+
+You'll also want one of:
+
+- [`agent-browser`](https://agent-browser.dev) for the default backend
+- [Playwright](https://playwright.dev) (`bun add -d playwright && bunx playwright install chromium`) for the `--backend playwright` path
+
+`cairn doctor` checks both.
+
 ## Quickstart
 
 ```bash

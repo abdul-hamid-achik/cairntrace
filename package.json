@@ -3,9 +3,19 @@
   "version": "0.10.0",
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
+  "license": "MIT",
   "bin": {
     "cairn": "./bin/cairn"
   },
+  "files": [
+    "bin",
+    "src",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "SECURITY.md",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "bun src/cli/index.ts",
     "test": "vitest run",
