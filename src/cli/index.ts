@@ -34,20 +34,25 @@ function addFormatFlags(c: Command): Command {
 
 addFormatFlags(
   program
-    .command("run <spec>")
-    .description("Run a behavioral spec")
+    .command("run <spec...>")
+    .description("Run one or more behavioral specs")
     .option("--env <name>", "environment override")
     .option("--cold-start", "force fresh browser profile (default: on in CI)")
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--parallel <n>",
+      "run N specs concurrently (each in its own browser session)",
+      "1",
+    )
     .option("--artifact-root <path>", "override artifact root directory")
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     )
     .option("--no-color", "disable ANSI colors in interactive output"),
-).action((spec: string, opts) => runCommand(spec, opts));
+).action((specs: string[], opts) => runCommand(specs, opts));
 
 addFormatFlags(
   program

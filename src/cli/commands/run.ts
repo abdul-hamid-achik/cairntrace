@@ -1,5 +1,8 @@
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
+import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
+import type { RunResult } from "../../core/schema/run.v1";
+import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
@@ -16,33 +19,51 @@ export interface RunCommandOptions {
   md?: boolean;
   artifactRoot?: string;
   config?: string;
+  parallel?: string;
   /** Commander sets this to false when `--no-color` is passed. */
   color?: boolean;
 }
 
+/**
+ * `cairn run <spec...> [--parallel N]`
+ *
+ * - Single spec, parallel=1 → rich interactive progress, RunResult output
+ *   (back-compat with v0.0 — existing JSON consumers still get RunResult).
+ * - Multiple specs OR parallel>1 → BatchRunResult, per-spec one-liners only.
+ */
 export async function runCommand(
+  specs: string[],
+  opts: RunCommandOptions,
+): Promise<void> {
+  const parallel = Math.max(1, Number(opts.parallel ?? "1"));
+
+  if (specs.length === 0) {
+    process.stderr.write("cairn run: at least one spec path is required\n");
+    process.exit(2);
+  }
+
+  if (specs.length === 1 && parallel === 1) {
+    await runSingle(specs[0]!, opts);
+    return;
+  }
+
+  await runBatch(specs, parallel, opts);
+}
+
+/* ----- single-spec path (preserves v0.0 behavior) ----- */
+
+async function runSingle(
   specPath: string,
   opts: RunCommandOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
-  const backend = createBackend({
-    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
-    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
-    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
-  });
-
-  // Interactive progress only when emitting markdown to a real TTY. JSON/YAML
-  // callers (agents, CI) get a clean structured payload with no progress noise.
+  const backend = createBackend(backendOpts(opts));
   const interactive = format === "md" && isInteractive();
-  const colorEnabled =
-    opts.color !== false &&
-    !process.env.NO_COLOR &&
-    process.env.TERM !== "dumb";
   const listener = interactive
-    ? makeInteractiveListener({ color: colorEnabled })
+    ? makeInteractiveListener({ color: colorEnabled(opts) })
     : undefined;
 
-  let exitCode = 2;
+  let exitCode: ExitCode = 2;
   try {
     const result = await runSpec({
       specPath,
@@ -58,29 +79,202 @@ export async function runCommand(
     exitCode = result.exitCode;
 
     if (!interactive) {
-      // Non-TTY md mode (piped output, CI) gets the full markdown summary.
-      // Interactive mode already streamed everything via the listener.
       process.stdout.write(emit(format, result, renderRunMarkdown));
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     }
   } catch (e) {
-    const err = e as Error;
-    if (format === "json") {
-      process.stdout.write(
-        JSON.stringify({
-          $schema: "https://cairntrace.dev/schemas/run.v1.json",
-          version: "1",
-          status: "errored",
-          error: { name: err.name, message: err.message },
-          exitCode: 2,
-        }),
-      );
-    } else {
-      process.stderr.write(`cairn run: ${err.message}\n`);
-    }
+    handleParseError(e as Error, format);
   } finally {
     await backend.close().catch(() => undefined);
   }
+  process.exit(exitCode);
+}
+
+/* ----- multi-spec path ----- */
+
+export interface BatchRunResult {
+  $schema: "https://cairntrace.dev/schemas/run-batch.v1.json";
+  version: "1";
+  parallel: number;
+  totalDurationMs: number;
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    errored: number;
+  };
+  results: RunResult[];
+  exitCode: ExitCode;
+}
+
+async function runBatch(
+  specs: string[],
+  parallel: number,
+  opts: RunCommandOptions,
+): Promise<void> {
+  const format = resolveFormat(opts, "md");
+  const interactive = format === "md" && isInteractive();
+  const tStart = Date.now();
+
+  if (interactive) {
+    process.stdout.write(
+      `\x1b[1mRunning\x1b[0m ${specs.length} spec${
+        specs.length === 1 ? "" : "s"
+      } (parallel: ${parallel})\n\n`,
+    );
+  }
+
+  const results = await runPool(specs, parallel, async (specPath, idx) => {
+    const backend = createBackend(backendOpts(opts));
+    try {
+      const r = await runSpec({
+        specPath,
+        backend,
+        ...(opts.artifactRoot !== undefined
+          ? { artifactRoot: opts.artifactRoot }
+          : {}),
+        ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
+        ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
+        ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      });
+      if (interactive) {
+        const mark =
+          r.status === "passed"
+            ? "\x1b[32m✓\x1b[0m"
+            : r.status === "failed"
+              ? "\x1b[31m✗\x1b[0m"
+              : "\x1b[33m·\x1b[0m";
+        process.stdout.write(
+          `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
+            r.outcomes.filter((o) => o.status === "passed").length
+          }/${r.outcomes.length} outcomes)\n`,
+        );
+      }
+      return r;
+    } catch (e) {
+      // Synthesize an errored RunResult so the batch survives.
+      const err = e as Error;
+      if (interactive) {
+        process.stdout.write(
+          `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+        );
+      }
+      return synthesizeErroredResult(specPath, err);
+    } finally {
+      await backend.close().catch(() => undefined);
+    }
+  });
+
+  const totalDurationMs = Date.now() - tStart;
+  const summary = {
+    total: results.length,
+    passed: results.filter((r) => r.status === "passed").length,
+    failed: results.filter((r) => r.status === "failed").length,
+    errored: results.filter((r) => r.status === "errored").length,
+  };
+  const exitCode: ExitCode =
+    summary.failed > 0 ? 1 : summary.errored > 0 ? 2 : 0;
+
+  const batch: BatchRunResult = {
+    $schema: "https://cairntrace.dev/schemas/run-batch.v1.json",
+    version: "1",
+    parallel,
+    totalDurationMs,
+    summary,
+    results,
+    exitCode,
+  };
+
+  if (format === "json" || format === "yaml") {
+    process.stdout.write(emit(format, batch, () => ""));
+  } else {
+    process.stdout.write(renderBatchMarkdown(batch));
+    process.stdout.write("\n");
+  }
 
   process.exit(exitCode);
+}
+
+/* ----- helpers ----- */
+
+function backendOpts(
+  opts: RunCommandOptions,
+): Parameters<typeof createBackend>[0] {
+  return {
+    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
+    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
+    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+  };
+}
+
+function colorEnabled(opts: RunCommandOptions): boolean {
+  return (
+    opts.color !== false && !process.env.NO_COLOR && process.env.TERM !== "dumb"
+  );
+}
+
+function handleParseError(err: Error, format: string): void {
+  if (format === "json") {
+    process.stdout.write(
+      JSON.stringify({
+        $schema: "https://cairntrace.dev/schemas/run.v1.json",
+        version: "1",
+        status: "errored",
+        error: { name: err.name, message: err.message },
+        exitCode: 2,
+      }),
+    );
+  } else {
+    process.stderr.write(`cairn run: ${err.message}\n`);
+  }
+}
+
+function synthesizeErroredResult(specPath: string, _err: Error): RunResult {
+  const now = new Date().toISOString();
+  return {
+    $schema: "https://cairntrace.dev/schemas/run.v1.json",
+    version: "1",
+    runId: `errored_${Date.now()}`,
+    runDir: specPath,
+    spec: { name: specPath.split("/").pop() ?? specPath, path: specPath },
+    environment: "local",
+    backend: "agent-browser",
+    coldStart: false,
+    status: "errored",
+    startedAt: now,
+    endedAt: now,
+    durationMs: 0,
+    outcomes: [],
+    steps: [],
+    artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
+    exitCode: 2,
+  };
+}
+
+function renderBatchMarkdown(b: BatchRunResult): string {
+  const bannerColor =
+    b.exitCode === 0 ? "\x1b[32m" : b.exitCode === 1 ? "\x1b[31m" : "\x1b[33m";
+  const lines: string[] = [
+    "",
+    `${bannerColor}\x1b[1m${b.summary.passed}/${b.summary.total} passed\x1b[0m  ${b.summary.failed} failed  ${b.summary.errored} errored  in ${formatMs(b.totalDurationMs)}`,
+    "",
+  ];
+  const failed = b.results.filter((r) => r.status !== "passed");
+  if (failed.length > 0) {
+    lines.push("Failing specs:");
+    for (const r of failed) {
+      lines.push(
+        `  - ${r.spec.name} → ${r.runDir}/${r.artifacts.agentContext}`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.floor((ms - m * 60_000) / 1000);
+  return `${m}m ${s}s`;
 }

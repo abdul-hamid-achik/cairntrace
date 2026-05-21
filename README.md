@@ -57,6 +57,7 @@ bun examples/demo-app/server.ts
 | `cairn mcp` | Start the MCP server on stdio for MCP-aware agents (Claude Code, Cursor, etc.). |
 | `cairn export playwright <spec> [--out <file>]` | Emit a real `@playwright/test` `.spec.ts` from a stable Cairntrace spec for CI lock-in. |
 | `cairn diff <runA> <runB>` | Structural compare of two runs — outcomes, steps, console, network. Each arg is a run id, absolute path, or `latest`/`previous`. |
+| `cairn run <spec...> --parallel N` | Run multiple specs concurrently (each in its own browser session). Emits a `BatchRunResult` with per-spec results + summary. |
 
 Every agent-callable command supports `--format json|yaml|md` (or `--json`,
 `--yaml`, `--md` shorthand). Exit codes are stable across versions:
