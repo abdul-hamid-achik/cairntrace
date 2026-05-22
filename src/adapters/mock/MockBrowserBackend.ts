@@ -1,4 +1,5 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Step } from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
@@ -40,6 +41,7 @@ export class MockBrowserBackend implements BrowserBackend {
   private stepFailureMessage = "mock step failure";
   /** Recorded steps for assertions in tests. */
   public readonly stepLog: Step[] = [];
+  public lastEvaluatedScript = "";
 
   /* ----- scripting hooks for tests ----- */
 
@@ -85,6 +87,10 @@ export class MockBrowserBackend implements BrowserBackend {
   async runStep(step: Step): Promise<InvocationResult> {
     this.stepLog.push(step);
     if ("open" in step) this.url = step.open;
+    if ("download" in step) {
+      await mkdir(dirname(step.download.saveAs), { recursive: true });
+      await writeFile(step.download.saveAs, MOCK_DOWNLOAD);
+    }
     if (this.stepShouldFail) {
       this.stepShouldFail = false;
       return failure(this.stepFailureMessage);
@@ -137,6 +143,21 @@ export class MockBrowserBackend implements BrowserBackend {
   }
 
   async evaluate(_js: string): Promise<InvocationResult> {
+    this.lastEvaluatedScript = _js;
+    if (this.scriptQueue.length === 0 && _js.includes("expectedTextExcerpts")) {
+      return {
+        ok: true,
+        stdout: JSON.stringify({
+          url: this.url,
+          title: this.title,
+          expectedTextExcerpts: [{ needle: "Submit", found: false }],
+        }),
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+        argv: ["eval"],
+      };
+    }
     const r = this.scriptQueue.shift() ?? { ok: true, evidence: null };
     return {
       ok: true,
@@ -227,4 +248,9 @@ const MOCK_PNG = new Uint8Array([
   0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d,
   0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
   0x60, 0x82,
+]);
+
+const MOCK_DOWNLOAD = new Uint8Array([
+  0x6d, 0x6f, 0x63, 0x6b, 0x20, 0x64, 0x6f, 0x77, 0x6e, 0x6c, 0x6f, 0x61, 0x64,
+  0x0a,
 ]);

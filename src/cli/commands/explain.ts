@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExplainResult } from "../../core/schema/explain.v1";
+import { DOC_TOPICS } from "./docs";
 import { emit, resolveFormat } from "../format";
 
 export interface ExplainOptions {
@@ -27,13 +28,13 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "1.0.0", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "1.1.0", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
         summary: "Run a behavioral spec; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path> [--env <name>] [--cold-start] [--headed] [--mock] [--format json|yaml|md]",
+          "cairn run <spec-path> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -74,6 +75,57 @@ export function buildExplain(): ExplainResult {
           "6": "contract hash mismatch",
         },
         outputSchema: "urn:cairntrace.dev:run:v1",
+      },
+      {
+        name: "spec heal",
+        summary: "Run a spec and propose selector-drift fixes",
+        synopsis:
+          "cairn spec heal <spec-path> [--apply] [--backend agent-browser|playwright|mock] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--apply",
+            type: "boolean",
+            default: false,
+            description: "Write the proposed patch in place",
+          },
+          {
+            name: "--backend",
+            type: "string",
+            description: "Backend override",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "patch proposed or applied",
+          "2": "error",
+          "5": "no heal possible",
+          "6": "contract hash mismatch",
+        },
+        outputSchema: "urn:cairntrace.dev:heal:v1",
+      },
+      {
+        name: "docs",
+        summary:
+          "Return focused agent documentation for a topic as structured data",
+        synopsis:
+          "cairn docs [overview|authoring|steps|verifiers|downloads|scripts|artifacts|mcp|backends] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "unknown topic" },
+        outputSchema: "urn:cairntrace.dev:docs:v1",
       },
       {
         name: "doctor",
@@ -308,9 +360,10 @@ export function buildExplain(): ExplainResult {
       {
         id: "script",
         kind: "escape-hatch",
-        summary: "Page-evaluated JS returning { ok, evidence }",
+        summary:
+          "Page-evaluated JS returning { ok, evidence }; use run inline or file for external JS/TS",
         yamlExample:
-          "verify:\n  script:\n    run: |\n      const ok = window.someInvariant();\n      return { ok, evidence: null };",
+          "verify:\n  script:\n    file: ./verifiers/check-template.ts\n    fixtures:\n      templatePath: ${artifacts.template.path}",
         parameters: [
           {
             name: "fixtures",
@@ -318,6 +371,12 @@ export function buildExplain(): ExplainResult {
             description: "fixture name → path (object)",
           },
           { name: "run", type: "string", description: "JS body" },
+          {
+            name: "file",
+            type: "string",
+            description:
+              "Path to JS/TS verifier body, resolved relative to the spec file",
+          },
         ],
       },
     ],
@@ -374,6 +433,10 @@ export function explainToMarkdown(e: ExplainResult): string {
     `- artifactRoot: ${e.config.artifactRoot}`,
     `- defaultEnvironment: ${e.config.defaultEnvironment}`,
     `- defaultBackend: ${e.config.defaultBackend}`,
+    "",
+    "## Agent Docs",
+    `- topics: ${DOC_TOPICS.join(", ")}`,
+    "- use `cairn docs <topic> --json` or MCP `cairn_docs` for focused guidance",
   ];
   return lines.join("\n");
 }

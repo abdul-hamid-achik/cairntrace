@@ -58,7 +58,7 @@ async function dispatch(
       return await evaluateNoFailedRequests(v, backend);
     if (isConsoleVerifier(v)) return await evaluateConsole(v, backend);
     if (isCountVerifier(v)) return await evaluateCount(v, backend);
-    if (isScriptVerifier(v)) return await evaluateScript(v, backend);
+    if (isScriptVerifier(v)) return await evaluateScript(v, backend, ctx);
   } catch (e) {
     return {
       passed: false,

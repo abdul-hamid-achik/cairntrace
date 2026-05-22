@@ -26,6 +26,14 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     evidenceRefs.push(`- ${result.artifacts.network}`);
   if (result.artifacts.console)
     evidenceRefs.push(`- ${result.artifacts.console}`);
+  if (result.artifacts.diagnostics) {
+    for (const path of result.artifacts.diagnostics)
+      evidenceRefs.push(`- ${path}`);
+  }
+  if (result.artifacts.downloads) {
+    for (const [name, path] of Object.entries(result.artifacts.downloads))
+      evidenceRefs.push(`- ${name}: ${path}`);
+  }
   if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
 
   const lines: string[] = [

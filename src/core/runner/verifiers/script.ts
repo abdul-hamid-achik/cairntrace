@@ -1,6 +1,8 @@
+import { readFile } from "node:fs/promises";
+import { extname, isAbsolute, resolve } from "node:path";
 import type { BrowserBackend } from "../../../adapters/browserBackend";
 import type { ScriptVerifier } from "../../schema/verifier.v1";
-import type { VerifierEvaluation } from "./types";
+import type { VerifierContext, VerifierEvaluation } from "./types";
 
 /**
  * Escape hatch — evaluate a JS expression in the page and expect `{ ok, evidence }`.
@@ -16,8 +18,10 @@ import type { VerifierEvaluation } from "./types";
 export async function evaluateScript(
   verifier: ScriptVerifier,
   backend: BrowserBackend,
+  ctx: VerifierContext = {},
 ): Promise<VerifierEvaluation> {
-  const result = await backend.evaluate(buildScript(verifier));
+  const source = await loadScriptSource(verifier, ctx);
+  const result = await backend.evaluate(buildScript(verifier, source, ctx));
   if (!result.ok) {
     return {
       passed: false,
@@ -45,19 +49,80 @@ export async function evaluateScript(
   };
 }
 
-function buildScript(verifier: ScriptVerifier): string {
-  const fixtures = JSON.stringify(verifier.script.fixtures ?? {});
+async function loadScriptSource(
+  verifier: ScriptVerifier,
+  ctx: VerifierContext,
+): Promise<string> {
+  if (verifier.script.run !== undefined) return verifier.script.run;
+
+  const file = verifier.script.file;
+  if (!file) {
+    throw new Error("script verifier must define either run or file");
+  }
+  const abs = isAbsolute(file)
+    ? file
+    : resolve(ctx.specDir ?? process.cwd(), file);
+  const source = await readFile(abs, "utf8");
+  if (extname(abs) !== ".ts") return source;
+
+  const bun = (
+    globalThis as typeof globalThis & {
+      Bun?: {
+        Transpiler?: new (opts: {
+          loader: "ts";
+        }) => {
+          transformSync(source: string): string;
+        };
+      };
+    }
+  ).Bun;
+  if (!bun?.Transpiler) {
+    throw new Error(
+      `script.file uses TypeScript but Bun.Transpiler is unavailable: ${file}`,
+    );
+  }
+  return new bun.Transpiler({ loader: "ts" }).transformSync(source);
+}
+
+function buildScript(
+  verifier: ScriptVerifier,
+  source: string,
+  ctx: VerifierContext,
+): string {
+  const fixtures = JSON.stringify(resolveRuntimeFixtures(verifier, ctx));
+  const artifacts = JSON.stringify(ctx.artifacts ?? {});
   // The user's `run` body should `return { ok, evidence }`. We wrap it in a
   // function call so the body can use `return` statements; agent-browser's
   // `eval` then auto-stringifies the returned object as JSON.
   return [
     `(function(){`,
     `  const fixtures = ${fixtures};`,
+    `  const artifacts = ${artifacts};`,
     `  return (function(){`,
-    verifier.script.run,
+    source,
     `  })();`,
     `})()`,
   ].join("\n");
+}
+
+function resolveRuntimeFixtures(
+  verifier: ScriptVerifier,
+  ctx: VerifierContext,
+): Record<string, string> {
+  const input = verifier.script.fixtures ?? {};
+  const output: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    output[key] = value
+      .replace(
+        /\$\{artifacts\.([a-z][a-z0-9_]*)\.path\}/g,
+        (_match, name: string) => ctx.artifacts?.[name]?.path ?? "",
+      )
+      .replace(
+        /\$\{artifacts\.([a-z][a-z0-9_]*)\.relativePath\}/g,
+        (_match, name: string) => ctx.artifacts?.[name]?.relativePath ?? "",
+      );
+  }
+  return output;
 }
 
 function truncate(s: string, max: number): string {

@@ -12,34 +12,92 @@ import { VerifierSchema } from "./verifier.v1";
 
 /* ----- locators (used by click / fill / upload / count) ----- */
 
+export const RoleLocatorSchema = z
+  .object({
+    by: z.literal("role"),
+    role: z.string().min(1),
+    name: z.string().optional(),
+  })
+  .strict();
+export const LabelLocatorSchema = z
+  .object({
+    by: z.literal("label"),
+    name: z.string().min(1),
+  })
+  .strict();
+export const TextLocatorSchema = z
+  .object({
+    by: z.literal("text"),
+    text: z.string().min(1),
+  })
+  .strict();
+export const SelectorLocatorSchema = z
+  .object({
+    by: z.literal("selector"),
+    selector: z.string().min(1),
+  })
+  .strict();
+
 export const LocatorSchema = z.union([
-  z
-    .object({
-      by: z.literal("role"),
-      role: z.string().min(1),
-      name: z.string().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      by: z.literal("label"),
-      name: z.string().min(1),
-    })
-    .strict(),
-  z
-    .object({
-      by: z.literal("text"),
-      text: z.string().min(1),
-    })
-    .strict(),
-  z
-    .object({
-      by: z.literal("selector"),
-      selector: z.string().min(1),
-    })
-    .strict(),
+  RoleLocatorSchema,
+  LabelLocatorSchema,
+  TextLocatorSchema,
+  SelectorLocatorSchema,
 ]);
 export type Locator = z.infer<typeof LocatorSchema>;
+
+const fillTargetSchema = z.union([
+  RoleLocatorSchema.extend({ value: z.string() }).strict(),
+  LabelLocatorSchema.extend({ value: z.string() }).strict(),
+  TextLocatorSchema.extend({ value: z.string() }).strict(),
+  SelectorLocatorSchema.extend({ value: z.string() }).strict(),
+]);
+
+const uploadTargetSchema = z.union([
+  RoleLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+  LabelLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+  TextLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+  SelectorLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+]);
+
+const downloadTargetSchema = z.union([
+  RoleLocatorSchema.extend({
+    saveAs: z.string().min(1),
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  }).strict(),
+  LabelLocatorSchema.extend({
+    saveAs: z.string().min(1),
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  }).strict(),
+  TextLocatorSchema.extend({
+    saveAs: z.string().min(1),
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  }).strict(),
+  SelectorLocatorSchema.extend({
+    saveAs: z.string().min(1),
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  }).strict(),
+]);
 
 /* ----- wait conditions ----- */
 
@@ -85,7 +143,7 @@ export type ClickStep = z.infer<typeof ClickStepSchema>;
 export const FillStepSchema = z
   .object({
     ...stepCommon,
-    fill: z.intersection(LocatorSchema, z.object({ value: z.string() })),
+    fill: fillTargetSchema,
   })
   .strict();
 export type FillStep = z.infer<typeof FillStepSchema>;
@@ -93,13 +151,18 @@ export type FillStep = z.infer<typeof FillStepSchema>;
 export const UploadStepSchema = z
   .object({
     ...stepCommon,
-    upload: z.intersection(
-      LocatorSchema,
-      z.object({ path: z.string().min(1) }),
-    ),
+    upload: uploadTargetSchema,
   })
   .strict();
 export type UploadStep = z.infer<typeof UploadStepSchema>;
+
+export const DownloadStepSchema = z
+  .object({
+    ...stepCommon,
+    download: downloadTargetSchema,
+  })
+  .strict();
+export type DownloadStep = z.infer<typeof DownloadStepSchema>;
 
 export const WaitStepSchema = z
   .object({ ...stepCommon, wait: WaitConditionSchema })
@@ -130,6 +193,7 @@ export const StepSchema = z.union([
   ClickStepSchema,
   FillStepSchema,
   UploadStepSchema,
+  DownloadStepSchema,
   WaitStepSchema,
   SnapshotStepSchema,
   UseStepSchema,

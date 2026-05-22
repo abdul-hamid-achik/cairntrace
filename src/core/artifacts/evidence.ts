@@ -19,6 +19,8 @@ export interface EvidenceInput {
     /** Relative paths inside the run dir. */
     screenshot?: string;
     snapshot?: string;
+    diagnostics?: string;
+    downloads?: Record<string, string>;
     trace?: string;
   };
   /** When present, a sidecar .raw.json is written too. */
@@ -42,6 +44,14 @@ export function renderEvidenceMarkdown(input: EvidenceInput): string {
   }
   if (input.source.snapshot) {
     sourceLines.push(`- snapshot: ${input.source.snapshot}`);
+  }
+  if (input.source.diagnostics) {
+    sourceLines.push(`- diagnostics: ${input.source.diagnostics}`);
+  }
+  if (input.source.downloads) {
+    for (const [name, path] of Object.entries(input.source.downloads)) {
+      sourceLines.push(`- download ${name}: ${path}`);
+    }
   }
   if (input.source.trace) {
     sourceLines.push(`- trace: ${input.source.trace}`);

@@ -47,6 +47,14 @@ export interface ConsoleEntry {
   [extra: string]: unknown;
 }
 
+export interface ArtifactRef {
+  /** Absolute path on disk. */
+  path: string;
+  /** Path relative to the run directory. */
+  relativePath: string;
+  kind: "download";
+}
+
 export interface NetworkFilter {
   method?: string;
   /** Single (200), range (4xx), or comma-separated (200,201). Backend-parsed. */

@@ -183,9 +183,14 @@ export const ScriptVerifierSchema = z
     script: z
       .object({
         fixtures: z.record(z.string(), z.string()).optional(),
-        run: z.string().min(1),
+        run: z.string().min(1).optional(),
+        file: z.string().min(1).optional(),
       })
-      .strict(),
+      .strict()
+      .refine(
+        (s) => [s.run, s.file].filter((x) => x !== undefined).length === 1,
+        { message: "exactly one of: run, file" },
+      ),
   })
   .strict();
 export type ScriptVerifier = z.infer<typeof ScriptVerifierSchema>;

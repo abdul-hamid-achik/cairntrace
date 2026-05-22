@@ -24,7 +24,9 @@ export interface RunEvent {
     | "outcome.passed"
     | "outcome.failed"
     | "artifact.screenshot"
-    | "artifact.snapshot";
+    | "artifact.snapshot"
+    | "artifact.download"
+    | "artifact.diagnostics";
   [extra: string]: unknown;
 }
 
@@ -50,6 +52,8 @@ export class ArtifactWriter {
     await mkdir(this.runDir, { recursive: true });
     await mkdir(join(this.runDir, "screenshots"), { recursive: true });
     await mkdir(join(this.runDir, "snapshots"), { recursive: true });
+    await mkdir(join(this.runDir, "downloads"), { recursive: true });
+    await mkdir(join(this.runDir, "diagnostics"), { recursive: true });
     await mkdir(join(this.runDir, "outcomes"), { recursive: true });
   }
 

@@ -48,6 +48,8 @@ export const RunArtifactsSchema = z
     events: RelativePathSchema,
     screenshots: z.array(RelativePathSchema).optional(),
     snapshots: z.array(RelativePathSchema).optional(),
+    downloads: z.record(z.string(), RelativePathSchema).optional(),
+    diagnostics: z.array(RelativePathSchema).optional(),
     console: RelativePathSchema.optional(),
     network: RelativePathSchema.optional(),
     trace: RelativePathSchema.optional(),

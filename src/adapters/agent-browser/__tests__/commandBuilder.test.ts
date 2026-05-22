@@ -128,6 +128,28 @@ describe("stepToArgv", () => {
     ).toEqual(["upload", "input[type=file]", "./fixtures/sample.xlsx"]);
   });
 
+  it("download with role locator", () => {
+    expect(
+      stepToArgv({
+        download: {
+          by: "role",
+          role: "button",
+          name: "Download template",
+          saveAs: "/tmp/template.xlsx",
+          assign: "template",
+        },
+      }),
+    ).toEqual([
+      "find",
+      "role",
+      "button",
+      "download",
+      "/tmp/template.xlsx",
+      "--name",
+      "Download template",
+    ]);
+  });
+
   it("wait with text", () => {
     expect(
       stepToArgv({ wait: { text: "Imported", timeoutMs: 30000 } }),

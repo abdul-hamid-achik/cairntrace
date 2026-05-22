@@ -70,6 +70,13 @@ export class PlaywrightAdapter implements BrowserBackend {
         await this.resolveLocator(loc as Locator).setInputFiles(path, {
           timeout: this.opts.defaultTimeoutMs,
         });
+      } else if ("download" in step) {
+        const { saveAs, assign: _assign, timeoutMs, ...loc } = step.download;
+        const timeout = timeoutMs ?? this.opts.defaultTimeoutMs ?? 30_000;
+        const downloadPromise = page.waitForEvent("download", { timeout });
+        await this.resolveLocator(loc as Locator).click({ timeout });
+        const download = await downloadPromise;
+        await download.saveAs(saveAs);
       } else if ("wait" in step) {
         await this.applyWait(page, step.wait);
       } else if ("snapshot" in step) {
@@ -217,7 +224,10 @@ export class PlaywrightAdapter implements BrowserBackend {
       if (this.context) {
         await this.context.close();
       }
-      this.context = await this.browser!.newContext({ storageState: path });
+      this.context = await this.browser!.newContext({
+        storageState: path,
+        acceptDownloads: true,
+      });
       this.page = await this.context.newPage();
       this.attachListeners(this.page);
       return success(Date.now() - start);
@@ -250,11 +260,12 @@ export class PlaywrightAdapter implements BrowserBackend {
   async startTrace(): Promise<void> {
     await this.ensureBrowser();
     if (!this.context) {
-      this.context = await this.browser!.newContext(
-        this.opts.initialStatePath
+      this.context = await this.browser!.newContext({
+        ...(this.opts.initialStatePath
           ? { storageState: this.opts.initialStatePath }
-          : {},
-      );
+          : {}),
+        acceptDownloads: true,
+      });
     }
     try {
       await this.context.tracing.start({
@@ -304,11 +315,12 @@ export class PlaywrightAdapter implements BrowserBackend {
     if (this.page) return this.page;
     await this.ensureBrowser();
     if (!this.context) {
-      this.context = await this.browser!.newContext(
-        this.opts.initialStatePath
+      this.context = await this.browser!.newContext({
+        ...(this.opts.initialStatePath
           ? { storageState: this.opts.initialStatePath }
-          : {},
-      );
+          : {}),
+        acceptDownloads: true,
+      });
     }
     this.page = await this.context.newPage();
     this.attachListeners(this.page);

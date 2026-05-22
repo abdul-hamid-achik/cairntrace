@@ -1,4 +1,5 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
+import type { ArtifactRef } from "../../../adapters/browserBackend";
 import type { Verifier } from "../../schema/verifier.v1";
 
 /**
@@ -14,6 +15,14 @@ export interface VerifierContext {
   latestSnapshot?: string;
   /** Relative path to a trace artifact, if one was captured. */
   trace?: string;
+  /** Relative path to diagnostics captured after the latest failed step/outcome. */
+  latestDiagnostics?: string;
+  /** Absolute run directory for resolving relative artifact paths. */
+  runDir?: string;
+  /** Absolute spec directory for resolving script.file and fixture paths. */
+  specDir?: string;
+  /** Named artifacts produced by steps, e.g. download.assign. */
+  artifacts?: Record<string, ArtifactRef>;
 }
 
 /**

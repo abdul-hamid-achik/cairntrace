@@ -97,6 +97,11 @@ bunx playwright install chromium                       # for `--backend playwrig
 `./bin/cairn` works from this directory; to use `cairn` anywhere, symlink it
 to a location on your `$PATH`.
 
+You do not need Playwright's browser binary for the default `agent-browser`
+backend. Install Chromium through Playwright only when you plan to run
+`--backend playwright`, debug with Playwright-native traces, or validate a spec
+before exporting it to `@playwright/test`.
+
 ## Quickstart
 
 ```bash
@@ -153,6 +158,7 @@ steps:
   - open: /invoices                        # baseUrl prepended from config
   - click: { by: role, role: button, name: Import }
   - upload: { by: label, name: Upload file, path: ./fixtures/sample.xlsx }
+  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }
   - wait: { text: "Import complete", timeoutMs: 30000 }
   - id: settle
     when: urlContains:/imported            # conditional execution
@@ -178,6 +184,27 @@ typed verifiers when 3+ specs need them.
 | `console` | `errorsMax: N` — bounded console + pageerror events |
 | `count` | N elements match (`role` or `selector` in optional `in_region`) |
 | `script` | escape hatch: page-evaluated JS returning `{ ok, evidence }` |
+
+`script` supports either inline `run:` or an external JS/TS body via `file:`.
+External files resolve relative to the spec file. Download steps can expose
+named artifacts to scripts with `${artifacts.<name>.path}`.
+
+```yaml
+outcomes:
+  - id: template_shape
+    verify:
+      script:
+        file: ./verifiers/check-template.ts
+        fixtures:
+          templatePath: ${artifacts.template.path}
+steps:
+  - download:
+      by: role
+      role: button
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+```
 
 Each outcome writes a structured `outcomes/<id>.md` evidence file (≤80 lines,
 fixed shape) that agents can drop straight into context.
@@ -255,6 +282,7 @@ post-mortems and `cairn run` re-runs.
 | `cairn run --cold-start` | Wipe cookies + storage before steps. Auto-on when `CI=true`. |
 | `cairn doctor` | Check Node/Bun/agent-browser/artifact-dir health. |
 | `cairn explain` | Return the full agent-facing surface (commands + verifiers + rules + config) as structured data. |
+| `cairn docs [topic]` | Return focused agent docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
 | `cairn context <run\|latest> [--path]` | Print or locate the run's `agent_context.md`. |
 | `cairn spec scaffold <name> --intent ...` | Write a starter spec YAML with the cold-start header. |
 | `cairn spec verify <spec> [--stamp]` | Lint the spec; `--stamp` writes a fresh `contractHash:`. |
@@ -296,12 +324,13 @@ Add Cairntrace to any MCP-aware agent (Claude Code, Cursor, Windsurf, etc.):
 }
 ```
 
-Ten tools exposed, all returning `content` (text summary) + `structuredContent`
+Eleven tools exposed, all returning `content` (text summary) + `structuredContent`
 (JSON matching the v1 wire schemas):
 
 | Tool | Maps to |
 |---|---|
 | `cairn_explain` | `cairn explain` |
+| `cairn_docs` | `cairn docs` |
 | `cairn_doctor` | `cairn doctor` |
 | `cairn_run` | `cairn run` |
 | `cairn_context` | `cairn context` |
@@ -315,9 +344,19 @@ Ten tools exposed, all returning `content` (text summary) + `structuredContent`
 Agents that don't speak MCP use the same surface via the shell CLI — the
 output is identical.
 
+For agent bootstrapping, call `cairn_explain` first, then call `cairn_docs`
+for the topic the agent is about to work on. This keeps docs fetches small:
+
+```bash
+cairn explain --json
+cairn docs authoring --json
+cairn docs downloads --json
+cairn docs backends --json
+```
+
 ## Wire contract (v1)
 
-The CLI + MCP outputs are stable across v1.x. Five v1 schemas:
+The CLI + MCP outputs are stable across v1.x. Six v1 schemas:
 
 | URN | Source | Emitted by |
 |---|---|---|
@@ -325,6 +364,7 @@ The CLI + MCP outputs are stable across v1.x. Five v1 schemas:
 | `urn:cairntrace.dev:run-batch:v1` | [`runBatch.v1.ts`](./src/core/schema/runBatch.v1.ts) | `cairn run --parallel` (multi-spec) |
 | `urn:cairntrace.dev:heal:v1` | [`heal.v1.ts`](./src/core/schema/heal.v1.ts) | `cairn spec heal` |
 | `urn:cairntrace.dev:explain:v1` | [`explain.v1.ts`](./src/core/schema/explain.v1.ts) | `cairn explain` + MCP `cairn_explain` |
+| `urn:cairntrace.dev:docs:v1` | [`docs.v1.ts`](./src/core/schema/docs.v1.ts) | `cairn docs` + MCP `cairn_docs` |
 | `urn:cairntrace.dev:diff:v1` | [`diff.v1.ts`](./src/core/schema/diff.v1.ts) | `cairn diff` |
 
 Plus the YAML spec format itself ([`spec.v1.ts`](./src/core/schema/spec.v1.ts))
@@ -352,6 +392,8 @@ Each run produces a fully self-contained directory:
   screenshots/<NN>_<step>.png # on-failure or always-on per spec policy
   console/console.ndjson, errors.ndjson
   network/requests.ndjson, failed_requests.ndjson
+  downloads/<file>           # files captured by download steps
+  diagnostics/<NN>_<step>.json # failed-step UI diagnostics
   traces/<backend>-trace.zip  # Playwright Trace Viewer compatible
 ```
 

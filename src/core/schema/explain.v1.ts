@@ -27,8 +27,8 @@ export const CommandDocSchema = z
     flags: z.array(CommandFlagSchema).default([]),
     /** exit code → meaning */
     exitCodes: z.record(z.string().regex(/^\d+$/), z.string()),
-    /** URL of the JSON Schema for the command's structured output, if any. */
-    outputSchema: z.string().url().optional(),
+    /** URN or URL identifying the command's structured output schema, if any. */
+    outputSchema: z.string().min(1).optional(),
   })
   .strict();
 export type CommandDoc = z.infer<typeof CommandDocSchema>;

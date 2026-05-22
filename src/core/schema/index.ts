@@ -6,3 +6,4 @@ export * from "./runBatch.v1";
 export * from "./heal.v1";
 export * from "./explain.v1";
 export * from "./diff.v1";
+export * from "./docs.v1";

@@ -4,6 +4,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DocsResultSchema } from "../core/schema/docs.v1";
+import { ExplainResultSchema } from "../core/schema/explain.v1";
 import { buildMcpServer } from "./server";
 
 let dir: string;
@@ -34,6 +36,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_checkpoint_list",
       "cairn_checkpoint_show",
       "cairn_context",
+      "cairn_docs",
       "cairn_doctor",
       "cairn_explain",
       "cairn_run",
@@ -47,21 +50,28 @@ describe("Cairntrace MCP server", () => {
   it("cairn_explain returns the v1 ExplainResult shape (parity with `cairn explain --json`)", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_explain", arguments: {} });
-    expect(r.structuredContent).toMatchObject({
-      $schema: "urn:cairntrace.dev:explain:v1",
-      version: "1",
-      cairntrace: { version: expect.any(String) },
-      commands: expect.any(Array),
-      verifiers: expect.any(Array),
-      rules: expect.any(Object),
-      config: expect.any(Object),
-    });
-    const verifiers = (
-      r.structuredContent as { verifiers: Array<{ id: string }> }
-    ).verifiers;
+    const structured = ExplainResultSchema.parse(r.structuredContent);
+    const verifiers = structured.verifiers;
     const ids = verifiers.map((v) => v.id);
     expect(ids).toContain("text");
     expect(ids).toContain("script");
+    await c.close();
+  });
+
+  it("cairn_docs returns focused docs for a topic", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_docs",
+      arguments: { topic: "downloads" },
+    });
+    const structured = DocsResultSchema.parse(r.structuredContent);
+    expect(structured.topic).toBe("downloads");
+    expect(structured.sections.length).toBeGreaterThan(0);
+    const content = r.content as Array<{ type: string; text: string }>;
+    expect(content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("Download Capture"),
+    });
     await c.close();
   });
 
@@ -86,7 +96,11 @@ steps:
     const c = await connectInMemory();
     const r = await c.callTool({
       name: "cairn_run",
-      arguments: { path: specPath, mock: true },
+      arguments: {
+        path: specPath,
+        mock: true,
+        artifactRoot: join(dir, "runs"),
+      },
     });
     expect(r.isError).toBeFalsy();
     expect(r.structuredContent).toMatchObject({

@@ -87,6 +87,48 @@ steps:
     expect((r.resolved.steps![2] as { open: string }).open).toBe("/dashboard");
   });
 
+  it("allows fill.value inside imported reusable actions", async () => {
+    const actionPath = join(dir, "login_with_fill.yml");
+    await writeFile(
+      actionPath,
+      `version: 1
+name: login_admin
+steps:
+  - open: /login
+  - fill:
+      by: label
+      name: Email
+      value: admin@example.com
+  - fill:
+      by: label
+      name: Password
+      value: secret
+`,
+    );
+    const specPath = join(dir, "uses_action_fill.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: uses_action_fill
+intent: imported action fill steps are valid
+imports:
+  - ./login_with_fill.yml
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - use: login_admin
+`,
+    );
+    const r = await parseSpec(specPath);
+    expect(r.resolved.steps).toHaveLength(3);
+    expect(r.resolved.steps![1]).toMatchObject({
+      fill: { by: "label", name: "Email", value: "admin@example.com" },
+    });
+  });
+
   it("tracks origins back to imported action files", async () => {
     const actionPath = join(dir, "open_dashboard_action.yml");
     await writeFile(

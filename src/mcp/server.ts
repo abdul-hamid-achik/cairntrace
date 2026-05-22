@@ -7,16 +7,18 @@ import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
+import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { computeContractHash } from "../core/contractHash";
 import { healSpec } from "../core/healer/Healer";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
+import { DocsTopicSchema } from "../core/schema/docs.v1";
 import type { RunResult } from "../core/schema/run.v1";
 import { SpecSchema } from "../core/schema/spec.v1";
 
-const VERSION = "0.3.0";
+const VERSION = "1.1.0";
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this
@@ -54,6 +56,29 @@ export function buildMcpServer(): McpServer {
               `Verifiers: ${doc.verifiers.map((v) => v.id).join(", ")}`,
           },
         ],
+        structuredContent: doc as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_docs",
+    {
+      title: "Read Cairntrace docs",
+      description:
+        "Return focused agent documentation for one topic. Use this after " +
+        "`cairn_explain` when authoring specs, choosing steps/verifiers, " +
+        "or understanding artifacts, MCP, and backends.",
+      inputSchema: {
+        topic: DocsTopicSchema.optional().describe(
+          "Docs topic; defaults to overview",
+        ),
+      },
+    },
+    async ({ topic }) => {
+      const doc = buildDocs(topic ?? "overview");
+      return {
+        content: [{ type: "text", text: docsToMarkdown(doc) }],
         structuredContent: doc as unknown as Record<string, unknown>,
       };
     },
@@ -101,9 +126,13 @@ export function buildMcpServer(): McpServer {
           .boolean()
           .optional()
           .describe("Wipe browser state before steps"),
+        artifactRoot: z
+          .string()
+          .optional()
+          .describe("Override run artifact root directory"),
       },
     },
-    async ({ path, env, mock, coldStart }) => {
+    async ({ path, env, mock, coldStart, artifactRoot }) => {
       const backend = mock
         ? new MockBrowserBackend()
         : new AgentBrowserAdapter({
@@ -115,6 +144,7 @@ export function buildMcpServer(): McpServer {
           backend,
           ...(env !== undefined ? { environmentOverride: env } : {}),
           ...(coldStart !== undefined ? { coldStart } : {}),
+          ...(artifactRoot !== undefined ? { artifactRoot } : {}),
         });
         return {
           content: [{ type: "text", text: summarizeRun(result) }],

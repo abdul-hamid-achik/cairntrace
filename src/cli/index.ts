@@ -6,6 +6,7 @@ import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { diffCommand } from "./commands/diff";
 import { doctorCommand } from "./commands/doctor";
+import { docsCommand } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
 import { loginCommand } from "./commands/login";
@@ -22,7 +23,7 @@ program
   .description(
     "Cairntrace — behavioral browser-spec layer for agent-in-session use",
   )
-  .version("1.0.0");
+  .version("1.1.0");
 
 function addFormatFlags(c: Command): Command {
   return c
@@ -65,6 +66,14 @@ addFormatFlags(
     .command("explain")
     .description("Return the full agent-facing surface"),
 ).action((opts) => explainCommand(opts));
+
+addFormatFlags(
+  program
+    .command("docs [topic]")
+    .description(
+      "Return focused agent docs; topics: overview, authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends",
+    ),
+).action((topic: string | undefined, opts) => docsCommand(topic, opts));
 
 program
   .command("context <run>")

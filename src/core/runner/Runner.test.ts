@@ -137,6 +137,98 @@ steps:
     expect(result.outcomes[0]!.status).toBe("failed");
   });
 
+  it("captures downloads as named run artifacts", async () => {
+    const specPath = await writeSpec(
+      "download",
+      `version: 1
+name: download_demo
+intent: capture a downloaded template
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: template
+    download:
+      by: role
+      role: button
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.downloads).toEqual({
+      template: "downloads/template.xlsx",
+    });
+    expect(result.steps[0]!.artifacts).toContain("downloads/template.xlsx");
+    const downloaded = await readFile(
+      join(result.runDir, "downloads/template.xlsx"),
+      "utf8",
+    );
+    expect(downloaded).toContain("mock download");
+    expect(backend.stepLog[0]).toMatchObject({
+      download: {
+        by: "role",
+        role: "button",
+        name: "Download template",
+        saveAs: join(result.runDir, "downloads/template.xlsx"),
+      },
+    });
+  });
+
+  it("exposes downloaded artifacts and external script files to script verifiers", async () => {
+    await writeFile(
+      join(workDir, "download-check.js"),
+      `return {
+  ok: Boolean(artifacts.template && fixtures.templatePath === artifacts.template.path),
+  evidence: { templatePath: fixtures.templatePath, relativePath: artifacts.template.relativePath }
+};`,
+    );
+    const specPath = await writeSpec(
+      "download_script_file",
+      `version: 1
+name: download_script_file
+intent: external verifier files can inspect named artifacts
+outcomes:
+  - id: script_can_see_artifact
+    description: script verifier can see the downloaded artifact
+    verify:
+      script:
+        file: ./download-check.js
+        fixtures:
+          templatePath: "\${artifacts.template.path}"
+steps:
+  - id: template
+    download:
+      by: role
+      role: button
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueScriptResult({
+      ok: true,
+      evidence: { checked: true },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.lastEvaluatedScript).toContain("templatePath");
+    expect(backend.lastEvaluatedScript).toContain("const artifacts = ");
+    expect(backend.lastEvaluatedScript).toContain(
+      join(result.runDir, "downloads/template.xlsx"),
+    );
+  });
+
   it("stops on step failure and surfaces the error in the step result", async () => {
     const specPath = await writeSpec(
       "step_fail",
@@ -169,6 +261,14 @@ steps:
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0]!.status).toBe("failed");
     expect(result.steps[0]!.error).toContain("selector");
+    expect(result.artifacts.diagnostics?.[0]).toMatch(
+      /^diagnostics\/001_bad\.json$/,
+    );
+    const diagnostics = await readFile(
+      join(result.runDir, result.artifacts.diagnostics![0]!),
+      "utf8",
+    );
+    expect(diagnostics).toContain("Submit");
   });
 
   it("--cold-start wipes browser state before steps", async () => {

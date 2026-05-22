@@ -1,5 +1,6 @@
 import type {
   ClickStep,
+  DownloadStep,
   FillStep,
   Locator,
   OpenStep,
@@ -80,6 +81,16 @@ export function uploadStepToArgv(step: UploadStep): string[] {
   return locatorToArgv(locator as Locator, "upload", path);
 }
 
+export function downloadStepToArgv(step: DownloadStep): string[] {
+  const {
+    saveAs,
+    assign: _assign,
+    timeoutMs: _timeoutMs,
+    ...locator
+  } = step.download;
+  return locatorToArgv(locator as Locator, "download", saveAs);
+}
+
 export function waitStepToArgv(step: WaitStep): string[] {
   return waitConditionToArgv(step.wait);
 }
@@ -119,6 +130,7 @@ export function stepToArgv(step: Step): string[] {
   if ("click" in step) return clickStepToArgv(step);
   if ("fill" in step) return fillStepToArgv(step);
   if ("upload" in step) return uploadStepToArgv(step);
+  if ("download" in step) return downloadStepToArgv(step);
   if ("wait" in step) return waitStepToArgv(step);
   if ("snapshot" in step) return snapshotStepToArgv(step);
   if ("use" in step) {

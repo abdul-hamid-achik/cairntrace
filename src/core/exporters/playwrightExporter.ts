@@ -136,6 +136,17 @@ function renderStepBody(step: Step): string[] {
       `await ${locator(loc as Locator)}.setInputFiles(${JSON.stringify(path)});`,
     ];
   }
+  if ("download" in step) {
+    const { saveAs, assign: _assign, timeoutMs, ...loc } = step.download;
+    const timeout = timeoutMs ?? 30_000;
+    return [
+      `const download = await Promise.all([`,
+      `  page.waitForEvent("download", { timeout: ${timeout} }),`,
+      `  ${locator(loc as Locator)}.click(),`,
+      `]).then(([download]) => download);`,
+      `await download.saveAs(${JSON.stringify(saveAs)});`,
+    ];
+  }
   if ("wait" in step) {
     const w = step.wait;
     const timeout = w.timeoutMs ?? 30_000;
@@ -346,12 +357,18 @@ function renderScriptOutcome(
   v: import("../schema/verifier.v1").ScriptVerifier,
 ): string[] {
   const fixtures = JSON.stringify(v.script.fixtures ?? {});
+  if (v.script.file) {
+    return [
+      `// script.file ${JSON.stringify(v.script.file)} is not inlined by the exporter yet.`,
+      `// Keep the Cairntrace spec as the source of truth or inline the script.run body before export.`,
+    ];
+  }
   return [
     `{`,
     `  const result = await page.evaluate(() => {`,
     `    const fixtures = ${fixtures};`,
     `    return (function(){`,
-    ...v.script.run.split("\n").map((l) => `      ${l}`),
+    ...(v.script.run ?? "").split("\n").map((l) => `      ${l}`),
     `    })();`,
     `  });`,
     `  expect(result.ok).toBe(true);`,

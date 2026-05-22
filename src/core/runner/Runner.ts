@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type { BrowserBackend } from "../../adapters/browserBackend";
+import { basename, dirname, join } from "node:path";
+import type {
+  ArtifactRef,
+  BrowserBackend,
+} from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { loadConfig } from "../config/loader";
@@ -158,7 +161,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   let lastSuccessfulStep: Step | undefined;
   let latestScreenshot: string | undefined;
   let latestSnapshot: string | undefined;
+  let latestDiagnostics: string | undefined;
   let didError = false;
+  const downloads: Record<string, string> = {};
+  const namedArtifacts: Record<string, ArtifactRef> = {};
+  const diagnostics: string[] = [];
 
   const policy = mergeCapturePolicy(spec);
 
@@ -218,13 +225,52 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       }
     }
 
+    const stepArtifacts: string[] = [];
+    let stepToRun = step;
+    let pendingDownload:
+      | {
+          assign: string;
+          relativePath: string;
+          absolutePath: string;
+        }
+      | undefined;
+    if ("download" in step) {
+      const relativePath = downloadRelativePath(step.download.saveAs);
+      const absolutePath = writer.resolve(relativePath);
+      pendingDownload = {
+        assign: step.download.assign ?? artifactNameFromPath(relativePath),
+        relativePath,
+        absolutePath,
+      };
+      await ensureParentDir(absolutePath);
+      stepToRun = {
+        ...step,
+        download: { ...step.download, saveAs: absolutePath },
+      };
+    }
+
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
     try {
-      const r = await opts.backend.runStep(step);
+      const r = await opts.backend.runStep(stepToRun);
       if (!r.ok) {
         stepStatus = "failed";
         stepError = r.stderr.trim() || `exit ${r.exitCode}`;
+      } else if (pendingDownload) {
+        downloads[pendingDownload.assign] = pendingDownload.relativePath;
+        namedArtifacts[pendingDownload.assign] = {
+          kind: "download",
+          path: pendingDownload.absolutePath,
+          relativePath: pendingDownload.relativePath,
+        };
+        stepArtifacts.push(pendingDownload.relativePath);
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.download",
+          stepId,
+          path: pendingDownload.relativePath,
+          assign: pendingDownload.assign,
+        });
       }
     } catch (e) {
       stepStatus = "failed";
@@ -242,6 +288,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       if (snap && snap.ok) {
         await Bun_writeFile(writer.resolve(rel), snap.text);
         latestSnapshot = rel;
+        stepArtifacts.push(rel);
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.snapshot",
+          stepId,
+          path: rel,
+        });
       }
     }
     const shouldShoot =
@@ -252,7 +305,34 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       const shot = await safe(() =>
         opts.backend.screenshot({ path: writer.resolve(rel) }),
       );
-      if (shot && shot.ok) latestScreenshot = rel;
+      if (shot && shot.ok) {
+        latestScreenshot = rel;
+        stepArtifacts.push(rel);
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.screenshot",
+          stepId,
+          path: rel,
+        });
+      }
+    }
+    if (stepStatus !== "passed") {
+      const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
+      const captured = await captureDiagnostics(opts.backend, step, stepError);
+      await Bun_writeFile(
+        writer.resolve(rel),
+        renderDiagnostics(captured),
+        true,
+      );
+      latestDiagnostics = rel;
+      diagnostics.push(rel);
+      stepArtifacts.push(rel);
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.diagnostics",
+        stepId,
+        path: rel,
+      });
     }
 
     const durationMs = Date.now() - stepStart;
@@ -261,6 +341,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       status: stepStatus,
       durationMs,
       ...(stepError ? { error: stepError } : {}),
+      ...(stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
     });
 
     await writer.appendEvent({
@@ -333,6 +414,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     lastSuccessfulStep: lastSuccessfulStep?.id,
     latestScreenshot,
     latestSnapshot,
+    latestDiagnostics,
+    ...(tracePath ? { trace: tracePath } : {}),
+    runDir,
+    specDir: dirname(specPath),
+    artifacts: namedArtifacts,
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
   const evaluated = await evaluateOutcomes(
@@ -357,6 +443,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           : {}),
         ...(latestScreenshot ? { screenshot: latestScreenshot } : {}),
         ...(latestSnapshot ? { snapshot: latestSnapshot } : {}),
+        ...(latestDiagnostics ? { diagnostics: latestDiagnostics } : {}),
+        ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
+        ...(tracePath ? { trace: tracePath } : {}),
       },
       ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
       whyThisMatters: outcome.description,
@@ -395,6 +484,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     network: "network/failed_requests.ndjson",
     ...(latestScreenshot ? { screenshots: [latestScreenshot] } : {}),
     ...(latestSnapshot ? { snapshots: [latestSnapshot] } : {}),
+    ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
   };
 
@@ -465,6 +556,154 @@ function pad(n: number): string {
   return n.toString().padStart(3, "0");
 }
 
+function downloadRelativePath(saveAs: string): string {
+  // Keep downloads inside the run directory even when a spec accidentally
+  // provides an absolute or parent-relative path. Nested download paths are
+  // deliberately collapsed for now to keep artifact references simple.
+  return `downloads/${basename(saveAs)}`;
+}
+
+function artifactNameFromPath(path: string): string {
+  const raw = basename(path)
+    .replace(/\.[^.]+$/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return /^[a-z]/.test(raw) ? raw : `artifact_${raw || "download"}`;
+}
+
+async function ensureParentDir(absPath: string): Promise<void> {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(dirname(absPath), { recursive: true });
+}
+
+async function captureDiagnostics(
+  backend: BrowserBackend,
+  step: Step,
+  stepError: string | undefined,
+): Promise<unknown> {
+  const descriptor = diagnosticStepDescriptor(step);
+  const needles = diagnosticNeedles(step);
+  const selector =
+    ("click" in step && step.click.by === "selector" && step.click.selector) ||
+    ("fill" in step && step.fill.by === "selector" && step.fill.selector) ||
+    ("upload" in step &&
+      step.upload.by === "selector" &&
+      step.upload.selector) ||
+    ("download" in step &&
+      step.download.by === "selector" &&
+      step.download.selector) ||
+    "";
+  const js = [
+    `(() => {`,
+    `  const descriptor = ${JSON.stringify(descriptor)};`,
+    `  const needles = ${JSON.stringify(needles)};`,
+    `  const selector = ${JSON.stringify(selector)};`,
+    `  const normalize = (v) => String(v || '').replace(/\\s+/g, ' ').trim();`,
+    `  const visible = (el) => {`,
+    `    if (!el) return false;`,
+    `    const style = getComputedStyle(el);`,
+    `    const rect = el.getBoundingClientRect();`,
+    `    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;`,
+    `  };`,
+    `  const textOf = (el) => normalize(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.textContent);`,
+    `  const sample = (sel, map) => Array.from(document.querySelectorAll(sel)).filter(visible).map(map).filter(Boolean).slice(0, 40);`,
+    `  const bodyText = document.body ? document.body.innerText || '' : '';`,
+    `  const excerpts = needles.map((needle) => {`,
+    `    const idx = bodyText.toLowerCase().indexOf(String(needle).toLowerCase());`,
+    `    return { needle, found: idx >= 0, excerpt: idx >= 0 ? normalize(bodyText.slice(Math.max(0, idx - 120), idx + String(needle).length + 120)) : '' };`,
+    `  });`,
+    `  let selectorCount = null;`,
+    `  if (selector) {`,
+    `    try { selectorCount = document.querySelectorAll(selector).length; } catch (e) { selectorCount = 'invalid selector: ' + e.message; }`,
+    `  }`,
+    `  return {`,
+    `    url: location.href,`,
+    `    title: document.title,`,
+    `    step: descriptor,`,
+    `    stepError: ${JSON.stringify(stepError ?? "")},`,
+    `    selectorCount,`,
+    `    expectedTextExcerpts: excerpts,`,
+    `    visibleButtons: sample('button, [role=button], input[type=button], input[type=submit]', (el) => ({ text: textOf(el), disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'), selector: el.tagName.toLowerCase(), className: String(el.className || '').slice(0, 120) })),`,
+    `    visibleLinks: sample('a, [role=link]', (el) => ({ text: textOf(el), href: el.href || '', className: String(el.className || '').slice(0, 120) })),`,
+    `    visibleInputs: sample('input, textarea, select, [role=combobox]', (el) => ({ label: normalize(el.labels && el.labels[0] ? el.labels[0].innerText : ''), placeholder: el.getAttribute('placeholder') || '', name: el.getAttribute('name') || '', type: el.getAttribute('type') || el.tagName.toLowerCase(), value: el.type === 'password' ? '[redacted]' : String(el.value || '').slice(0, 80) })),`,
+    `    formLabels: sample('label', (el) => textOf(el)),`,
+    `    tableHeaders: sample('th, [role=columnheader]', (el) => textOf(el)),`,
+    `  };`,
+    `})()`,
+  ].join("\n");
+
+  const result = await safe(() => backend.evaluate(js));
+  if (!result?.ok) {
+    return {
+      step: descriptor,
+      stepError,
+      diagnosticsError:
+        result?.stderr ||
+        `diagnostics eval failed with exit ${result?.exitCode}`,
+    };
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (e) {
+    return {
+      step: descriptor,
+      stepError,
+      diagnosticsError: `diagnostics JSON parse failed: ${(e as Error).message}`,
+      stdout: result.stdout.slice(0, 2000),
+    };
+  }
+}
+
+function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
+  if ("click" in step) return { kind: "click", locator: step.click };
+  if ("fill" in step) {
+    const { value: _value, ...locator } = step.fill;
+    return { kind: "fill", locator };
+  }
+  if ("upload" in step) {
+    const { path: _path, ...locator } = step.upload;
+    return { kind: "upload", locator };
+  }
+  if ("download" in step) {
+    const { saveAs: _saveAs, ...locator } = step.download;
+    return { kind: "download", locator };
+  }
+  if ("open" in step) return { kind: "open", url: step.open };
+  if ("wait" in step) return { kind: "wait", condition: step.wait };
+  if ("snapshot" in step) return { kind: "snapshot" };
+  return { kind: "use", action: step.use };
+}
+
+function diagnosticNeedles(step: Step): string[] {
+  const values: string[] = [];
+  const add = (v: string | undefined) => {
+    if (v && !values.includes(v)) values.push(v);
+  };
+  if ("click" in step) add(locatorNeedle(step.click));
+  if ("fill" in step) add(locatorNeedle(step.fill));
+  if ("upload" in step) add(locatorNeedle(step.upload));
+  if ("download" in step) add(locatorNeedle(step.download));
+  if ("wait" in step) {
+    if ("text" in step.wait) add(step.wait.text);
+    if ("notText" in step.wait) add(step.wait.notText);
+  }
+  return values.slice(0, 10);
+}
+
+function locatorNeedle(locator: {
+  name?: string;
+  text?: string;
+  role?: string;
+  selector?: string;
+}): string | undefined {
+  return locator.name ?? locator.text ?? locator.selector ?? locator.role;
+}
+
+function renderDiagnostics(value: unknown): string {
+  return JSON.stringify(value, null, 2) + "\n";
+}
+
 /**
  * writeFile that ensures parent dir exists. Named with Bun_ prefix to avoid
  * shadowing the global fs.writeFile import; this is just a small helper.
@@ -476,7 +715,6 @@ async function Bun_writeFile(
 ): Promise<void> {
   const { mkdir, writeFile } = await import("node:fs/promises");
   if (createDir) {
-    const { dirname } = await import("node:path");
     await mkdir(dirname(absPath), { recursive: true });
   }
   await writeFile(absPath, contents);
