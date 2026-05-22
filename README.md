@@ -169,6 +169,40 @@ If the button gets renamed `Import → Import xlsx`, the spec breaks. Run
 `cairn spec heal` — it reads the snapshot, finds the new name, and rewrites
 the step (preserving YAML comments). Comments survive.
 
+### Config variables resolve before validation
+
+Specs can put config-backed variables in schema-required fields. Cairntrace
+loads `cairntrace.config.yml`, resolves the environment, merges environment
+vars with caller vars, then parses the spec.
+
+```yaml
+# flows/table-import.yml
+steps:
+  - open: "${vars.connectionPath}"
+```
+
+```yaml
+# cairntrace.config.yml
+version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars:
+      connectionPath: /connection/abc
+```
+
+Use the same config path for validation and runs:
+
+```bash
+cairn spec verify flows/table-import.yml --config cairntrace.config.yml --json
+cairn run flows/table-import.yml --config cairntrace.config.yml --cold-start --json
+```
+
+Missing `${vars.X}` placeholders fail with a clear parse error instead of being
+silently replaced by an empty string. `contractHash` remains based on the raw
+`intent + outcomes` contract, so hashes do not change across environments.
+
 ### The v0 verifier vocabulary
 
 Eight typed verifiers plus an escape hatch. Promote `script` patterns to
@@ -285,7 +319,7 @@ post-mortems and `cairn run` re-runs.
 | `cairn docs [topic]` | Return focused agent docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
 | `cairn context <run\|latest> [--path]` | Print or locate the run's `agent_context.md`. |
 | `cairn spec scaffold <name> --intent ...` | Write a starter spec YAML with the cold-start header. |
-| `cairn spec verify <spec> [--stamp]` | Lint the spec; `--stamp` writes a fresh `contractHash:`. |
+| `cairn spec verify <spec> [--stamp] [--env <name>] [--config <path>]` | Lint the spec; `--stamp` writes a fresh raw-contract `contractHash:`. |
 | `cairn spec heal <spec> [--apply]` | Propose selector-drift fixes from the snapshot. `--apply` writes them (comments preserved). |
 | `cairn checkpoint capture-from-session <name> --session <ab-session>` | Save state of an existing agent-browser session. |
 | `cairn checkpoint list / show / delete` | Manage saved checkpoints. |

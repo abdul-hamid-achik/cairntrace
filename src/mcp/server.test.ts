@@ -111,6 +111,47 @@ steps:
     await c.close();
   });
 
+  it("cairn_spec_verify resolves config vars before validation", async () => {
+    const configPath = join(dir, "mcp.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    vars:
+      connectionPath: /connection/from-mcp
+`,
+    );
+    const specPath = join(dir, "mcp-config-var.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: mcp_config_var
+intent: mcp verify resolves config vars
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: "\${vars.connectionPath}"
+`,
+    );
+
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_spec_verify",
+      arguments: { path: specPath, config: configPath },
+    });
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({
+      status: "valid",
+      path: specPath,
+    });
+    await c.close();
+  });
+
   it("cairn_spec_scaffold writes a starter file", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({

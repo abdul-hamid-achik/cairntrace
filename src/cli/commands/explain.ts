@@ -28,7 +28,7 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "1.1.0", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "1.1.1", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
@@ -198,13 +198,23 @@ export function buildExplain(): ExplainResult {
         name: "spec verify",
         summary: "Lint and (optionally) stamp the contract hash on a spec",
         synopsis:
-          "cairn spec verify <spec-path> [--stamp] [--format json|yaml|md]",
+          "cairn spec verify <spec-path> [--stamp] [--env <name>] [--config <path>] [--format json|yaml|md]",
         flags: [
           {
             name: "--stamp",
             type: "boolean",
             default: false,
             description: "Write a fresh contractHash into the file",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Environment override",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "Explicit config path",
           },
           {
             name: "--format",

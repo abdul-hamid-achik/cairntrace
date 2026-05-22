@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ContractHashMismatchError,
+  MissingTemplateVariableError,
   parseSpec,
   UnresolvedActionError,
 } from "./parseSpec";
@@ -276,6 +277,69 @@ steps: []
     const r = await parseSpec(path, { baseUrl: "http://localhost:9999" });
     const verify = r.spec.outcomes[0]!.verify as { url: { equals: string } };
     expect(verify.url.equals).toBe("http://localhost:9999/x");
+  });
+
+  it("throws a clear error when a ${vars.X} placeholder is missing", async () => {
+    const path = join(dir, "missing_var.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: missing_var
+intent: missing var should not become an empty string
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: "\${vars.connectionPath}"
+`,
+    );
+    await expect(parseSpec(path)).rejects.toThrow(
+      `missing vars.connectionPath while parsing ${path}`,
+    );
+    await expect(parseSpec(path)).rejects.toBeInstanceOf(
+      MissingTemplateVariableError,
+    );
+  });
+
+  it("validates contractHash against the raw unresolved contract", async () => {
+    const path = join(dir, "hash_with_var.yml");
+    const rawSpec = {
+      version: 1 as const,
+      name: "hash_with_var",
+      intent: "contract hash keeps placeholders raw",
+      outcomes: [
+        {
+          id: "path_visible",
+          description: "path is visible",
+          verify: {
+            text: { contains: "${vars.expectedPath}" },
+            region: "page",
+          },
+        },
+      ],
+    };
+    const hash = computeContractHash(rawSpec);
+    await writeFile(
+      path,
+      `version: 1
+name: hash_with_var
+intent: contract hash keeps placeholders raw
+outcomes:
+  - id: path_visible
+    description: path is visible
+    verify:
+      text: { contains: "\${vars.expectedPath}" }
+contractHash: ${hash}
+`,
+    );
+    const r = await parseSpec(path, {
+      vars: { expectedPath: "/connection/abc" },
+    });
+    expect(r.contractHashValid).toBe(true);
+    const verify = r.spec.outcomes[0]!.verify as { text: { contains: string } };
+    expect(verify.text.contains).toBe("/connection/abc");
   });
 
   it("rejects a tampered contractHash", async () => {

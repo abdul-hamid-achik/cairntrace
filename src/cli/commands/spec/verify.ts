@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { computeContractHash } from "../../../core/contractHash";
+import { resolveSpecRuntimeContext } from "../../../core/config/runtimeContext";
 import {
   ContractHashMismatchError,
   parseSpec,
@@ -14,6 +15,8 @@ export interface VerifyOptions {
   json?: boolean;
   yaml?: boolean;
   md?: boolean;
+  env?: string;
+  config?: string;
 }
 
 interface VerifyResult {
@@ -58,7 +61,14 @@ export async function verifyCommand(
       result.status = "stamped";
       result.contractHash = hash;
     } else {
-      const parsed = await parseSpec(specPath);
+      const runtime = await resolveSpecRuntimeContext(specPath, {
+        ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+        ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      });
+      const parsed = await parseSpec(specPath, {
+        vars: runtime.vars,
+        ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+      });
       result.contractHash = parsed.spec.contractHash;
       if (!parsed.spec.contractHash) {
         result.warnings.push(

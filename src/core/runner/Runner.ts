@@ -6,7 +6,7 @@ import type {
 } from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
-import { loadConfig } from "../config/loader";
+import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
 import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
@@ -77,43 +77,30 @@ export interface RunOptions {
  * interface, so a MockBrowserBackend works for tests and `--mock` runs.
  */
 export async function runSpec(opts: RunOptions): Promise<RunResult> {
-  // Load optional project config (cairntrace.config.yml).
-  const loaded = await loadConfig(opts.specPath, opts.configPath);
-  const config = loaded?.config;
-
-  // Peek at the spec to read its environment field. Cheap — a single parse.
-  // Then resolve the env name and re-parse with the right baseUrl + vars.
-  const peek = await parseSpec(opts.specPath, {
-    ...(opts.env ? { env: opts.env } : {}),
-    vars: opts.vars ?? {},
+  const runtime = await resolveSpecRuntimeContext(opts.specPath, {
+    ...(opts.environmentOverride !== undefined
+      ? { envOverride: opts.environmentOverride }
+      : {}),
+    ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+    ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
   });
-  const envName =
-    opts.environmentOverride ??
-    peek.spec.environment ??
-    config?.defaultEnvironment ??
-    "local";
-  const envConfig = config?.environments[envName];
-  const baseUrl = envConfig?.baseUrl;
-  const configVars = envConfig?.vars ?? {};
-  const mergedVars = { ...configVars, ...opts.vars };
-
   const {
     spec,
     resolved,
     path: specPath,
   } = await parseSpec(opts.specPath, {
     ...(opts.env ? { env: opts.env } : {}),
-    vars: mergedVars,
-    ...(baseUrl ? { baseUrl } : {}),
+    vars: runtime.vars,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
   });
 
-  const env = envName;
+  const env = runtime.envName;
   // The actual backend that ran is authoritative — spec.backend is only
   // advisory metadata that may not match the CLI's --backend choice.
   const backendName = opts.backend.name;
   const artifactRoot =
     opts.artifactRoot ??
-    config?.artifactRoot ??
+    runtime.config?.artifactRoot ??
     join(homedir(), ".cairntrace", "runs");
   const now = (opts.now ?? (() => new Date()))();
   const runId = generateRunId(spec.name, now);

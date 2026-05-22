@@ -10,6 +10,7 @@ import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
+import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
 import { computeContractHash } from "../core/contractHash";
 import { healSpec } from "../core/healer/Healer";
 import { parseSpec } from "../core/parser/parseSpec";
@@ -18,7 +19,7 @@ import { DocsTopicSchema } from "../core/schema/docs.v1";
 import type { RunResult } from "../core/schema/run.v1";
 import { SpecSchema } from "../core/schema/spec.v1";
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this
@@ -233,9 +234,11 @@ export function buildMcpServer(): McpServer {
       inputSchema: {
         path: z.string(),
         stamp: z.boolean().optional(),
+        env: z.string().optional().describe("Environment name override"),
+        config: z.string().optional().describe("Explicit config path"),
       },
     },
-    async ({ path, stamp }) => {
+    async ({ path, stamp, env, config }) => {
       try {
         if (stamp) {
           const hash = await stampContractHash(path);
@@ -244,7 +247,14 @@ export function buildMcpServer(): McpServer {
             structuredContent: { status: "stamped", contractHash: hash, path },
           };
         }
-        const r = await parseSpec(path);
+        const runtime = await resolveSpecRuntimeContext(path, {
+          ...(env !== undefined ? { envOverride: env } : {}),
+          ...(config !== undefined ? { configPath: config } : {}),
+        });
+        const r = await parseSpec(path, {
+          vars: runtime.vars,
+          ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+        });
         return {
           content: [
             {

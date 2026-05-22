@@ -82,7 +82,9 @@ export async function parseSpec(
   const vars = opts.vars ?? {};
   const baseUrl = opts.baseUrl;
 
-  const raw = await loadAndParse(absPath, env, vars, baseUrl);
+  const rawSource = await readFile(absPath, "utf8");
+  const rawSpec = SpecSchema.parse(parseYaml(rawSource));
+  const raw = loadAndParseSource(rawSource, absPath, env, vars, baseUrl);
   const spec = SpecSchema.parse(raw);
 
   const actionsByName = new Map<string, LoadedAction>();
@@ -129,10 +131,10 @@ export async function parseSpec(
   const resolved: Spec = { ...spec, steps: stepsWithBaseUrl };
 
   let contractHashValid = false;
-  if (spec.contractHash) {
-    const computed = computeContractHash(spec);
-    if (computed !== spec.contractHash) {
-      throw new ContractHashMismatchError(spec.contractHash, computed);
+  if (rawSpec.contractHash) {
+    const computed = computeContractHash(rawSpec);
+    if (computed !== rawSpec.contractHash) {
+      throw new ContractHashMismatchError(rawSpec.contractHash, computed);
     }
     contractHashValid = true;
   }
@@ -175,6 +177,16 @@ export class UnresolvedActionError extends Error {
   }
 }
 
+export class MissingTemplateVariableError extends Error {
+  constructor(
+    public readonly variable: string,
+    public readonly filePath: string,
+  ) {
+    super(`missing vars.${variable} while parsing ${filePath}`);
+    this.name = "MissingTemplateVariableError";
+  }
+}
+
 async function loadAndParse(
   absPath: string,
   env: Record<string, string | undefined>,
@@ -182,7 +194,24 @@ async function loadAndParse(
   baseUrl: string | undefined,
 ): Promise<unknown> {
   const text = await readFile(absPath, "utf8");
-  const substituted = substitute(text, env, vars, dirname(absPath), baseUrl);
+  return loadAndParseSource(text, absPath, env, vars, baseUrl);
+}
+
+function loadAndParseSource(
+  text: string,
+  absPath: string,
+  env: Record<string, string | undefined>,
+  vars: Record<string, string | number | boolean>,
+  baseUrl: string | undefined,
+): unknown {
+  const substituted = substitute(
+    text,
+    env,
+    vars,
+    dirname(absPath),
+    baseUrl,
+    absPath,
+  );
   return parseYaml(substituted);
 }
 
@@ -208,6 +237,7 @@ function substitute(
   vars: Record<string, string | number | boolean>,
   projectRoot: string,
   baseUrl: string | undefined,
+  filePath: string,
 ): string {
   return text.replace(/\$\{([\w.]+)\}/g, (match, key: string) => {
     if (key === "project.root") return projectRoot;
@@ -221,7 +251,9 @@ function substitute(
     }
     if (ns === "vars") {
       const v = vars[name];
-      return v === undefined ? "" : String(v);
+      if (v === undefined)
+        throw new MissingTemplateVariableError(name, filePath);
+      return String(v);
     }
     return match;
   });

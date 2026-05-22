@@ -123,11 +123,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Cold Start",
-        body: "Every finished spec must replay from a clean browser. Satisfy that with an imported login action, `session.resume`, or deterministic `preconditions.commands`. Before calling a spec done, run `cairn run <spec> --cold-start --json`.",
+        body: "Every finished spec must replay from a clean browser. Satisfy that with an imported login action, `session.resume`, or deterministic `preconditions.commands`. Before calling a spec done, run `cairn spec verify <spec> --config <path> --json` when using config variables, then run `cairn run <spec> --cold-start --json`.",
       },
       {
         title: "Small YAML",
         body: "Keep YAML readable. Use normal steps for navigation and interaction, first-class `download` for file capture, and `script.file` when a script body would make the YAML noisy.",
+      },
+      {
+        title: "Config Variables",
+        body: "Config-backed `${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values.",
       },
     ],
     examples: [
@@ -155,6 +159,22 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "      name: Download template",
           "      saveAs: template.xlsx",
           "      assign: template",
+        ].join("\n"),
+      },
+      {
+        title: "config-backed open path",
+        language: "yaml",
+        code: [
+          "# flows/table-import.yml",
+          "steps:",
+          '  - open: "${vars.connectionPath}"',
+          "",
+          "# cairntrace.config.yml",
+          "environments:",
+          "  local:",
+          "    baseUrl: http://localhost:8080",
+          "    vars:",
+          "      connectionPath: /connection/abc",
         ].join("\n"),
       },
     ],

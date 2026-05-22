@@ -23,7 +23,7 @@ program
   .description(
     "Cairntrace — behavioral browser-spec layer for agent-in-session use",
   )
-  .version("1.1.0");
+  .version("1.1.1");
 
 function addFormatFlags(c: Command): Command {
   return c
@@ -138,7 +138,12 @@ addFormatFlags(
   spec
     .command("verify <spec>")
     .description("Lint and (optionally) stamp the contract hash on a spec")
-    .option("--stamp", "write a fresh contractHash into the file", false),
+    .option("--stamp", "write a fresh contractHash into the file", false)
+    .option("--env <name>", "environment override")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
 ).action((p: string, opts) => verifyCommand(p, opts));
 
 addFormatFlags(

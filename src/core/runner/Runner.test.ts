@@ -182,6 +182,43 @@ steps:
     });
   });
 
+  it("resolves config vars before parsing schema-required step fields", async () => {
+    await writeFile(
+      join(workDir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars:
+      connectionPath: /connection/abc
+`,
+    );
+    const specPath = await writeSpec(
+      "config_var_open",
+      `version: 1
+name: config_var_open
+intent: config vars can supply required open values
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: "\${vars.connectionPath}"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toMatchObject({
+      open: "http://localhost:8080/connection/abc",
+    });
+  });
+
   it("exposes downloaded artifacts and external script files to script verifiers", async () => {
     await writeFile(
       join(workDir, "download-check.js"),
