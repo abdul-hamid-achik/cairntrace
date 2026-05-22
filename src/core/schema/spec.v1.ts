@@ -10,7 +10,7 @@ import { VerifierSchema } from "./verifier.v1";
  * and validated by `cairn spec heal` to enforce contract immutability.
  */
 
-/* ----- locators (used by click / fill / upload / count) ----- */
+/* ----- locators (used by click / hover / fill / upload / count) ----- */
 
 export const RoleLocatorSchema = z
   .object({
@@ -140,6 +140,11 @@ export const ClickStepSchema = z
   .strict();
 export type ClickStep = z.infer<typeof ClickStepSchema>;
 
+export const HoverStepSchema = z
+  .object({ ...stepCommon, hover: LocatorSchema })
+  .strict();
+export type HoverStep = z.infer<typeof HoverStepSchema>;
+
 export const FillStepSchema = z
   .object({
     ...stepCommon,
@@ -191,6 +196,7 @@ export type UseStep = z.infer<typeof UseStepSchema>;
 export const StepSchema = z.union([
   OpenStepSchema,
   ClickStepSchema,
+  HoverStepSchema,
   FillStepSchema,
   UploadStepSchema,
   DownloadStepSchema,

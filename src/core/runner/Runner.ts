@@ -573,6 +573,7 @@ async function captureDiagnostics(
   const needles = diagnosticNeedles(step);
   const selector =
     ("click" in step && step.click.by === "selector" && step.click.selector) ||
+    ("hover" in step && step.hover.by === "selector" && step.hover.selector) ||
     ("fill" in step && step.fill.by === "selector" && step.fill.selector) ||
     ("upload" in step &&
       step.upload.by === "selector" &&
@@ -644,6 +645,7 @@ async function captureDiagnostics(
 
 function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   if ("click" in step) return { kind: "click", locator: step.click };
+  if ("hover" in step) return { kind: "hover", locator: step.hover };
   if ("fill" in step) {
     const { value: _value, ...locator } = step.fill;
     return { kind: "fill", locator };
@@ -653,7 +655,12 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
     return { kind: "upload", locator };
   }
   if ("download" in step) {
-    const { saveAs: _saveAs, ...locator } = step.download;
+    const {
+      saveAs: _saveAs,
+      assign: _assign,
+      timeoutMs: _timeoutMs,
+      ...locator
+    } = step.download;
     return { kind: "download", locator };
   }
   if ("open" in step) return { kind: "open", url: step.open };
@@ -668,6 +675,7 @@ function diagnosticNeedles(step: Step): string[] {
     if (v && !values.includes(v)) values.push(v);
   };
   if ("click" in step) add(locatorNeedle(step.click));
+  if ("hover" in step) add(locatorNeedle(step.hover));
   if ("fill" in step) add(locatorNeedle(step.fill));
   if ("upload" in step) add(locatorNeedle(step.upload));
   if ("download" in step) add(locatorNeedle(step.download));

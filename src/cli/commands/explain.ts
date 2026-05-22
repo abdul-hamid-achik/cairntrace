@@ -28,7 +28,7 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "1.1.1", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "1.2.0", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
@@ -229,6 +229,67 @@ export function buildExplain(): ExplainResult {
           "4": "lint failed",
           "6": "contract hash mismatch",
         },
+      },
+    ],
+    steps: [
+      {
+        id: "open",
+        kind: "navigation",
+        summary: "Navigate to a URL or config-resolved path",
+        yamlExample: "steps:\n  - open: /settings",
+      },
+      {
+        id: "click",
+        kind: "interaction",
+        summary: "Activate a locator with click",
+        yamlExample:
+          "steps:\n  - click: { by: role, role: button, name: Save }",
+      },
+      {
+        id: "hover",
+        kind: "interaction",
+        summary: "Move the pointer over a locator to reveal hover-only UI",
+        yamlExample:
+          'steps:\n  - hover: { by: selector, selector: ".question-table-wrap .table-title" }',
+      },
+      {
+        id: "fill",
+        kind: "interaction",
+        summary: "Fill a locator with a string value",
+        yamlExample:
+          "steps:\n  - fill: { by: label, name: Email, value: user@example.com }",
+      },
+      {
+        id: "upload",
+        kind: "file",
+        summary: "Set a file input from a local path",
+        yamlExample:
+          "steps:\n  - upload: { by: label, name: File, path: ./fixtures/sample.xlsx }",
+      },
+      {
+        id: "download",
+        kind: "file",
+        summary: "Click a locator and capture the resulting download artifact",
+        yamlExample:
+          "steps:\n  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }",
+      },
+      {
+        id: "wait",
+        kind: "wait",
+        summary: "Wait for text, notText, or load state",
+        yamlExample: "steps:\n  - wait: { text: Saved, timeoutMs: 10000 }",
+      },
+      {
+        id: "snapshot",
+        kind: "artifact",
+        summary: "Capture an accessibility snapshot for evidence or healing",
+        yamlExample: "steps:\n  - snapshot: { interactive: true }",
+      },
+      {
+        id: "use",
+        kind: "interaction",
+        summary: "Invoke an imported reusable action",
+        yamlExample: "steps:\n  - use: login_admin",
       },
     ],
     verifiers: [
@@ -433,6 +494,9 @@ export function explainToMarkdown(e: ExplainResult): string {
     "",
     "## Verifier vocabulary (v0)",
     ...e.verifiers.map((v) => `- **${v.id}** *(${v.kind})* — ${v.summary}`),
+    "",
+    "## Step vocabulary",
+    ...e.steps.map((s) => `- **${s.id}** *(${s.kind})* — ${s.summary}`),
     "",
     "## Rules",
     `- cold-start: ${e.rules.coldStart.summary}`,

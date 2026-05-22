@@ -75,7 +75,8 @@ per-agent code paths.
   produces more, split outcomes or push detail to an `outcomes/<id>.raw.json`
   sidecar.
 - On first contact, run `cairn explain --json` (CLI) or call the
-  `cairn_explain` MCP tool to get the current surface and verifier vocabulary.
+  `cairn_explain` MCP tool to get the current surface and step/verifier
+  vocabulary.
   For focused authoring guidance, use `cairn docs <topic> --json` or MCP
   `cairn_docs` (`authoring`, `steps`, `verifiers`, `downloads`, `scripts`,
   `artifacts`, `mcp`, `backends`) — don't rely on training-data knowledge of

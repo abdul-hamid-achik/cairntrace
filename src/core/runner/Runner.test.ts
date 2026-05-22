@@ -182,6 +182,37 @@ steps:
     });
   });
 
+  it("runs hover steps as first-class interactions", async () => {
+    const specPath = await writeSpec(
+      "hover",
+      `version: 1
+name: hover_demo
+intent: reveal table controls before continuing
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: reveal_header_actions
+    hover:
+      by: selector
+      selector: ".question-table-wrap .table-title"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toMatchObject({
+      hover: {
+        by: "selector",
+        selector: ".question-table-wrap .table-title",
+      },
+    });
+  });
+
   it("resolves config vars before parsing schema-required step fields", async () => {
     await writeFile(
       join(workDir, "cairntrace.config.yml"),
@@ -306,6 +337,40 @@ steps:
       "utf8",
     );
     expect(diagnostics).toContain("Submit");
+  });
+
+  it("includes hover selectors in failed-step diagnostics", async () => {
+    const specPath = await writeSpec(
+      "hover_fail",
+      `version: 1
+name: hover_fail
+intent: hover failure should capture selector diagnostics
+outcomes:
+  - id: dummy
+    description: dummy
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: reveal_header_actions
+    hover:
+      by: selector
+      selector: ".question-table-wrap .table-title"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("hover target not found");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.diagnostics?.[0]).toMatch(
+      /^diagnostics\/001_reveal_header_actions\.json$/,
+    );
+    expect(backend.lastEvaluatedScript).toContain('"kind":"hover"');
+    expect(backend.lastEvaluatedScript).toContain(
+      ".question-table-wrap .table-title",
+    );
   });
 
   it("--cold-start wipes browser state before steps", async () => {

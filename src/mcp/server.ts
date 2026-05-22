@@ -19,7 +19,7 @@ import { DocsTopicSchema } from "../core/schema/docs.v1";
 import type { RunResult } from "../core/schema/run.v1";
 import { SpecSchema } from "../core/schema/spec.v1";
 
-const VERSION = "1.1.1";
+const VERSION = "1.2.0";
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this
@@ -38,7 +38,7 @@ export function buildMcpServer(): McpServer {
       title: "Explain Cairntrace surface",
       description:
         "Returns the agent-facing surface: full command list with flags and " +
-        "exit codes, verifier vocabulary with parameters, rules, and config. " +
+        "exit codes, step and verifier vocabulary, rules, and config. " +
         "Call this once at session start. Output matches the v1 ExplainResult " +
         "schema (same as `cairn explain --json`).",
       inputSchema: {},
@@ -54,6 +54,7 @@ export function buildMcpServer(): McpServer {
             text:
               `Cairntrace ${doc.cairntrace.version}\n` +
               `Commands: ${doc.commands.map((c) => c.name).join(", ")}\n` +
+              `Steps: ${doc.steps.map((s) => s.id).join(", ")}\n` +
               `Verifiers: ${doc.verifiers.map((v) => v.id).join(", ")}`,
           },
         ],

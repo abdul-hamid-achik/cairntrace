@@ -126,6 +126,9 @@ function renderStepBody(step: Step): string[] {
   if ("click" in step) {
     return [`await ${locator(step.click)}.click();`];
   }
+  if ("hover" in step) {
+    return [`await ${locator(step.hover)}.hover();`];
+  }
   if ("fill" in step) {
     const { value, ...loc } = step.fill;
     return [`await ${locator(loc as Locator)}.fill(${JSON.stringify(value)});`];

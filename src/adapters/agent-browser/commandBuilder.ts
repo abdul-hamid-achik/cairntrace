@@ -2,6 +2,7 @@ import type {
   ClickStep,
   DownloadStep,
   FillStep,
+  HoverStep,
   Locator,
   OpenStep,
   SnapshotStep,
@@ -71,6 +72,10 @@ export function clickStepToArgv(step: ClickStep): string[] {
   return locatorToArgv(step.click, "click");
 }
 
+export function hoverStepToArgv(step: HoverStep): string[] {
+  return locatorToArgv(step.hover, "hover");
+}
+
 export function fillStepToArgv(step: FillStep): string[] {
   const { value, ...locator } = step.fill;
   return locatorToArgv(locator as Locator, "fill", value);
@@ -128,6 +133,7 @@ export function snapshotStepToArgv(step: SnapshotStep): string[] {
 export function stepToArgv(step: Step): string[] {
   if ("open" in step) return openStepToArgv(step);
   if ("click" in step) return clickStepToArgv(step);
+  if ("hover" in step) return hoverStepToArgv(step);
   if ("fill" in step) return fillStepToArgv(step);
   if ("upload" in step) return uploadStepToArgv(step);
   if ("download" in step) return downloadStepToArgv(step);

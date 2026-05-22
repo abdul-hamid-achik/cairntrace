@@ -30,6 +30,7 @@ steps:
   - use: login_admin
   - open: /invoices
   - click: { by: role, role: button, name: Import }
+  - hover: { by: selector, selector: ".question-table-wrap .table-title" }
   - upload: { by: label, name: Upload file, path: ./fixtures/sample.xlsx }
   - wait: { text: "Import complete", timeoutMs: 30000 }
 ```
@@ -157,6 +158,7 @@ steps:
   - use: login_admin                       # imported reusable action
   - open: /invoices                        # baseUrl prepended from config
   - click: { by: role, role: button, name: Import }
+  - hover: { by: selector, selector: ".question-table-wrap .table-title" }
   - upload: { by: label, name: Upload file, path: ./fixtures/sample.xlsx }
   - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }
   - wait: { text: "Import complete", timeoutMs: 30000 }
@@ -383,6 +385,7 @@ for the topic the agent is about to work on. This keeps docs fetches small:
 
 ```bash
 cairn explain --json
+cairn docs steps --json
 cairn docs authoring --json
 cairn docs downloads --json
 cairn docs backends --json

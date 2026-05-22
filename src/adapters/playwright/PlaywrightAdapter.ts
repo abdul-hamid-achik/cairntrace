@@ -60,6 +60,10 @@ export class PlaywrightAdapter implements BrowserBackend {
         await this.resolveLocator(step.click).click({
           timeout: this.opts.defaultTimeoutMs,
         });
+      } else if ("hover" in step) {
+        await this.resolveLocator(step.hover).hover({
+          timeout: this.opts.defaultTimeoutMs,
+        });
       } else if ("fill" in step) {
         const { value, ...loc } = step.fill;
         await this.resolveLocator(loc as Locator).fill(value, {

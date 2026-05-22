@@ -58,7 +58,49 @@ describe("proposeOps", () => {
     expect((ops[0] as { to: string }).to).toBe("Apply coupon");
   });
 
-  it("does nothing for non-role locators (v0 scope)", () => {
+  it("heals hover locator drift", () => {
+    const snap = parseSnapshot(`
+- main
+  - button "Table options"
+`);
+    const step: Step = {
+      hover: { by: "role", role: "button", name: "Table actions" },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/hover/name",
+      from: "Table actions",
+      to: "Table options",
+    });
+  });
+
+  it("heals download locator drift", () => {
+    const snap = parseSnapshot(`
+- main
+  - button "Download template"
+`);
+    const step: Step = {
+      download: {
+        by: "role",
+        role: "button",
+        name: "Download xlsx",
+        saveAs: "template.xlsx",
+        assign: "template",
+      },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/download/name",
+      from: "Download xlsx",
+      to: "Download template",
+    });
+  });
+
+  it("does nothing for selector locators (v0 scope)", () => {
     const snap = parseSnapshot(SNAPSHOT_WITH_RENAMED_LINK);
     expect(
       proposeOps({ click: { by: "selector", selector: "#missing" } }, 0, snap),

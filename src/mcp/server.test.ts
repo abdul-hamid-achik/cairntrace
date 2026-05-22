@@ -55,6 +55,7 @@ describe("Cairntrace MCP server", () => {
     const ids = verifiers.map((v) => v.id);
     expect(ids).toContain("text");
     expect(ids).toContain("script");
+    expect(structured.steps.map((s) => s.id)).toContain("hover");
     await c.close();
   });
 

@@ -5,7 +5,7 @@ import { VerifierKindSchema } from "./verifier.v1";
 /**
  * Wire schema for `cairn explain --json` (plan §13c).
  * Bootstrapping document — an agent calls this once at session start and
- * learns the full command surface, verifier vocabulary, and rules.
+ * learns the full command surface, step/verifier vocabulary, and rules.
  */
 
 export const CommandFlagSchema = z
@@ -65,6 +65,26 @@ export const VerifierDocSchema = z
   .strict();
 export type VerifierDoc = z.infer<typeof VerifierDocSchema>;
 
+export const StepDocSchema = z
+  .object({
+    id: z.enum([
+      "open",
+      "click",
+      "hover",
+      "fill",
+      "upload",
+      "download",
+      "wait",
+      "snapshot",
+      "use",
+    ]),
+    kind: z.enum(["navigation", "interaction", "file", "wait", "artifact"]),
+    summary: z.string().min(1),
+    yamlExample: z.string().min(1),
+  })
+  .strict();
+export type StepDoc = z.infer<typeof StepDocSchema>;
+
 export const RulesDocSchema = z
   .object({
     coldStart: z
@@ -114,6 +134,7 @@ export const ExplainResultSchema = z
       })
       .strict(),
     commands: z.array(CommandDocSchema),
+    steps: z.array(StepDocSchema),
     verifiers: z.array(VerifierDocSchema),
     rules: RulesDocSchema,
     config: ConfigDocSchema,

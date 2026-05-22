@@ -187,7 +187,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates, `click` activates a locator, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `wait` waits for text/notText/load state, `snapshot` captures the page, and `use` invokes an imported reusable action.",
+        body: "`open` navigates, `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `wait` waits for text/notText/load state, `snapshot` captures the page, and `use` invokes an imported reusable action.",
       },
       {
         title: "Locators",
@@ -195,7 +195,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Reusable Actions",
-        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `fill.value`, `upload.path`, and `download.saveAs`.",
+        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, and `download.saveAs`.",
       },
     ],
     examples: [
@@ -206,8 +206,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "steps:",
           "  - open: /settings",
           "  - click: { by: role, role: button, name: Edit }",
+          '  - hover: { by: selector, selector: ".question-table-wrap .table-title" }',
           "  - fill: { by: label, name: Display name, value: Example Inc }",
           "  - upload: { by: label, name: Logo, path: ./fixtures/logo.png }",
+          "  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }",
           "  - wait: { text: Saved, timeoutMs: 10000 }",
         ].join("\n"),
       },

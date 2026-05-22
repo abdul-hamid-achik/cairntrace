@@ -27,7 +27,7 @@ describe("exportPlaywright", () => {
     expect(src.trim().endsWith("});")).toBe(true);
   });
 
-  it("translates open/click/fill steps", () => {
+  it("translates open/click/hover/fill steps", () => {
     const src = exportPlaywright(
       baseSpec({
         steps: [
@@ -35,6 +35,13 @@ describe("exportPlaywright", () => {
           {
             id: "click",
             click: { by: "role", role: "button", name: "Submit" },
+          },
+          {
+            id: "hover",
+            hover: {
+              by: "selector",
+              selector: ".question-table-wrap .table-title",
+            },
           },
           {
             id: "fill_email",
@@ -46,6 +53,9 @@ describe("exportPlaywright", () => {
     expect(src).toContain(`await page.goto("https://example.com/");`);
     expect(src).toContain(
       `await page.getByRole("button", { name: "Submit" }).click();`,
+    );
+    expect(src).toContain(
+      `await page.locator(".question-table-wrap .table-title").hover();`,
     );
     expect(src).toContain(`await page.getByLabel("Email").fill("a@b.c");`);
   });

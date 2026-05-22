@@ -35,7 +35,7 @@ export interface HealOutput {
 }
 
 /**
- * v0.4 heal — diagnose UI drift on a single click/fill/upload step.
+ * v0.4 heal — diagnose UI drift on a single locator-bearing step.
  *
  * Algorithm:
  *   1. Run the spec.
@@ -223,7 +223,7 @@ export function proposeOps(
   if (locatorOp) return [locatorOp];
 
   /* 2) Wait-insertion heal — runs when no name candidate is found but the
-        step is a click/fill/upload and there isn't already a wait right
+        step has a healable locator and there isn't already a wait right
         before it. Inserts a `wait: { text: <locator-name> }` step. */
   const waitOp = tryWaitInsertion(step, stepIdx, ctx.allSteps);
   if (waitOp) return [waitOp];
@@ -236,8 +236,8 @@ function tryLocatorDrift(
   stepIdx: number,
   snapshot: SnapshotElement[],
 ): PatchOp | undefined {
-  // Find which locator key is on this step (click/fill/upload), and what kind
-  // of locator (role/label/text/selector).
+  // Find which locator key is on this step, and what kind of locator
+  // (role/label/text/selector).
   const target = extractLocatorTarget(step);
   if (!target) return undefined;
   const { key, locator } = target;
@@ -310,7 +310,7 @@ function tryWaitInsertion(
 }
 
 interface LocatorTarget {
-  key: "click" | "fill" | "upload";
+  key: "click" | "hover" | "fill" | "upload" | "download";
   locator: {
     by: string;
     role?: string;
@@ -322,8 +322,18 @@ interface LocatorTarget {
 
 function extractLocatorTarget(step: Step): LocatorTarget | undefined {
   if ("click" in step) return { key: "click", locator: step.click };
+  if ("hover" in step) return { key: "hover", locator: step.hover };
   if ("fill" in step) return { key: "fill", locator: step.fill };
   if ("upload" in step) return { key: "upload", locator: step.upload };
+  if ("download" in step) {
+    const {
+      saveAs: _saveAs,
+      assign: _assign,
+      timeoutMs: _timeoutMs,
+      ...locator
+    } = step.download;
+    return { key: "download", locator };
+  }
   return undefined;
 }
 
