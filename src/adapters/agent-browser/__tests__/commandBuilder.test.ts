@@ -156,8 +156,25 @@ describe("stepToArgv", () => {
     ).toEqual(["upload", "input[type=file]", "./fixtures/sample.xlsx"]);
   });
 
-  it("download with role locator", () => {
+  it("download with selector locator", () => {
     expect(
+      stepToArgv({
+        download: {
+          by: "selector",
+          selector: "button[aria-label='Download template']",
+          saveAs: "/tmp/template.xlsx",
+          assign: "template",
+        },
+      }),
+    ).toEqual([
+      "download",
+      "button[aria-label='Download template']",
+      "/tmp/template.xlsx",
+    ]);
+  });
+
+  it("semantic download locators must be resolved by the adapter", () => {
+    expect(() =>
       stepToArgv({
         download: {
           by: "role",
@@ -167,15 +184,7 @@ describe("stepToArgv", () => {
           assign: "template",
         },
       }),
-    ).toEqual([
-      "find",
-      "role",
-      "button",
-      "download",
-      "/tmp/template.xlsx",
-      "--name",
-      "Download template",
-    ]);
+    ).toThrow(/resolved by AgentBrowserAdapter/);
   });
 
   it("wait with text", () => {

@@ -93,7 +93,10 @@ export function downloadStepToArgv(step: DownloadStep): string[] {
     timeoutMs: _timeoutMs,
     ...locator
   } = step.download;
-  return locatorToArgv(locator as Locator, "download", saveAs);
+  if (locator.by === "selector") return ["download", locator.selector, saveAs];
+  throw new Error(
+    "semantic download locators must be resolved by AgentBrowserAdapter",
+  );
 }
 
 export function waitStepToArgv(step: WaitStep): string[] {

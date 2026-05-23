@@ -268,7 +268,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Backend Support",
-        body: "Playwright uses native browser download events. The agent-browser backend delegates to `agent-browser download`. Blob/object URL downloads should be handled by the active backend's download support; if a product bypasses browser download semantics entirely, use a product API or fixture precondition instead.",
+        body: "Playwright uses native browser download events. The agent-browser backend resolves semantic locators to interactive snapshot refs, then delegates to top-level `agent-browser download`. Blob/object URL downloads should be handled by the active backend's download support; if a product bypasses browser download semantics entirely, use a product API or fixture precondition instead.",
       },
     ],
     examples: [

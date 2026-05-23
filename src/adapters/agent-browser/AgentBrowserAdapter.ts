@@ -1,5 +1,14 @@
 import { execa } from "execa";
-import type { Step } from "../../core/schema/spec.v1";
+import {
+  parseSnapshot,
+  type SnapshotElement,
+} from "../../core/healer/snapshotParser";
+import type {
+  DownloadStep,
+  HoverStep,
+  Locator,
+  Step,
+} from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -45,6 +54,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /* ----- step dispatch ----- */
 
   async runStep(step: Step): Promise<InvocationResult> {
+    if ("download" in step) return this.runDownloadStep(step);
+    if ("hover" in step) return this.runHoverStep(step);
     return this.invoke(stepToArgv(step));
   }
 
@@ -286,8 +297,86 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   /* ----- internals ----- */
 
+  private async runDownloadStep(step: DownloadStep): Promise<InvocationResult> {
+    const {
+      saveAs,
+      assign: _assign,
+      timeoutMs,
+      ...locator
+    } = step.download;
+    if (locator.by === "selector") {
+      return this.invoke(["download", locator.selector, saveAs], {
+        timeoutMs,
+      });
+    }
+
+    const resolved = await this.resolveInteractiveRef(locator as Locator);
+    if (!resolved.ok) return resolved.result;
+    return this.invoke(["download", resolved.ref, saveAs], { timeoutMs });
+  }
+
+  private async runHoverStep(step: HoverStep): Promise<InvocationResult> {
+    if (step.hover.by === "selector") {
+      await this.scrollSelectorIntoView(step.hover.selector);
+    }
+    return this.invoke(stepToArgv(step));
+  }
+
+  private async scrollSelectorIntoView(selector: string): Promise<void> {
+    const script = `(() => {
+      try {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        el.scrollIntoView({ block: "center", inline: "center" });
+        return true;
+      } catch (_) {
+        return false;
+      }
+    })()`;
+    await this.invoke(["eval", script]);
+  }
+
+  private async resolveInteractiveRef(
+    locator: Locator,
+  ): Promise<
+    { ok: true; ref: string } | { ok: false; result: InvocationResult }
+  > {
+    const start = Date.now();
+    const snapshot = await this.invoke(["snapshot", "-i"]);
+    if (!snapshot.ok) return { ok: false, result: snapshot };
+
+    const matches = matchingSnapshotElements(
+      locator,
+      parseSnapshot(snapshot.stdout),
+    ).filter((el) => el.ref);
+    if (matches.length > 0) {
+      return { ok: true, ref: `@${matches[0]!.ref!}` };
+    }
+
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        stdout: "",
+        stderr: `could not resolve ${describeLocator(locator)} to an interactive snapshot ref for download`,
+        exitCode: 1,
+        durationMs: Date.now() - start,
+        argv: [
+          "--session",
+          this.opts.session,
+          ...this.globalArgs,
+          "download",
+          "<unresolved>",
+        ],
+      },
+    };
+  }
+
   /** Compose `[--session foo, ...globals, ...argv]` and invoke agent-browser. */
-  private async invoke(argv: string[]): Promise<InvocationResult> {
+  private async invoke(
+    argv: string[],
+    invokeOpts: { timeoutMs?: number } = {},
+  ): Promise<InvocationResult> {
     const start = Date.now();
     const fullArgv = [
       "--session",
@@ -298,7 +387,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const result = await execa(this.binary, fullArgv, {
       reject: false,
       cwd: this.opts.cwd,
-      timeout: this.opts.defaultTimeoutMs,
+      timeout: invokeOpts.timeoutMs ?? this.opts.defaultTimeoutMs,
     });
     return {
       ok: result.exitCode === 0,
@@ -312,3 +401,38 @@ export class AgentBrowserAdapter implements BrowserBackend {
 }
 
 /* ----- helpers — see ./parseOutput.ts for unit-tested implementations ----- */
+
+function matchingSnapshotElements(
+  locator: Locator,
+  snapshot: SnapshotElement[],
+): SnapshotElement[] {
+  switch (locator.by) {
+    case "role":
+      return snapshot.filter(
+        (el) =>
+          el.role === locator.role &&
+          (locator.name === undefined || el.name === locator.name),
+      );
+    case "label":
+      return snapshot.filter((el) => el.name === locator.name);
+    case "text":
+      return snapshot.filter((el) => el.name === locator.text);
+    case "selector":
+      return [];
+  }
+}
+
+function describeLocator(locator: Locator): string {
+  switch (locator.by) {
+    case "role":
+      return locator.name
+        ? `role=${locator.role} name=${JSON.stringify(locator.name)}`
+        : `role=${locator.role}`;
+    case "label":
+      return `label=${JSON.stringify(locator.name)}`;
+    case "text":
+      return `text=${JSON.stringify(locator.text)}`;
+    case "selector":
+      return `selector=${JSON.stringify(locator.selector)}`;
+  }
+}

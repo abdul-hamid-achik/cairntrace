@@ -224,6 +224,8 @@ typed verifiers when 3+ specs need them.
 `script` supports either inline `run:` or an external JS/TS body via `file:`.
 External files resolve relative to the spec file. Download steps can expose
 named artifacts to scripts with `${artifacts.<name>.path}`.
+With the `agent-browser` backend, semantic download locators resolve to an
+interactive snapshot ref before Cairn calls top-level `agent-browser download`.
 
 ```yaml
 outcomes:
