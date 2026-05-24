@@ -25,7 +25,7 @@ export const OutcomeResultSchema = z
     status: OutcomeStatusSchema,
     /** Path to the per-outcome evidence markdown file (§13b shape). */
     evidence: RelativePathSchema.optional(),
-    /** Untruncated deep data — present only for the `script` escape hatch. */
+    /** Untruncated deep data — present when a verifier emits raw evidence. */
     evidenceRaw: RelativePathSchema.optional(),
   })
   .strict();
@@ -49,6 +49,7 @@ export const RunArtifactsSchema = z
     screenshots: z.array(RelativePathSchema).optional(),
     snapshots: z.array(RelativePathSchema).optional(),
     downloads: z.record(z.string(), RelativePathSchema).optional(),
+    transforms: z.record(z.string(), RelativePathSchema).optional(),
     diagnostics: z.array(RelativePathSchema).optional(),
     console: RelativePathSchema.optional(),
     network: RelativePathSchema.optional(),

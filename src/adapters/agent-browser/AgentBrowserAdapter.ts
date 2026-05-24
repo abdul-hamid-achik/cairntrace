@@ -298,12 +298,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /* ----- internals ----- */
 
   private async runDownloadStep(step: DownloadStep): Promise<InvocationResult> {
-    const {
-      saveAs,
-      assign: _assign,
-      timeoutMs,
-      ...locator
-    } = step.download;
+    const { saveAs, assign: _assign, timeoutMs, ...locator } = step.download;
     if (locator.by === "selector") {
       return this.invoke(["download", locator.selector, saveAs], {
         timeoutMs,

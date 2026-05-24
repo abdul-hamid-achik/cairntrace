@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MockBrowserBackend } from "../../../adapters/mock/MockBrowserBackend";
 import { evaluateConsole } from "./console";
@@ -206,5 +209,75 @@ describe("script", () => {
     );
     expect(r.passed).toBe(false);
     expect(r.raw).toMatchObject({ mismatches: [{ row: 3 }] });
+  });
+
+  it("runs runtime: node scripts outside the browser with filesystem access", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-node-verifier-"));
+    const artifactPath = join(dir, "template.txt");
+    const verifierPath = join(dir, "check-template.ts");
+    await writeFile(artifactPath, "template body");
+    await writeFile(
+      verifierPath,
+      `import { readFile } from "node:fs/promises";
+
+export default async function verify(ctx) {
+  const text = await readFile(ctx.fixtures.templatePath, "utf8");
+  return {
+    ok: text === "template body" && ctx.artifacts.template.relativePath === "downloads/template.txt",
+    evidence: { text, templatePath: ctx.fixtures.templatePath }
+  };
+}
+`,
+    );
+
+    const b = new MockBrowserBackend();
+    const r = await evaluateScript(
+      {
+        script: {
+          runtime: "node",
+          file: "./check-template.ts",
+          fixtures: {
+            templatePath: "${artifacts.template.path}",
+          },
+        },
+      },
+      b,
+      {
+        specDir: dir,
+        runDir: dir,
+        artifacts: {
+          template: {
+            kind: "download",
+            path: artifactPath,
+            relativePath: "downloads/template.txt",
+          },
+        },
+      },
+    );
+
+    expect(r.passed).toBe(true);
+    expect(r.raw).toMatchObject({ text: "template body" });
+    expect(b.lastEvaluatedScript).toBe("");
+  });
+
+  it("keeps node verifier stack traces in raw evidence on failure", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-node-fail-"));
+    await writeFile(
+      join(dir, "fail.ts"),
+      `export default async function verify() {
+  throw new Error("workbook parse failed");
+}
+`,
+    );
+    const r = await evaluateScript(
+      { script: { runtime: "node", file: "./fail.ts" } },
+      new MockBrowserBackend(),
+      { specDir: dir, runDir: dir },
+    );
+    expect(r.passed).toBe(false);
+    expect(r.raw).toMatchObject({
+      error: { message: "workbook parse failed" },
+    });
+    expect(JSON.stringify(r.raw)).toContain("workbook parse failed");
   });
 });

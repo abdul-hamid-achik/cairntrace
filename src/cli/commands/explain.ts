@@ -28,7 +28,7 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "1.2.1", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: "1.3.0", binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",
@@ -274,6 +274,13 @@ export function buildExplain(): ExplainResult {
           "steps:\n  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }",
       },
       {
+        id: "transform",
+        kind: "file",
+        summary: "Run a Node transform that writes a new named file artifact",
+        yamlExample:
+          "steps:\n  - transform: { runtime: node, file: ./transforms/make-invalid-template.ts, input: ${artifacts.template.path}, saveAs: invalid-template.xlsx, assign: invalidTemplate }",
+      },
+      {
         id: "wait",
         kind: "wait",
         summary: "Wait for text, notText, or load state",
@@ -432,10 +439,18 @@ export function buildExplain(): ExplainResult {
         id: "script",
         kind: "escape-hatch",
         summary:
-          "Page-evaluated JS returning { ok, evidence }; use run inline or file for external JS/TS",
+          "Browser or Node JS returning { ok, evidence }; use run inline or file for external JS/TS",
         yamlExample:
-          "verify:\n  script:\n    file: ./verifiers/check-template.ts\n    fixtures:\n      templatePath: ${artifacts.template.path}",
+          "verify:\n  script:\n    runtime: node\n    file: ./verifiers/check-template.ts\n    fixtures:\n      templatePath: ${artifacts.template.path}",
         parameters: [
+          {
+            name: "runtime",
+            type: "enum",
+            values: ["browser", "node"],
+            default: "browser",
+            description:
+              "browser runs in page context; node runs in a Node process with fs/import access",
+          },
           {
             name: "fixtures",
             type: "string",
@@ -447,6 +462,30 @@ export function buildExplain(): ExplainResult {
             type: "string",
             description:
               "Path to JS/TS verifier body, resolved relative to the spec file",
+          },
+        ],
+      },
+      {
+        id: "xlsx",
+        kind: "file",
+        summary: "Inspect workbook text and Excel data validations",
+        yamlExample:
+          "verify:\n  xlsx:\n    path: ${artifacts.template.path}\n    sheets:\n      - name: Template Guide\n        contains: [Help Text, Allowed Values, Examples]\n    validations:\n      - sheet: RBA Academy Training\n        column: Email\n        type: textLength",
+        parameters: [
+          {
+            name: "path",
+            type: "string",
+            description: "Workbook path; artifact placeholders are supported",
+          },
+          {
+            name: "sheets",
+            type: "array",
+            description: "sheet name plus contains text checks",
+          },
+          {
+            name: "validations",
+            type: "array",
+            description: "sheet, column header, and optional validation type",
           },
         ],
       },

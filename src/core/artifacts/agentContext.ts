@@ -34,6 +34,10 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     for (const [name, path] of Object.entries(result.artifacts.downloads))
       evidenceRefs.push(`- ${name}: ${path}`);
   }
+  if (result.artifacts.transforms) {
+    for (const [name, path] of Object.entries(result.artifacts.transforms))
+      evidenceRefs.push(`- ${name}: ${path}`);
+  }
   if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
 
   const lines: string[] = [

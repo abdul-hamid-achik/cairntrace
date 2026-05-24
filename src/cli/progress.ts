@@ -58,9 +58,6 @@ export function makeInteractiveListener(
   options: { color?: boolean } = {},
 ): ProgressListener {
   const c: Palette = options.color === false ? noColors : ANSI;
-  const out = (s: string): void => {
-    process.stdout.write(s);
-  };
 
   let stepCount = 0;
 
@@ -160,11 +157,15 @@ export function makeInteractiveListener(
 function printRerunHint(
   result: RunResult,
   c: Palette,
-  out: (s: string) => void,
+  write: (s: string) => void,
 ): void {
-  out(
+  write(
     `${c.dim}Reproduce:${c.reset}    cairn run ${result.spec.path} --env ${result.environment}\n`,
   );
+}
+
+function out(s: string): void {
+  process.stdout.write(s);
 }
 
 function formatMs(ms: number): string {

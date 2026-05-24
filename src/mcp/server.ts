@@ -19,7 +19,7 @@ import { DocsTopicSchema } from "../core/schema/docs.v1";
 import type { RunResult } from "../core/schema/run.v1";
 import { SpecSchema } from "../core/schema/spec.v1";
 
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this

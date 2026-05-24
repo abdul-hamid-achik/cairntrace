@@ -150,6 +150,11 @@ function renderStepBody(step: Step): string[] {
       `await download.saveAs(${JSON.stringify(saveAs)});`,
     ];
   }
+  if ("transform" in step) {
+    return [
+      `// transform step skipped — Cairntrace runs ${JSON.stringify(step.transform.file)} in Node`,
+    ];
+  }
   if ("wait" in step) {
     const w = step.wait;
     const timeout = w.timeoutMs ?? 30_000;

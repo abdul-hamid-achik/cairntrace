@@ -2,9 +2,9 @@ import { z } from "zod";
 
 /**
  * Outcome verifier vocabulary (plan §10.5).
- * Seven typed verifiers + one escape hatch. Discriminated union by top-level key.
+ * Typed verifiers + one escape hatch. Discriminated union by top-level key.
  *
- * If a need appears in 3+ real specs via `script`, promote it to a typed verifier in v0.x.
+ * If a need appears in 3+ real specs via `script`, promote it to a typed verifier.
  */
 
 /* ----- shared sub-matchers ----- */
@@ -174,6 +174,42 @@ export const CountVerifierSchema = z
   .strict();
 export type CountVerifier = z.infer<typeof CountVerifierSchema>;
 
+/** #8 — workbook content checks for downloaded `.xlsx` artifacts. */
+export const XlsxVerifierSchema = z
+  .object({
+    xlsx: z
+      .object({
+        path: z.string().min(1),
+        sheets: z
+          .array(
+            z
+              .object({
+                name: z.string().min(1),
+                contains: z.array(z.string().min(1)).optional(),
+              })
+              .strict(),
+          )
+          .optional(),
+        validations: z
+          .array(
+            z
+              .object({
+                sheet: z.string().min(1),
+                column: z.string().min(1),
+                type: z.string().min(1).optional(),
+              })
+              .strict(),
+          )
+          .optional(),
+      })
+      .strict()
+      .refine((x) => Boolean(x.sheets?.length || x.validations?.length), {
+        message: "xlsx verifier requires sheets or validations",
+      }),
+  })
+  .strict();
+export type XlsxVerifier = z.infer<typeof XlsxVerifierSchema>;
+
 /**
  * Escape hatch — page-evaluated JS returning { ok, evidence }.
  * `evidence` is truncated per §13b; untruncated form goes to outcomes/<id>.raw.json.
@@ -182,6 +218,7 @@ export const ScriptVerifierSchema = z
   .object({
     script: z
       .object({
+        runtime: z.enum(["browser", "node"]).optional(),
         fixtures: z.record(z.string(), z.string()).optional(),
         run: z.string().min(1).optional(),
         file: z.string().min(1).optional(),
@@ -205,6 +242,7 @@ export const VerifierSchema = z.union([
   NoFailedRequestsVerifierSchema,
   ConsoleVerifierSchema,
   CountVerifierSchema,
+  XlsxVerifierSchema,
   ScriptVerifierSchema,
 ]);
 export type Verifier = z.infer<typeof VerifierSchema>;
@@ -218,6 +256,7 @@ export const VerifierKindSchema = z.enum([
   "noFailedRequests",
   "console",
   "count",
+  "xlsx",
   "script",
 ]);
 export type VerifierKind = z.infer<typeof VerifierKindSchema>;
@@ -237,6 +276,7 @@ export const isConsoleVerifier = (v: Verifier): v is ConsoleVerifier =>
   "console" in v;
 export const isCountVerifier = (v: Verifier): v is CountVerifier =>
   "count" in v;
+export const isXlsxVerifier = (v: Verifier): v is XlsxVerifier => "xlsx" in v;
 export const isScriptVerifier = (v: Verifier): v is ScriptVerifier =>
   "script" in v;
 
@@ -248,5 +288,6 @@ export const verifierKind = (v: Verifier): VerifierKind => {
   if (isNoFailedRequestsVerifier(v)) return "noFailedRequests";
   if (isConsoleVerifier(v)) return "console";
   if (isCountVerifier(v)) return "count";
+  if (isXlsxVerifier(v)) return "xlsx";
   return "script";
 };

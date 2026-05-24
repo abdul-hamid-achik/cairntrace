@@ -23,7 +23,7 @@ program
   .description(
     "Cairntrace — behavioral browser-spec layer for agent-in-session use",
   )
-  .version("1.2.1");
+  .version("1.3.0");
 
 function addFormatFlags(c: Command): Command {
   return c

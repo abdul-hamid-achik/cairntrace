@@ -1,16 +1,17 @@
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
   BrowserBackend,
 } from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
+import { createArtifactRedactor } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
 import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
-import type { Spec, Step } from "../schema/spec.v1";
+import type { Spec, Step, TransformStep } from "../schema/spec.v1";
 import type {
   OutcomeResult,
   RunArtifacts,
@@ -19,6 +20,12 @@ import type {
 } from "../schema/run.v1";
 import type { Outcome } from "../schema/spec.v1";
 import { evaluateOutcomes } from "./OutcomeEvaluator";
+import { runNodeScript } from "./nodeScripts";
+import {
+  resolveArtifactPlaceholders,
+  resolveFixtureMap,
+  resolveRuntimeFilePath,
+} from "./runtimePlaceholders";
 import { generateRunId } from "./runId";
 import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
 
@@ -106,7 +113,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const runId = generateRunId(spec.name, now);
   const runDir = join(artifactRoot, runId);
 
-  const writer = new ArtifactWriter(runDir);
+  const redactor = createArtifactRedactor(
+    spec.redaction,
+    opts.env ?? (process.env as Record<string, string | undefined>),
+  );
+  const writer = new ArtifactWriter(runDir, redactor);
   await writer.ensureDirs();
   await writer.writeResolvedSpec(resolved);
 
@@ -151,6 +162,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   let latestDiagnostics: string | undefined;
   let didError = false;
   const downloads: Record<string, string> = {};
+  const transforms: Record<string, string> = {};
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
 
@@ -234,30 +246,66 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ...step,
         download: { ...step.download, saveAs: absolutePath },
       };
+    } else if ("upload" in step) {
+      stepToRun = {
+        ...step,
+        upload: {
+          ...step.upload,
+          path: resolveUploadPath(step.upload.path, runDir, namedArtifacts),
+        },
+      };
     }
 
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
     try {
-      const r = await opts.backend.runStep(stepToRun);
-      if (!r.ok) {
-        stepStatus = "failed";
-        stepError = r.stderr.trim() || `exit ${r.exitCode}`;
-      } else if (pendingDownload) {
-        downloads[pendingDownload.assign] = pendingDownload.relativePath;
-        namedArtifacts[pendingDownload.assign] = {
-          kind: "download",
-          path: pendingDownload.absolutePath,
-          relativePath: pendingDownload.relativePath,
-        };
-        stepArtifacts.push(pendingDownload.relativePath);
-        await writer.appendEvent({
-          ts: new Date().toISOString(),
-          type: "artifact.download",
-          stepId,
-          path: pendingDownload.relativePath,
-          assign: pendingDownload.assign,
+      if ("transform" in step) {
+        const transformed = await runTransformStep({
+          step,
+          runDir,
+          specDir: dirname(specPath),
+          artifacts: namedArtifacts,
         });
+        if (!transformed.ok) {
+          stepStatus = "failed";
+          stepError = transformed.error;
+        } else {
+          transforms[transformed.assign] = transformed.relativePath;
+          namedArtifacts[transformed.assign] = {
+            kind: "transform",
+            path: transformed.absolutePath,
+            relativePath: transformed.relativePath,
+          };
+          stepArtifacts.push(transformed.relativePath);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.transform",
+            stepId,
+            path: transformed.relativePath,
+            assign: transformed.assign,
+          });
+        }
+      } else {
+        const r = await opts.backend.runStep(stepToRun);
+        if (!r.ok) {
+          stepStatus = "failed";
+          stepError = r.stderr.trim() || `exit ${r.exitCode}`;
+        } else if (pendingDownload) {
+          downloads[pendingDownload.assign] = pendingDownload.relativePath;
+          namedArtifacts[pendingDownload.assign] = {
+            kind: "download",
+            path: pendingDownload.absolutePath,
+            relativePath: pendingDownload.relativePath,
+          };
+          stepArtifacts.push(pendingDownload.relativePath);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.download",
+            stepId,
+            path: pendingDownload.relativePath,
+            assign: pendingDownload.assign,
+          });
+        }
       }
     } catch (e) {
       stepStatus = "failed";
@@ -273,7 +321,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       const rel = `snapshots/${pad(i + 1)}_${stepId}.txt`;
       const snap = await safe(() => opts.backend.snapshot());
       if (snap && snap.ok) {
-        await Bun_writeFile(writer.resolve(rel), snap.text);
+        await Bun_writeFile(writer.resolve(rel), redactor.text(snap.text));
         latestSnapshot = rel;
         stepArtifacts.push(rel);
         await writer.appendEvent({
@@ -308,7 +356,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       const captured = await captureDiagnostics(opts.backend, step, stepError);
       await Bun_writeFile(
         writer.resolve(rel),
-        renderDiagnostics(captured),
+        redactor.text(renderDiagnostics(captured)),
         true,
       );
       latestDiagnostics = rel;
@@ -358,13 +406,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const consoleErrors = consoleEntries.filter((e) => e.type === "error");
   await Bun_writeFile(
     writer.resolve("console/console.ndjson"),
-    consoleEntries.map((e) => JSON.stringify(e)).join("\n") +
+    redactor.text(consoleEntries.map((e) => JSON.stringify(e)).join("\n")) +
       (consoleEntries.length ? "\n" : ""),
     true,
   );
   await Bun_writeFile(
     writer.resolve("console/errors.ndjson"),
-    consoleErrors.map((e) => JSON.stringify(e)).join("\n") +
+    redactor.text(consoleErrors.map((e) => JSON.stringify(e)).join("\n")) +
       (consoleErrors.length ? "\n" : ""),
     true,
   );
@@ -373,13 +421,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   );
   await Bun_writeFile(
     writer.resolve("network/requests.ndjson"),
-    networkEntries.map((e) => JSON.stringify(e)).join("\n") +
+    redactor.text(networkEntries.map((e) => JSON.stringify(e)).join("\n")) +
       (networkEntries.length ? "\n" : ""),
     true,
   );
   await Bun_writeFile(
     writer.resolve("network/failed_requests.ndjson"),
-    failedNetwork.map((e) => JSON.stringify(e)).join("\n") +
+    redactor.text(failedNetwork.map((e) => JSON.stringify(e)).join("\n")) +
       (failedNetwork.length ? "\n" : ""),
     true,
   );
@@ -432,6 +480,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ...(latestSnapshot ? { snapshot: latestSnapshot } : {}),
         ...(latestDiagnostics ? { diagnostics: latestDiagnostics } : {}),
         ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
+        ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
         ...(tracePath ? { trace: tracePath } : {}),
       },
       ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
@@ -472,6 +521,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(latestScreenshot ? { screenshots: [latestScreenshot] } : {}),
     ...(latestSnapshot ? { snapshots: [latestSnapshot] } : {}),
     ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
+    ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
   };
@@ -499,9 +549,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     exitCode,
   };
 
-  await writer.writeRun(result);
-  await writer.writeOutcomesIndex(result);
-  await writer.writeAgentContext(spec, result);
+  const publicResult = redactor.value(result);
+  await writer.writeRun(publicResult);
+  await writer.writeOutcomesIndex(publicResult);
+  await writer.writeAgentContext(spec, publicResult);
 
   await writer.appendEvent({
     ts: endedAt,
@@ -514,9 +565,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     runId,
     durationMs,
   });
-  opts.listener?.onRunEnd?.(result);
+  opts.listener?.onRunEnd?.(publicResult);
 
-  return result;
+  return publicResult;
 }
 
 /** Capture policies with sensible defaults. */
@@ -550,6 +601,10 @@ function downloadRelativePath(saveAs: string): string {
   return `downloads/${basename(saveAs)}`;
 }
 
+function transformRelativePath(saveAs: string): string {
+  return `transforms/${basename(saveAs)}`;
+}
+
 function artifactNameFromPath(path: string): string {
   const raw = basename(path)
     .replace(/\.[^.]+$/, "")
@@ -559,9 +614,103 @@ function artifactNameFromPath(path: string): string {
   return /^[a-z]/.test(raw) ? raw : `artifact_${raw || "download"}`;
 }
 
+function resolveUploadPath(
+  path: string,
+  runDir: string,
+  artifacts: Record<string, ArtifactRef>,
+): string {
+  const resolved = resolveArtifactPlaceholders(path, artifacts);
+  const usedRelativeArtifact =
+    /\$\{artifacts\.[a-z][A-Za-z0-9_]*\.relativePath\}/.test(path);
+  if (usedRelativeArtifact && !isAbsolute(resolved)) {
+    return resolve(runDir, resolved);
+  }
+  return resolved;
+}
+
+async function runTransformStep(opts: {
+  step: TransformStep;
+  runDir: string;
+  specDir: string;
+  artifacts: Record<string, ArtifactRef>;
+}): Promise<
+  | {
+      ok: true;
+      assign: string;
+      relativePath: string;
+      absolutePath: string;
+    }
+  | { ok: false; error: string }
+> {
+  const target = opts.step.transform;
+  const relativePath = transformRelativePath(target.saveAs);
+  const absolutePath = resolve(opts.runDir, relativePath);
+  await ensureParentDir(absolutePath);
+
+  const file = isAbsolute(target.file)
+    ? target.file
+    : resolve(opts.specDir, target.file);
+  const input = resolveRuntimeFilePath(target.input, {
+    artifacts: opts.artifacts,
+    runDir: opts.runDir,
+    specDir: opts.specDir,
+  });
+
+  const result = await runNodeScript({
+    file,
+    cwd: opts.specDir,
+    entryNames: ["transform"],
+    ctx: {
+      input,
+      inputPath: input,
+      output: { path: absolutePath, relativePath },
+      outputPath: absolutePath,
+      fixtures: resolveFixtureMap(target.fixtures, opts.artifacts),
+      artifacts: opts.artifacts,
+      runDir: opts.runDir,
+      specDir: opts.specDir,
+    },
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: `node transform failed: ${result.error?.message ?? result.stderr}`,
+    };
+  }
+
+  const returned = result.result as { ok?: unknown; evidence?: unknown } | null;
+  if (returned && typeof returned === "object" && returned.ok === false) {
+    return { ok: false, error: "node transform returned ok=false" };
+  }
+
+  if (!(await fileExists(absolutePath))) {
+    return {
+      ok: false,
+      error: `node transform did not write ${absolutePath}`,
+    };
+  }
+
+  return {
+    ok: true,
+    assign: target.assign ?? artifactNameFromPath(relativePath),
+    relativePath,
+    absolutePath,
+  };
+}
+
 async function ensureParentDir(absPath: string): Promise<void> {
   const { mkdir } = await import("node:fs/promises");
   await mkdir(dirname(absPath), { recursive: true });
+}
+
+async function fileExists(absPath: string): Promise<boolean> {
+  const { stat } = await import("node:fs/promises");
+  try {
+    return (await stat(absPath)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 async function captureDiagnostics(
@@ -663,6 +812,17 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
     } = step.download;
     return { kind: "download", locator };
   }
+  if ("transform" in step) {
+    const {
+      file,
+      input,
+      saveAs,
+      assign,
+      runtime: _runtime,
+      fixtures: _fixtures,
+    } = step.transform;
+    return { kind: "transform", file, input, saveAs, assign };
+  }
   if ("open" in step) return { kind: "open", url: step.open };
   if ("wait" in step) return { kind: "wait", condition: step.wait };
   if ("snapshot" in step) return { kind: "snapshot" };
@@ -679,6 +839,11 @@ function diagnosticNeedles(step: Step): string[] {
   if ("fill" in step) add(locatorNeedle(step.fill));
   if ("upload" in step) add(locatorNeedle(step.upload));
   if ("download" in step) add(locatorNeedle(step.download));
+  if ("transform" in step) {
+    add(step.transform.file);
+    add(step.transform.input);
+    add(step.transform.saveAs);
+  }
   if ("wait" in step) {
     if ("text" in step.wait) add(step.wait.text);
     if ("notText" in step.wait) add(step.wait.notText);

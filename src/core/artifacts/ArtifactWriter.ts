@@ -26,9 +26,20 @@ export interface RunEvent {
     | "artifact.screenshot"
     | "artifact.snapshot"
     | "artifact.download"
+    | "artifact.transform"
     | "artifact.diagnostics";
   [extra: string]: unknown;
 }
+
+export interface ArtifactRedactor {
+  value<T>(input: T): T;
+  text(input: string): string;
+}
+
+const IDENTITY_REDACTOR: ArtifactRedactor = {
+  value: <T>(input: T) => input,
+  text: (input: string) => input,
+};
 
 /**
  * Writes artifacts to the per-run directory.
@@ -43,16 +54,20 @@ export interface RunEvent {
  *   └── outcomes/
  *       ├── results.json | .yaml | .md
  *       ├── <outcomeId>.md
- *       └── <outcomeId>.raw.json       (only for `script` verifier with raw data)
+ *       └── <outcomeId>.raw.json       (when a verifier emits raw data)
  */
 export class ArtifactWriter {
-  constructor(public readonly runDir: string) {}
+  constructor(
+    public readonly runDir: string,
+    private readonly redactor: ArtifactRedactor = IDENTITY_REDACTOR,
+  ) {}
 
   async ensureDirs(): Promise<void> {
     await mkdir(this.runDir, { recursive: true });
     await mkdir(join(this.runDir, "screenshots"), { recursive: true });
     await mkdir(join(this.runDir, "snapshots"), { recursive: true });
     await mkdir(join(this.runDir, "downloads"), { recursive: true });
+    await mkdir(join(this.runDir, "transforms"), { recursive: true });
     await mkdir(join(this.runDir, "diagnostics"), { recursive: true });
     await mkdir(join(this.runDir, "outcomes"), { recursive: true });
   }
@@ -62,9 +77,13 @@ export class ArtifactWriter {
   }
 
   async writeRun(result: RunResult): Promise<void> {
-    await writeFile(this.resolve("run.json"), renderJson(result));
-    await writeFile(this.resolve("run.yaml"), renderYaml(result));
-    await writeFile(this.resolve("run.md"), renderRunMarkdown(result));
+    const redacted = this.redactor.value(result);
+    await writeFile(this.resolve("run.json"), renderJson(redacted));
+    await writeFile(this.resolve("run.yaml"), renderYaml(redacted));
+    await writeFile(
+      this.resolve("run.md"),
+      this.redactor.text(renderRunMarkdown(redacted)),
+    );
   }
 
   async writeOutcomesIndex(result: RunResult): Promise<void> {
@@ -73,8 +92,14 @@ export class ArtifactWriter {
       status: result.status,
       outcomes: result.outcomes,
     };
-    await writeFile(this.resolve("outcomes/results.json"), renderJson(summary));
-    await writeFile(this.resolve("outcomes/results.yaml"), renderYaml(summary));
+    await writeFile(
+      this.resolve("outcomes/results.json"),
+      renderJson(this.redactor.value(summary)),
+    );
+    await writeFile(
+      this.resolve("outcomes/results.yaml"),
+      renderYaml(this.redactor.value(summary)),
+    );
     const md =
       [
         `# Outcomes — ${result.status}`,
@@ -86,16 +111,20 @@ export class ArtifactWriter {
           return `- ${mark} ${o.id}${o.evidence ? ` → ${o.evidence}` : ""}`;
         }),
       ].join("\n") + "\n";
-    await writeFile(this.resolve("outcomes/results.md"), md);
+    await writeFile(
+      this.resolve("outcomes/results.md"),
+      this.redactor.text(md),
+    );
   }
 
   async writeOutcomeEvidence(evidence: EvidenceInput): Promise<void> {
-    const md = renderEvidenceMarkdown(evidence);
+    const redacted = this.redactor.value(evidence);
+    const md = renderEvidenceMarkdown(redacted);
     await writeFile(this.resolve(`outcomes/${evidence.outcomeId}.md`), md);
-    if (evidence.raw !== undefined) {
+    if (redacted.raw !== undefined) {
       await writeFile(
         this.resolve(`outcomes/${evidence.outcomeId}.raw.json`),
-        renderJson(evidence.raw),
+        renderJson(redacted.raw),
       );
     }
   }
@@ -103,19 +132,22 @@ export class ArtifactWriter {
   async writeAgentContext(spec: Spec, result: RunResult): Promise<void> {
     await writeFile(
       this.resolve("agent_context.md"),
-      renderAgentContext(spec, result),
+      this.redactor.text(renderAgentContext(spec, result)),
     );
   }
 
   async appendEvent(event: RunEvent): Promise<void> {
     await appendFile(
       this.resolve("events.ndjson"),
-      JSON.stringify(event) + "\n",
+      JSON.stringify(this.redactor.value(event)) + "\n",
     );
   }
 
   /** Used by the runner to write a resolved snapshot of the spec for this run. */
   async writeResolvedSpec(spec: Spec): Promise<void> {
-    await writeFile(this.resolve("spec.resolved.yml"), renderYaml(spec));
+    await writeFile(
+      this.resolve("spec.resolved.yml"),
+      renderYaml(this.redactor.value(spec)),
+    );
   }
 }

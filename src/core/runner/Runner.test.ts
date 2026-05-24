@@ -297,6 +297,125 @@ steps:
     );
   });
 
+  it("transforms a downloaded artifact and resolves it for upload", async () => {
+    await writeFile(
+      join(workDir, "make-invalid-template.ts"),
+      `import { copyFile, appendFile } from "node:fs/promises";
+
+export default async function transform(ctx) {
+  await copyFile(ctx.input, ctx.output.path);
+  await appendFile(ctx.output.path, "\\ninvalid row");
+  return { ok: true, evidence: { output: ctx.output.relativePath } };
+}
+`,
+    );
+    const specPath = await writeSpec(
+      "transform_upload",
+      `version: 1
+name: transform_upload
+intent: transform a downloaded template into an upload fixture
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: template
+    download:
+      by: role
+      role: button
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+  - id: invalid_template
+    transform:
+      runtime: node
+      file: ./make-invalid-template.ts
+      input: "\${artifacts.template.path}"
+      saveAs: invalid-template.xlsx
+      assign: invalidTemplate
+  - id: upload_invalid
+    upload:
+      by: label
+      name: Upload data
+      path: "\${artifacts.invalidTemplate.path}"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.downloads).toEqual({
+      template: "downloads/template.xlsx",
+    });
+    expect(result.artifacts.transforms).toEqual({
+      invalidTemplate: "transforms/invalid-template.xlsx",
+    });
+    expect(result.steps[1]!.artifacts).toContain(
+      "transforms/invalid-template.xlsx",
+    );
+    expect(backend.stepLog[1]).toMatchObject({
+      upload: {
+        path: join(result.runDir, "transforms/invalid-template.xlsx"),
+      },
+    });
+    const transformed = await readFile(
+      join(result.runDir, "transforms/invalid-template.xlsx"),
+      "utf8",
+    );
+    expect(transformed).toContain("mock download");
+    expect(transformed).toContain("invalid row");
+  });
+
+  it("redacts secrets from failed node verifier artifacts", async () => {
+    await writeFile(
+      join(workDir, "secret-fail.ts"),
+      `export default async function verify() {
+  throw new Error("supersecret-token leaked in stack");
+}
+`,
+    );
+    const specPath = await writeSpec(
+      "node_redaction",
+      `version: 1
+name: node_redaction
+intent: node verifier failures redact configured secrets
+redaction:
+  values: ["supersecret-token"]
+outcomes:
+  - id: node_failure
+    description: failed node verifier has redacted stack evidence
+    verify:
+      script:
+        runtime: node
+        file: ./secret-fail.ts
+steps: []
+`,
+    );
+
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    const evidence = await readFile(
+      join(result.runDir, "outcomes/node_failure.md"),
+      "utf8",
+    );
+    const raw = await readFile(
+      join(result.runDir, "outcomes/node_failure.raw.json"),
+      "utf8",
+    );
+    const runJson = await readFile(join(result.runDir, "run.json"), "utf8");
+    expect(`${evidence}\n${raw}\n${runJson}`).not.toContain(
+      "supersecret-token",
+    );
+    expect(raw).toContain("[redacted]");
+  });
+
   it("stops on step failure and surfaces the error in the step result", async () => {
     const specPath = await writeSpec(
       "step_fail",

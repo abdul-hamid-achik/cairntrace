@@ -66,7 +66,7 @@ const downloadTargetSchema = z.union([
     assign: z
       .string()
       .min(1)
-      .regex(/^[a-z][a-z0-9_]*$/)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
       .optional(),
     timeoutMs: z.number().int().positive().optional(),
   }).strict(),
@@ -75,7 +75,7 @@ const downloadTargetSchema = z.union([
     assign: z
       .string()
       .min(1)
-      .regex(/^[a-z][a-z0-9_]*$/)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
       .optional(),
     timeoutMs: z.number().int().positive().optional(),
   }).strict(),
@@ -84,7 +84,7 @@ const downloadTargetSchema = z.union([
     assign: z
       .string()
       .min(1)
-      .regex(/^[a-z][a-z0-9_]*$/)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
       .optional(),
     timeoutMs: z.number().int().positive().optional(),
   }).strict(),
@@ -93,11 +93,27 @@ const downloadTargetSchema = z.union([
     assign: z
       .string()
       .min(1)
-      .regex(/^[a-z][a-z0-9_]*$/)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
       .optional(),
     timeoutMs: z.number().int().positive().optional(),
   }).strict(),
 ]);
+
+const artifactAssignSchema = z
+  .string()
+  .min(1)
+  .regex(/^[a-z][A-Za-z0-9_]*$/);
+
+const transformTargetSchema = z
+  .object({
+    runtime: z.literal("node").optional(),
+    file: z.string().min(1),
+    input: z.string().min(1),
+    saveAs: z.string().min(1),
+    assign: artifactAssignSchema.optional(),
+    fixtures: z.record(z.string(), z.string()).optional(),
+  })
+  .strict();
 
 /* ----- wait conditions ----- */
 
@@ -169,6 +185,14 @@ export const DownloadStepSchema = z
   .strict();
 export type DownloadStep = z.infer<typeof DownloadStepSchema>;
 
+export const TransformStepSchema = z
+  .object({
+    ...stepCommon,
+    transform: transformTargetSchema,
+  })
+  .strict();
+export type TransformStep = z.infer<typeof TransformStepSchema>;
+
 export const WaitStepSchema = z
   .object({ ...stepCommon, wait: WaitConditionSchema })
   .strict();
@@ -200,6 +224,7 @@ export const StepSchema = z.union([
   FillStepSchema,
   UploadStepSchema,
   DownloadStepSchema,
+  TransformStepSchema,
   WaitStepSchema,
   SnapshotStepSchema,
   UseStepSchema,

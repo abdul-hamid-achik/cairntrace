@@ -127,7 +127,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Small YAML",
-        body: "Keep YAML readable. Use normal steps for navigation and interaction, first-class `download` for file capture, and `script.file` when a script body would make the YAML noisy.",
+        body: "Keep YAML readable. Use normal steps for navigation and interaction, first-class `download` for file capture, `transform` for Node-side fixture generation, and `script.file` when a script body would make the YAML noisy.",
       },
       {
         title: "Config Variables",
@@ -147,6 +147,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    description: template download is captured as an artifact",
           "    verify:",
           "      script:",
+          "        runtime: node",
           "        file: ./verifiers/template-downloaded.ts",
           "        fixtures:",
           "          templatePath: ${artifacts.template.path}",
@@ -187,7 +188,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates, `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `wait` waits for text/notText/load state, `snapshot` captures the page, and `use` invokes an imported reusable action.",
+        body: "`open` navigates, `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `wait` waits for text/notText/load state, `snapshot` captures the page, and `use` invokes an imported reusable action.",
       },
       {
         title: "Locators",
@@ -195,7 +196,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Reusable Actions",
-        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, and `download.saveAs`.",
+        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, `download.saveAs`, and `transform.saveAs`.",
       },
     ],
     examples: [
@@ -210,6 +211,8 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "  - fill: { by: label, name: Display name, value: Example Inc }",
           "  - upload: { by: label, name: Logo, path: ./fixtures/logo.png }",
           "  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }",
+          "  - transform: { runtime: node, file: ./transforms/make-invalid-template.ts, input: ${artifacts.template.path}, saveAs: invalid-template.xlsx, assign: invalidTemplate }",
+          "  - upload: { by: label, name: File, path: ${artifacts.invalidTemplate.path} }",
           "  - wait: { text: Saved, timeoutMs: 10000 }",
         ].join("\n"),
       },
@@ -223,11 +226,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Typed Verifiers",
-        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, and `count` cover common UI, navigation, network, and console assertions.",
+        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, and `xlsx` cover common UI, navigation, network, console, and workbook assertions.",
       },
       {
         title: "Script Escape Hatch",
-        body: "`script` runs JavaScript in the page context and must return `{ ok, evidence }`. Use `script.run` for short checks and `script.file` for longer JS/TS bodies.",
+        body: "`script` defaults to browser page context and must return `{ ok, evidence }`. Set `runtime: node` to run a JS/TS module in Node with filesystem and npm package access.",
       },
       {
         title: "Evidence",
@@ -295,11 +298,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Inline Or External",
-        body: "Use `script.run` for short bodies and `script.file` for longer JS/TS bodies. External files resolve relative to the spec file. TypeScript files are transpiled with Bun before evaluation.",
+        body: "Use `script.run` for short bodies and `script.file` for longer JS/TS bodies. External files resolve relative to the spec file. Browser TypeScript files are transpiled before page evaluation; Node runtime files are imported by Node.",
       },
       {
         title: "Execution Context",
-        body: "The script body runs in the browser page context, not Node. It can read DOM state and use injected `fixtures` and `artifacts`, but it cannot import npm packages or read local files with `fs`.",
+        body: "Browser scripts can read DOM state and use injected `fixtures` and `artifacts`. Node scripts receive `ctx` with `fixtures`, `artifacts`, `runDir`, and `specDir`, and can import project dependencies or read files with `fs`.",
       },
       {
         title: "Return Shape",
@@ -313,6 +316,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         code: [
           "verify:",
           "  script:",
+          "    runtime: node",
           "    file: ./verifiers/check-template.ts",
           "    fixtures:",
           "      templatePath: ${artifacts.template.path}",
@@ -322,15 +326,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "script file body",
         language: "ts",
         code: [
-          "const text = document.body.innerText;",
-          "return {",
-          "  ok: text.includes('Import complete'),",
-          "  evidence: {",
-          "    url: location.href,",
-          "    sawImportComplete: text.includes('Import complete'),",
-          "    templatePath: fixtures.templatePath,",
-          "  },",
-          "};",
+          "import { stat } from 'node:fs/promises';",
+          "",
+          "export default async function verify(ctx) {",
+          "  const file = await stat(ctx.fixtures.templatePath);",
+          "  return {",
+          "    ok: file.isFile(),",
+          "    evidence: { templatePath: ctx.fixtures.templatePath, size: file.size },",
+          "  };",
+          "}",
         ].join("\n"),
       },
     ],
@@ -347,7 +351,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Downloads And Diagnostics",
-        body: "Download steps save files under `downloads/`. Failed steps can write diagnostics under `diagnostics/` with current URL, visible controls, table headers, selector counts, and nearby text excerpts.",
+        body: "Download steps save files under `downloads/`. Transform steps save generated fixtures under `transforms/`. Failed steps can write diagnostics under `diagnostics/` with current URL, visible controls, table headers, selector counts, and nearby text excerpts.",
       },
       {
         title: "Agent Handoff",

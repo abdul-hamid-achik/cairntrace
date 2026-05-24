@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
 import type { BrowserBackend } from "../../../adapters/browserBackend";
 import type { ScriptVerifier } from "../../schema/verifier.v1";
+import { runNodeScript } from "../nodeScripts";
+import { resolveFixtureMap } from "../runtimePlaceholders";
 import type { VerifierContext, VerifierEvaluation } from "./types";
 
 /**
@@ -20,6 +22,10 @@ export async function evaluateScript(
   backend: BrowserBackend,
   ctx: VerifierContext = {},
 ): Promise<VerifierEvaluation> {
+  if (verifier.script.runtime === "node") {
+    return evaluateNodeScript(verifier, ctx);
+  }
+
   const source = await loadScriptSource(verifier, ctx);
   const result = await backend.evaluate(buildScript(verifier, source, ctx));
   if (!result.ok) {
@@ -49,6 +55,62 @@ export async function evaluateScript(
   };
 }
 
+async function evaluateNodeScript(
+  verifier: ScriptVerifier,
+  ctx: VerifierContext,
+): Promise<VerifierEvaluation> {
+  const file = verifier.script.file
+    ? resolveScriptFile(verifier.script.file, ctx)
+    : undefined;
+  const result = await runNodeScript({
+    ...(file ? { file } : {}),
+    ...(verifier.script.run ? { source: verifier.script.run } : {}),
+    cwd: ctx.specDir,
+    entryNames: ["verify"],
+    ctx: {
+      fixtures: resolveRuntimeFixtures(verifier, ctx),
+      artifacts: ctx.artifacts ?? {},
+      runDir: ctx.runDir,
+      specDir: ctx.specDir,
+    },
+  });
+
+  if (!result.ok) {
+    const stack = result.error?.stack ?? result.stderr;
+    return {
+      passed: false,
+      expected: "node script returned { ok: true, evidence: ... }",
+      actual: `node script failed: exitCode=${result.exitCode}, ${truncate(
+        result.error?.message ?? result.stderr,
+        300,
+      )}`,
+      raw: {
+        error: result.error,
+        stack,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      },
+    };
+  }
+
+  const parsed = result.result as { ok?: unknown; evidence?: unknown };
+  if (!parsed || typeof parsed !== "object" || typeof parsed.ok !== "boolean") {
+    return {
+      passed: false,
+      expected: "node script returned { ok: boolean, evidence: ... }",
+      actual: `node script returned ${typeof result.result}`,
+      raw: result.result,
+    };
+  }
+
+  return {
+    passed: parsed.ok,
+    expected: "script ok === true",
+    actual: parsed.ok ? "script returned ok=true" : "script returned ok=false",
+    raw: parsed.evidence,
+  };
+}
+
 async function loadScriptSource(
   verifier: ScriptVerifier,
   ctx: VerifierContext,
@@ -59,9 +121,7 @@ async function loadScriptSource(
   if (!file) {
     throw new Error("script verifier must define either run or file");
   }
-  const abs = isAbsolute(file)
-    ? file
-    : resolve(ctx.specDir ?? process.cwd(), file);
+  const abs = resolveScriptFile(file, ctx);
   const source = await readFile(abs, "utf8");
   if (extname(abs) !== ".ts") return source;
 
@@ -82,6 +142,10 @@ async function loadScriptSource(
     );
   }
   return new bun.Transpiler({ loader: "ts" }).transformSync(source);
+}
+
+function resolveScriptFile(file: string, ctx: VerifierContext): string {
+  return isAbsolute(file) ? file : resolve(ctx.specDir ?? process.cwd(), file);
 }
 
 function buildScript(
@@ -109,20 +173,7 @@ function resolveRuntimeFixtures(
   verifier: ScriptVerifier,
   ctx: VerifierContext,
 ): Record<string, string> {
-  const input = verifier.script.fixtures ?? {};
-  const output: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input)) {
-    output[key] = value
-      .replace(
-        /\$\{artifacts\.([a-z][a-z0-9_]*)\.path\}/g,
-        (_match, name: string) => ctx.artifacts?.[name]?.path ?? "",
-      )
-      .replace(
-        /\$\{artifacts\.([a-z][a-z0-9_]*)\.relativePath\}/g,
-        (_match, name: string) => ctx.artifacts?.[name]?.relativePath ?? "",
-      );
-  }
-  return output;
+  return resolveFixtureMap(verifier.script.fixtures, ctx.artifacts);
 }
 
 function truncate(s: string, max: number): string {

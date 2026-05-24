@@ -52,7 +52,7 @@ export interface ArtifactRef {
   path: string;
   /** Path relative to the run directory. */
   relativePath: string;
-  kind: "download";
+  kind: "download" | "transform";
 }
 
 export interface NetworkFilter {

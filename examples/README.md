@@ -117,11 +117,11 @@ contains the Expected/Actual evidence.
   `AgentBrowserAdapter`, including the semantic `find role link click` mapping,
   `wait --text` waits, and the `{success, data, error}` JSON envelope from
   `network requests --json` / `console --json` / `errors --json`.
-- **Outcome vocabulary v0** — all eight verifiers are exercised across the
+- **Outcome vocabulary v0** — the browser-focused verifiers are exercised across the
   five specs: `text`, `notText` (implicitly via wait), `url`, `count`,
   `console.errorsMax`, `network`, `noFailedRequests`, `script`.
 - **Artifact pack** — every artifact category gets written (JSON+YAML+MD trio,
-  evidence files, events, snapshots, console, network, script `.raw.json`
+  evidence files, events, snapshots, console, network, verifier `.raw.json`
   sidecar).
 - **Exit codes** — passing runs return 0; spec 05 returns 1 by design to
   confirm failure detection.

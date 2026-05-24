@@ -142,6 +142,11 @@ export function stepToArgv(step: Step): string[] {
   if ("download" in step) return downloadStepToArgv(step);
   if ("wait" in step) return waitStepToArgv(step);
   if ("snapshot" in step) return snapshotStepToArgv(step);
+  if ("transform" in step) {
+    throw new Error(
+      "transform steps are handled by the runner before adapter dispatch",
+    );
+  }
   if ("use" in step) {
     throw new Error(
       `'use: ${step.use}' must be expanded to inline steps by the runner before adapter dispatch`,

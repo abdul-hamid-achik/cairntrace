@@ -85,6 +85,10 @@ export class PlaywrightAdapter implements BrowserBackend {
         await this.applyWait(page, step.wait);
       } else if ("snapshot" in step) {
         // Snapshot is captured by the Runner via .snapshot() — no-op here.
+      } else if ("transform" in step) {
+        throw new Error(
+          "transform steps are handled by the runner before adapter dispatch",
+        );
       } else if ("use" in step) {
         throw new Error(
           `'use: ${step.use}' must be expanded by the runner before adapter dispatch`,

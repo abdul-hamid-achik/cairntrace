@@ -57,7 +57,14 @@ export type VerifierParam = z.infer<typeof VerifierParamSchema>;
 export const VerifierDocSchema = z
   .object({
     id: VerifierKindSchema,
-    kind: z.enum(["ui", "navigation", "network", "console", "escape-hatch"]),
+    kind: z.enum([
+      "ui",
+      "navigation",
+      "network",
+      "console",
+      "file",
+      "escape-hatch",
+    ]),
     summary: z.string().min(1),
     yamlExample: z.string().min(1),
     parameters: z.array(VerifierParamSchema),
@@ -74,6 +81,7 @@ export const StepDocSchema = z
       "fill",
       "upload",
       "download",
+      "transform",
       "wait",
       "snapshot",
       "use",
