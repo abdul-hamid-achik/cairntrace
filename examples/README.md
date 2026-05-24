@@ -1,6 +1,6 @@
 # Examples
 
-Two-spec smoke pack against a tiny local static app. Used both as documentation
+Smoke pack against a tiny local static app. Used both as documentation
 and as Cairntrace's end-to-end integration sanity check against a real
 [`agent-browser`](https://agent-browser.dev) install.
 
@@ -14,7 +14,12 @@ examples/
 │   ├── dashboard.html                 inventory table with 3 rows
 │   ├── api.html                       page that fetches /api/inventory and renders items
 │   ├── api-broken.html                page that fetches /api/broken (returns 500)
+│   ├── import.html                    workbook download/upload demo
 │   └── server.ts                      bun server on :8787 with static + JSON routes
+├── transforms/
+│   └── make-invalid-template.ts       Node transform that creates an invalid upload fixture
+├── verifiers/
+│   └── check-template-xlsx.ts         Node verifier that reads a downloaded workbook artifact
 └── flows/
     ├── 01-dashboard-nav.yml           open → click → URL + text + console outcomes
     ├── 02-row-count.yml               open → count + no-failed-requests outcomes
@@ -24,7 +29,8 @@ examples/
     ├── 06-drifted-link.yml            DELIBERATELY drifted spec for `cairn spec heal` demo
     ├── 07-config-driven.yml           uses cairntrace.config.yml for baseUrl + ${vars.X}
     ├── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
-    └── 09-imported-drift.yml          drift inside an imported action; heal patches the action file
+    ├── 09-imported-drift.yml          drift inside an imported action; heal patches the action file
+    └── 10-artifact-xlsx.yml           download → Node verifier → xlsx verifier → transform → upload
 ```
 
 ## Heal demo (`cairn spec heal`)
@@ -101,6 +107,8 @@ formatting in the YAML are preserved by `--apply` (uses the `yaml` package's
    screenshots/<step>.png      (on failure or when always-on)
    console/console.ndjson, errors.ndjson
    network/requests.ndjson, failed_requests.ndjson
+   downloads/<file>
+   transforms/<file>
    spec.resolved.yml
    ```
 
@@ -117,12 +125,13 @@ contains the Expected/Actual evidence.
   `AgentBrowserAdapter`, including the semantic `find role link click` mapping,
   `wait --text` waits, and the `{success, data, error}` JSON envelope from
   `network requests --json` / `console --json` / `errors --json`.
-- **Outcome vocabulary v0** — the browser-focused verifiers are exercised across the
-  five specs: `text`, `notText` (implicitly via wait), `url`, `count`,
-  `console.errorsMax`, `network`, `noFailedRequests`, `script`.
+- **Outcome vocabulary v0** — the browser-focused verifiers plus artifact
+  verifiers are exercised across the specs: `text`, `notText` (implicitly via
+  wait), `url`, `count`, `console.errorsMax`, `network`, `noFailedRequests`,
+  browser `script`, Node `script`, and `xlsx`.
 - **Artifact pack** — every artifact category gets written (JSON+YAML+MD trio,
-  evidence files, events, snapshots, console, network, verifier `.raw.json`
-  sidecar).
+  evidence files, events, snapshots, console, network, downloads, transforms,
+  verifier `.raw.json` sidecar).
 - **Exit codes** — passing runs return 0; spec 05 returns 1 by design to
   confirm failure detection.
 - **Interactive DX** — in a real terminal, `cairn run` streams per-step ✓/✗

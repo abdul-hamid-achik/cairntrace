@@ -1,0 +1,80 @@
+# Cairntrace example spec — downloaded artifact verification + transform upload.
+#
+# Demonstrates:
+#   - download assigns ${artifacts.template.*}
+#   - script.runtime: node reads the downloaded workbook from fs
+#   - xlsx verifies workbook text and data validation metadata
+#   - transform.runtime: node creates an invalid upload fixture
+#   - upload consumes ${artifacts.invalidTemplate.path}
+#
+version: 1
+name: artifact_xlsx_import
+intent: verify a downloaded workbook template and reject a transformed invalid upload
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: template_readable_from_node
+    description: Node verifier can read the downloaded template artifact from disk
+    verify:
+      script:
+        runtime: node
+        file: ../verifiers/check-template-xlsx.ts
+        fixtures:
+          templatePath: "${artifacts.template.path}"
+          templateRelativePath: "${artifacts.template.relativePath}"
+  - id: template_xlsx_contract
+    description: workbook guide text and column validations match the import contract
+    verify:
+      xlsx:
+        path: "${artifacts.template.path}"
+        sheets:
+          - name: Template Guide
+            contains:
+              - Help Text
+              - Allowed Values
+              - Examples
+        validations:
+          - sheet: RBA Academy Training
+            column: Email
+            type: textLength
+          - sheet: In Scope Workers
+            column: FMW
+            type: decimal
+  - id: invalid_upload_rejected
+    description: transformed invalid workbook shows a clear row-level error
+    verify:
+      text:
+        contains: "Row 2: Email must be unique"
+  - id: no_console_errors
+    description: import workflow produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - id: open_import_page
+    open: /import.html
+  - id: download_template
+    download:
+      by: role
+      role: button
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+  - id: make_invalid_template
+    transform:
+      runtime: node
+      file: ../transforms/make-invalid-template.ts
+      input: "${artifacts.template.path}"
+      saveAs: invalid-template.xlsx
+      assign: invalidTemplate
+  - id: upload_invalid_template
+    upload:
+      by: label
+      name: Upload data
+      path: "${artifacts.invalidTemplate.path}"
+  - id: wait_for_row_error
+    wait:
+      text: "Row 2: Email must be unique"
+      timeoutMs: 5000

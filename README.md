@@ -508,9 +508,9 @@ interface. Cairntrace ships no per-agent code paths.
 ## Examples
 
 A tiny end-to-end demo in [`examples/`](./examples) with a static + JSON
-server and nine spec YAMLs covering every v0 verifier, the heal flow, and
-imported-action drift. See [`examples/README.md`](./examples/README.md) for
-the walkthrough.
+server and ten spec YAMLs covering the verifier vocabulary, artifact workflows,
+the heal flow, and imported-action drift. See
+[`examples/README.md`](./examples/README.md) for the walkthrough.
 
 | Spec | Demonstrates |
 |---|---|
@@ -523,6 +523,7 @@ the walkthrough.
 | `07-config-driven.yml` | `cairntrace.config.yml` baseUrl + `${vars.X}` |
 | `08-conditional-step.yml` | `when:` predicate skips redundant steps |
 | `09-imported-drift.yml` | drift inside an imported action — heal patches the action file |
+| `10-artifact-xlsx.yml` | `download` artifact, Node `script`, `xlsx`, `transform`, and upload fixture |
 
 ## Development
 

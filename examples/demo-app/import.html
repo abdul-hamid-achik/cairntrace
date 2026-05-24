@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Import</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      .button { display: inline-block; padding: 0.6rem 1rem; background: #1e7e34; color: #fff; border: 0; border-radius: 4px; text-decoration: none; cursor: pointer; }
+      .panel { margin-top: 1.5rem; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; }
+      label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+      .error { color: #b00020; font-weight: 600; }
+      .success { color: #1e7e34; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Workbook import</h1>
+      <p>Download a template, edit it, and upload it for validation.</p>
+    </header>
+    <main>
+      <a class="button" role="button" href="/template.xlsx" download="template.xlsx">Download template</a>
+
+      <section class="panel" aria-label="Upload workbook">
+        <label for="upload-file">Upload data</label>
+        <input id="upload-file" type="file" accept=".xlsx" />
+        <p id="upload-result" aria-live="polite">No file uploaded</p>
+      </section>
+    </main>
+    <script>
+      const input = document.getElementById("upload-file");
+      const result = document.getElementById("upload-result");
+
+      input.addEventListener("change", async () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const text = await file.text();
+        if (text.includes("duplicate@example.com")) {
+          result.className = "error";
+          result.textContent = "Row 2: Email must be unique";
+        } else {
+          result.className = "success";
+          result.textContent = "Import preview ready";
+        }
+      });
+    </script>
+  </body>
+</html>
