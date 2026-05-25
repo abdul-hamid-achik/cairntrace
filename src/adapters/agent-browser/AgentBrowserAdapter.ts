@@ -305,7 +305,10 @@ export class AgentBrowserAdapter implements BrowserBackend {
       });
     }
 
-    const resolved = await this.resolveInteractiveRef(locator as Locator);
+    const resolved = await this.resolveInteractiveRef(
+      locator as Locator,
+      timeoutMs ?? DEFAULT_LOCATOR_TIMEOUT_MS,
+    );
     if (!resolved.ok) return resolved.result;
     return this.invoke(["download", resolved.ref, saveAs], { timeoutMs });
   }
@@ -333,27 +336,58 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   private async resolveInteractiveRef(
     locator: Locator,
+    timeoutMs: number,
   ): Promise<
     { ok: true; ref: string } | { ok: false; result: InvocationResult }
   > {
     const start = Date.now();
-    const snapshot = await this.invoke(["snapshot", "-i"]);
-    if (!snapshot.ok) return { ok: false, result: snapshot };
+    const deadline = start + Math.max(0, timeoutMs);
+    let lastSnapshot: { ok: boolean; stdout: string; stderr: string } = {
+      ok: false,
+      stdout: "",
+      stderr: "",
+    };
 
-    const matches = matchingSnapshotElements(
-      locator,
-      parseSnapshot(snapshot.stdout),
-    ).filter((el) => el.ref);
-    if (matches.length > 0) {
-      return { ok: true, ref: `@${matches[0]!.ref!}` };
+    // Poll the interactive snapshot until the locator resolves or the timeout
+    // expires — parity with click's wait-for-visibility behavior. Selector-only
+    // downloads skip this path; agent-browser's `download <selector>` waits on
+    // its own.
+    while (true) {
+      const snapshot = await this.invoke(["snapshot", "-i"]);
+      lastSnapshot = snapshot;
+      if (snapshot.ok) {
+        const parsed = parseSnapshot(snapshot.stdout);
+        const matchIdx = matchingSnapshotIndices(locator, parsed);
+        if (matchIdx.length > 0) {
+          // Prefer the enclosing actionable ancestor (typically <a href download>)
+          // when the locator resolves to an inner control like a > button.
+          const idx = matchIdx[0]!;
+          const target = preferActionableAncestor(idx, parsed) ?? parsed[idx]!;
+          if (target.ref) {
+            return { ok: true, ref: `@${target.ref}` };
+          }
+        }
+      }
+      if (Date.now() >= deadline) break;
+      const remaining = deadline - Date.now();
+      await sleep(Math.min(POLL_INTERVAL_MS, Math.max(50, remaining)));
     }
 
+    const parsed = lastSnapshot.ok ? parseSnapshot(lastSnapshot.stdout) : [];
+    const diagnostics = buildLocatorDiagnostics(locator, parsed);
+    const stderrLines = [
+      `could not resolve ${describeLocator(locator)} to an interactive snapshot ref for download within ${timeoutMs}ms`,
+      ...diagnostics,
+    ];
+    if (!lastSnapshot.ok && lastSnapshot.stderr) {
+      stderrLines.push(`snapshot stderr: ${lastSnapshot.stderr.trim()}`);
+    }
     return {
       ok: false,
       result: {
         ok: false,
         stdout: "",
-        stderr: `could not resolve ${describeLocator(locator)} to an interactive snapshot ref for download`,
+        stderr: stderrLines.join("\n"),
         exitCode: 1,
         durationMs: Date.now() - start,
         argv: [
@@ -397,24 +431,145 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
 /* ----- helpers — see ./parseOutput.ts for unit-tested implementations ----- */
 
-function matchingSnapshotElements(
+const DEFAULT_LOCATOR_TIMEOUT_MS = 10000;
+const POLL_INTERVAL_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function matchingSnapshotIndices(
   locator: Locator,
   snapshot: SnapshotElement[],
-): SnapshotElement[] {
+): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < snapshot.length; i++) {
+    const el = snapshot[i]!;
+    if (!el.ref) continue;
+    if (!matchesLocator(locator, el)) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
   switch (locator.by) {
     case "role":
-      return snapshot.filter(
-        (el) =>
-          el.role === locator.role &&
-          (locator.name === undefined || el.name === locator.name),
+      return (
+        el.role === locator.role &&
+        (locator.name === undefined || el.name === locator.name)
       );
     case "label":
-      return snapshot.filter((el) => el.name === locator.name);
+      return el.name === locator.name;
     case "text":
-      return snapshot.filter((el) => el.name === locator.text);
+      return el.name === locator.text;
     case "selector":
-      return [];
+      return false;
   }
+}
+
+/**
+ * Walk back from a matched element and return the nearest ancestor that looks
+ * like the real actionable target (typically `<a href download>`). Used for
+ * downloads where the locator resolves to an inner control (e.g. a > button)
+ * but clicking the inner control bypasses the link's download behavior.
+ *
+ * Returns undefined when no link ancestor is found within the search depth, in
+ * which case the matched element is used as-is.
+ */
+export function preferActionableAncestor(
+  matchIndex: number,
+  snapshot: SnapshotElement[],
+  maxDepth = 4,
+): SnapshotElement | undefined {
+  const match = snapshot[matchIndex];
+  if (!match) return undefined;
+  let currentLevel = match.level;
+  let depth = 0;
+  for (let i = matchIndex - 1; i >= 0 && depth < maxDepth; i--) {
+    const el = snapshot[i]!;
+    if (el.level >= currentLevel) continue;
+    if (el.role === "link" && el.ref) return el;
+    currentLevel = el.level;
+    depth++;
+  }
+  return undefined;
+}
+
+/**
+ * Build the failure-time diagnostic lines listing candidate elements that
+ * almost matched the locator. Calls out elements inside `dialog` so authors
+ * can see when the right control is hidden behind a still-open dialog.
+ */
+export function buildLocatorDiagnostics(
+  locator: Locator,
+  snapshot: SnapshotElement[],
+): string[] {
+  if (snapshot.length === 0) return ["snapshot was empty"];
+  const candidates: Array<{
+    el: SnapshotElement;
+    dialog: SnapshotElement | undefined;
+  }> = [];
+  const targetRole = locator.by === "role" ? locator.role : undefined;
+  for (let i = 0; i < snapshot.length; i++) {
+    const el = snapshot[i]!;
+    if (!el.ref) continue;
+    if (targetRole && el.role !== targetRole) continue;
+    if (!targetRole) {
+      // For label/text locators, fall back to interactive controls.
+      if (!INTERACTIVE_ROLES.has(el.role)) continue;
+    }
+    candidates.push({ el, dialog: enclosingDialog(i, snapshot) });
+  }
+  if (candidates.length === 0) {
+    return [
+      targetRole
+        ? `no elements with role=${targetRole} in the current snapshot`
+        : "no interactive elements in the current snapshot",
+    ];
+  }
+  const lines: string[] = [];
+  lines.push(`matching candidates (${candidates.length}):`);
+  for (const c of candidates.slice(0, 12)) {
+    const name = c.el.name ? JSON.stringify(c.el.name) : "<no name>";
+    const ref = c.el.ref ? ` ref=${c.el.ref}` : "";
+    const dlg = c.dialog
+      ? ` in dialog ${c.dialog.name ? JSON.stringify(c.dialog.name) : "(unnamed)"}`
+      : "";
+    lines.push(`  - ${c.el.role} ${name}${ref}${dlg}`);
+  }
+  if (candidates.length > 12) {
+    lines.push(`  …and ${candidates.length - 12} more`);
+  }
+  return lines;
+}
+
+const INTERACTIVE_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "tab",
+  "checkbox",
+  "radio",
+  "textbox",
+  "combobox",
+  "switch",
+]);
+
+function enclosingDialog(
+  index: number,
+  snapshot: SnapshotElement[],
+): SnapshotElement | undefined {
+  const el = snapshot[index];
+  if (!el) return undefined;
+  let level = el.level;
+  for (let i = index - 1; i >= 0; i--) {
+    const a = snapshot[i]!;
+    if (a.level >= level) continue;
+    if (a.role === "dialog" || a.attrs?.["role"] === "dialog") return a;
+    level = a.level;
+  }
+  return undefined;
 }
 
 function describeLocator(locator: Locator): string {
