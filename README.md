@@ -1,398 +1,308 @@
 # Cairntrace
 
-> Mark the path, replay the browser, hand the trace to the agent.
+> Mark browser behavior in YAML, replay it, and hand the trace to any coding agent.
 
-**A local-first behavioral browser-spec layer for coding agents.** You write
-`intent + outcomes` in YAML; agents (Claude Code, Codex, Cursor, OpenCode,
-whatever ships next) execute, capture, and heal those specs against a real
-browser through [`agent-browser`](https://agent-browser.dev) or
-[Playwright](https://playwright.dev). Cairntrace is **agent-neutral** — no
-per-agent code paths, just a CLI + MCP server any agent can call.
+Cairntrace is a local-first behavioral browser-spec layer for coding agents.
+Specs define `intent + outcomes` as the behavior contract and `steps` as
+repairable hints for reaching that state. The same spec can run from the CLI,
+through the MCP server, or later be exported to Playwright.
 
-```yaml
-# A Cairntrace spec — the contract is intent + outcomes; steps are repairable hints.
-version: 1
-name: import_xlsx_invoices
-intent: |
-  An admin uploads sample.xlsx via the Invoices > Import flow. The invoice list
-  shows all rows with correct totals and one audit-log entry per row.
+Cairntrace is agent-neutral: there are no Claude, Codex, Cursor, or OpenCode
+branches in core. The stable interface is the CLI, MCP tools, and run artifact
+format.
 
-outcomes:
-  - id: invoice_count_visible
-    verify: { text: { contains: "Showing 42 invoices" } }
-  - id: import_request_succeeded
-    verify:
-      network: { method: POST, urlContains: /api/invoices/import, status: { in: [200, 201] } }
-  - id: no_console_errors
-    verify: { console: { errorsMax: 0 } }
+## Why Use It
 
-steps:
-  - use: login_admin
-  - open: /invoices
-  - click: { by: role, role: button, name: Import }
-  - hover: { by: selector, selector: ".question-table-wrap .table-title" }
-  - upload: { by: label, name: Upload file, path: ./fixtures/sample.xlsx }
-  - wait: { text: "Import complete", timeoutMs: 30000 }
-```
+- Give agents a real browser acceptance check while they build a feature.
+- Replace manual "click through this workflow" smoke tests with YAML specs.
+- Capture DOM snapshots, screenshots, console, network, and outcome evidence
+  into one agent-readable artifact pack.
+- Heal common locator drift without changing the behavior contract.
+- Start with `agent-browser` for agent-in-session work and switch to
+  Playwright when you need Playwright-native traces or exported tests.
+
+## Installation Guide
+
+### 1. Install prerequisites
+
+- [Bun](https://bun.com) `>=1.3.0`
+- A browser backend:
+  - [`agent-browser`](https://agent-browser.dev) on `$PATH` for the default
+    backend
+  - or Playwright Chromium for `--backend playwright`
+
+Check Bun first:
 
 ```bash
-cairn run flows/import_xlsx_invoices.yml          # → exit 0/1, structured artifacts
-cairn spec heal flows/import_xlsx_invoices.yml    # ← UI drifted? patch the locator
-cairn export playwright flows/import_xlsx_invoices.yml  # eject to a real Playwright test
+bun --version
 ```
 
----
-
-## Why
-
-Agents are good at writing code and bad at clicking 40 buttons to verify their
-own changes. Manual E2E in a complex repo is the bottleneck.
-
-Cairntrace lets an agent (or you) define **what success looks like** —
-behavioral outcomes against the real DOM and network — separate from **how
-to get there**. The agent picks the steps; the runner verifies the outcomes;
-when the UI drifts, `cairn spec heal` rewrites the steps from the
-accessibility-tree snapshot. The contract (`intent + outcomes`) is preserved
-mechanically via a sha256 stamp, so heal can't quietly change what the spec
-asserts.
-
-The same spec runs across two backends:
-
-- **`agent-browser`** (default) — AI-native browser CLI, semantic locators,
-  compact accessibility snapshots, optimized for token efficiency.
-- **`playwright`** — full Playwright runtime, native traces + HAR + video,
-  Trace Viewer integration.
-
-And the same spec can be **exported to a real `@playwright/test` `.spec.ts`**
-once it's stable, giving you CI lock-in (sharding, retries, HTML reports)
-without rewriting anything.
-
-## Three pillars
-
-| Pillar | What it solves |
-|---|---|
-| **Feature development driver** | Author + iterate on a spec while building a feature. The spec acts as both the acceptance check and the regression test. `cairn run` is the inner loop. |
-| **Manual-E2E replacement** | Have a complex repo with no E2E suite? Write 10 behavioral specs instead of standing up Playwright + fixtures + page objects + CI. Eject stable specs to Playwright later via `cairn export`. |
-| **Bug repro + agent handoff** | Reach a bug state, capture the full artifact pack (DOM, network, console, screenshots, trace), hand the run id to any agent. `agent_context.md` is the universal interface — no per-agent prompt template. |
-
-## Install
-
-Cairntrace runs on [**Bun 1.3+**](https://bun.com). The `cairn` binary is a
-bun-shebang TypeScript file — no compile step in v1. A compiled
-Node-compatible distribution is a v1.x goal.
+### 2. Clone and install dependencies
 
 ```bash
 git clone https://github.com/abdul-hamid-achik/cairntrace
 cd cairntrace
 bun install
+```
 
-# Optional: install one of the browser backends
-brew install vercel-labs/agent-browser/agent-browser   # default; see https://agent-browser.dev
-# or
-bunx playwright install chromium                       # for `--backend playwright`
+### 3. Install a browser backend
 
-# Verify the environment
+`agent-browser` is the default backend and the recommended path for
+agent-in-session runs:
+
+```bash
+brew install vercel-labs/agent-browser/agent-browser
+agent-browser --version
+```
+
+Playwright is optional. Install its Chromium browser only if you plan to run
+with `--backend playwright`, inspect Playwright traces, or export specs to
+`@playwright/test`:
+
+```bash
+bunx playwright install chromium
+```
+
+### 4. Verify the install
+
+```bash
 ./bin/cairn doctor
 ```
 
-`./bin/cairn` works from this directory; to use `cairn` anywhere, symlink it
-to a location on your `$PATH`.
+`./bin/cairn` is a Bun shebang launcher for development, so there is no compile
+step for local use.
 
-You do not need Playwright's browser binary for the default `agent-browser`
-backend. Install Chromium through Playwright only when you plan to run
-`--backend playwright`, debug with Playwright-native traces, or validate a spec
-before exporting it to `@playwright/test`.
+### 5. Optional: put `cairn` on your PATH
 
-## Quickstart
+You can always run Cairntrace from this repo with `./bin/cairn`. To use
+`cairn` from any directory, symlink the launcher into a directory already on
+your `$PATH`:
 
 ```bash
-# 1. Start the demo app
-bun examples/demo-app/server.ts          # listens on :8787
+ln -sf "$PWD/bin/cairn" /usr/local/bin/cairn
+cairn doctor
+```
 
-# 2. Run an example spec
+If `cairn doctor` reports `bun` or `agent-browser` missing, confirm those
+commands work in the same shell and that their install directories are on
+`$PATH`.
+
+## 5-Minute Demo
+
+Start the tiny demo app in one terminal:
+
+```bash
+bun examples/demo-app/server.ts
+```
+
+Run a real browser spec in another terminal:
+
+```bash
 ./bin/cairn run examples/flows/01-dashboard-nav.yml
+```
 
-#   ✓ open_home (483ms)
-#   ✓ click_open_dashboard (446ms)
-#   ✓ wait_for_dashboard (425ms)
-#
-#   Outcomes (3)
-#     ✓ url_is_dashboard
-#     ✓ dashboard_heading_visible
-#     ✓ no_console_errors
-#
-#   ✓ PASSED  3/3 outcomes  3.5s
+Then inspect the agent handoff summary:
 
-# 3. Inspect the agent-readable handoff
+```bash
 ./bin/cairn context latest
 ```
 
-Try `--backend playwright`, `--mock` (in-memory), `--json` (for agents), or
-`--parallel 4` (against multiple specs at once).
+Useful variants:
 
-## Concepts
+```bash
+./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright
+./bin/cairn run examples/flows/01-dashboard-nav.yml --mock
+./bin/cairn run examples/flows/01-dashboard-nav.yml examples/flows/02-row-count.yml --parallel 2 --json
+./bin/cairn spec heal examples/flows/06-drifted-link.yml
+```
 
-### Intent + outcomes is the contract
+See [examples/README.md](./examples/README.md) for the full demo walkthrough,
+including the intentionally failing spec, the heal demo, config-backed specs,
+downloads, transforms, and `xlsx` verification.
+
+## A First Spec
+
+This is the shape of a Cairntrace spec:
 
 ```yaml
+version: 1
+name: dashboard_nav
 intent: |
-  When an admin clicks "Import" and uploads sample.xlsx, the invoice list shows
-  all rows from the file.
+  A user can open the demo dashboard from the home page.
 
 outcomes:
-  - id: invoice_count_visible
-    description: invoice list shows 42 rows after import
+  - id: url_is_dashboard
+    description: browser lands on the dashboard page
     verify:
-      text: { contains: "Showing 42 invoices" }
-```
+      url: { endsWith: /dashboard.html }
 
-The spec gets a `contractHash:` stamped over `intent + outcomes` by
-`cairn spec verify --stamp`. `cairn spec heal` may rewrite **steps** but
-refuses to touch `intent` or `outcomes` without that diff being seen by a
-human at PR review.
+  - id: dashboard_heading_visible
+    description: dashboard heading is visible
+    verify:
+      text: { contains: "Inventory Dashboard" }
 
-### Steps are repairable hints
+  - id: no_console_errors
+    description: page has no console errors
+    verify:
+      console: { errorsMax: 0 }
 
-```yaml
 steps:
-  - use: login_admin                       # imported reusable action
-  - open: /invoices                        # baseUrl prepended from config
-  - click: { by: role, role: button, name: Import }
-  - hover: { by: selector, selector: ".question-table-wrap .table-title" }
-  - upload: { by: label, name: Upload file, path: ./fixtures/sample.xlsx }
-  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }
-  - wait: { text: "Import complete", timeoutMs: 30000 }
-  - id: settle
-    when: urlContains:/imported            # conditional execution
-    open: /invoices?refresh=1
+  - open: /
+  - click: { by: role, role: link, name: Open dashboard }
+  - wait: { text: "Inventory Dashboard" }
 ```
 
-If the button gets renamed `Import → Import xlsx`, the spec breaks. Run
-`cairn spec heal` — it reads the snapshot, finds the new name, and rewrites
-the step (preserving YAML comments). Comments survive.
+The example above matches the first demo flow. Run that checked-in spec:
 
-### Config variables resolve before validation
-
-Specs can put config-backed variables in schema-required fields. Cairntrace
-loads `cairntrace.config.yml`, resolves the environment, merges environment
-vars with caller vars, then parses the spec.
-
-```yaml
-# flows/table-import.yml
-steps:
-  - open: "${vars.connectionPath}"
+```bash
+./bin/cairn run examples/flows/01-dashboard-nav.yml --cold-start --json
 ```
 
+For your own specs, validate and stamp the behavior contract:
+
+```bash
+./bin/cairn spec verify flows/dashboard_nav.yml --json
+./bin/cairn spec verify flows/dashboard_nav.yml --stamp
+```
+
+`intent + outcomes` are the contract. `steps` are hints. `cairn spec heal`
+can patch drifted steps, but the contract hash prevents accidental changes to
+what the spec asserts.
+
+## Core Concepts
+
+**Cold-start contract**
+
+Finished specs must replay from a fresh browser session. Use one of:
+
+- imported login actions: `imports: [actions/login_admin.yml]` plus
+  `steps: [{ use: login_admin }]`
+- checkpoint restore: `session: { resume: <checkpoint-name> }`
+- deterministic setup: `preconditions.commands`
+
+Run `cairn run <spec> --cold-start --json` before declaring a spec done.
+
+**Steps**
+
+Current step keys:
+
+`open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`, `wait`,
+`snapshot`, `use`.
+
+Interactive steps use locators with `by: role`, `by: label`, `by: text`, or
+`by: selector`. Prefer role and label locators when possible; they are clearer
+for humans and easier to heal.
+
+**Verifiers**
+
+Outcome verifier keys:
+
+`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`,
+`xlsx`, `script`.
+
+Use typed verifiers for normal UI, URL, network, console, count, and workbook
+checks. Use `script` when the assertion is product-specific or needs browser
+or Node code.
+
+**Config**
+
+`cairntrace.config.yml` can provide `baseUrl`, environment vars, artifact root,
+and project settings. Config-backed placeholders such as `${vars.connectionPath}`
+resolve before spec validation, so they can appear in required fields.
+
 ```yaml
-# cairntrace.config.yml
 version: 1
 defaultEnvironment: local
 environments:
   local:
-    baseUrl: http://localhost:8080
+    baseUrl: http://localhost:8787
     vars:
-      connectionPath: /connection/abc
+      dashboardPath: /dashboard.html
 ```
 
-Use the same config path for validation and runs:
+Use the same config for validation and runs:
 
 ```bash
-cairn spec verify flows/table-import.yml --config cairntrace.config.yml --json
-cairn run flows/table-import.yml --config cairntrace.config.yml --cold-start --json
+./bin/cairn spec verify flows/dashboard.yml --config cairntrace.config.yml --json
+./bin/cairn run flows/dashboard.yml --config cairntrace.config.yml --cold-start --json
 ```
 
-Missing `${vars.X}` placeholders fail with a clear parse error instead of being
-silently replaced by an empty string. `contractHash` remains based on the raw
-`intent + outcomes` contract, so hashes do not change across environments.
+**Artifacts**
 
-### The v0 verifier vocabulary
+Every run writes a self-contained directory under `~/.cairntrace/runs/<run-id>/`
+unless config or flags override the artifact root. The important files are:
 
-Nine typed verifiers plus an escape hatch. Promote `script` patterns to
-typed verifiers when 3+ specs need them.
-
-| Verifier | What it checks |
-|---|---|
-| `text` | text appears in a region (page-wide or a selector) |
-| `notText` | text does NOT appear |
-| `url` | URL equals / startsWith / endsWith / matches |
-| `network` | at least one matching request (method + urlContains + status) |
-| `noFailedRequests` | no 4xx/5xx for requests matching a pattern |
-| `console` | `errorsMax: N` — bounded console + pageerror events |
-| `count` | N elements match (`role` or `selector` in optional `in_region`) |
-| `xlsx` | workbook sheet text and Excel data validation checks |
-| `script` | escape hatch: browser or Node JS returning `{ ok, evidence }` |
-
-`script` supports either inline `run:` or an external JS/TS body via `file:`.
-External files resolve relative to the spec file. Set `runtime: node` when the
-script needs filesystem or npm package access. Download and transform steps can
-expose named artifacts to scripts with `${artifacts.<name>.path}`.
-With the `agent-browser` backend, semantic download locators resolve to an
-interactive snapshot ref before Cairn calls top-level `agent-browser download`.
-
-```yaml
-outcomes:
-  - id: template_shape
-    verify:
-      script:
-        runtime: node
-        file: ./verifiers/check-template.ts
-        fixtures:
-          templatePath: ${artifacts.template.path}
-steps:
-  - download:
-      by: role
-      role: button
-      name: Download template
-      saveAs: template.xlsx
-      assign: template
+```text
+run.json | run.yaml | run.md
+agent_context.md
+events.ndjson
+spec.resolved.yml
+outcomes/<outcome-id>.md
+snapshots/
+screenshots/
+console/
+network/
+downloads/
+transforms/
+diagnostics/
+traces/
 ```
 
-Use the built-in `xlsx` verifier when the assertion is workbook structure
-instead of custom business logic:
+`agent_context.md` is the compact handoff file for coding agents. Use
+`./bin/cairn context latest` to print it.
 
-```yaml
-outcomes:
-  - id: template_xlsx_content_contract
-    description: the import template contains guide text and expected validations
-    verify:
-      xlsx:
-        path: ${artifacts.template.path}
-        sheets:
-          - name: Template Guide
-            contains:
-              - Help Text
-              - Allowed Values
-              - Examples
-        validations:
-          - sheet: RBA Academy Training
-            column: Email
-            type: textLength
-```
+## CLI Reference
 
-Transform downloaded artifacts into upload fixtures with a Node-side step:
+Common commands:
 
-```yaml
-steps:
-  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }
-  - transform:
-      runtime: node
-      file: ./transforms/make-invalid-template.ts
-      input: ${artifacts.template.path}
-      saveAs: invalid-template.xlsx
-      assign: invalidTemplate
-  - upload:
-      by: role
-      role: button
-      name: Upload data
-      path: ${artifacts.invalidTemplate.path}
-```
-
-Each outcome writes a structured `outcomes/<id>.md` evidence file (≤80 lines,
-fixed shape) that agents can drop straight into context.
-
-### Cold-start contract
-
-Specs must replay from a clean browser. Satisfy with one of:
-
-1. `imports:` a reusable login action + `steps: [{ use: login_admin }]`
-2. `session: { resume: <checkpoint-name> }` (captured by
-   `cairn checkpoint capture-from-session` or `cairn login`)
-3. `preconditions.commands` to seed the database
-
-`cairn run --cold-start` (auto-on in CI) wipes cookies + localStorage +
-sessionStorage before the first step.
-
-## Heal demo
-
-```bash
-# 0. The action in examples/actions/open_dashboard.yml is intentionally drifted —
-#    the click locator says name="Dashboard link" but the page has "Open dashboard".
-
-# 1. Run — fails (locator not found, URL outcome doesn't hold)
-./bin/cairn run examples/flows/09-imported-drift.yml --backend playwright
-
-# 2. Heal — reads the snapshot, proposes the right name
-./bin/cairn spec heal examples/flows/09-imported-drift.yml --backend playwright
-#   ▸ patch proposed: replace /steps/1/click/name from "Dashboard link" to "Open dashboard"
-#     why: snapshot shows role=link with name="Open dashboard" (1 candidate)
-
-# 3. Apply — patches the ACTION FILE (open_dashboard.yml), comments preserved
-./bin/cairn spec heal examples/flows/09-imported-drift.yml --apply --backend playwright
-
-# 4. Re-run — passes
-./bin/cairn run examples/flows/09-imported-drift.yml --backend playwright
-```
-
-Heal follows the **origin** of the failed step. If the drifted step lives
-inside an imported action, the patch lands in the action file, not the spec
-that imported it.
-
-## Diff two runs
-
-```bash
-./bin/cairn diff previous latest
-```
-
-```
-# Diff: a5286e → a59ccd
-
-## Overall
-- Status: passed → failed (changed)
-- Duration: 5.1s → 2.9s (−2.2s)
-
-## Outcomes
-- ✗→✓ price_displayed
-- ✓→✗ checkout_request_succeeded
-
-## Network
-- Failures: +1 (1 new)
-  - POST /api/checkout → 500
-```
-
-`<runA> <runB>` can be run ids, absolute paths, or the literal
-`latest` / `previous` against `~/.cairntrace/runs/`. Pairs well with CI
-post-mortems and `cairn run` re-runs.
-
-## CLI reference
-
-| Command | What it does |
-|---|---|
-| `cairn run <spec...>` | Run one or more behavioral specs. Streams ✓/✗ live in a TTY; multi-spec mode emits a `BatchRunResult`. |
-| `cairn run --parallel N` | Run N specs concurrently, each in its own browser session. |
-| `cairn run --backend agent-browser \| playwright \| mock` | Select the backend. Mock is for tests/demos. |
-| `cairn run --cold-start` | Wipe cookies + storage before steps. Auto-on when `CI=true`. |
-| `cairn doctor` | Check Node/Bun/agent-browser/artifact-dir health. |
-| `cairn explain` | Return the full agent-facing surface (commands + verifiers + rules + config) as structured data. |
-| `cairn docs [topic]` | Return focused agent docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
-| `cairn context <run\|latest> [--path]` | Print or locate the run's `agent_context.md`. |
-| `cairn spec scaffold <name> --intent ...` | Write a starter spec YAML with the cold-start header. |
-| `cairn spec verify <spec> [--stamp] [--env <name>] [--config <path>]` | Lint the spec; `--stamp` writes a fresh raw-contract `contractHash:`. |
-| `cairn spec heal <spec> [--apply]` | Propose selector-drift fixes from the snapshot. `--apply` writes them (comments preserved). |
-| `cairn checkpoint capture-from-session <name> --session <ab-session>` | Save state of an existing agent-browser session. |
-| `cairn checkpoint list / show / delete` | Manage saved checkpoints. |
-| `cairn login <name> --url ... [--wait-for text:\|url:]` | Open a headed browser, let the user log in, capture state into a checkpoint. |
-| `cairn diff <runA> <runB>` | Structurally compare two runs — outcomes, steps, console, network. |
-| `cairn export playwright <spec> [--out <file>]` | Emit a real `@playwright/test` `.spec.ts` from a stable spec for CI lock-in. |
+| Command | Purpose |
+| --- | --- |
+| `cairn run <spec...>` | Run one or more specs. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`. |
+| `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
+| `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
+| `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path` for the file path. |
+| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
+| `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
+| `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network. |
+| `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
+| `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session. |
+| `cairn login <name> --url <url>` | Open a headed login flow and save a checkpoint. |
+| `cairn export playwright <spec>` | Emit an `@playwright/test` spec from a Cairntrace spec. |
 | `cairn mcp` | Start the MCP server on stdio. |
 
-Every agent-callable command supports `--format json|yaml|md` (or `--json`,
-`--yaml`, `--md` shorthand).
+Structured output is available on commands wired with format flags:
 
-**Exit codes** are stable across versions:
+```bash
+./bin/cairn run examples/flows/01-dashboard-nav.yml --json
+./bin/cairn spec verify examples/flows/01-dashboard-nav.yml --format yaml
+./bin/cairn docs verifiers --json
+./bin/cairn diff previous latest --format md
+```
+
+Commands with structured output today: `run`, `doctor`, `explain`, `docs`,
+`diff`, `spec verify`, `spec heal`, `checkpoint list`, and `checkpoint show`.
+
+Stable exit codes:
 
 | Code | Meaning |
-|------|---------|
+| --- | --- |
 | 0 | success |
-| 1 | outcome failure (run completed; contract didn't hold) |
-| 2 | errored (crash, parse failure, FS error) |
-| 3 | cold-start gate failed |
-| 4 | lint failed |
-| 5 | heal-no-progress |
+| 1 | outcome failure |
+| 2 | errored |
+| 3 | cold-start gate |
+| 4 | lint failure |
+| 5 | heal made no progress |
 | 6 | contract-hash mismatch |
 
-## MCP integration
+## MCP Integration
 
-Add Cairntrace to any MCP-aware agent (Claude Code, Cursor, Windsurf, etc.):
+Run the stdio MCP server:
+
+```bash
+./bin/cairn mcp
+```
+
+Example MCP client config:
 
 ```json
 {
@@ -405,194 +315,69 @@ Add Cairntrace to any MCP-aware agent (Claude Code, Cursor, Windsurf, etc.):
 }
 ```
 
-Eleven tools exposed, all returning `content` (text summary) + `structuredContent`
-(JSON matching the v1 wire schemas):
+The MCP server exposes 11 tools:
 
-| Tool | Maps to |
-|---|---|
-| `cairn_explain` | `cairn explain` |
-| `cairn_docs` | `cairn docs` |
-| `cairn_doctor` | `cairn doctor` |
-| `cairn_run` | `cairn run` |
-| `cairn_context` | `cairn context` |
-| `cairn_spec_scaffold` | `cairn spec scaffold` |
-| `cairn_spec_verify` | `cairn spec verify` |
-| `cairn_spec_heal` | `cairn spec heal` |
-| `cairn_checkpoint_list` | `cairn checkpoint list` |
-| `cairn_checkpoint_show` | `cairn checkpoint show` |
-| `cairn_checkpoint_delete` | `cairn checkpoint delete` |
+`cairn_explain`, `cairn_docs`, `cairn_doctor`, `cairn_run`, `cairn_context`,
+`cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
+`cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`.
 
-Agents that don't speak MCP use the same surface via the shell CLI — the
-output is identical.
-
-For agent bootstrapping, call `cairn_explain` first, then call `cairn_docs`
-for the topic the agent is about to work on. This keeps docs fetches small:
-
-```bash
-cairn explain --json
-cairn docs steps --json
-cairn docs authoring --json
-cairn docs downloads --json
-cairn docs backends --json
-```
-
-## Wire contract (v1)
-
-The CLI + MCP outputs are stable across v1.x. Six v1 schemas:
-
-| URN | Source | Emitted by |
-|---|---|---|
-| `urn:cairntrace.dev:run:v1` | [`run.v1.ts`](./src/core/schema/run.v1.ts) | `cairn run` (single spec) |
-| `urn:cairntrace.dev:run-batch:v1` | [`runBatch.v1.ts`](./src/core/schema/runBatch.v1.ts) | `cairn run --parallel` (multi-spec) |
-| `urn:cairntrace.dev:heal:v1` | [`heal.v1.ts`](./src/core/schema/heal.v1.ts) | `cairn spec heal` |
-| `urn:cairntrace.dev:explain:v1` | [`explain.v1.ts`](./src/core/schema/explain.v1.ts) | `cairn explain` + MCP `cairn_explain` |
-| `urn:cairntrace.dev:docs:v1` | [`docs.v1.ts`](./src/core/schema/docs.v1.ts) | `cairn docs` + MCP `cairn_docs` |
-| `urn:cairntrace.dev:diff:v1` | [`diff.v1.ts`](./src/core/schema/diff.v1.ts) | `cairn diff` |
-
-Plus the YAML spec format itself ([`spec.v1.ts`](./src/core/schema/spec.v1.ts))
-and the verifier union ([`verifier.v1.ts`](./src/core/schema/verifier.v1.ts)).
-
-Schemas are zod-first; TypeScript types come from `z.infer`. Schemas are
-currently `urn:` IDs (no published JSON Schema file yet); v1.x will host
-fetchable JSON Schemas without changing the wire format.
-
-## Artifact layout
-
-Each run produces a fully self-contained directory:
-
-```
-~/.cairntrace/runs/<run-id>/
-  run.{json,yaml,md}          # canonical result in three formats
-  agent_context.md            # narrative summary for agent handoff
-  events.ndjson               # streaming run log
-  spec.resolved.yml           # spec after imports + var substitution
-  outcomes/
-    results.{json,yaml,md}    # per-outcome summary
-    <outcome-id>.md           # §13b evidence file (≤80 lines, fixed shape)
-    <outcome-id>.raw.json     # verifier deep data (when present)
-  snapshots/<NN>_<step>.txt   # accessibility tree per step
-  screenshots/<NN>_<step>.png # on-failure or always-on per spec policy
-  console/console.ndjson, errors.ndjson
-  network/requests.ndjson, failed_requests.ndjson
-  downloads/<file>           # files captured by download steps
-  transforms/<file>          # files generated by transform steps
-  diagnostics/<NN>_<step>.json # failed-step UI diagnostics
-  traces/<backend>-trace.zip  # Playwright Trace Viewer compatible
-```
-
-View the trace: `bunx playwright show-trace <runDir>/traces/<backend>-trace.zip`
+Agents should call `cairn_explain` once at session start, then `cairn_docs`
+for the focused topic they need.
 
 ## Architecture
 
-```
-behavioral spec (intent + outcomes + steps + imports)
-        ↓ parser + validator (zod, comment-preserving YAML, origin tracking)
-        ↓ contract-hash check
-config-aware Runner (cairntrace.config.yml resolves baseUrl + vars per env)
-        ↓ runs each step against
-BrowserBackend interface
-        ↓ implemented by
-        ├── AgentBrowserAdapter   (default; AI-native compact snapshots)
-        ├── PlaywrightAdapter     (full traces, HAR, ariaSnapshot)
-        └── MockBrowserBackend    (tests + `--mock`)
-        ↓ evaluates outcomes via
-OutcomeEvaluator + 9 verifiers
-        ↓ produces
-ArtifactWriter → run.{json,yaml,md} + agent_context.md + evidence + events
-                + trace.zip + snapshots/screenshots/console/network
+```text
+spec YAML
+  -> parseSpec + zod validation + config substitution + imports
+  -> contract-hash check
+  -> Runner
+  -> BrowserBackend
+       -> AgentBrowserAdapter
+       -> PlaywrightAdapter
+       -> MockBrowserBackend
+  -> OutcomeEvaluator
+  -> ArtifactWriter
 ```
 
-The CLI surface + the artifact format + the MCP tools are the agent
-interface. Cairntrace ships no per-agent code paths.
+The parser, runner, browser adapters, verifiers, and artifact writer are kept
+separate so the core stays deterministic and testable.
 
-## Examples
+## Advanced Workflows
 
-A tiny end-to-end demo in [`examples/`](./examples) with a static + JSON
-server and ten spec YAMLs covering the verifier vocabulary, artifact workflows,
-the heal flow, and imported-action drift. See
-[`examples/README.md`](./examples/README.md) for the walkthrough.
-
-| Spec | Demonstrates |
-|---|---|
-| `01-dashboard-nav.yml` | open → click → URL + text + console outcomes |
-| `02-row-count.yml` | `count` verifier + `noFailedRequests` |
-| `03-network.yml` | `network` verifier against a real fetch |
-| `04-script.yml` | `script` escape hatch (DOM-evaluated JS) |
-| `05-detects-broken-api.yml` | proves `noFailedRequests` catches 500s (designed to fail) |
-| `06-drifted-link.yml` | UI drift; `cairn spec heal` demo |
-| `07-config-driven.yml` | `cairntrace.config.yml` baseUrl + `${vars.X}` |
-| `08-conditional-step.yml` | `when:` predicate skips redundant steps |
-| `09-imported-drift.yml` | drift inside an imported action — heal patches the action file |
-| `10-artifact-xlsx.yml` | `download` artifact, Node `script`, `xlsx`, `transform`, and upload fixture |
+- **Download artifacts:** `download` clicks a locator and saves the file under
+  `downloads/`, optionally assigning it as `${artifacts.<name>.path}`.
+- **Transform artifacts:** `transform` runs a Node-side script to turn a
+  downloaded file into a new upload fixture under `transforms/`.
+- **Workbook assertions:** `xlsx` verifies workbook sheet text and Excel data
+  validation metadata.
+- **Custom assertions:** `script` runs browser or Node code and returns
+  `{ ok, evidence }`.
+- **Playwright export:** `cairn export playwright <spec>` emits a normal
+  `@playwright/test` file when a Cairntrace spec is stable enough for CI.
 
 ## Development
 
 ```bash
-bun install            # install deps
-bun run typecheck      # tsc --noEmit
-bun run test           # vitest (156 tests across 20 files)
-bun run lint           # oxlint
-bun run format         # oxfmt src bin
-bun run verify         # typecheck + lint + tests (the gate)
+bun install
+bun run typecheck
+bun run lint
+bun run test
+bun run format
+bun run verify
 ```
 
-Layout summary in [`AGENTS.md`](./AGENTS.md), which is the canonical
-instruction set for any coding agent working in this repo.
-[`CLAUDE.md`](./CLAUDE.md) is the Claude Code-specific overlay.
+Run `bun run verify` before pushing. If you touched the runner, heal flow, or
+browser adapters, also smoke-test against the demo app in `examples/`.
 
-## Stack
-
-- [**Bun**](https://bun.com) — runtime + package manager
-- [**TypeScript**](https://www.typescriptlang.org) — typed source
-- [**Zod**](https://zod.dev) — runtime schema validation (TS types derived via `z.infer`)
-- [**Vitest**](https://vitest.dev) — tests
-- [**Oxlint**](https://oxc.rs/docs/guide/usage/linter.html) + [**Oxfmt**](https://oxc.rs/docs/guide/usage/formatter/quickstart) — lint + format (Rust-based, fast)
-- [**yaml**](https://eemeli.org/yaml/) — comment-preserving YAML
-- [**agent-browser**](https://agent-browser.dev) — default execution backend
-- [**Playwright**](https://playwright.dev) — alternate execution backend
-- [**@modelcontextprotocol/sdk**](https://www.npmjs.com/package/@modelcontextprotocol/sdk) — MCP server
-- [**Commander**](https://github.com/tj/commander.js) — CLI parser
-- [**execa**](https://github.com/sindresorhus/execa) — subprocess helper
+More contributor guidance lives in [AGENTS.md](./AGENTS.md). That file is the
+canonical instruction set for coding agents working in this repo.
 
 ## Security
 
-See [SECURITY.md](./SECURITY.md). Short version: **Cairntrace specs are
-trusted code, just like a Playwright test file or a shell script.** Don't run
-specs from untrusted sources. The MCP server widens the trust boundary to
-"any process speaking MCP over stdio" — only connect MCP clients you trust.
-
-## Roadmap (v1.x)
-
-Not blocking v1.0 — landing as additive minor releases:
-
-- Compiled Node-compatible distribution (no Bun required for users)
-- Published JSON Schema files at fetchable URLs (replacing the `urn:` IDs)
-- Real unit tests for the Playwright adapter's side-effecting paths
-- `cairn replay <runId>` (replay an events.ndjson for incident analysis)
-- `cairn report <dir>` (HTML dashboard of run history + flake rates)
-- Heal beyond name-drift: selector swaps, role swaps, multi-step diffs
-- TUI (`cairn tui`) — interactive flow picker + live dashboard
-
-## Contributing
-
-PRs welcome. Before pushing:
-
-1. `bun run verify` must be green.
-2. New verifiers / step kinds need a schema entry, a verifier file, a
-   dispatcher branch, an `cairn explain` entry, and tests. See
-   [AGENTS.md](./AGENTS.md) for the recipe.
-3. Add a test for any bug fix. The fix isn't done until something would
-   catch a regression.
-4. Format with `bun run format`; lint with `bun run lint`.
+See [SECURITY.md](./SECURITY.md). Short version: Cairntrace specs are trusted
+code, like Playwright tests or shell scripts. Do not run specs from untrusted
+sources, and only connect MCP clients you trust.
 
 ## License
 
-[MIT](./LICENSE) — © 2026 Abdul Hamid
-
----
-
-<sub>Cairntrace is named for the cairns that mark a hiking trail — small
-stacks of stone left by previous travelers so the next one can find the
-way. A trace is the debugging artifact left by a run. The tool's job is to
-mark browser paths, replay them, and preserve traces for humans and agents
-alike.</sub>
+[MIT](./LICENSE)
