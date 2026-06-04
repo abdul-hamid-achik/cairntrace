@@ -1,4 +1,5 @@
 import { isAbsolute as isAbsolutePath } from "node:path";
+import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
@@ -292,7 +293,7 @@ export function synthesizeErroredResult(
         id: "parse",
         status: "failed",
         durationMs: 0,
-        error: err.message,
+        error: addEnospcHint(err.message),
       },
     ],
     artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },

@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { cleanCommand } from "./commands/clean";
 import { captureFromSessionCommand } from "./commands/checkpoint/capture";
 import { deleteCheckpointCommand } from "./commands/checkpoint/delete";
 import { listCheckpointsCommand } from "./commands/checkpoint/list";
@@ -71,6 +72,21 @@ addFormatFlags(
     .command("doctor")
     .description("Check environment for cairn dependencies"),
 ).action((opts) => doctorCommand(opts));
+
+addFormatFlags(
+  program
+    .command("clean")
+    .description(
+      "Prune old run directories from the artifact root (keeps newest N per spec)",
+    )
+    .option("--keep <n>", "keep the newest N runs per spec")
+    .option("--all", "remove ALL run directories", false)
+    .option("--artifact-root <path>", "artifact root to clean")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((opts) => cleanCommand(opts));
 
 addFormatFlags(
   program

@@ -50,6 +50,21 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
     detail: `${artifactRoot} ${writable ? "writable" : "not writable"}`,
   });
 
+  // Disk-space check: a full disk surfaces as cryptic ENOSPC mid-run, so
+  // flag it here first. Threshold is deliberately conservative — one evening
+  // of trace-heavy runs has produced 12GB.
+  const free = await freeDiskBytes(artifactRoot);
+  if (free !== undefined) {
+    const gb = free / 1024 ** 3;
+    checks.push({
+      name: "disk-space",
+      ok: gb >= 1,
+      detail:
+        `${gb.toFixed(1)}GB free at ${artifactRoot}` +
+        (gb >= 1 ? "" : " — low; run `cairn clean` or set retention.keepRuns"),
+    });
+  }
+
   const ok = checks.every((c) => c.ok);
   const report: DoctorReport = { ok, checks };
 
@@ -70,6 +85,17 @@ async function tryExec(
     };
   } catch {
     return { ok: false, stdout: "" };
+  }
+}
+
+async function freeDiskBytes(dir: string): Promise<number | undefined> {
+  try {
+    const { statfs } = await import("node:fs/promises");
+    const s = await statfs(dir);
+    return s.bsize * s.bavail;
+  } catch {
+    // statfs unavailable on this runtime/filesystem — skip the check.
+    return undefined;
   }
 }
 

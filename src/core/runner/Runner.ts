@@ -6,6 +6,7 @@ import type {
   ResolvedElement,
 } from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
+import { addEnospcHint, pruneRuns } from "../artifacts/retention";
 import { createArtifactRedactor } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
@@ -144,9 +145,15 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   await safe(() => opts.backend.clearNetworkLog());
   await safe(() => opts.backend.clearConsole());
 
+  const policy = mergeCapturePolicy(spec);
+
   // Start trace recording. Trace artifacts are best-effort: backends without
-  // trace support no-op, and a failed start is swallowed.
-  await safe(async () => opts.backend.startTrace?.());
+  // trace support no-op, and a failed start is swallowed. With the default
+  // `on-failure` policy the trace still has to record from the start — it's
+  // deleted after the run if everything passed.
+  if (policy.trace !== "never") {
+    await safe(async () => opts.backend.startTrace?.());
+  }
 
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
   // Resolves before checkpoint resume so the spec's own setup populates state
@@ -194,8 +201,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const responses: Record<string, unknown> = {};
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
-
-  const policy = mergeCapturePolicy(spec);
 
   for (let i = 0; i < (resolved.steps ?? []).length; i++) {
     const step = resolved.steps![i]!;
@@ -387,7 +392,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       }
     } catch (e) {
       stepStatus = "failed";
-      stepError = (e as Error).message;
+      stepError = addEnospcHint((e as Error).message);
       didError = true;
     }
 
@@ -515,13 +520,15 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Stop trace recording and save to traces/<backend>-trace.zip.
   const traceRelPath = `traces/${backendName}-trace.zip`;
   let tracePath: string | undefined;
-  const traceResult = await safe(async () => {
-    const { mkdir } = await import("node:fs/promises");
-    await mkdir(writer.resolve("traces"), { recursive: true });
-    return opts.backend.stopTrace?.(writer.resolve(traceRelPath));
-  });
-  if (traceResult?.ok) {
-    tracePath = traceRelPath;
+  if (policy.trace !== "never") {
+    const traceResult = await safe(async () => {
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(writer.resolve("traces"), { recursive: true });
+      return opts.backend.stopTrace?.(writer.resolve(traceRelPath));
+    });
+    if (traceResult?.ok) {
+      tracePath = traceRelPath;
+    }
   }
 
   // Evaluate outcomes.
@@ -595,6 +602,16 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const exitCode: ExitCode =
     status === "errored" ? 2 : status === "failed" ? 1 : 0;
 
+  // Honor the trace capture policy: with the default "on-failure", a passing
+  // run deletes its trace zip (they're the bulk of artifact disk usage).
+  if (tracePath && status === "passed" && policy.trace !== "always") {
+    await safe(async () => {
+      const { rm } = await import("node:fs/promises");
+      await rm(writer.resolve(traceRelPath), { force: true });
+    });
+    tracePath = undefined;
+  }
+
   const artifacts: RunArtifacts = {
     agentContext: "agent_context.md",
     events: "events.ndjson",
@@ -650,6 +667,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   });
   opts.listener?.onRunEnd?.(publicResult);
 
+  // Auto-prune the artifact root per config retention policy. Best-effort —
+  // a prune failure must never fail the run that just completed.
+  const keepRuns = runtime.config?.retention?.keepRuns;
+  if (keepRuns !== undefined) {
+    await safe(() => pruneRuns(artifactRoot, { keepRuns }));
+  }
+
   return publicResult;
 }
 
@@ -657,11 +681,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
 function mergeCapturePolicy(spec: Spec): {
   screenshots: "always" | "on-failure" | "never";
   snapshots: "always" | "on-failure" | "never";
+  trace: "always" | "on-failure" | "never";
 } {
   const c = spec.artifacts?.capture ?? {};
   return {
     screenshots: c.screenshots ?? "on-failure",
     snapshots: c.snapshots ?? "always",
+    trace: c.trace ?? "on-failure",
   };
 }
 

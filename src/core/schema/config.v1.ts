@@ -43,6 +43,14 @@ export const SecretsConfigSchema = z
   .strict();
 export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
 
+export const RetentionConfigSchema = z
+  .object({
+    /** Keep only the newest N runs per spec; pruned after every run. */
+    keepRuns: z.number().int().positive(),
+  })
+  .strict();
+export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.literal(1),
@@ -53,6 +61,8 @@ export const ConfigSchema = z
     workflowRoots: z.array(z.string()).optional(),
     environments: z.record(EnvironmentConfigSchema),
     secrets: SecretsConfigSchema.optional(),
+    /** Artifact-root pruning policy (see `cairn clean`). */
+    retention: RetentionConfigSchema.optional(),
   })
   .strict();
 export type Config = z.infer<typeof ConfigSchema>;
