@@ -34,6 +34,11 @@ export async function findConfigFile(
  * Load + validate config. Discovery starts from `specPath`'s directory unless
  * `explicitPath` is provided. Returns `undefined` if no config exists — that's
  * a supported state.
+ *
+ * `${env.X}` placeholders in the config TEXT are substituted from
+ * process.env before parsing, so dynamic-port runners can write
+ * `baseUrl: http://localhost:${env.APP_PORT}` instead of materializing a
+ * per-run YAML. Missing env vars substitute as "" (same as spec parsing).
  */
 export async function loadConfig(
   specPath: string,
@@ -57,9 +62,16 @@ export async function loadConfig(
   if (!configPath) return undefined;
 
   const text = await readFile(configPath, "utf8");
-  const raw = parseYaml(text);
+  const raw = parseYaml(substituteEnv(text));
   const config = ConfigSchema.parse(raw);
   return { config, path: configPath };
+}
+
+function substituteEnv(text: string): string {
+  return text.replace(
+    /\$\{env\.(\w+)\}/g,
+    (_match, name: string) => process.env[name] ?? "",
+  );
 }
 
 async function exists(path: string): Promise<boolean> {

@@ -33,3 +33,29 @@ describe("synthesizeErroredResult", () => {
     ).toBe("foo");
   });
 });
+
+describe("parseVarFlags", () => {
+  it("parses repeated key=value pairs", async () => {
+    const { parseVarFlags } = await import("./run");
+    expect(parseVarFlags(["baseUrl=http://localhost:3123", "a=b"])).toEqual({
+      baseUrl: "http://localhost:3123",
+      a: "b",
+    });
+  });
+
+  it("splits on the first = only", async () => {
+    const { parseVarFlags } = await import("./run");
+    expect(parseVarFlags(["token=a=b=c"])).toEqual({ token: "a=b=c" });
+  });
+
+  it("throws on malformed pairs", async () => {
+    const { parseVarFlags } = await import("./run");
+    expect(() => parseVarFlags(["nodelimiter"])).toThrow(/key=value/);
+    expect(() => parseVarFlags(["=value"])).toThrow(/key=value/);
+  });
+
+  it("returns an empty bag for undefined", async () => {
+    const { parseVarFlags } = await import("./run");
+    expect(parseVarFlags(undefined)).toEqual({});
+  });
+});

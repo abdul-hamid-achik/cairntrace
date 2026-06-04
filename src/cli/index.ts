@@ -26,6 +26,10 @@ program
   )
   .version(CAIRN_VERSION);
 
+function collectRepeatable(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
 function addFormatFlags(c: Command): Command {
   return c
     .option("--format <format>", "output format: json | yaml | md", "md")
@@ -52,6 +56,12 @@ addFormatFlags(
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
     )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
@@ -144,6 +154,12 @@ addFormatFlags(
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
     ),
 ).action((p: string, opts) => verifyCommand(p, opts));
 

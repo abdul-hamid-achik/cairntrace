@@ -21,8 +21,28 @@ export interface RunCommandOptions {
   artifactRoot?: string;
   config?: string;
   parallel?: string;
+  /** Repeatable `--var key=value` overrides; win over config env vars. */
+  var?: string[];
   /** Commander sets this to false when `--no-color` is passed. */
   color?: boolean;
+}
+
+/**
+ * Parse repeatable `--var key=value` flags into a vars bag.
+ * Values may contain `=` (split happens on the first one).
+ */
+export function parseVarFlags(
+  pairs: string[] | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of pairs ?? []) {
+    const eq = pair.indexOf("=");
+    if (eq <= 0) {
+      throw new Error(`--var expects key=value, got "${pair}"`);
+    }
+    out[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return out;
 }
 
 /**
@@ -40,6 +60,13 @@ export async function runCommand(
 
   if (specs.length === 0) {
     process.stderr.write("cairn run: at least one spec path is required\n");
+    process.exit(2);
+  }
+
+  try {
+    parseVarFlags(opts.var);
+  } catch (e) {
+    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
     process.exit(2);
   }
 
@@ -66,6 +93,7 @@ async function runSingle(
 
   let exitCode: ExitCode = 2;
   try {
+    const vars = parseVarFlags(opts.var);
     const result = await runSpec({
       specPath,
       backend,
@@ -75,6 +103,7 @@ async function runSingle(
       ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      ...(Object.keys(vars).length > 0 ? { vars } : {}),
       ...(listener ? { listener } : {}),
     });
     exitCode = result.exitCode;
@@ -126,6 +155,7 @@ async function runBatch(
       session: `${sessionRoot}-w${idx}`,
     });
     try {
+      const vars = parseVarFlags(opts.var);
       const r = await runSpec({
         specPath,
         backend,
@@ -135,6 +165,7 @@ async function runBatch(
         ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
         ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
         ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+        ...(Object.keys(vars).length > 0 ? { vars } : {}),
       });
       if (interactive) {
         const mark =

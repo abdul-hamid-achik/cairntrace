@@ -93,3 +93,34 @@ environments:
     );
   });
 });
+
+describe("loadConfig env substitution", () => {
+  it("substitutes ${env.X} in config text before parsing", async () => {
+    const projectDir = join(dir, "env-subst");
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:\${env.CAIRN_TEST_PORT}
+    vars:
+      apiBase: http://localhost:\${env.CAIRN_TEST_PORT}/api
+`,
+    );
+    process.env["CAIRN_TEST_PORT"] = "3123";
+    try {
+      const loaded = await loadConfig(specPath);
+      expect(loaded?.config.environments["local"]?.baseUrl).toBe(
+        "http://localhost:3123",
+      );
+      expect(loaded?.config.environments["local"]?.vars?.["apiBase"]).toBe(
+        "http://localhost:3123/api",
+      );
+    } finally {
+      delete process.env["CAIRN_TEST_PORT"];
+    }
+  });
+});

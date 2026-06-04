@@ -8,6 +8,7 @@ import {
 } from "../../../core/parser/parseSpec";
 import { SpecSchema } from "../../../core/schema/spec.v1";
 import { emit, resolveFormat } from "../../format";
+import { parseVarFlags } from "../run";
 
 export interface VerifyOptions {
   stamp?: boolean;
@@ -17,6 +18,8 @@ export interface VerifyOptions {
   md?: boolean;
   env?: string;
   config?: string;
+  /** Repeatable `--var key=value` overrides; win over config env vars. */
+  var?: string[];
 }
 
 interface VerifyResult {
@@ -61,9 +64,11 @@ export async function verifyCommand(
       result.status = "stamped";
       result.contractHash = hash;
     } else {
+      const vars = parseVarFlags(opts.var);
       const runtime = await resolveSpecRuntimeContext(specPath, {
         ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
         ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+        ...(Object.keys(vars).length > 0 ? { vars } : {}),
       });
       const parsed = await parseSpec(specPath, {
         vars: runtime.vars,
