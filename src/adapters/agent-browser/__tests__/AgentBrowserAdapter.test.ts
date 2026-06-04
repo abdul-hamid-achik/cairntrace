@@ -425,6 +425,46 @@ describe("strict semantic interaction resolution", () => {
   });
 });
 
+describe("daemon-busy retry", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("retries a transient os-error-35 failure and succeeds", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr:
+          "Failed to read: Resource temporarily unavailable (os error 35) (after 5 retries - daemon may be busy or unresponsive)",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "/page", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "busy-test" });
+
+    const url = await adapter.getUrl();
+
+    expect(url).toBe("/page");
+    expect(execaMock).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("does not retry ordinary failures", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "element not found: #missing",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "no-retry" });
+
+    const r = await adapter.runStep({
+      click: { by: "selector", selector: "#missing" },
+    });
+
+    expect(r.ok).toBe(false);
+    // 1 eval (scroll) + 1 click — no extra retry invocations.
+    expect(execaMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("open with waitUntil", () => {
   beforeEach(() => {
     execaMock.mockReset();

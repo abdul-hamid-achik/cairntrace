@@ -548,8 +548,26 @@ export class AgentBrowserAdapter implements BrowserBackend {
     };
   }
 
-  /** Compose `[--session foo, ...globals, ...argv]` and invoke agent-browser. */
+  /**
+   * Compose `[--session foo, ...globals, ...argv]` and invoke agent-browser.
+   * Transient daemon-busy failures (`os error 35` under sequential multi-spec
+   * load) are retried with backoff before surfacing — they're load hiccups,
+   * not step failures.
+   */
   private async invoke(
+    argv: string[],
+    invokeOpts: { timeoutMs?: number } = {},
+  ): Promise<InvocationResult> {
+    let result = await this.invokeOnce(argv, invokeOpts);
+    for (const backoffMs of DAEMON_BUSY_BACKOFF_MS) {
+      if (result.ok || !isTransientDaemonError(result.stderr)) break;
+      await sleep(backoffMs);
+      result = await this.invokeOnce(argv, invokeOpts);
+    }
+    return result;
+  }
+
+  private async invokeOnce(
     argv: string[],
     invokeOpts: { timeoutMs?: number } = {},
   ): Promise<InvocationResult> {
@@ -580,6 +598,15 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
 const DEFAULT_LOCATOR_TIMEOUT_MS = 10000;
 const POLL_INTERVAL_MS = 250;
+
+/** Backoff schedule for transient daemon-busy retries (dogfood P2 #14). */
+const DAEMON_BUSY_BACKOFF_MS = [300, 1200];
+
+export function isTransientDaemonError(stderr: string): boolean {
+  return /os error 35|Resource temporarily unavailable|daemon may be busy/i.test(
+    stderr,
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
