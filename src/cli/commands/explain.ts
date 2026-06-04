@@ -61,11 +61,29 @@ export function buildExplain(): ExplainResult {
             description: "Use the in-memory mock backend",
           },
           {
+            name: "--backend",
+            type: "enum",
+            values: ["agent-browser", "playwright", "mock"],
+            default: "agent-browser",
+            description: "Browser backend",
+          },
+          {
             name: "--parallel",
             type: "number",
             default: 1,
             description:
               "Run N specs concurrently, each in its own browser session",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override the artifact root directory",
           },
           {
             name: "--var",
@@ -235,6 +253,125 @@ export function buildExplain(): ExplainResult {
         exitCodes: { "0": "success", "2": "error" },
       },
       {
+        name: "diff",
+        summary:
+          "Structurally compare two runs by outcomes, steps, console, and network",
+        synopsis:
+          "cairn diff <runA> <runB> [--format json|yaml|md] (each arg: run id, absolute path, or 'latest'/'previous')",
+        flags: [
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "run not found" },
+        outputSchema: "urn:cairntrace.dev:diff:v1",
+      },
+      {
+        name: "checkpoint list",
+        summary: "List saved browser-state checkpoints",
+        synopsis: "cairn checkpoint list [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success" },
+      },
+      {
+        name: "checkpoint show",
+        summary: "Inspect a saved checkpoint",
+        synopsis: "cairn checkpoint show <name> [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "no such checkpoint" },
+      },
+      {
+        name: "checkpoint delete",
+        summary: "Remove a saved checkpoint",
+        synopsis: "cairn checkpoint delete <name>",
+        flags: [],
+        exitCodes: { "0": "success", "2": "no such checkpoint" },
+      },
+      {
+        name: "checkpoint capture-from-session",
+        summary:
+          "Save the current state of an existing agent-browser session as a named checkpoint (for spec session.resume)",
+        synopsis:
+          "cairn checkpoint capture-from-session <name> --session <ab-session>",
+        flags: [
+          {
+            name: "--session",
+            type: "string",
+            description: "agent-browser --session value to read state from",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "error" },
+      },
+      {
+        name: "login",
+        summary:
+          "Open a headed browser, let a human log in, then capture state into a checkpoint",
+        synopsis:
+          "cairn login <name> --url <url> [--wait-for text:<...>|url:<...>] [--timeout <ms>]",
+        flags: [
+          {
+            name: "--url",
+            type: "string",
+            description: "Page to load in the headed browser",
+          },
+          {
+            name: "--wait-for",
+            type: "string",
+            description:
+              "Wait for text:<...> or url:<...> instead of an ENTER keypress",
+          },
+        ],
+        exitCodes: { "0": "checkpoint saved", "2": "error" },
+      },
+      {
+        name: "export playwright",
+        summary: "Emit a @playwright/test .spec.ts from a Cairntrace spec",
+        synopsis: "cairn export playwright <spec> [--out <file>] [--stdout]",
+        flags: [
+          {
+            name: "--out",
+            type: "string",
+            description:
+              "Where to write (defaults to <spec-dir>/<name>.spec.ts)",
+          },
+          {
+            name: "--stdout",
+            type: "boolean",
+            default: false,
+            description: "Print to stdout instead of writing",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "error" },
+      },
+      {
+        name: "mcp",
+        summary:
+          "Start the Cairntrace MCP server on stdio (tools mirror this CLI surface)",
+        synopsis: "cairn mcp",
+        flags: [],
+        exitCodes: { "0": "clean shutdown" },
+      },
+      {
         name: "spec verify",
         summary: "Lint and (optionally) stamp the contract hash on a spec",
         synopsis:
@@ -255,6 +392,12 @@ export function buildExplain(): ExplainResult {
             name: "--config",
             type: "string",
             description: "Explicit config path",
+          },
+          {
+            name: "--var",
+            type: "string",
+            description:
+              "Runtime var override (key=value); repeatable, wins over config env vars",
           },
           {
             name: "--format",
