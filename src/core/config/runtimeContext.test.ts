@@ -53,6 +53,40 @@ steps:
     expect(ctx.vars).toEqual({ connectionPath: "/connection/staging" });
   });
 
+  it("surfaces the environment viewport from config", async () => {
+    const projectRoot = join(dir, "viewport-project");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    viewport: { width: 1280, height: 800 }
+`,
+    );
+    const specPath = join(flowsDir, "viewport.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: viewport_spec
+intent: env viewport flows into runtime context
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: /
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath);
+    expect(ctx.viewport).toEqual({ width: 1280, height: 800 });
+  });
+
   it("lets CLI vars override environment config vars", async () => {
     const projectRoot = join(dir, "override-project");
     const flowsDir = join(projectRoot, "flows");

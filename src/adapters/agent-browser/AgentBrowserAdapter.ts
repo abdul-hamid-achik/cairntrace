@@ -179,6 +179,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
     return [...pageErrors, ...consoleErrors];
   }
 
+  /* ----- viewport ----- */
+
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.invoke(["viewport", String(width), String(height)]);
+  }
+
   /* ----- evaluation (script verifier escape hatch) ----- */
 
   /**

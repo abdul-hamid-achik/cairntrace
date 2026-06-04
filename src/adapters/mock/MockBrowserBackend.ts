@@ -142,6 +142,12 @@ export class MockBrowserBackend implements BrowserBackend {
     return this.consoleLog.filter((e) => e.type === "error");
   }
 
+  /** Viewport sizes applied via setViewport, for test assertions. */
+  public readonly viewportLog: Array<{ width: number; height: number }> = [];
+  async setViewport(width: number, height: number): Promise<void> {
+    this.viewportLog.push({ width, height });
+  }
+
   async evaluate(_js: string): Promise<InvocationResult> {
     this.lastEvaluatedScript = _js;
     if (this.scriptQueue.length === 0 && _js.includes("expectedTextExcerpts")) {

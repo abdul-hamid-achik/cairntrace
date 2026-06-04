@@ -2,7 +2,11 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type LoadedConfig } from "./loader";
-import type { Config, ConfigVarValue } from "../schema/config.v1";
+import type {
+  Config,
+  ConfigVarValue,
+  ViewportConfig,
+} from "../schema/config.v1";
 
 export interface RuntimeContextOptions {
   /** Override the spec/config default environment. */
@@ -20,6 +24,8 @@ export interface SpecRuntimeContext {
   envName: string;
   baseUrl?: string;
   vars: Record<string, ConfigVarValue>;
+  /** Environment-level viewport from config (spec-level `viewport:` wins). */
+  viewport?: ViewportConfig;
   config?: Config;
   configPath?: string;
 }
@@ -53,6 +59,7 @@ export async function resolveSpecRuntimeContext(
     envName,
     vars,
     ...(envConfig?.baseUrl ? { baseUrl: envConfig.baseUrl } : {}),
+    ...(envConfig?.viewport ? { viewport: envConfig.viewport } : {}),
     ...(loaded ? loadedConfigFields(loaded) : {}),
   };
 }

@@ -156,6 +156,22 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     await safe(() => opts.backend.loadState(resolvedResume));
   }
 
+  // Apply the viewport before any step runs. Spec-level wins over the
+  // environment's config. Placed after loadState so backends that rebuild
+  // their page on state restore still end up at the requested size.
+  const viewport = spec.viewport ?? runtime.viewport;
+  if (viewport) {
+    await safe(async () =>
+      opts.backend.setViewport?.(viewport.width, viewport.height),
+    );
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "viewport.set",
+      width: viewport.width,
+      height: viewport.height,
+    });
+  }
+
   const stepResults: StepResult[] = [];
   let lastSuccessfulStep: Step | undefined;
   let latestScreenshot: string | undefined;

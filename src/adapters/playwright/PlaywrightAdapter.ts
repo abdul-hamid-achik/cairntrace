@@ -45,6 +45,8 @@ export class PlaywrightAdapter implements BrowserBackend {
   private page: Page | undefined;
   private networkLog: NetworkEntry[] = [];
   private consoleLog: ConsoleEntry[] = [];
+  /** Sticky viewport — re-applied when loadState rebuilds the page. */
+  private viewport: { width: number; height: number } | undefined;
 
   constructor(private readonly opts: PlaywrightAdapterOptions = {}) {}
 
@@ -186,6 +188,13 @@ export class PlaywrightAdapter implements BrowserBackend {
     return this.consoleLog.filter((e) => e.type === "error");
   }
 
+  async setViewport(width: number, height: number): Promise<void> {
+    this.viewport = { width, height };
+    if (this.page) {
+      await this.page.setViewportSize(this.viewport);
+    }
+  }
+
   async evaluate(js: string): Promise<InvocationResult> {
     const start = Date.now();
     const page = await this.ensurePage();
@@ -235,6 +244,7 @@ export class PlaywrightAdapter implements BrowserBackend {
       this.context = await this.browser!.newContext({
         storageState: path,
         acceptDownloads: true,
+        ...(this.viewport ? { viewport: this.viewport } : {}),
       });
       this.page = await this.context.newPage();
       this.attachListeners(this.page);
@@ -328,9 +338,13 @@ export class PlaywrightAdapter implements BrowserBackend {
           ? { storageState: this.opts.initialStatePath }
           : {}),
         acceptDownloads: true,
+        ...(this.viewport ? { viewport: this.viewport } : {}),
       });
     }
     this.page = await this.context.newPage();
+    if (this.viewport) {
+      await this.page.setViewportSize(this.viewport);
+    }
     this.attachListeners(this.page);
     return this.page;
   }

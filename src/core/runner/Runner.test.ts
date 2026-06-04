@@ -521,6 +521,31 @@ steps:
     expect(backend.clearBrowserStateCalls).toBe(1);
   });
 
+  it("applies the spec-level viewport before steps run", async () => {
+    const specPath = await writeSpec(
+      "viewport",
+      `version: 1
+name: viewport_demo
+intent: mobile-width regression check
+viewport: { width: 390, height: 844 }
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /home
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.viewportLog).toEqual([{ width: 390, height: 844 }]);
+  });
+
   it("cold-start defaults to off without CI=true", async () => {
     const specPath = await writeSpec(
       "default",

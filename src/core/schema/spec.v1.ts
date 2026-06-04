@@ -354,6 +354,19 @@ export const SpecSchema = z
     backend: BackendSchema.optional(),
     mode: z.enum(["normal", "debug"]).default("normal"),
 
+    /**
+     * Browser viewport for this spec. Overrides the environment-level
+     * `viewport` from cairntrace.config.yml. Applied at run start, before any
+     * step executes.
+     */
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+
     metadata: SpecMetadataSchema.optional(),
     imports: z.array(z.string()).optional(),
     preconditions: PreconditionsSchema.optional(),

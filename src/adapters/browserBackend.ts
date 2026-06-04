@@ -119,6 +119,13 @@ export interface BrowserBackend {
    */
   getErrors(): Promise<ConsoleEntry[]>;
 
+  /* ----- viewport ----- */
+  /**
+   * Resize the browser viewport. Optional: backends without window control
+   * may omit it; the Runner applies it best-effort at run start.
+   */
+  setViewport?(width: number, height: number): Promise<void>;
+
   /* ----- script escape hatch ----- */
   evaluate(js: string): Promise<InvocationResult>;
 

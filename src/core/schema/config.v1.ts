@@ -15,12 +15,22 @@ export const ConfigVarValueSchema = z.union([
 ]);
 export type ConfigVarValue = z.infer<typeof ConfigVarValueSchema>;
 
+export const ViewportConfigSchema = z
+  .object({
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  })
+  .strict();
+export type ViewportConfig = z.infer<typeof ViewportConfigSchema>;
+
 export const EnvironmentConfigSchema = z
   .object({
     /** Base URL prepended to `open:` steps that begin with `/`. */
     baseUrl: z.string().optional(),
     /** Variables substituted as `${vars.X}` inside specs. */
     vars: z.record(ConfigVarValueSchema).optional(),
+    /** Browser viewport applied at run start. Spec-level `viewport:` wins. */
+    viewport: ViewportConfigSchema.optional(),
   })
   .strict();
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
