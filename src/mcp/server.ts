@@ -18,8 +18,7 @@ import { runSpec } from "../core/runner/Runner";
 import { DocsTopicSchema } from "../core/schema/docs.v1";
 import type { RunResult } from "../core/schema/run.v1";
 import { SpecSchema } from "../core/schema/spec.v1";
-
-const VERSION = "1.3.0";
+import { CAIRN_VERSION as VERSION } from "../cli/version";
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this

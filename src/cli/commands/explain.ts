@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ExplainResult } from "../../core/schema/explain.v1";
 import { DOC_TOPICS } from "./docs";
 import { emit, resolveFormat } from "../format";
+import { CAIRN_VERSION } from "../version";
 
 export interface ExplainOptions {
   format?: string;
@@ -28,7 +29,7 @@ export function buildExplain(): ExplainResult {
   return {
     $schema: "urn:cairntrace.dev:explain:v1",
     version: "1",
-    cairntrace: { version: "1.3.0", binary: "/usr/local/bin/cairn" },
+    cairntrace: { version: CAIRN_VERSION, binary: "/usr/local/bin/cairn" },
     commands: [
       {
         name: "run",

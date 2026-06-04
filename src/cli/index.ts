@@ -15,6 +15,7 @@ import { runCommand } from "./commands/run";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
 import { verifyCommand } from "./commands/spec/verify";
+import { CAIRN_VERSION } from "./version";
 
 const program = new Command();
 
@@ -23,7 +24,7 @@ program
   .description(
     "Cairntrace — behavioral browser-spec layer for agent-in-session use",
   )
-  .version("1.3.0");
+  .version(CAIRN_VERSION);
 
 function addFormatFlags(c: Command): Command {
   return c
