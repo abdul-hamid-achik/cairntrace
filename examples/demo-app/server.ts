@@ -37,6 +37,11 @@ const server = Bun.serve({
     if (url.pathname === "/api/inventory") {
       return Response.json({ items: inventory });
     }
+    if (url.pathname === "/favicon.ico") {
+      // Browsers request this on first load of a fresh session; a 404 here
+      // would trip noFailedRequests outcomes for reasons unrelated to specs.
+      return new Response(null, { status: 204 });
+    }
     if (url.pathname === "/api/broken") {
       return Response.json(
         { error: "intentional 500 for the demo" },
