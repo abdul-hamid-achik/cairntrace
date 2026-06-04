@@ -14,7 +14,7 @@ import type {
   ScreenshotResult,
   SnapshotResult,
 } from "../browserBackend";
-import { stepToArgv } from "./commandBuilder";
+import { stepToArgv, waitConditionToArgv } from "./commandBuilder";
 import {
   buildGlobalArgs,
   parseEnvelope,
@@ -63,6 +63,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
     if ("scroll" in step && "to" in step.scroll) {
       return this.runScrollToStep(step.scroll.to);
+    }
+    if ("open" in step && typeof step.open !== "string") {
+      // Object form: navigate, then wait for the requested load state so the
+      // first interaction doesn't race SPA hydration.
+      const nav = await this.invoke(["navigate", step.open.path]);
+      if (!nav.ok) return nav;
+      return this.invoke(
+        waitConditionToArgv({
+          load: step.open.waitUntil,
+          ...(step.open.timeoutMs !== undefined
+            ? { timeoutMs: step.open.timeoutMs }
+            : {}),
+        }),
+      );
     }
     return this.invoke(stepToArgv(step));
   }

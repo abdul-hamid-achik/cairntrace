@@ -57,7 +57,14 @@ export class PlaywrightAdapter implements BrowserBackend {
     const page = await this.ensurePage();
     try {
       if ("open" in step) {
-        await page.goto(step.open, { timeout: this.opts.defaultTimeoutMs });
+        if (typeof step.open === "string") {
+          await page.goto(step.open, { timeout: this.opts.defaultTimeoutMs });
+        } else {
+          await page.goto(step.open.path, {
+            waitUntil: step.open.waitUntil,
+            timeout: step.open.timeoutMs ?? this.opts.defaultTimeoutMs,
+          });
+        }
       } else if ("click" in step) {
         await this.resolveLocator(step.click).click({
           timeout: this.opts.defaultTimeoutMs,

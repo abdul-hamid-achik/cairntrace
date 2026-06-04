@@ -1,17 +1,18 @@
-import type {
-  ClickStep,
-  DownloadStep,
-  FillStep,
-  HoverStep,
-  Locator,
-  OpenStep,
-  PressStep,
-  ScrollStep,
-  SnapshotStep,
-  Step,
-  UploadStep,
-  WaitCondition,
-  WaitStep,
+import {
+  openPath,
+  type ClickStep,
+  type DownloadStep,
+  type FillStep,
+  type HoverStep,
+  type Locator,
+  type OpenStep,
+  type PressStep,
+  type ScrollStep,
+  type SnapshotStep,
+  type Step,
+  type UploadStep,
+  type WaitCondition,
+  type WaitStep,
 } from "../../core/schema/spec.v1";
 
 /**
@@ -73,7 +74,9 @@ export function openStepToArgv(step: OpenStep): string[] {
   // Use `navigate` (not `open`) — open is for browser launch; navigate handles
   // both initial nav and subsequent nav. agent-browser lazily starts the
   // browser on first command per session, so navigate is safe as the first step.
-  return ["navigate", step.open];
+  // The object form's waitUntil is issued as a follow-up `wait --load` by the
+  // adapter (two commands), so only the navigation is built here.
+  return ["navigate", openPath(step)];
 }
 
 export function clickStepToArgv(step: ClickStep): string[] {

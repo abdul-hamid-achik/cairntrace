@@ -161,10 +161,35 @@ const stepCommon = {
   when: z.string().optional(), // simple condition string, e.g. "notAuthenticated"
 };
 
+/**
+ * `open: /path` or the object form with a post-navigation wait:
+ *   open: { path: /admin, waitUntil: networkidle, timeoutMs: 45000 }
+ *
+ * The object form exists because SPA hydration races the first interaction —
+ * a click before the framework attaches handlers is swallowed. `waitUntil`
+ * folds the `wait: { load: ... }` boilerplate into the navigation itself.
+ */
 export const OpenStepSchema = z
-  .object({ ...stepCommon, open: z.string().min(1) })
+  .object({
+    ...stepCommon,
+    open: z.union([
+      z.string().min(1),
+      z
+        .object({
+          path: z.string().min(1),
+          waitUntil: z.enum(["networkidle", "load", "domcontentloaded"]),
+          timeoutMs: z.number().int().positive().optional(),
+        })
+        .strict(),
+    ]),
+  })
   .strict();
 export type OpenStep = z.infer<typeof OpenStepSchema>;
+
+/** The navigation target of an open step, regardless of form. */
+export function openPath(step: OpenStep): string {
+  return typeof step.open === "string" ? step.open : step.open.path;
+}
 
 export const ClickStepSchema = z
   .object({ ...stepCommon, click: LocatorSchema })

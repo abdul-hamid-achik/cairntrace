@@ -121,7 +121,18 @@ function renderStep(step: Step): string[] {
 
 function renderStepBody(step: Step): string[] {
   if ("open" in step) {
-    return [`await page.goto(${JSON.stringify(step.open)});`];
+    if (typeof step.open === "string") {
+      return [`await page.goto(${JSON.stringify(step.open)});`];
+    }
+    const opts: string[] = [
+      `waitUntil: ${JSON.stringify(step.open.waitUntil)}`,
+    ];
+    if (step.open.timeoutMs !== undefined) {
+      opts.push(`timeout: ${step.open.timeoutMs}`);
+    }
+    return [
+      `await page.goto(${JSON.stringify(step.open.path)}, { ${opts.join(", ")} });`,
+    ];
   }
   if ("click" in step) {
     return [`await ${locator(step.click)}.click();`];

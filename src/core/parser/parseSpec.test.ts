@@ -259,6 +259,34 @@ steps:
     );
   });
 
+  it("prepends baseUrl to object-form open: steps and keeps waitUntil", async () => {
+    const path = join(dir, "with_base_obj.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: with_base_obj
+intent: object-form open joins baseUrl and keeps waitUntil
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: ok }
+steps:
+  - id: home
+    open: { path: /admin, waitUntil: networkidle, timeoutMs: 45000 }
+`,
+    );
+    const r = await parseSpec(path, { baseUrl: "http://localhost:9999" });
+    const step = r.resolved.steps![0] as {
+      open: { path: string; waitUntil: string; timeoutMs: number };
+    };
+    expect(step.open).toEqual({
+      path: "http://localhost:9999/admin",
+      waitUntil: "networkidle",
+      timeoutMs: 45000,
+    });
+  });
+
   it("substitutes ${baseUrl} inside string fields", async () => {
     const path = join(dir, "baseurl_var.yml");
     await writeFile(

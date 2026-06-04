@@ -12,7 +12,12 @@ import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
 import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
-import type { Spec, Step, TransformStep } from "../schema/spec.v1";
+import {
+  openPath,
+  type Spec,
+  type Step,
+  type TransformStep,
+} from "../schema/spec.v1";
 import type {
   OutcomeResult,
   RunArtifacts,
@@ -844,7 +849,7 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
     } = step.transform;
     return { kind: "transform", file, input, saveAs, assign };
   }
-  if ("open" in step) return { kind: "open", url: step.open };
+  if ("open" in step) return { kind: "open", url: openPath(step) };
   if ("wait" in step) return { kind: "wait", condition: step.wait };
   if ("press" in step) return { kind: "press", key: step.press };
   if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };

@@ -425,6 +425,53 @@ describe("strict semantic interaction resolution", () => {
   });
 });
 
+describe("open with waitUntil", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("navigates then waits for the load state", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "open-wait" });
+
+    const result = await adapter.runStep({
+      open: { path: "/admin", waitUntil: "networkidle", timeoutMs: 45000 },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenNthCalledWith(
+      1,
+      "agent-browser",
+      ["--session", "open-wait", "navigate", "/admin"],
+      expect.objectContaining({ reject: false }),
+    );
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      [
+        "--session",
+        "open-wait",
+        "wait",
+        "--load",
+        "networkidle",
+        "--timeout",
+        "45000",
+      ],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("string form stays a single navigate", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "open-plain" });
+
+    const result = await adapter.runStep({ open: "/admin" });
+
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("scroll-to with semantic locator", () => {
   beforeEach(() => {
     execaMock.mockReset();

@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Step } from "../../core/schema/spec.v1";
+import { openPath, type Step } from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -86,7 +86,7 @@ export class MockBrowserBackend implements BrowserBackend {
 
   async runStep(step: Step): Promise<InvocationResult> {
     this.stepLog.push(step);
-    if ("open" in step) this.url = step.open;
+    if ("open" in step) this.url = openPath(step);
     if ("download" in step) {
       await mkdir(dirname(step.download.saveAs), { recursive: true });
       await writeFile(step.download.saveAs, MOCK_DOWNLOAD);

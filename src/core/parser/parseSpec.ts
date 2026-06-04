@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { computeContractHash } from "../contractHash";
 import {
+  openPath,
   ReusableActionSchema,
   SpecSchema,
   type ReusableAction,
@@ -122,11 +123,17 @@ export async function parseSpec(
   // across environments without rewriting URLs by hand. This only affects
   // `resolved.steps`; `origins[i].step` remains the raw file step so heal
   // patches the file's actual content.
-  const stepsWithBaseUrl = origins.map(({ step }) =>
-    baseUrl && "open" in step && isRelativeUrl(step.open)
+  const stepsWithBaseUrl = origins.map(({ step }) => {
+    if (!baseUrl || !("open" in step) || !isRelativeUrl(openPath(step))) {
+      return step;
+    }
+    return typeof step.open === "string"
       ? { ...step, open: joinUrl(baseUrl, step.open) }
-      : step,
-  );
+      : {
+          ...step,
+          open: { ...step.open, path: joinUrl(baseUrl, step.open.path) },
+        };
+  });
 
   const resolved: Spec = { ...spec, steps: stepsWithBaseUrl };
 
