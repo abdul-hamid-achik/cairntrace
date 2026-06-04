@@ -28,6 +28,7 @@ export interface RunEvent {
     | "artifact.download"
     | "artifact.transform"
     | "artifact.diagnostics"
+    | "artifact.request"
     | "viewport.set";
   [extra: string]: unknown;
 }

@@ -23,6 +23,8 @@ export interface VerifierContext {
   specDir?: string;
   /** Named artifacts produced by steps, e.g. download.assign. */
   artifacts?: Record<string, ArtifactRef>;
+  /** Captured request-step responses, for ${requests.<name>.…} in fixtures. */
+  responses?: Record<string, unknown>;
 }
 
 /**

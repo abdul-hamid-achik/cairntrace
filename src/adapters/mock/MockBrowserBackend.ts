@@ -36,7 +36,7 @@ export class MockBrowserBackend implements BrowserBackend {
   private countBySelector = new Map<string, number>();
   private networkLog: NetworkEntry[] = [];
   private consoleLog: ConsoleEntry[] = [];
-  private scriptQueue: ScriptInvocationResult[] = [];
+  private scriptQueue: unknown[] = [];
   private stepShouldFail = false;
   private stepFailureMessage = "mock step failure";
   /** Recorded steps for assertions in tests. */
@@ -76,6 +76,10 @@ export class MockBrowserBackend implements BrowserBackend {
   /** Queue the next script-verifier result. FIFO. */
   enqueueScriptResult(r: ScriptInvocationResult): void {
     this.scriptQueue.push(r);
+  }
+  /** Queue a raw evaluate() result (e.g. a request-step response envelope). FIFO with script results. */
+  enqueueEvalResult(value: unknown): void {
+    this.scriptQueue.push(value);
   }
   failNextStep(message = "mock step failure"): void {
     this.stepShouldFail = true;

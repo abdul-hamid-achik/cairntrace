@@ -178,6 +178,11 @@ export function stepToArgv(step: Step): string[] {
       "transform steps are handled by the runner before adapter dispatch",
     );
   }
+  if ("request" in step) {
+    throw new Error(
+      "request steps are handled by the runner before adapter dispatch",
+    );
+  }
   if ("use" in step) {
     throw new Error(
       `'use: ${step.use}' must be expanded to inline steps by the runner before adapter dispatch`,

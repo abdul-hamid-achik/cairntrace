@@ -521,6 +521,100 @@ steps:
     expect(backend.clearBrowserStateCalls).toBe(1);
   });
 
+  it("captures request responses and splices fields into later steps", async () => {
+    const specPath = await writeSpec(
+      "request_flow",
+      `version: 1
+name: request_flow
+intent: fetch a token via API and fill it into the UI
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: get_token
+    request:
+      method: POST
+      url: /api/qr-token
+      body: { memberId: 42 }
+      expectStatus: 200
+      assign: qr
+  - id: fill_token
+    fill:
+      by: label
+      name: Scanner code
+      value: "\${requests.qr.body.token}"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      headers: { "content-type": "application/json" },
+      body: { token: "tok-123" },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    // The request fetch ran in page context with session cookies.
+    expect(backend.lastEvaluatedScript).toContain('credentials: "include"');
+    expect(backend.lastEvaluatedScript).toContain("/api/qr-token");
+    expect(result.artifacts.requests).toEqual({ qr: "requests/qr.json" });
+    const envelope = JSON.parse(
+      await readFile(join(result.runDir, "requests/qr.json"), "utf8"),
+    );
+    expect(envelope).toMatchObject({
+      method: "POST",
+      url: "/api/qr-token",
+      status: 200,
+      body: { token: "tok-123" },
+    });
+    // The fill step received the spliced token value.
+    expect(backend.stepLog[0]).toMatchObject({
+      fill: { by: "label", name: "Scanner code", value: "tok-123" },
+    });
+  });
+
+  it("fails the request step when expectStatus does not match", async () => {
+    const specPath = await writeSpec(
+      "request_bad_status",
+      `version: 1
+name: request_bad_status
+intent: expectStatus guards against silent API failures
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: checkout
+    request:
+      method: POST
+      url: /api/billing/checkout
+      expectStatus: [200, 201]
+      assign: checkout
+  - id: never_runs
+    open: /unreachable
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 500,
+      ok: false,
+      headers: {},
+      body: { error: "boom" },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.error).toContain("500");
+    expect(result.steps[0]!.error).toContain("expectStatus");
+  });
+
   it("applies the spec-level viewport before steps run", async () => {
     const specPath = await writeSpec(
       "viewport",

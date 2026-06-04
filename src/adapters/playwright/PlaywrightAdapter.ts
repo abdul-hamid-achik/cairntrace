@@ -113,6 +113,10 @@ export class PlaywrightAdapter implements BrowserBackend {
         throw new Error(
           "transform steps are handled by the runner before adapter dispatch",
         );
+      } else if ("request" in step) {
+        throw new Error(
+          "request steps are handled by the runner before adapter dispatch",
+        );
       } else if ("use" in step) {
         throw new Error(
           `'use: ${step.use}' must be expanded by the runner before adapter dispatch`,

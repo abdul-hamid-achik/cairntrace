@@ -130,6 +130,41 @@ const transformTargetSchema = z
   })
   .strict();
 
+/**
+ * Typed authenticated API call (the promotion of the fetch+cookie glue that
+ * kept reappearing in `script` verifiers). Runs `fetch` in the browser page
+ * context with `credentials: "include"`, so the browser session's cookies
+ * ride along on both backends. Relative `url` resolves against the current
+ * page origin.
+ *
+ * `assign` names the captured response: the full envelope is written to
+ * `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`),
+ * and later steps/fixtures can splice response fields with
+ * `${requests.<name>.body.<field>}` / `${requests.<name>.status}` — e.g.
+ * fetch a QR token via API, then `fill` it into the scanner UI.
+ */
+const requestTargetSchema = z
+  .object({
+    method: z
+      .enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+      .default("GET"),
+    url: z.string().min(1),
+    headers: z.record(z.string(), z.string()).optional(),
+    /** Objects are JSON-encoded (content-type: application/json unless overridden); strings are sent raw. */
+    body: z.unknown().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    /** Fail the step unless the response status is (one of) these. Omit to accept any completed response. */
+    expectStatus: z
+      .union([z.number().int(), z.array(z.number().int()).nonempty()])
+      .optional(),
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
+      .optional(),
+  })
+  .strict();
+
 /* ----- wait conditions ----- */
 
 export const WaitConditionSchema = z.union([
@@ -238,6 +273,12 @@ export const WaitStepSchema = z
   .strict();
 export type WaitStep = z.infer<typeof WaitStepSchema>;
 
+/** See `requestTargetSchema` above for semantics. */
+export const RequestStepSchema = z
+  .object({ ...stepCommon, request: requestTargetSchema })
+  .strict();
+export type RequestStep = z.infer<typeof RequestStepSchema>;
+
 /**
  * Keyboard key press, e.g. `press: Enter` or `press: Control+a`.
  * Useful for Enter-to-submit flows and as a below-fold submit fallback.
@@ -296,6 +337,7 @@ export const StepSchema = z.union([
   DownloadStepSchema,
   TransformStepSchema,
   WaitStepSchema,
+  RequestStepSchema,
   PressStepSchema,
   ScrollStepSchema,
   SnapshotStepSchema,

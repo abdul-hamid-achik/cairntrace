@@ -14,6 +14,7 @@ import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
 import {
   openPath,
+  type RequestStep,
   type Spec,
   type Step,
   type TransformStep,
@@ -28,8 +29,10 @@ import type { Outcome } from "../schema/spec.v1";
 import { evaluateOutcomes } from "./OutcomeEvaluator";
 import { runNodeScript } from "./nodeScripts";
 import {
+  deepMapStrings,
   resolveArtifactPlaceholders,
   resolveFixtureMap,
+  resolveResponsePlaceholders,
   resolveRuntimeFilePath,
 } from "./runtimePlaceholders";
 import { generateRunId } from "./runId";
@@ -185,6 +188,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   let didError = false;
   const downloads: Record<string, string> = {};
   const transforms: Record<string, string> = {};
+  /** request-step artifact paths by assign name (run-relative). */
+  const requests: Record<string, string> = {};
+  /** Captured request-step responses for ${requests.<name>.…} substitution. */
+  const responses: Record<string, unknown> = {};
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
 
@@ -247,7 +254,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
 
     const stepArtifacts: string[] = [];
-    let stepToRun = step;
+    // Splice captured request-response fields (${requests.<name>.…}) into any
+    // string field of the step before it runs — the hybrid-flow hook ("fetch
+    // token via API, fill it into the UI").
+    const substituted =
+      Object.keys(responses).length > 0
+        ? deepMapStrings(step, (s) => resolveResponsePlaceholders(s, responses))
+        : step;
+    let stepToRun = substituted;
     let pendingDownload:
       | {
           assign: string;
@@ -255,25 +269,30 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           absolutePath: string;
         }
       | undefined;
-    if ("download" in step) {
-      const relativePath = downloadRelativePath(step.download.saveAs);
+    if ("download" in substituted) {
+      const relativePath = downloadRelativePath(substituted.download.saveAs);
       const absolutePath = writer.resolve(relativePath);
       pendingDownload = {
-        assign: step.download.assign ?? artifactNameFromPath(relativePath),
+        assign:
+          substituted.download.assign ?? artifactNameFromPath(relativePath),
         relativePath,
         absolutePath,
       };
       await ensureParentDir(absolutePath);
       stepToRun = {
-        ...step,
-        download: { ...step.download, saveAs: absolutePath },
+        ...substituted,
+        download: { ...substituted.download, saveAs: absolutePath },
       };
-    } else if ("upload" in step) {
+    } else if ("upload" in substituted) {
       stepToRun = {
-        ...step,
+        ...substituted,
         upload: {
-          ...step.upload,
-          path: resolveUploadPath(step.upload.path, runDir, namedArtifacts),
+          ...substituted.upload,
+          path: resolveUploadPath(
+            substituted.upload.path,
+            runDir,
+            namedArtifacts,
+          ),
         },
       };
     }
@@ -282,7 +301,41 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     let stepError: string | undefined;
     let stepResolved: ResolvedElement | undefined;
     try {
-      if ("transform" in step) {
+      if ("request" in stepToRun) {
+        const requested = await runRequestStep({
+          step: stepToRun,
+          backend: opts.backend,
+          requestIndex: i + 1,
+        });
+        if (!requested.ok) {
+          stepStatus = "failed";
+          stepError = requested.error;
+        } else {
+          const relativePath = `requests/${requested.assign}.json`;
+          const absolutePath = writer.resolve(relativePath);
+          await Bun_writeFile(
+            absolutePath,
+            redactor.text(JSON.stringify(requested.response, null, 2) + "\n"),
+            true,
+          );
+          responses[requested.assign] = requested.response;
+          requests[requested.assign] = relativePath;
+          namedArtifacts[requested.assign] = {
+            kind: "request",
+            path: absolutePath,
+            relativePath,
+          };
+          stepArtifacts.push(relativePath);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.request",
+            stepId,
+            path: relativePath,
+            assign: requested.assign,
+            status: requested.response.status,
+          });
+        }
+      } else if ("transform" in step) {
         const transformed = await runTransformStep({
           step,
           runDir,
@@ -480,6 +533,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     runDir,
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
+    responses,
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
   const evaluated = await evaluateOutcomes(
@@ -548,6 +602,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(latestSnapshot ? { snapshots: [latestSnapshot] } : {}),
     ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
     ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
+    ...(Object.keys(requests).length > 0 ? { requests } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
   };
@@ -652,6 +707,123 @@ function resolveUploadPath(
     return resolve(runDir, resolved);
   }
   return resolved;
+}
+
+/** The captured envelope a request step produces. */
+interface RequestResponse {
+  url: string;
+  method: string;
+  status: number;
+  ok: boolean;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+/**
+ * Execute a `request` step as `fetch` in the browser page context via
+ * backend.evaluate — cookies ride along (credentials: include) on every
+ * backend, so authenticated API calls need no cookie glue.
+ */
+async function runRequestStep(opts: {
+  step: RequestStep;
+  backend: BrowserBackend;
+  requestIndex: number;
+}): Promise<
+  | { ok: true; assign: string; response: RequestResponse }
+  | { ok: false; error: string }
+> {
+  const req = opts.step.request;
+  const assign = req.assign ?? `request_${opts.requestIndex}`;
+
+  const result = await opts.backend.evaluate(buildRequestScript(req));
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: `request eval failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`,
+    };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+  } catch {
+    return {
+      ok: false,
+      error: `request returned non-JSON eval output: ${result.stdout.slice(0, 200)}`,
+    };
+  }
+  if (parsed && typeof parsed["requestError"] === "string") {
+    return {
+      ok: false,
+      error: `request failed: ${parsed["requestError"]} (${req.method} ${req.url})`,
+    };
+  }
+
+  const response: RequestResponse = {
+    url: req.url,
+    method: req.method,
+    status: typeof parsed["status"] === "number" ? parsed["status"] : 0,
+    ok: Boolean(parsed["ok"]),
+    headers:
+      parsed["headers"] && typeof parsed["headers"] === "object"
+        ? (parsed["headers"] as Record<string, string>)
+        : {},
+    body: parsed["body"],
+  };
+
+  if (req.expectStatus !== undefined) {
+    const allowed = Array.isArray(req.expectStatus)
+      ? req.expectStatus
+      : [req.expectStatus];
+    if (!allowed.includes(response.status)) {
+      const bodyExcerpt = JSON.stringify(response.body)?.slice(0, 300) ?? "";
+      return {
+        ok: false,
+        error: `request status ${response.status} not in expectStatus [${allowed.join(", ")}] (${req.method} ${req.url}) body: ${bodyExcerpt}`,
+      };
+    }
+  }
+
+  return { ok: true, assign, response };
+}
+
+function buildRequestScript(req: RequestStep["request"]): string {
+  const headers: Record<string, string> = { ...req.headers };
+  let bodyExpr: string | undefined;
+  if (req.body !== undefined) {
+    if (typeof req.body === "string") {
+      bodyExpr = JSON.stringify(req.body);
+    } else {
+      bodyExpr = JSON.stringify(JSON.stringify(req.body));
+      const hasContentType = Object.keys(headers).some(
+        (h) => h.toLowerCase() === "content-type",
+      );
+      if (!hasContentType) headers["content-type"] = "application/json";
+    }
+  }
+  return [
+    `(async () => {`,
+    `  try {`,
+    `    const res = await fetch(${JSON.stringify(req.url)}, {`,
+    `      method: ${JSON.stringify(req.method)},`,
+    `      credentials: "include",`,
+    `      headers: ${JSON.stringify(headers)},`,
+    ...(bodyExpr !== undefined ? [`      body: ${bodyExpr},`] : []),
+    ...(req.timeoutMs !== undefined
+      ? [`      signal: AbortSignal.timeout(${req.timeoutMs}),`]
+      : []),
+    `    });`,
+    `    const text = await res.text();`,
+    `    let body = null;`,
+    `    try { body = JSON.parse(text); } catch (_) { body = text; }`,
+    `    const headers = {};`,
+    `    res.headers.forEach((v, k) => { headers[k] = v; });`,
+    `    return { status: res.status, ok: res.ok, headers, body };`,
+    `  } catch (e) {`,
+    `    return { requestError: String((e && e.message) || e) };`,
+    `  }`,
+    `})()`,
+  ].join("\n");
 }
 
 async function runTransformStep(opts: {
@@ -850,6 +1022,13 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
     return { kind: "transform", file, input, saveAs, assign };
   }
   if ("open" in step) return { kind: "open", url: openPath(step) };
+  if ("request" in step) {
+    return {
+      kind: "request",
+      method: step.request.method,
+      url: step.request.url,
+    };
+  }
   if ("wait" in step) return { kind: "wait", condition: step.wait };
   if ("press" in step) return { kind: "press", key: step.press };
   if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };

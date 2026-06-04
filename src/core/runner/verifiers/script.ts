@@ -173,7 +173,11 @@ function resolveRuntimeFixtures(
   verifier: ScriptVerifier,
   ctx: VerifierContext,
 ): Record<string, string> {
-  return resolveFixtureMap(verifier.script.fixtures, ctx.artifacts);
+  return resolveFixtureMap(
+    verifier.script.fixtures,
+    ctx.artifacts,
+    ctx.responses,
+  );
 }
 
 function truncate(s: string, max: number): string {

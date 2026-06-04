@@ -166,6 +166,16 @@ function renderStepBody(step: Step): string[] {
       `// transform step skipped — Cairntrace runs ${JSON.stringify(step.transform.file)} in Node`,
     ];
   }
+  if ("request" in step) {
+    const r = step.request;
+    return [
+      `// request step (${r.assign ?? "unnamed"}) — response-field splicing not exported`,
+      `await page.evaluate(async () => {`,
+      `  const res = await fetch(${JSON.stringify(r.url)}, { method: ${JSON.stringify(r.method)}, credentials: "include" });`,
+      `  if (!res.ok) throw new Error(\`request failed: \${res.status}\`);`,
+      `});`,
+    ];
+  }
   if ("wait" in step) {
     const w = step.wait;
     const timeout = w.timeoutMs ?? 30_000;
