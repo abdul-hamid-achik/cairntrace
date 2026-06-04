@@ -341,6 +341,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           runDir,
           specDir: dirname(specPath),
           artifacts: namedArtifacts,
+          vars: runtime.vars,
         });
         if (!transformed.ok) {
           stepStatus = "failed";
@@ -534,6 +535,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
     responses,
+    vars: runtime.vars,
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
   const evaluated = await evaluateOutcomes(
@@ -831,6 +833,7 @@ async function runTransformStep(opts: {
   runDir: string;
   specDir: string;
   artifacts: Record<string, ArtifactRef>;
+  vars?: Record<string, string | number | boolean>;
 }): Promise<
   | {
       ok: true;
@@ -865,6 +868,7 @@ async function runTransformStep(opts: {
       outputPath: absolutePath,
       fixtures: resolveFixtureMap(target.fixtures, opts.artifacts),
       artifacts: opts.artifacts,
+      vars: opts.vars ?? {},
       runDir: opts.runDir,
       specDir: opts.specDir,
     },

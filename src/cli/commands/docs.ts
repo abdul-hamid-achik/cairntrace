@@ -302,11 +302,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Execution Context",
-        body: "Browser scripts can read DOM state and use injected `fixtures` and `artifacts`. Node scripts receive `ctx` with `fixtures`, `artifacts`, `runDir`, and `specDir`, and can import project dependencies or read files with `fs`.",
+        body: "Browser scripts can read DOM state and use injected `fixtures`, `artifacts`, and `vars`. Node scripts receive `ctx` with `fixtures`, `artifacts`, `vars` (resolved config/CLI vars for the active environment), `runDir`, and `specDir`, and can import project dependencies or read files with `fs`.",
       },
       {
         title: "Return Shape",
         body: "The body should `return { ok: boolean, evidence: unknown }`. Evidence is summarized in the outcome markdown and retained in a raw JSON sidecar when needed.",
+      },
+      {
+        title: "Node Import Gotcha",
+        body: "Node verifier files run under Node's TypeScript type-stripping, so relative imports MUST carry an explicit extension: `import { helper } from './lib.ts'` — a bare `./lib` fails with `Cannot find module`.",
       },
     ],
     examples: [

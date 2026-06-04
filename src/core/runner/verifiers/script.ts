@@ -70,6 +70,7 @@ async function evaluateNodeScript(
     ctx: {
       fixtures: resolveRuntimeFixtures(verifier, ctx),
       artifacts: ctx.artifacts ?? {},
+      vars: ctx.vars ?? {},
       runDir: ctx.runDir,
       specDir: ctx.specDir,
     },
@@ -155,6 +156,7 @@ function buildScript(
 ): string {
   const fixtures = JSON.stringify(resolveRuntimeFixtures(verifier, ctx));
   const artifacts = JSON.stringify(ctx.artifacts ?? {});
+  const vars = JSON.stringify(ctx.vars ?? {});
   // The user's `run` body should `return { ok, evidence }`. We wrap it in a
   // function call so the body can use `return` statements; agent-browser's
   // `eval` then auto-stringifies the returned object as JSON.
@@ -162,6 +164,7 @@ function buildScript(
     `(function(){`,
     `  const fixtures = ${fixtures};`,
     `  const artifacts = ${artifacts};`,
+    `  const vars = ${vars};`,
     `  return (function(){`,
     source,
     `  })();`,

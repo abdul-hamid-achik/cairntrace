@@ -521,6 +521,38 @@ steps:
     expect(backend.clearBrowserStateCalls).toBe(1);
   });
 
+  it("exposes resolved config vars as ctx.vars to node verifiers", async () => {
+    await writeFile(
+      join(workDir, "vars-check.ts"),
+      `export default async function verify(ctx) {
+  return { ok: ctx.vars.connectionPath === "/connection/abc", evidence: ctx.vars };
+}
+`,
+    );
+    const specPath = await writeSpec(
+      "node_ctx_vars",
+      `version: 1
+name: node_ctx_vars
+intent: node verifiers see resolved vars without fixture threading
+outcomes:
+  - id: vars_visible
+    description: ctx.vars carries config vars
+    verify:
+      script:
+        runtime: node
+        file: ./vars-check.ts
+steps: []
+`,
+    );
+
+    // workDir has a cairntrace.config.yml (written by the config-var test
+    // above) defining vars.connectionPath = /connection/abc.
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+  });
+
   it("captures request responses and splices fields into later steps", async () => {
     const specPath = await writeSpec(
       "request_flow",
