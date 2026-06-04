@@ -213,6 +213,36 @@ export const WaitStepSchema = z
   .strict();
 export type WaitStep = z.infer<typeof WaitStepSchema>;
 
+/**
+ * Keyboard key press, e.g. `press: Enter` or `press: Control+a`.
+ * Useful for Enter-to-submit flows and as a below-fold submit fallback.
+ */
+export const PressStepSchema = z
+  .object({ ...stepCommon, press: z.string().min(1) })
+  .strict();
+export type PressStep = z.infer<typeof PressStepSchema>;
+
+/**
+ * Scroll the page by direction/pixels, or bring a locator into view:
+ *   - scroll: { direction: down, px: 600 }
+ *   - scroll: { to: { by: role, role: button, name: Submit } }
+ */
+export const ScrollStepSchema = z
+  .object({
+    ...stepCommon,
+    scroll: z.union([
+      z
+        .object({
+          direction: z.enum(["up", "down", "left", "right"]),
+          px: z.number().int().positive().optional(),
+        })
+        .strict(),
+      z.object({ to: LocatorSchema }).strict(),
+    ]),
+  })
+  .strict();
+export type ScrollStep = z.infer<typeof ScrollStepSchema>;
+
 export const SnapshotStepSchema = z
   .object({
     ...stepCommon,
@@ -241,6 +271,8 @@ export const StepSchema = z.union([
   DownloadStepSchema,
   TransformStepSchema,
   WaitStepSchema,
+  PressStepSchema,
+  ScrollStepSchema,
   SnapshotStepSchema,
   UseStepSchema,
 ]);

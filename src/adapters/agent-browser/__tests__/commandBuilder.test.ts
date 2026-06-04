@@ -216,6 +216,37 @@ describe("stepToArgv", () => {
     ).toEqual(["wait", "--text", "Imported", "--timeout", "30000"]);
   });
 
+  it("press → press <key>", () => {
+    expect(stepToArgv({ press: "Enter" })).toEqual(["press", "Enter"]);
+    expect(stepToArgv({ press: "Control+a" })).toEqual(["press", "Control+a"]);
+  });
+
+  it("scroll by direction → scroll <dir> [px]", () => {
+    expect(stepToArgv({ scroll: { direction: "down" } })).toEqual([
+      "scroll",
+      "down",
+    ]);
+    expect(stepToArgv({ scroll: { direction: "down", px: 600 } })).toEqual([
+      "scroll",
+      "down",
+      "600",
+    ]);
+  });
+
+  it("scroll to selector → scrollintoview <selector>", () => {
+    expect(
+      stepToArgv({ scroll: { to: { by: "selector", selector: "#footer" } } }),
+    ).toEqual(["scrollintoview", "#footer"]);
+  });
+
+  it("scroll to semantic locator must be resolved by the adapter", () => {
+    expect(() =>
+      stepToArgv({
+        scroll: { to: { by: "role", role: "button", name: "Submit" } },
+      }),
+    ).toThrow(/resolved by AgentBrowserAdapter/);
+  });
+
   it("snapshot interactive", () => {
     expect(stepToArgv({ snapshot: { interactive: true } })).toEqual([
       "snapshot",

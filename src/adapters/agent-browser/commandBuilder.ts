@@ -5,6 +5,8 @@ import type {
   HoverStep,
   Locator,
   OpenStep,
+  PressStep,
+  ScrollStep,
   SnapshotStep,
   Step,
   UploadStep,
@@ -133,6 +135,24 @@ export function snapshotStepToArgv(step: SnapshotStep): string[] {
   return argv;
 }
 
+export function pressStepToArgv(step: PressStep): string[] {
+  return ["press", step.press];
+}
+
+export function scrollStepToArgv(step: ScrollStep): string[] {
+  if ("direction" in step.scroll) {
+    const argv = ["scroll", step.scroll.direction];
+    if (step.scroll.px !== undefined) argv.push(String(step.scroll.px));
+    return argv;
+  }
+  if (step.scroll.to.by === "selector") {
+    return ["scrollintoview", step.scroll.to.selector];
+  }
+  throw new Error(
+    "semantic scroll.to locators must be resolved by AgentBrowserAdapter",
+  );
+}
+
 /* ----- top-level dispatch ----- */
 
 /**
@@ -147,6 +167,8 @@ export function stepToArgv(step: Step): string[] {
   if ("upload" in step) return uploadStepToArgv(step);
   if ("download" in step) return downloadStepToArgv(step);
   if ("wait" in step) return waitStepToArgv(step);
+  if ("press" in step) return pressStepToArgv(step);
+  if ("scroll" in step) return scrollStepToArgv(step);
   if ("snapshot" in step) return snapshotStepToArgv(step);
   if ("transform" in step) {
     throw new Error(

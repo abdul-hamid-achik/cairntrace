@@ -180,6 +180,19 @@ function renderStepBody(step: Step): string[] {
       `await page.waitForLoadState(${JSON.stringify(w.load)}, { timeout: ${timeout} });`,
     ];
   }
+  if ("press" in step) {
+    return [`await page.keyboard.press(${JSON.stringify(step.press)});`];
+  }
+  if ("scroll" in step) {
+    if ("to" in step.scroll) {
+      return [`await ${locator(step.scroll.to)}.scrollIntoViewIfNeeded();`];
+    }
+    const px = step.scroll.px ?? 400;
+    const { direction } = step.scroll;
+    const dx = direction === "left" ? -px : direction === "right" ? px : 0;
+    const dy = direction === "up" ? -px : direction === "down" ? px : 0;
+    return [`await page.mouse.wheel(${dx}, ${dy});`];
+  }
   if ("snapshot" in step) {
     return [
       `// snapshot step skipped — Playwright traces cover this via context.tracing`,

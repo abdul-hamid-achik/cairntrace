@@ -425,6 +425,36 @@ describe("strict semantic interaction resolution", () => {
   });
 });
 
+describe("scroll-to with semantic locator", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("resolves the locator and issues scrollintoview @ref", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Submit" [ref=e8]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "scroll-test" });
+
+    const result = await adapter.runStep({
+      scroll: { to: { by: "role", role: "button", name: "Submit" } },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement?.ref).toBe("e8");
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "scroll-test", "scrollintoview", "@e8"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+});
+
 describe("collapseNestedMatches", () => {
   it("collapses a same-named control nested in its container to one match", () => {
     const snap = parseSnapshot(

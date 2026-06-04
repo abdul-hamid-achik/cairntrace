@@ -846,6 +846,8 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   }
   if ("open" in step) return { kind: "open", url: step.open };
   if ("wait" in step) return { kind: "wait", condition: step.wait };
+  if ("press" in step) return { kind: "press", key: step.press };
+  if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };
   if ("snapshot" in step) return { kind: "snapshot" };
   return { kind: "use", action: step.use };
 }
@@ -869,6 +871,8 @@ function diagnosticNeedles(step: Step): string[] {
     if ("text" in step.wait) add(step.wait.text);
     if ("notText" in step.wait) add(step.wait.notText);
   }
+  if ("scroll" in step && "to" in step.scroll)
+    add(locatorNeedle(step.scroll.to));
   return values.slice(0, 10);
 }
 

@@ -85,6 +85,21 @@ export class PlaywrightAdapter implements BrowserBackend {
         await download.saveAs(saveAs);
       } else if ("wait" in step) {
         await this.applyWait(page, step.wait);
+      } else if ("press" in step) {
+        await page.keyboard.press(step.press);
+      } else if ("scroll" in step) {
+        if ("to" in step.scroll) {
+          await this.resolveLocator(step.scroll.to).scrollIntoViewIfNeeded({
+            timeout: this.opts.defaultTimeoutMs,
+          });
+        } else {
+          const px = step.scroll.px ?? DEFAULT_SCROLL_PX;
+          const { direction } = step.scroll;
+          const dx =
+            direction === "left" ? -px : direction === "right" ? px : 0;
+          const dy = direction === "up" ? -px : direction === "down" ? px : 0;
+          await page.mouse.wheel(dx, dy);
+        }
       } else if ("snapshot" in step) {
         // Snapshot is captured by the Runner via .snapshot() — no-op here.
       } else if ("transform" in step) {
@@ -443,6 +458,9 @@ export class PlaywrightAdapter implements BrowserBackend {
 }
 
 /* ----- helpers ----- */
+
+/** Matches agent-browser's default `scroll <dir>` distance closely enough. */
+const DEFAULT_SCROLL_PX = 400;
 
 /**
  * Cairntrace semantic-name semantics: whole-name, case-insensitive by

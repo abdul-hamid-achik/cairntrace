@@ -61,7 +61,25 @@ export class AgentBrowserAdapter implements BrowserBackend {
       const { path, ...locator } = step.upload;
       return this.runInteractiveStep(locator as Locator, "upload", path);
     }
+    if ("scroll" in step && "to" in step.scroll) {
+      return this.runScrollToStep(step.scroll.to);
+    }
     return this.invoke(stepToArgv(step));
+  }
+
+  /** `scroll: { to: <locator> }` — semantic locators resolve strictly first. */
+  private async runScrollToStep(locator: Locator): Promise<InvocationResult> {
+    if (locator.by === "selector") {
+      return this.invoke(["scrollintoview", locator.selector]);
+    }
+    const resolved = await this.resolveInteractiveRef(
+      locator,
+      this.locatorTimeoutMs(),
+      "scroll",
+    );
+    if (!resolved.ok) return resolved.result;
+    const r = await this.invoke(["scrollintoview", `@${resolved.element.ref}`]);
+    return { ...r, resolvedElement: toResolvedElement(resolved.element) };
   }
 
   /* ----- artifact capture ----- */
