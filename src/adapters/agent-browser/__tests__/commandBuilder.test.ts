@@ -37,6 +37,29 @@ describe("locatorToArgv", () => {
     ]);
   });
 
+  it("role with exact → appends --exact", () => {
+    expect(
+      locatorToArgv(
+        { by: "role", role: "button", name: "Apply", exact: true },
+        "click",
+      ),
+    ).toEqual([
+      "find",
+      "role",
+      "button",
+      "click",
+      "--name",
+      "Apply",
+      "--exact",
+    ]);
+  });
+
+  it("label with exact → appends --exact", () => {
+    expect(
+      locatorToArgv({ by: "label", name: "Email", exact: true }, "fill", "x"),
+    ).toEqual(["find", "label", "Email", "fill", "x", "--exact"]);
+  });
+
   it("selector → falls back to raw <action> <selector>", () => {
     expect(
       locatorToArgv({ by: "selector", selector: "#submit" }, "click"),

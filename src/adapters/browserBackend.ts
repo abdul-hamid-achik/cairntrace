@@ -6,6 +6,18 @@ import type { Step } from "../core/schema/spec.v1";
  * only — not on any specific backend — so backends are swappable.
  */
 
+/**
+ * The element an interactive step actually acted on, captured from the
+ * accessibility snapshot at resolution time. Step-level evidence: issues 1–3
+ * of the liftclub dogfood report were diagnosable only by manual CLI
+ * bisection because runs never recorded what a click really hit.
+ */
+export interface ResolvedElement {
+  role: string;
+  name?: string;
+  ref?: string;
+}
+
 export interface InvocationResult {
   ok: boolean;
   stdout: string;
@@ -13,6 +25,8 @@ export interface InvocationResult {
   exitCode: number;
   durationMs: number;
   argv: string[];
+  /** Present when the backend resolved a semantic locator before acting. */
+  resolvedElement?: ResolvedElement;
 }
 
 export interface SnapshotResult {

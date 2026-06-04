@@ -194,15 +194,24 @@ function renderStepBody(step: Step): string[] {
 }
 
 function locator(loc: Locator): string {
+  const nth = "nth" in loc && loc.nth !== undefined ? `.nth(${loc.nth})` : "";
   switch (loc.by) {
-    case "role":
+    case "role": {
+      const opts: string[] = [];
+      if (loc.name) opts.push(`name: ${JSON.stringify(loc.name)}`);
+      if (loc.exact) opts.push("exact: true");
       return `page.getByRole(${JSON.stringify(loc.role)}${
-        loc.name ? `, { name: ${JSON.stringify(loc.name)} }` : ""
-      })`;
+        opts.length > 0 ? `, { ${opts.join(", ")} }` : ""
+      })${nth}`;
+    }
     case "label":
-      return `page.getByLabel(${JSON.stringify(loc.name)})`;
+      return `page.getByLabel(${JSON.stringify(loc.name)}${
+        loc.exact ? ", { exact: true }" : ""
+      })${nth}`;
     case "text":
-      return `page.getByText(${JSON.stringify(loc.text)})`;
+      return `page.getByText(${JSON.stringify(loc.text)}${
+        loc.exact ? ", { exact: true }" : ""
+      })${nth}`;
     case "selector":
       return `page.locator(${JSON.stringify(loc.selector)})`;
   }

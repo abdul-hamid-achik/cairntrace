@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
   BrowserBackend,
+  ResolvedElement,
 } from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
 import { createArtifactRedactor } from "../artifacts/redaction";
@@ -258,6 +259,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
 
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
+    let stepResolved: ResolvedElement | undefined;
     try {
       if ("transform" in step) {
         const transformed = await runTransformStep({
@@ -287,6 +289,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         }
       } else {
         const r = await opts.backend.runStep(stepToRun);
+        stepResolved = r.resolvedElement;
         if (!r.ok) {
           stepStatus = "failed";
           stepError = r.stderr.trim() || `exit ${r.exitCode}`;
@@ -377,6 +380,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       durationMs,
       ...(stepError ? { error: stepError } : {}),
       ...(stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
+      ...(stepResolved ? { resolved: stepResolved } : {}),
     });
 
     await writer.appendEvent({
@@ -385,6 +389,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       stepId,
       durationMs,
       ...(stepError ? { error: stepError } : {}),
+      ...(stepResolved ? { resolved: stepResolved } : {}),
     });
     opts.listener?.onStepFinish?.(i, stepId, stepStatus, durationMs, stepError);
 

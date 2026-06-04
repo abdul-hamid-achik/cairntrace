@@ -14,6 +14,10 @@ Agents author + run + heal those specs via the `cairn` CLI or the MCP server.
 - MCP server: `cairn mcp` (stdio JSON-RPC) — preferred path for MCP-aware agents
 - Plan: `~/notes/cairntrace_project_plan.md` (private to the author)
 - Examples: [`examples/`](./examples) — a tiny demo app + spec YAMLs
+- Distribution: **not published to npm or GitHub Packages.** Users install by
+  cloning `github.com/abdul-hamid-achik/cairntrace`, running `bun install`,
+  and using `./bin/cairn` (optionally symlinked onto `$PATH`). Releases are
+  git tags mirrored as GitHub release pages.
 
 ## Architecture in 60 seconds
 
@@ -159,4 +163,20 @@ Only promote to a typed verifier when 3+ real specs would benefit.
 - Smoke-test against the demo app if you touched anything in the run/heal
   pipeline (see `examples/README.md`).
 - Tag intentionally — significant feature sets get a `vX.Y.Z` git tag with a
-  release-note style commit message.
+  release-note style commit message. Bump `package.json` `version` in the
+  same commit. Push tags and create releases only when the user asks.
+
+## Releasing (on the user's request only)
+
+```bash
+git tag -a vX.Y.Z -m "<release-note style message>"
+git push origin main vX.Y.Z
+gh release create vX.Y.Z --title vX.Y.Z --generate-notes
+```
+
+- `vX.Y.Z` tags are the **only** tag kind. Do not create or move a floating
+  `latest` tag — GitHub marks the newest release "Latest" automatically, and
+  `<repo>/releases/latest` always points at it.
+- The README install guide deliberately hardcodes no version; it resolves the
+  newest tag with `git tag --sort=-v:refname`. Nothing in the docs needs a
+  version bump at release time — only `package.json`.

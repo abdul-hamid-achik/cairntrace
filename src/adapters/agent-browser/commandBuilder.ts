@@ -16,10 +16,13 @@ import type {
  * Pure functions mapping a behavioral Step → agent-browser argv.
  * No I/O; all side effects live in AgentBrowserAdapter.
  *
- * Locators use agent-browser's semantic `find` family wherever possible
- * (find role / find label / find text), falling back to raw selectors only
- * for `by: "selector"` locators. This matches agent-browser's AI-ergonomic
- * model and keeps specs resilient to UI changes.
+ * NOTE: for interactive steps (click/hover/fill/upload) with semantic
+ * locators, AgentBrowserAdapter no longer dispatches through the `find`
+ * family — it resolves the locator against the interactive snapshot first
+ * (strict matching, scroll-into-view, resolved-element evidence) and acts on
+ * the `@ref`. agent-browser's `find` reported success on zero matches, which
+ * produced silent no-op clicks (dogfood P0 #1). The find path below remains
+ * for selector locators, `batch`, and as a documented fallback.
  */
 
 /* ----- locator dispatch ----- */
@@ -39,16 +42,19 @@ export function locatorToArgv(
       const argv = ["find", "role", loc.role, action];
       if (value !== undefined) argv.push(value);
       if (loc.name !== undefined) argv.push("--name", loc.name);
+      if (loc.exact) argv.push("--exact");
       return argv;
     }
     case "label": {
       const argv = ["find", "label", loc.name, action];
       if (value !== undefined) argv.push(value);
+      if (loc.exact) argv.push("--exact");
       return argv;
     }
     case "text": {
       const argv = ["find", "text", loc.text, action];
       if (value !== undefined) argv.push(value);
+      if (loc.exact) argv.push("--exact");
       return argv;
     }
     case "selector": {

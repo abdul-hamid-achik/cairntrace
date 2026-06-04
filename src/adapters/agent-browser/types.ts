@@ -18,6 +18,11 @@ export interface AgentBrowserOptions {
   initialStatePath?: string;
   /** Per-command timeout in milliseconds; agent-browser exits non-zero on timeout. */
   defaultTimeoutMs?: number;
+  /**
+   * How long interactive steps poll the snapshot for a semantic locator to
+   * resolve before failing with "element not found". Default 10s.
+   */
+  locatorTimeoutMs?: number;
   /** Where screenshot files land (--screenshot-dir). */
   screenshotDir?: string;
   /** Cap on the agent-browser stdout size (--max-output). */

@@ -3,18 +3,14 @@ import {
   parseSnapshot,
   type SnapshotElement,
 } from "../../core/healer/snapshotParser";
-import type {
-  DownloadStep,
-  HoverStep,
-  Locator,
-  Step,
-} from "../../core/schema/spec.v1";
+import type { DownloadStep, Locator, Step } from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
   InvocationResult,
   NetworkEntry,
   NetworkFilter,
+  ResolvedElement,
   ScreenshotResult,
   SnapshotResult,
 } from "../browserBackend";
@@ -55,7 +51,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   async runStep(step: Step): Promise<InvocationResult> {
     if ("download" in step) return this.runDownloadStep(step);
-    if ("hover" in step) return this.runHoverStep(step);
+    if ("click" in step) return this.runInteractiveStep(step.click, "click");
+    if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
+    if ("fill" in step) {
+      const { value, ...locator } = step.fill;
+      return this.runInteractiveStep(locator as Locator, "fill", value);
+    }
+    if ("upload" in step) {
+      const { path, ...locator } = step.upload;
+      return this.runInteractiveStep(locator as Locator, "upload", path);
+    }
     return this.invoke(stepToArgv(step));
   }
 
@@ -307,17 +312,66 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
     const resolved = await this.resolveInteractiveRef(
       locator as Locator,
-      timeoutMs ?? DEFAULT_LOCATOR_TIMEOUT_MS,
+      timeoutMs ?? this.locatorTimeoutMs(),
+      "download",
+      { preferLinkAncestor: true },
     );
     if (!resolved.ok) return resolved.result;
-    return this.invoke(["download", resolved.ref, saveAs], { timeoutMs });
+    const r = await this.invoke(
+      ["download", `@${resolved.element.ref}`, saveAs],
+      {
+        timeoutMs,
+      },
+    );
+    return { ...r, resolvedElement: toResolvedElement(resolved.element) };
   }
 
-  private async runHoverStep(step: HoverStep): Promise<InvocationResult> {
-    if (step.hover.by === "selector") {
-      await this.scrollSelectorIntoView(step.hover.selector);
+  /**
+   * Click / hover / fill / upload, with the P0 dogfood fixes baked in:
+   *
+   *   1. Semantic locators resolve against the interactive accessibility
+   *      snapshot BEFORE acting — zero matches fail here, at this step, with
+   *      candidate diagnostics (never a silent `find … ✓ Done` no-op).
+   *   2. The resolved element is scrolled into view first; agent-browser
+   *      actions don't auto-scroll and below-fold targets silently no-op.
+   *   3. Matching is against accessible names (post-text-transform),
+   *      case-insensitive whole-name by default, visible-only (hidden nodes
+   *      aren't in the a11y tree), and ambiguity is a hard error unless the
+   *      locator carries `nth`.
+   */
+  private async runInteractiveStep(
+    locator: Locator,
+    action: "click" | "hover" | "fill" | "upload",
+    value?: string,
+  ): Promise<InvocationResult> {
+    if (locator.by === "selector") {
+      // Selector locators skip snapshot resolution (agent-browser errors on
+      // missing selectors already) but still get the scroll-into-view guard.
+      await this.scrollSelectorIntoView(locator.selector);
+      const argv = [action, locator.selector];
+      if (value !== undefined) argv.push(value);
+      return this.invoke(argv);
     }
-    return this.invoke(stepToArgv(step));
+
+    const resolved = await this.resolveInteractiveRef(
+      locator,
+      this.locatorTimeoutMs(),
+      action,
+    );
+    if (!resolved.ok) return resolved.result;
+
+    // Best-effort: a failed scroll shouldn't fail the step — the action
+    // itself will surface a real problem.
+    await this.invoke(["scrollintoview", `@${resolved.element.ref}`]);
+
+    const argv = [action, `@${resolved.element.ref}`];
+    if (value !== undefined) argv.push(value);
+    const r = await this.invoke(argv);
+    return { ...r, resolvedElement: toResolvedElement(resolved.element) };
+  }
+
+  private locatorTimeoutMs(): number {
+    return this.opts.locatorTimeoutMs ?? DEFAULT_LOCATOR_TIMEOUT_MS;
   }
 
   private async scrollSelectorIntoView(selector: string): Promise<void> {
@@ -337,8 +391,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
   private async resolveInteractiveRef(
     locator: Locator,
     timeoutMs: number,
+    action: string,
+    opts: { preferLinkAncestor?: boolean } = {},
   ): Promise<
-    { ok: true; ref: string } | { ok: false; result: InvocationResult }
+    | { ok: true; element: SnapshotElement }
+    | { ok: false; result: InvocationResult }
   > {
     const start = Date.now();
     const deadline = start + Math.max(0, timeoutMs);
@@ -347,25 +404,53 @@ export class AgentBrowserAdapter implements BrowserBackend {
       stdout: "",
       stderr: "",
     };
+    let lastShortfall: string | undefined;
 
     // Poll the interactive snapshot until the locator resolves or the timeout
-    // expires — parity with click's wait-for-visibility behavior. Selector-only
-    // downloads skip this path; agent-browser's `download <selector>` waits on
-    // its own.
+    // expires — parity with Playwright's wait-for-visibility behavior.
     while (true) {
       const snapshot = await this.invoke(["snapshot", "-i"]);
       lastSnapshot = snapshot;
       if (snapshot.ok) {
         const parsed = parseSnapshot(snapshot.stdout);
-        const matchIdx = matchingSnapshotIndices(locator, parsed);
-        if (matchIdx.length > 0) {
-          // Prefer the enclosing actionable ancestor (typically <a href download>)
-          // when the locator resolves to an inner control like a > button.
-          const idx = matchIdx[0]!;
-          const target = preferActionableAncestor(idx, parsed) ?? parsed[idx]!;
-          if (target.ref) {
-            return { ok: true, ref: `@${target.ref}` };
+        const matchIdx = collapseNestedMatches(
+          matchingSnapshotIndices(locator, parsed),
+          parsed,
+        );
+        const nth = "nth" in locator ? locator.nth : undefined;
+        if (nth !== undefined) {
+          if (nth < matchIdx.length) {
+            return {
+              ok: true,
+              element: this.pickTarget(matchIdx[nth]!, parsed, opts),
+            };
           }
+          // nth out of range can be transient while the page hydrates — keep
+          // polling and report the shortfall if the timeout expires.
+          if (matchIdx.length > 0) {
+            lastShortfall = `nth=${nth} requested but only ${matchIdx.length} match(es) visible`;
+          }
+        } else if (matchIdx.length === 1) {
+          return {
+            ok: true,
+            element: this.pickTarget(matchIdx[0]!, parsed, opts),
+          };
+        } else if (matchIdx.length > 1) {
+          // Strict mode: ambiguity won't resolve itself by waiting — fail now
+          // with the candidate list (Playwright strict-mode style).
+          return {
+            ok: false,
+            result: this.unresolvedFailure(action, start, [
+              `ambiguous ${describeLocator(locator)} for ${action}: ${matchIdx.length} visible matches`,
+              ...matchIdx.map((i) => {
+                const el = parsed[i]!;
+                return `  - ${el.role} ${
+                  el.name ? JSON.stringify(el.name) : "<no name>"
+                } ref=${el.ref}`;
+              }),
+              "disambiguate with `exact: true`, `nth: <index>`, a more specific name, or `by: selector`",
+            ]),
+          };
         }
       }
       if (Date.now() >= deadline) break;
@@ -376,7 +461,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const parsed = lastSnapshot.ok ? parseSnapshot(lastSnapshot.stdout) : [];
     const diagnostics = buildLocatorDiagnostics(locator, parsed);
     const stderrLines = [
-      `could not resolve ${describeLocator(locator)} to an interactive snapshot ref for download within ${timeoutMs}ms`,
+      `element not found: could not resolve ${describeLocator(locator)} for ${action} within ${timeoutMs}ms`,
+      ...(lastShortfall ? [lastShortfall] : []),
       ...diagnostics,
     ];
     if (!lastSnapshot.ok && lastSnapshot.stderr) {
@@ -384,20 +470,43 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
     return {
       ok: false,
-      result: {
-        ok: false,
-        stdout: "",
-        stderr: stderrLines.join("\n"),
-        exitCode: 1,
-        durationMs: Date.now() - start,
-        argv: [
-          "--session",
-          this.opts.session,
-          ...this.globalArgs,
-          "download",
-          "<unresolved>",
-        ],
-      },
+      result: this.unresolvedFailure(action, start, stderrLines),
+    };
+  }
+
+  /**
+   * Return the element to act on for a matched index — for downloads, prefer
+   * the enclosing actionable ancestor (typically `<a href download>`).
+   */
+  private pickTarget(
+    idx: number,
+    parsed: SnapshotElement[],
+    opts: { preferLinkAncestor?: boolean },
+  ): SnapshotElement {
+    if (opts.preferLinkAncestor) {
+      return preferActionableAncestor(idx, parsed) ?? parsed[idx]!;
+    }
+    return parsed[idx]!;
+  }
+
+  private unresolvedFailure(
+    action: string,
+    startedAt: number,
+    stderrLines: string[],
+  ): InvocationResult {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: stderrLines.join("\n"),
+      exitCode: 1,
+      durationMs: Date.now() - startedAt,
+      argv: [
+        "--session",
+        this.opts.session,
+        ...this.globalArgs,
+        action,
+        "<unresolved>",
+      ],
     };
   }
 
@@ -457,15 +566,71 @@ function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
     case "role":
       return (
         el.role === locator.role &&
-        (locator.name === undefined || el.name === locator.name)
+        (locator.name === undefined ||
+          nameMatches(el.name, locator.name, locator.exact))
       );
     case "label":
-      return el.name === locator.name;
+      return nameMatches(el.name, locator.name, locator.exact);
     case "text":
-      return el.name === locator.text;
+      return nameMatches(el.name, locator.text, locator.exact);
     case "selector":
       return false;
   }
+}
+
+/**
+ * Accessible-name matching semantics (dogfood P0 #3): whole-name,
+ * whitespace-normalized, case-insensitive by default; `exact: true` keeps the
+ * case comparison. Substring matching is deliberately NOT supported — it let
+ * `name: Cobrar` silently bind to "Cobrar plan".
+ */
+function nameMatches(
+  elName: string | undefined,
+  wanted: string,
+  exact: boolean | undefined,
+): boolean {
+  const a = normalizeName(elName ?? "");
+  const b = normalizeName(wanted);
+  if (exact) return a === b;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function normalizeName(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Drop matches that sit inside the subtree of an earlier match. A link
+ * wrapping a same-named button (or a text locator matching both a control and
+ * its container) is one logical target, not an ambiguity — keep the outermost.
+ */
+export function collapseNestedMatches(
+  indices: number[],
+  snapshot: SnapshotElement[],
+): number[] {
+  const kept: number[] = [];
+  let subtreeEnd = -1; // exclusive end of the last kept match's subtree
+  for (const idx of indices) {
+    if (idx < subtreeEnd) continue;
+    kept.push(idx);
+    subtreeEnd = subtreeEndOf(idx, snapshot);
+  }
+  return kept;
+}
+
+function subtreeEndOf(idx: number, snapshot: SnapshotElement[]): number {
+  const level = snapshot[idx]!.level;
+  let end = idx + 1;
+  while (end < snapshot.length && snapshot[end]!.level > level) end++;
+  return end;
+}
+
+function toResolvedElement(el: SnapshotElement): ResolvedElement {
+  return {
+    role: el.role,
+    ...(el.name !== undefined ? { name: el.name } : {}),
+    ...(el.ref !== undefined ? { ref: el.ref } : {}),
+  };
 }
 
 /**
@@ -534,7 +699,9 @@ export function buildLocatorDiagnostics(
     const name = c.el.name ? JSON.stringify(c.el.name) : "<no name>";
     const ref = c.el.ref ? ` ref=${c.el.ref}` : "";
     const dlg = c.dialog
-      ? ` in dialog ${c.dialog.name ? JSON.stringify(c.dialog.name) : "(unnamed)"}`
+      ? ` in dialog ${
+          c.dialog.name ? JSON.stringify(c.dialog.name) : "(unnamed)"
+        }`
       : "";
     lines.push(`  - ${c.el.role} ${name}${ref}${dlg}`);
   }

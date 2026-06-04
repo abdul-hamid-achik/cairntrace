@@ -38,6 +38,15 @@ export const StepResultSchema = z
     durationMs: z.number().int().nonnegative(),
     error: z.string().optional(),
     artifacts: z.array(RelativePathSchema).optional(),
+    /** The snapshot element a semantic locator resolved to before acting. */
+    resolved: z
+      .object({
+        role: z.string().min(1),
+        name: z.string().optional(),
+        ref: z.string().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type StepResult = z.infer<typeof StepResultSchema>;

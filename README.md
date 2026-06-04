@@ -23,6 +23,12 @@ format.
 
 ## Installation Guide
 
+Cairntrace is **not published to npm or GitHub Packages**. The supported
+install path is cloning this repository and running it from source with Bun —
+there is no build or compile step. Pin the
+[latest release](https://github.com/abdul-hamid-achik/cairntrace/releases/latest)
+or use `main`.
+
 ### 1. Install prerequisites
 
 - [Bun](https://bun.com) `>=1.3.0`
@@ -44,6 +50,15 @@ git clone https://github.com/abdul-hamid-achik/cairntrace
 cd cairntrace
 bun install
 ```
+
+To pin the newest release tag instead of tracking `main`:
+
+```bash
+git checkout "$(git tag --sort=-v:refname | head -1)"
+```
+
+Updating later is `git pull` (or `git fetch` and re-run the checkout above)
+followed by `bun install` — nothing to rebuild.
 
 ### 3. Install a browser backend
 

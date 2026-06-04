@@ -338,16 +338,32 @@ export class PlaywrightAdapter implements BrowserBackend {
   /** Map a behavioral Locator to a Playwright Locator. */
   resolveLocator(loc: Locator): PlaywrightLocator {
     if (!this.page) throw new Error("page not yet initialized");
+    const nth = (l: PlaywrightLocator): PlaywrightLocator =>
+      "nth" in loc && loc.nth !== undefined ? l.nth(loc.nth) : l;
     switch (loc.by) {
-      case "role":
-        return this.page.getByRole(
-          loc.role as Parameters<Page["getByRole"]>[0],
-          loc.name ? { name: loc.name } : undefined,
+      case "role": {
+        const role = loc.role as Parameters<Page["getByRole"]>[0];
+        if (loc.name === undefined) return nth(this.page.getByRole(role));
+        if (loc.exact)
+          return nth(
+            this.page.getByRole(role, { name: loc.name, exact: true }),
+          );
+        return nth(
+          this.page.getByRole(role, { name: wholeNameRegex(loc.name) }),
         );
+      }
       case "label":
-        return this.page.getByLabel(loc.name);
+        return nth(
+          loc.exact
+            ? this.page.getByLabel(loc.name, { exact: true })
+            : this.page.getByLabel(wholeNameRegex(loc.name)),
+        );
       case "text":
-        return this.page.getByText(loc.text);
+        return nth(
+          loc.exact
+            ? this.page.getByText(loc.text, { exact: true })
+            : this.page.getByText(wholeNameRegex(loc.text)),
+        );
       case "selector":
         return this.page.locator(loc.selector);
     }
@@ -413,6 +429,21 @@ export class PlaywrightAdapter implements BrowserBackend {
 }
 
 /* ----- helpers ----- */
+
+/**
+ * Cairntrace semantic-name semantics: whole-name, case-insensitive by
+ * default; `exact: true` is case-sensitive whole-name. Playwright's bare
+ * string matching is case-insensitive SUBSTRING, which diverges from the
+ * agent-browser backend's strict whole-name resolution — an anchored
+ * case-insensitive regex keeps the two backends agreeing on what matches.
+ */
+function wholeNameRegex(name: string): RegExp {
+  return new RegExp(`^${escapeRegExp(name.replace(/\s+/g, " ").trim())}$`, "i");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function mapConsoleType(t: string): ConsoleEntry["type"] {
   if (t === "error" || t === "warning" || t === "info" || t === "debug")

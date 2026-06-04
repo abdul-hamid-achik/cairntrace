@@ -12,23 +12,38 @@ import { VerifierSchema } from "./verifier.v1";
 
 /* ----- locators (used by click / hover / fill / upload / count) ----- */
 
+/**
+ * Disambiguators shared by the semantic (role/label/text) locators.
+ * Default name matching is case-insensitive whole-name against the
+ * accessibility tree; multiple visible matches are a hard error.
+ */
+const semanticLocatorExtras = {
+  /** Case-sensitive whole-name match (default: case-insensitive whole-name). */
+  exact: z.boolean().optional(),
+  /** Pick the Nth match (0-based, document order) when several elements match. */
+  nth: z.number().int().min(0).optional(),
+};
+
 export const RoleLocatorSchema = z
   .object({
     by: z.literal("role"),
     role: z.string().min(1),
     name: z.string().optional(),
+    ...semanticLocatorExtras,
   })
   .strict();
 export const LabelLocatorSchema = z
   .object({
     by: z.literal("label"),
     name: z.string().min(1),
+    ...semanticLocatorExtras,
   })
   .strict();
 export const TextLocatorSchema = z
   .object({
     by: z.literal("text"),
     text: z.string().min(1),
+    ...semanticLocatorExtras,
   })
   .strict();
 export const SelectorLocatorSchema = z

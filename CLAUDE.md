@@ -15,8 +15,11 @@ all coding agents. Read that file first — everything below assumes you have.
 - Do not introduce a `scripts/` folder for ad-hoc utilities — the user has
   flagged it as a pattern they dislike. CLI subcommands, test files, or
   short-lived tmp files only.
-- Do not push to GitHub. The repo is intentionally local-only for now;
-  pushes will happen on the user's timing.
+- The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
+  GitHub releases. Don't push or cut a release proactively — the user drives
+  that timing; do it when asked, following the "Releasing" checklist in
+  AGENTS.md (annotated `vX.Y.Z` tag → push → `gh release create`; never a
+  floating `latest` tag).
 
 ## Useful one-liners
 
