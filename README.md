@@ -201,22 +201,43 @@ Run `cairn run <spec> --cold-start --json` before declaring a spec done.
 
 Current step keys:
 
-`open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`, `wait`,
-`snapshot`, `use`.
+`open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`,
+`request`, `wait`, `press`, `scroll`, `snapshot`, `use`.
 
 Interactive steps use locators with `by: role`, `by: label`, `by: text`, or
 `by: selector`. Prefer role and label locators when possible; they are clearer
 for humans and easier to heal.
+
+Semantic locators are strict: they match accessible names (whole-name,
+case-insensitive, visible elements only), scroll the target into view before
+acting, fail at the step with candidate diagnostics when nothing matches, and
+error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
+`nth: <index>` (0-based), or a more specific name.
+
+`open` also takes an object form to wait out SPA hydration:
+
+```yaml
+- open: { path: /admin, waitUntil: networkidle, timeoutMs: 45000 }
+```
+
+`request` makes an authenticated API call from the page (browser cookies
+included) and captures the response for later steps:
+
+```yaml
+- request: { method: POST, url: /api/qr-token, expectStatus: 200, assign: qr }
+- fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }
+```
 
 **Verifiers**
 
 Outcome verifier keys:
 
 `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`,
-`xlsx`, `script`.
+`xlsx`, `file`, `script`.
 
-Use typed verifiers for normal UI, URL, network, console, count, and workbook
-checks. Use `script` when the assertion is product-specific or needs browser
+Use typed verifiers for normal UI, URL, network, console, count, workbook,
+and on-disk checks (`file` polls a glob, e.g. a local email driver's capture
+files). Use `script` when the assertion is product-specific or needs browser
 or Node code.
 
 **Config**
@@ -228,18 +249,30 @@ resolve before spec validation, so they can appear in required fields.
 ```yaml
 version: 1
 defaultEnvironment: local
+retention:
+  keepRuns: 20 # newest N runs per spec; pruned after every run
 environments:
   local:
-    baseUrl: http://localhost:8787
+    baseUrl: http://localhost:${env.APP_PORT} # ${env.X} works in config text
+    viewport: { width: 1280, height: 800 }
     vars:
       dashboardPath: /dashboard.html
 ```
+
+Specs can also set a top-level `viewport: { width, height }`, which wins over
+the environment's.
 
 Use the same config for validation and runs:
 
 ```bash
 ./bin/cairn spec verify flows/dashboard.yml --config cairntrace.config.yml --json
 ./bin/cairn run flows/dashboard.yml --config cairntrace.config.yml --cold-start --json
+```
+
+Override vars per invocation without touching YAML:
+
+```bash
+./bin/cairn run flows/dashboard.yml --var baseUrl=http://localhost:3123 --var apiBase=http://localhost:3123/api
 ```
 
 **Artifacts**
@@ -259,6 +292,7 @@ console/
 network/
 downloads/
 transforms/
+requests/
 diagnostics/
 traces/
 ```
@@ -266,13 +300,19 @@ traces/
 `agent_context.md` is the compact handoff file for coding agents. Use
 `./bin/cairn context latest` to print it.
 
+Disk usage is bounded by `retention.keepRuns` in the config (pruned after
+every run) and by `cairn clean [--keep N | --all]`. Traces follow the
+`artifacts.capture.trace` policy — the `on-failure` default deletes the trace
+zip when the run passes.
+
 ## CLI Reference
 
 Common commands:
 
 | Command | Purpose |
 | --- | --- |
-| `cairn run <spec...>` | Run one or more specs. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`. |
+| `cairn run <spec...>` | Run one or more specs. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`. |
+| `cairn clean` | Prune old run directories (`--keep N` per spec, or `--all`). |
 | `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
 | `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path` for the file path. |
@@ -294,8 +334,9 @@ Structured output is available on commands wired with format flags:
 ./bin/cairn diff previous latest --format md
 ```
 
-Commands with structured output today: `run`, `doctor`, `explain`, `docs`,
-`diff`, `spec verify`, `spec heal`, `checkpoint list`, and `checkpoint show`.
+Commands with structured output today: `run`, `doctor`, `clean`, `explain`,
+`docs`, `diff`, `spec verify`, `spec heal`, `checkpoint list`, and
+`checkpoint show`.
 
 Stable exit codes:
 
@@ -359,6 +400,10 @@ separate so the core stays deterministic and testable.
 
 ## Advanced Workflows
 
+- **Hybrid API + UI flows:** `request` fetches with the browser session's
+  cookies, captures the response, and later steps splice fields via
+  `${requests.<name>.body.<field>}` — e.g. fetch a QR token via API, then
+  `fill` it into the scanner UI.
 - **Download artifacts:** `download` clicks a locator and saves the file under
   `downloads/`, optionally assigning it as `${artifacts.<name>.path}`.
 - **Transform artifacts:** `transform` runs a Node-side script to turn a

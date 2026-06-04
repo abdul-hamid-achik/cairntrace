@@ -131,7 +131,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config Variables",
-        body: "Config-backed `${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values.",
+        body: "Config-backed `${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Override vars at the CLI with repeatable `--var key=value`; config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
+      },
+      {
+        title: "Viewport And Retention",
+        body: "Set the browser viewport per environment (`environments.<env>.viewport: { width, height }`) or per spec (top-level `viewport:`); spec wins. Bound artifact disk usage with `retention: { keepRuns: N }` (newest N runs per spec, pruned after every run) or `cairn clean [--keep N | --all]`. Traces follow `artifacts.capture.trace` — the on-failure default deletes the trace zip on passing runs.",
       },
     ],
     examples: [
@@ -188,11 +192,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates, `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `wait` waits for text/notText/load state, `snapshot` captures the page, and `use` invokes an imported reusable action.",
+        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated in-page API call and captures the response, `wait` waits for text/notText/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, and `use` invokes an imported reusable action.",
       },
       {
         title: "Locators",
-        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand.",
+        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), or a more specific name. Targets are scrolled into view automatically before the action.",
+      },
+      {
+        title: "Request Steps",
+        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against the current page origin. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
       },
       {
         title: "Reusable Actions",
@@ -205,15 +213,30 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         language: "yaml",
         code: [
           "steps:",
-          "  - open: /settings",
+          "  - open: { path: /settings, waitUntil: networkidle }",
           "  - click: { by: role, role: button, name: Edit }",
+          "  - click: { by: role, role: button, name: Save, nth: 1 }",
           '  - hover: { by: selector, selector: ".question-table-wrap .table-title" }',
           "  - fill: { by: label, name: Display name, value: Example Inc }",
+          "  - press: Enter",
+          "  - scroll: { to: { by: role, role: button, name: Submit } }",
           "  - upload: { by: label, name: Logo, path: ./fixtures/logo.png }",
           "  - download: { by: role, role: button, name: Download template, saveAs: template.xlsx, assign: template }",
           "  - transform: { runtime: node, file: ./transforms/make-invalid-template.ts, input: ${artifacts.template.path}, saveAs: invalid-template.xlsx, assign: invalidTemplate }",
           "  - upload: { by: label, name: File, path: ${artifacts.invalidTemplate.path} }",
           "  - wait: { text: Saved, timeoutMs: 10000 }",
+        ].join("\n"),
+      },
+      {
+        title: "hybrid API + UI flow",
+        language: "yaml",
+        code: [
+          "steps:",
+          "  - use: login_admin",
+          "  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, expectStatus: 200, assign: qr }",
+          "  - open: /scanner",
+          '  - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }',
+          "  - press: Enter",
         ].join("\n"),
       },
     ],
@@ -226,7 +249,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Typed Verifiers",
-        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, and `xlsx` cover common UI, navigation, network, console, and workbook assertions.",
+        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, and `file` cover common UI, navigation, network, console, workbook, and on-disk assertions. `file` polls a glob (filename wildcards, relative to the spec dir) until a matching file exists and optionally contains a needle — built for file-based test doubles like local email captures.",
       },
       {
         title: "Script Escape Hatch",
@@ -355,7 +378,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Downloads And Diagnostics",
-        body: "Download steps save files under `downloads/`. Transform steps save generated fixtures under `transforms/`. Failed steps can write diagnostics under `diagnostics/` with current URL, visible controls, table headers, selector counts, and nearby text excerpts.",
+        body: "Download steps save files under `downloads/`. Transform steps save generated fixtures under `transforms/`. Request steps save response envelopes under `requests/`. Failed steps write diagnostics under `diagnostics/` with current URL, visible controls, table headers, selector counts, and nearby text excerpts; every interactive step also records the element it actually hit (role/name/ref) in its StepResult and events.ndjson.",
       },
       {
         title: "Agent Handoff",

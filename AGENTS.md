@@ -28,11 +28,14 @@ spec YAML (intent + outcomes + steps)
 Runner
         ↓ cold-start? clearBrowserState  (when CI=true or --cold-start)
         ↓ session.resume? loadState <checkpoint>
+        ↓ viewport? setViewport  (spec-level wins over environment config)
         ↓ each step:
               when: predicate?  → maybe skip
+              ${requests.<name>.…} placeholders spliced from captured responses
+              request: → fetch in page context (runner-handled, not adapter)
               runStep(step) on the BrowserBackend  (AgentBrowserAdapter or MockBrowserBackend)
               capture snapshot/screenshot per artifacts policy
-        ↓ OutcomeEvaluator (text / notText / url / network / noFailedRequests / console / count / script)
+        ↓ OutcomeEvaluator (text / notText / url / network / noFailedRequests / console / count / xlsx / file / script)
         ↓ ArtifactWriter
               run.{json,yaml,md}  agent_context.md  events.ndjson
               outcomes/<id>.md (+ .raw.json sidecar for script)
@@ -61,9 +64,21 @@ per-agent code paths.
 
 ## Rules for agents authoring specs
 
-- Outcomes must use only the v0 vocabulary: `text`, `notText`, `url`,
-  `network`, `noFailedRequests`, `console`, `count`, `script`. If you need
-  something else, use the `script` escape hatch — don't invent new verifier types.
+- Outcomes must use only the typed vocabulary: `text`, `notText`, `url`,
+  `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`,
+  `script`. If you need something else, use the `script` escape hatch —
+  don't invent new verifier types.
+- Semantic locators (`by: role|label|text`) are STRICT: accessible-name,
+  whole-name, case-insensitive, visible-only matching; zero matches fail the
+  step with diagnostics; multiple matches are an error unless the locator
+  carries `nth:`. Use `exact: true` for case-sensitive matching. Targets are
+  auto-scrolled into view.
+- For authenticated API calls use the typed `request` step (in-page fetch,
+  cookies included, `assign:` + `${requests.<name>.body.X}` splicing) — not a
+  node-script verifier full of fetch glue.
+- Hydration-sensitive first interactions: prefer
+  `open: { path, waitUntil: networkidle }` over a separate
+  `wait: { load: … }` step.
 - Every spec must satisfy the **cold-start contract**: it must be replayable
   from a fresh browser session. Satisfy via one of:
   1. `imports: [actions/login_admin.yml]` + `steps: [{ use: login_admin }]`
@@ -101,6 +116,13 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
 ### agent-browser quirks (when reading `AgentBrowserAdapter.ts`):
 
 - `--session <name>` is a global flag; the adapter stamps this on every call.
+- Interactive steps (click/hover/fill/upload, plus semantic `scroll.to` and
+  downloads) do NOT use agent-browser's `find` family — `find` reports
+  success on zero matches. The adapter resolves semantic locators against
+  `snapshot -i`, scrolls the `@ref` into view, acts on the ref, and records
+  the resolved element as step evidence.
+- Transient `os error 35` / daemon-busy failures are retried twice with
+  backoff inside `invoke()`.
 - `navigate <url>` (not `open <url>`) is what we send for `OpenStep` — `open`
   is for launching the browser, `navigate` for navigation.
 - `network requests --json` and `console --json` wrap results in

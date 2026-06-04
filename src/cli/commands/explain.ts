@@ -61,6 +61,19 @@ export function buildExplain(): ExplainResult {
             description: "Use the in-memory mock backend",
           },
           {
+            name: "--parallel",
+            type: "number",
+            default: 1,
+            description:
+              "Run N specs concurrently, each in its own browser session",
+          },
+          {
+            name: "--var",
+            type: "string",
+            description:
+              "Runtime var override (key=value); repeatable, wins over config env vars",
+          },
+          {
             name: "--format",
             type: "enum",
             values: ["json", "yaml", "md"],
@@ -76,6 +89,32 @@ export function buildExplain(): ExplainResult {
           "6": "contract hash mismatch",
         },
         outputSchema: "urn:cairntrace.dev:run:v1",
+      },
+      {
+        name: "clean",
+        summary: "Prune old run directories from the artifact root",
+        synopsis:
+          "cairn clean [--keep <n>] [--all] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--keep",
+            type: "number",
+            description:
+              "Keep the newest N runs per spec (default: config retention.keepRuns, else 10)",
+          },
+          {
+            name: "--all",
+            type: "boolean",
+            default: false,
+            description: "Remove ALL run directories",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Artifact root to clean",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "bad arguments" },
       },
       {
         name: "spec heal",
@@ -236,15 +275,18 @@ export function buildExplain(): ExplainResult {
       {
         id: "open",
         kind: "navigation",
-        summary: "Navigate to a URL or config-resolved path",
-        yamlExample: "steps:\n  - open: /settings",
+        summary:
+          "Navigate to a URL or config-resolved path; the object form waits for a load state to beat SPA hydration races",
+        yamlExample:
+          "steps:\n  - open: /settings\n  - open: { path: /admin, waitUntil: networkidle, timeoutMs: 45000 }",
       },
       {
         id: "click",
         kind: "interaction",
-        summary: "Activate a locator with click",
+        summary:
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several)",
         yamlExample:
-          "steps:\n  - click: { by: role, role: button, name: Save }",
+          "steps:\n  - click: { by: role, role: button, name: Save }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }",
       },
       {
         id: "hover",
@@ -282,10 +324,32 @@ export function buildExplain(): ExplainResult {
           "steps:\n  - transform: { runtime: node, file: ./transforms/make-invalid-template.ts, input: ${artifacts.template.path}, saveAs: invalid-template.xlsx, assign: invalidTemplate }",
       },
       {
+        id: "request",
+        kind: "network",
+        summary:
+          "Authenticated API call via in-page fetch (browser cookies included); assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
+        yamlExample:
+          "steps:\n  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, expectStatus: 200, assign: qr }\n  - fill: { by: label, name: Scanner code, value: '${requests.qr.body.token}' }",
+      },
+      {
         id: "wait",
         kind: "wait",
         summary: "Wait for text, notText, or load state",
         yamlExample: "steps:\n  - wait: { text: Saved, timeoutMs: 10000 }",
+      },
+      {
+        id: "press",
+        kind: "interaction",
+        summary: "Keyboard key press (e.g. Enter to submit, Control+a)",
+        yamlExample: "steps:\n  - press: Enter",
+      },
+      {
+        id: "scroll",
+        kind: "interaction",
+        summary:
+          "Scroll the page by direction/pixels, or bring a locator into view",
+        yamlExample:
+          "steps:\n  - scroll: { direction: down, px: 600 }\n  - scroll: { to: { by: role, role: button, name: Submit } }",
       },
       {
         id: "snapshot",
@@ -434,6 +498,33 @@ export function buildExplain(): ExplainResult {
           { name: "atLeast", type: "number", oneOfGroup: "matcher" },
           { name: "atMost", type: "number", oneOfGroup: "matcher" },
           { name: "between", type: "tuple", oneOfGroup: "matcher" },
+        ],
+      },
+      {
+        id: "file",
+        kind: "file",
+        summary:
+          "Poll for a file on disk (file-based test doubles, e.g. local email captures), optionally requiring contained text",
+        yamlExample:
+          "verify:\n  file:\n    glob: ./mail-captures/*-welcome-*.json\n    contains: Your QR code\n    timeoutMs: 5000",
+        parameters: [
+          {
+            name: "glob",
+            type: "string",
+            description:
+              "Relative to the spec dir; * and ? in the filename only",
+          },
+          {
+            name: "contains",
+            type: "string",
+            description: "Text the file must contain",
+          },
+          {
+            name: "timeoutMs",
+            type: "number",
+            default: 10000,
+            description: "Poll deadline",
+          },
         ],
       },
       {
