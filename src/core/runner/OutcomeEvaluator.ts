@@ -3,6 +3,7 @@ import type { Outcome } from "../schema/spec.v1";
 import {
   isConsoleVerifier,
   isCountVerifier,
+  isFileVerifier,
   isNetworkVerifier,
   isNoFailedRequestsVerifier,
   isNotTextVerifier,
@@ -13,6 +14,7 @@ import {
 } from "../schema/verifier.v1";
 import { evaluateConsole } from "./verifiers/console";
 import { evaluateCount } from "./verifiers/count";
+import { evaluateFile } from "./verifiers/file";
 import { evaluateNetwork } from "./verifiers/network";
 import { evaluateNoFailedRequests } from "./verifiers/noFailedRequests";
 import { evaluateNotText } from "./verifiers/notText";
@@ -61,6 +63,7 @@ async function dispatch(
     if (isConsoleVerifier(v)) return await evaluateConsole(v, backend);
     if (isCountVerifier(v)) return await evaluateCount(v, backend);
     if (isXlsxVerifier(v)) return await evaluateXlsx(v, ctx);
+    if (isFileVerifier(v)) return await evaluateFile(v, ctx);
     if (isScriptVerifier(v)) return await evaluateScript(v, backend, ctx);
   } catch (e) {
     return {

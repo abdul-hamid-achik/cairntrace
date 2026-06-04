@@ -211,6 +211,28 @@ export const XlsxVerifierSchema = z
 export type XlsxVerifier = z.infer<typeof XlsxVerifierSchema>;
 
 /**
+ * #9 — poll for a file on disk, optionally requiring its text to contain a
+ * needle. Covers file-based test doubles generically (e.g. a local email
+ * driver writing `*-welcome-user@example.com.json` captures) without a
+ * hand-rolled script poller.
+ *
+ * `glob` resolves relative to the spec's directory; `*` and `?` wildcards are
+ * supported in the FILENAME only — the directory part is literal.
+ */
+export const FileVerifierSchema = z
+  .object({
+    file: z
+      .object({
+        glob: z.string().min(1),
+        contains: z.string().min(1).optional(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+export type FileVerifier = z.infer<typeof FileVerifierSchema>;
+
+/**
  * Escape hatch — page-evaluated JS returning { ok, evidence }.
  * `evidence` is truncated per §13b; untruncated form goes to outcomes/<id>.raw.json.
  */
@@ -243,6 +265,7 @@ export const VerifierSchema = z.union([
   ConsoleVerifierSchema,
   CountVerifierSchema,
   XlsxVerifierSchema,
+  FileVerifierSchema,
   ScriptVerifierSchema,
 ]);
 export type Verifier = z.infer<typeof VerifierSchema>;
@@ -257,6 +280,7 @@ export const VerifierKindSchema = z.enum([
   "console",
   "count",
   "xlsx",
+  "file",
   "script",
 ]);
 export type VerifierKind = z.infer<typeof VerifierKindSchema>;
@@ -277,6 +301,7 @@ export const isConsoleVerifier = (v: Verifier): v is ConsoleVerifier =>
 export const isCountVerifier = (v: Verifier): v is CountVerifier =>
   "count" in v;
 export const isXlsxVerifier = (v: Verifier): v is XlsxVerifier => "xlsx" in v;
+export const isFileVerifier = (v: Verifier): v is FileVerifier => "file" in v;
 export const isScriptVerifier = (v: Verifier): v is ScriptVerifier =>
   "script" in v;
 
@@ -289,5 +314,6 @@ export const verifierKind = (v: Verifier): VerifierKind => {
   if (isConsoleVerifier(v)) return "console";
   if (isCountVerifier(v)) return "count";
   if (isXlsxVerifier(v)) return "xlsx";
+  if (isFileVerifier(v)) return "file";
   return "script";
 };

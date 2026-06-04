@@ -281,3 +281,74 @@ export default async function verify(ctx) {
     expect(JSON.stringify(r.raw)).toContain("workbook parse failed");
   });
 });
+
+describe("file", () => {
+  it("passes when a file matching the glob exists", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-file-verifier-"));
+    await writeFile(join(dir, "1717000-welcome-user@example.com.json"), "{}");
+    const { evaluateFile } = await import("./file");
+
+    const r = await evaluateFile(
+      { file: { glob: "./*-welcome-*.json", timeoutMs: 500 } },
+      { specDir: dir },
+    );
+    expect(r.passed).toBe(true);
+    expect(r.actual).toContain("welcome");
+  });
+
+  it("matches on contained text and reports near-misses", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-file-contains-"));
+    await writeFile(
+      join(dir, "mail-1.json"),
+      JSON.stringify({ subject: "Your QR code", to: "a@b.co" }),
+    );
+    const { evaluateFile } = await import("./file");
+
+    const hit = await evaluateFile(
+      { file: { glob: "mail-*.json", contains: "QR code", timeoutMs: 500 } },
+      { specDir: dir },
+    );
+    expect(hit.passed).toBe(true);
+
+    const miss = await evaluateFile(
+      {
+        file: {
+          glob: "mail-*.json",
+          contains: "password reset",
+          timeoutMs: 250,
+        },
+      },
+      { specDir: dir },
+    );
+    expect(miss.passed).toBe(false);
+    expect(miss.actual).toContain("none contained");
+    expect(miss.actual).toContain("mail-1.json");
+  });
+
+  it("polls until the file appears", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-file-poll-"));
+    const { evaluateFile } = await import("./file");
+
+    setTimeout(() => {
+      void writeFile(join(dir, "late.txt"), "arrived");
+    }, 150);
+    const r = await evaluateFile(
+      { file: { glob: "late.txt", contains: "arrived", timeoutMs: 3000 } },
+      { specDir: dir },
+    );
+    expect(r.passed).toBe(true);
+  });
+
+  it("times out with a clear directory diagnosis", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-file-timeout-"));
+    const { evaluateFile } = await import("./file");
+
+    const r = await evaluateFile(
+      { file: { glob: "never-*.json", timeoutMs: 200 } },
+      { specDir: dir },
+    );
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("timed out");
+    expect(r.actual).toContain("no files matching");
+  });
+});
