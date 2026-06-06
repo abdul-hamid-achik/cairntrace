@@ -240,6 +240,19 @@ and on-disk checks (`file` polls a glob, e.g. a local email driver's capture
 files). Use `script` when the assertion is product-specific or needs browser
 or Node code.
 
+When a step fails before producing an artifact, outcomes that reference the
+missing `${artifacts.<name>.…}` / `${requests.<name>.…}` report `skipped`
+("blocked") instead of a misleading missing-file failure — fix the failed
+step first.
+
+**Timeouts and interrupts**
+
+Cairn enforces a hard deadline on every browser-backend invocation (60s
+default; a step's own `timeoutMs` plus a 5s grace period when set). A hung
+browser command is killed and the step fails with a normal timeout error.
+Ctrl-C / SIGTERM during a run tears down the run's own agent-browser session
+(daemon and Chrome) before exiting with the conventional 130/143 exit code.
+
 **Config**
 
 `cairntrace.config.yml` can provide `baseUrl`, environment vars, artifact root,

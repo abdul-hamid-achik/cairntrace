@@ -22,6 +22,7 @@ import { evaluateScript } from "./verifiers/script";
 import { evaluateText } from "./verifiers/text";
 import { evaluateUrl } from "./verifiers/url";
 import { evaluateXlsx } from "./verifiers/xlsx";
+import { collectUnresolvedRuntimeRefs } from "./runtimePlaceholders";
 import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
 
 export interface EvaluatedOutcome {
@@ -53,6 +54,27 @@ async function dispatch(
   ctx: VerifierContext,
 ): Promise<VerifierEvaluation> {
   const v = outcome.verify;
+
+  // A failed step stops the run before later steps produce their artifacts.
+  // Outcomes that verify those artifacts are blocked, not failed — evaluating
+  // them anyway yields misleading "missing file" failures (and the file
+  // verifier would burn its full poll timeout on a file that can't appear).
+  if (ctx.failedStep) {
+    const missing = collectUnresolvedRuntimeRefs(
+      v,
+      ctx.artifacts,
+      ctx.responses,
+    );
+    if (missing.length > 0) {
+      return {
+        passed: false,
+        skipped: true,
+        expected: `${missing.join(", ")} to be produced by an earlier step`,
+        actual: `blocked: ${missing.join(", ")} never produced — run stopped at failed step "${ctx.failedStep}"`,
+      };
+    }
+  }
+
   try {
     if (isTextVerifier(v)) return await evaluateText(v, backend);
     if (isNotTextVerifier(v)) return await evaluateNotText(v, backend);

@@ -8,6 +8,7 @@ import type { RunResult } from "../schema/run.v1";
 export function renderAgentContext(spec: Spec, result: RunResult): string {
   const passed = result.outcomes.filter((o) => o.status === "passed");
   const failed = result.outcomes.filter((o) => o.status === "failed");
+  const skipped = result.outcomes.filter((o) => o.status === "skipped");
   const lastSuccessfulStep = result.steps
     .toReversed()
     .find((s) => s.status === "passed");
@@ -16,6 +17,12 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     (o) => `- ✗ ${o.id}${o.evidence ? ` — see ${o.evidence}` : ""}`,
   );
   const passLines = passed.map((o) => `- ✓ ${o.id}`);
+  const skippedLines = skipped.map(
+    (o) =>
+      `- · ${o.id} — blocked by a failed step${
+        o.evidence ? `, see ${o.evidence}` : ""
+      }`,
+  );
 
   const evidenceRefs: string[] = [];
   for (const o of failed) {
@@ -57,6 +64,7 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     "## Outcome results",
     ...passLines,
     ...failureLines,
+    ...skippedLines,
   ];
 
   if (lastSuccessfulStep) {
@@ -97,9 +105,11 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
   lines.push(
     "",
     "## Suggested next steps",
-    failed.length === 0
-      ? "- All outcomes passed. If you arrived here from a bug report, double-check that the failing scenario is captured by an outcome."
-      : "- Read each failing outcome's evidence file (paths above). Each contains Expected/Actual/Source. Edit code, re-run.",
+    failed.length > 0
+      ? "- Read each failing outcome's evidence file (paths above). Each contains Expected/Actual/Source. Edit code, re-run."
+      : skipped.length > 0
+        ? "- Blocked outcomes were never evaluated — fix the failed step first (see step results), then re-run."
+        : "- All outcomes passed. If you arrived here from a bug report, double-check that the failing scenario is captured by an outcome.",
     "- If steps failed because of UI drift rather than a real regression, run: cairn spec heal " +
       `${result.spec.path}`,
   );

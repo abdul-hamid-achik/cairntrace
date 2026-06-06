@@ -532,8 +532,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   // Evaluate outcomes.
+  const failedStep = stepResults.find((s) => s.status === "failed")?.id;
   const ctx: VerifierContext = {
     lastSuccessfulStep: lastSuccessfulStep?.id,
+    ...(failedStep ? { failedStep } : {}),
     latestScreenshot,
     latestSnapshot,
     latestDiagnostics,
@@ -554,10 +556,15 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const outcomeResults: OutcomeResult[] = [];
   for (const { outcome, evaluation } of evaluated) {
     opts.listener?.onOutcomeFinish?.(outcome, evaluation);
+    const outcomeStatus: OutcomeResult["status"] = evaluation.skipped
+      ? "skipped"
+      : evaluation.passed
+        ? "passed"
+        : "failed";
     const evidenceRel = `outcomes/${outcome.id}.md`;
     await writer.writeOutcomeEvidence({
       outcomeId: outcome.id,
-      status: evaluation.passed ? "passed" : "failed",
+      status: outcomeStatus,
       description: outcome.description,
       expected: evaluation.expected,
       actual: evaluation.actual,
@@ -577,7 +584,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
     outcomeResults.push({
       id: outcome.id,
-      status: evaluation.passed ? "passed" : "failed",
+      status: outcomeStatus,
       evidence: evidenceRel,
       ...(evaluation.raw !== undefined
         ? { evidenceRaw: `outcomes/${outcome.id}.raw.json` }
@@ -585,7 +592,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
     await writer.appendEvent({
       ts: new Date().toISOString(),
-      type: evaluation.passed ? "outcome.passed" : "outcome.failed",
+      type:
+        outcomeStatus === "skipped"
+          ? "outcome.skipped"
+          : evaluation.passed
+            ? "outcome.passed"
+            : "outcome.failed",
       outcomeId: outcome.id,
     });
   }

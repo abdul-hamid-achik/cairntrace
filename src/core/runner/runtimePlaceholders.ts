@@ -62,6 +62,34 @@ export function deepMapStrings<T>(value: T, fn: (s: string) => string): T {
   return value;
 }
 
+/**
+ * Collect `${artifacts.X.…}` / `${requests.X.…}` references anywhere inside
+ * `value` whose names were never produced. Used to mark artifact-dependent
+ * outcomes as blocked when an earlier step failure stopped the run before the
+ * producing step.
+ */
+export function collectUnresolvedRuntimeRefs(
+  value: unknown,
+  artifacts: Record<string, ArtifactRef> = {},
+  responses: Record<string, unknown> = {},
+): string[] {
+  const missing = new Set<string>();
+  deepMapStrings(value, (s) => {
+    for (const m of s.matchAll(
+      /\$\{artifacts\.([a-z][A-Za-z0-9_]*)\.(?:path|relativePath)\}/g,
+    )) {
+      if (!(m[1]! in artifacts)) missing.add(`artifacts.${m[1]}`);
+    }
+    for (const m of s.matchAll(
+      /\$\{requests\.([a-z][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_]+)*\}/g,
+    )) {
+      if (!(m[1]! in responses)) missing.add(`requests.${m[1]}`);
+    }
+    return s;
+  });
+  return [...missing];
+}
+
 export function resolveFixtureMap(
   input: Record<string, string> | undefined,
   artifacts: Record<string, ArtifactRef> = {},

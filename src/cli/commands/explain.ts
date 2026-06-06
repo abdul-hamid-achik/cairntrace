@@ -746,6 +746,16 @@ export function buildExplain(): ExplainResult {
         maxListItems: 20,
         deepDataLocation: "outcomes/<id>.raw.json",
       },
+      stepTimeouts: {
+        summary:
+          "Cairn enforces a hard deadline on every backend invocation; a hung browser command is killed and the step fails with a timeout error",
+        defaultMs: 60_000,
+        graceMs: 5_000,
+      },
+      blockedOutcomes: {
+        summary:
+          "Outcomes referencing ${artifacts.<name>.…} / ${requests.<name>.…} that a failed step never produced report status `skipped` with blocked evidence, not `failed`",
+      },
     },
     config: {
       artifactRoot: join(homedir(), ".cairntrace", "runs"),
@@ -776,6 +786,12 @@ export function explainToMarkdown(e: ExplainResult): string {
     `- cold-start: ${e.rules.coldStart.summary}`,
     `- contract immutability: ${e.rules.contractImmutability.summary}`,
     `- evidence budget: ≤${e.rules.evidenceBudget.maxLines} lines, ≤${e.rules.evidenceBudget.maxListItems} list items`,
+    ...(e.rules.stepTimeouts
+      ? [`- step timeouts: ${e.rules.stepTimeouts.summary}`]
+      : []),
+    ...(e.rules.blockedOutcomes
+      ? [`- blocked outcomes: ${e.rules.blockedOutcomes.summary}`]
+      : []),
     "",
     "## Config",
     `- artifactRoot: ${e.config.artifactRoot}`,

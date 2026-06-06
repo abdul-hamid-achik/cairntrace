@@ -100,6 +100,15 @@ export function makeInteractiveListener(
     },
 
     onOutcomeFinish(outcome, evaluation) {
+      if (evaluation.skipped) {
+        out(
+          `  ${c.yellow}·${c.reset} ${outcome.id} ${c.dim}(blocked)${c.reset}\n`,
+        );
+        out(
+          `    ${c.dim}${truncate(evaluation.actual.split("\n")[0] ?? "", 200)}${c.reset}\n`,
+        );
+        return;
+      }
       const mark = evaluation.passed
         ? `${c.green}✓${c.reset}`
         : `${c.red}✗${c.reset}`;

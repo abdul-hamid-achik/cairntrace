@@ -458,6 +458,109 @@ steps:
     expect(diagnostics).toContain("Submit");
   });
 
+  it("marks artifact-dependent outcomes as skipped when the producing step failed", async () => {
+    const specPath = await writeSpec(
+      "blocked_outcomes",
+      `version: 1
+name: blocked_outcomes
+intent: outcomes blocked by a failed step must not report as failed
+outcomes:
+  - id: template_contract
+    description: workbook has the expected sheet
+    verify:
+      xlsx:
+        path: "\${artifacts.template.path}"
+        sheets:
+          - name: Data
+            contains: ["Total"]
+  - id: template_script
+    description: script fixture depends on the same artifact
+    verify:
+      script:
+        run: "({ ok: true, evidence: null })"
+        fixtures:
+          templatePath: "\${artifacts.template.path}"
+  - id: url_ok
+    description: page-level outcome still evaluates
+    verify:
+      url: { endsWith: "/exports" }
+steps:
+  - id: grab
+    download:
+      by: selector
+      selector: "#download-template"
+      saveAs: template.xlsx
+      assign: template
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/exports");
+    backend.failNextStep("element not found: #download-template");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.status).toBe("failed");
+
+    const byId = Object.fromEntries(result.outcomes.map((o) => [o.id, o]));
+    expect(byId["template_contract"]!.status).toBe("skipped");
+    expect(byId["template_script"]!.status).toBe("skipped");
+    expect(byId["url_ok"]!.status).toBe("passed");
+
+    const evidence = await readFile(
+      join(result.runDir, byId["template_contract"]!.evidence!),
+      "utf8",
+    );
+    expect(evidence).toContain("blocked");
+    expect(evidence).toContain("artifacts.template");
+    expect(evidence).toContain('failed step "grab"');
+
+    const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
+    expect(ctx).toContain("template_contract — blocked by a failed step");
+
+    const events = (
+      await readFile(join(result.runDir, "events.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(
+      events.some(
+        (e) =>
+          e.type === "outcome.skipped" && e.outcomeId === "template_contract",
+      ),
+    ).toBe(true);
+  });
+
+  it("still fails artifact outcomes on a missing artifact when no step failed", async () => {
+    const specPath = await writeSpec(
+      "typo_artifact",
+      `version: 1
+name: typo_artifact
+intent: a typo'd artifact name on a green run is a real failure, not a skip
+outcomes:
+  - id: wrong_name
+    description: references an artifact that never existed
+    verify:
+      xlsx:
+        path: "\${artifacts.templte.path}"
+        sheets:
+          - name: Data
+            contains: ["Total"]
+steps:
+  - id: nav
+    open: /exports
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.steps[0]!.status).toBe("passed");
+    expect(result.outcomes[0]!.status).toBe("failed");
+  });
+
   it("includes hover selectors in failed-step diagnostics", async () => {
     const specPath = await writeSpec(
       "hover_fail",

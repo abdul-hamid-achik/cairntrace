@@ -9,6 +9,13 @@ import type { Verifier } from "../../schema/verifier.v1";
 export interface VerifierContext {
   /** Last step id that ran successfully — used for the "last successful step" line in evidence. */
   lastSuccessfulStep?: string;
+  /**
+   * Id of the step the run stopped at, when a step failed. Outcomes whose
+   * verifier references artifacts/responses that step (or a later one) never
+   * produced are reported as blocked (`skipped`) instead of failing on a
+   * missing file.
+   */
+  failedStep?: string;
   /** Relative path to the most recent screenshot captured. */
   latestScreenshot?: string;
   /** Relative path to the most recent snapshot captured. */
@@ -39,6 +46,13 @@ export interface VerifierContext {
  */
 export interface VerifierEvaluation {
   passed: boolean;
+  /**
+   * True when the outcome was never actually evaluated because a failed step
+   * blocked the artifact/response it depends on. Reported as `skipped` in
+   * RunResult — the run already fails on the step, and a bogus "missing file"
+   * outcome failure would point agents at the wrong culprit.
+   */
+  skipped?: boolean;
   /** Short, concrete description of what the verifier was looking for. */
   expected: string;
   /** Short description of what was observed. Bullet list as a single string OK. */

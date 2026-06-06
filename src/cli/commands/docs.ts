@@ -259,6 +259,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Evidence",
         body: "Each outcome writes a compact markdown evidence file. Script verifiers also write raw evidence JSON when the evidence is too deep for the markdown budget.",
       },
+      {
+        title: "Blocked Outcomes",
+        body: "When a step fails before producing an artifact or response, outcomes whose verifier references the missing `${artifacts.<name>.…}` / `${requests.<name>.…}` are reported as `skipped` (evidence says `blocked: … never produced — run stopped at failed step`), not `failed` — fix the failed step first. On a run with no step failure, a reference to an unknown artifact name is a real failure.",
+      },
     ],
     examples: [
       {
@@ -438,6 +442,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       {
         title: "agent-browser",
         body: "`agent-browser` is the default backend. Use it for the normal agent-in-session workflow: semantic locators, compact snapshots, lower context cost, and no Playwright browser install requirement.",
+      },
+      {
+        title: "Timeouts And Cleanup",
+        body: "Cairn enforces a hard deadline on every agent-browser invocation (60s default; step-level `timeoutMs` + 5s grace) — a wedged daemon gets its child killed and the step fails with a normal timeout error instead of hanging the run. Ctrl-C / SIGTERM tears down the run's own browser session (daemon + Chrome) before exiting; other sessions are untouched.",
       },
       {
         title: "Playwright",

@@ -465,6 +465,160 @@ describe("daemon-busy retry", () => {
   });
 });
 
+describe("child timeout enforcement", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("stamps every invocation with the 60s default deadline", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "deadline" });
+
+    await adapter.runStep({ open: "/dashboard" });
+
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      ["--session", "deadline", "navigate", "/dashboard"],
+      expect.objectContaining({ timeout: 60_000 }),
+    );
+  });
+
+  it("gives wait steps the spec timeout plus a kill grace period", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "wait-deadline" });
+
+    await adapter.runStep({ wait: { text: "Done", timeoutMs: 12_000 } });
+
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      [
+        "--session",
+        "wait-deadline",
+        "wait",
+        "--text",
+        "Done",
+        "--timeout",
+        "12000",
+      ],
+      expect.objectContaining({ timeout: 17_000 }),
+    );
+  });
+
+  it("fails a killed wait with a normal timeout error (no retry)", async () => {
+    execaMock.mockResolvedValue({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "wedged" });
+
+    const r = await adapter.runStep({
+      wait: { text: "Never", timeoutMs: 1_000 },
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain("timed out after 6000ms");
+    expect(r.stderr).toContain("daemon may be unresponsive");
+    // A kill is not a daemon-busy hiccup — no backoff retries.
+    expect(execaMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors an explicit defaultTimeoutMs over the built-in backstop", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({
+      session: "custom-deadline",
+      defaultTimeoutMs: 5_000,
+    });
+
+    await adapter.getUrl();
+
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      ["--session", "custom-deadline", "get", "url"],
+      expect.objectContaining({ timeout: 5_000 }),
+    );
+  });
+});
+
+describe("daemon teardown", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  async function pidFixture(session: string): Promise<{
+    stateDir: string;
+    exitSignal: Promise<NodeJS.Signals | null>;
+  }> {
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { spawn } = await import("node:child_process");
+    const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-state-"));
+    const child = spawn("sleep", ["30"]);
+    // Attach before the kill so the assertion can't miss the event.
+    const exitSignal = new Promise<NodeJS.Signals | null>((r) =>
+      child.once("exit", (_code, sig) => r(sig)),
+    );
+    await writeFile(join(stateDir, `${session}.pid`), `${child.pid}\n`);
+    return { stateDir, exitSignal };
+  }
+
+  it("close() escalates to a daemon kill after a child timeout", async () => {
+    const { stateDir, exitSignal } = await pidFixture("wedged-close");
+    execaMock.mockResolvedValue({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({
+      session: "wedged-close",
+      stateDir,
+    });
+
+    const wait = await adapter.runStep({
+      wait: { text: "Never", timeoutMs: 1_000 },
+    });
+    expect(wait.ok).toBe(false);
+
+    const closed = await adapter.close();
+    expect(closed.ok).toBe(true);
+    expect(closed.stdout).toContain("daemon terminated");
+    // The graceful `close` command was never issued — only the wait ran.
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(await exitSignal).toBe("SIGTERM");
+  });
+
+  it("terminateSync() kills the session daemon without invoking agent-browser", async () => {
+    const { stateDir, exitSignal } = await pidFixture("sig-teardown");
+    const adapter = new AgentBrowserAdapter({
+      session: "sig-teardown",
+      stateDir,
+    });
+
+    adapter.terminateSync();
+
+    expect(execaMock).not.toHaveBeenCalled();
+    expect(await exitSignal).toBe("SIGTERM");
+  });
+
+  it("terminateSync() is a no-op without a pid file", async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-empty-"));
+    const adapter = new AgentBrowserAdapter({
+      session: "no-daemon",
+      stateDir,
+    });
+
+    adapter.terminateSync();
+
+    expect(execaMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("open with waitUntil", () => {
   beforeEach(() => {
     execaMock.mockReset();

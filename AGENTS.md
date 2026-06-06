@@ -123,6 +123,16 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   the resolved element as step evidence.
 - Transient `os error 35` / daemon-busy failures are retried twice with
   backoff inside `invoke()`.
+- Every invocation carries a hard execa `timeout` (60s default; step-level
+  `timeoutMs` + 5s grace when present) so a wedged daemon can never hang a
+  run — the child is killed and the step fails with a timeout error.
+- The session daemon's command queue is serial: a `close` issued mid-`wait`
+  queues behind it, and a SIGTERM delivered while the daemon is busy is
+  dropped (verified on 0.26–0.27). Signal-time cleanup therefore goes through
+  `terminateSync()` — SIGTERM the daemon via `~/.agent-browser/<session>.pid`,
+  then escalate to killing its Chrome children + SIGKILL. The handler must
+  stay fully synchronous: with an in-flight execa child, signal-exit
+  re-raises the signal as soon as the sync portion returns.
 - `navigate <url>` (not `open <url>`) is what we send for `OpenStep` — `open`
   is for launching the browser, `navigate` for navigation.
 - `network requests --json` and `console --json` wrap results in

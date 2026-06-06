@@ -1,6 +1,7 @@
 import { healSpec, type HealOutput } from "../../../core/healer/Healer";
 import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
+import { trackBackend } from "../../cleanup";
 import { emit, resolveFormat } from "../../format";
 import { isInteractive } from "../../progress";
 
@@ -25,6 +26,7 @@ export async function healCommand(
     ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
   });
+  const untrack = trackBackend(backend);
 
   let exitCode = 2;
   try {
@@ -63,6 +65,7 @@ export async function healCommand(
       process.stderr.write(`cairn spec heal: ${err.message}\n`);
     }
   } finally {
+    untrack();
     await backend.close().catch(() => undefined);
   }
 

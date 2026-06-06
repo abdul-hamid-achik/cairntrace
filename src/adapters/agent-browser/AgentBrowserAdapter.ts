@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { execa } from "execa";
 import {
   parseSnapshot,
@@ -41,6 +45,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
   readonly name = "agent-browser" as const;
   private readonly binary: string;
   private readonly globalArgs: string[];
+  /** Set when a child had to be killed — close() escalates to a daemon kill. */
+  private sawChildTimeout = false;
 
   constructor(private readonly opts: AgentBrowserOptions) {
     this.binary = opts.binary ?? "agent-browser";
@@ -76,7 +82,17 @@ export class AgentBrowserAdapter implements BrowserBackend {
             ? { timeoutMs: step.open.timeoutMs }
             : {}),
         }),
+        { timeoutMs: childDeadline(step.open.timeoutMs) },
       );
+    }
+    if ("wait" in step) {
+      // Cairn enforces the wait deadline itself: the child gets the spec's
+      // timeout plus a grace period, so agent-browser's own (richer) timeout
+      // error wins when the daemon is healthy, and a wedged daemon gets the
+      // child killed instead of hanging the run forever (dogfood P0).
+      return this.invoke(stepToArgv(step), {
+        timeoutMs: childDeadline(step.wait.timeoutMs),
+      });
     }
     return this.invoke(stepToArgv(step));
   }
@@ -243,26 +259,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
     text: string,
     timeoutMs: number,
   ): Promise<InvocationResult> {
-    return this.invoke([
-      "wait",
-      "--text",
-      text,
-      "--timeout",
-      String(timeoutMs),
-    ]);
+    return this.invoke(
+      ["wait", "--text", text, "--timeout", String(timeoutMs)],
+      { timeoutMs: childDeadline(timeoutMs) },
+    );
   }
 
   async waitForUrl(
     pattern: string,
     timeoutMs: number,
   ): Promise<InvocationResult> {
-    return this.invoke([
-      "wait",
-      "--url",
-      pattern,
-      "--timeout",
-      String(timeoutMs),
-    ]);
+    return this.invoke(
+      ["wait", "--url", pattern, "--timeout", String(timeoutMs)],
+      { timeoutMs: childDeadline(timeoutMs) },
+    );
   }
 
   /* ----- tracing ----- */
@@ -321,7 +331,87 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /* ----- lifecycle ----- */
 
   async close(): Promise<InvocationResult> {
+    // After a child timeout the daemon is suspect: its per-session command
+    // queue is serial, so a graceful `close` would block behind whatever it
+    // is wedged on (verified against agent-browser 0.26–0.27). Kill the session
+    // daemon instead — it closes Chrome and removes its own state files.
+    if (this.sawChildTimeout && this.terminateDaemon()) {
+      return {
+        ok: true,
+        stdout: "session daemon terminated after child timeout",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+        argv: ["--session", this.opts.session, "close"],
+      };
+    }
     return this.invoke(["close"]);
+  }
+
+  /**
+   * Signal-time teardown: kill the owned session daemon (closes Chrome)
+   * without queueing behind in-flight commands. Fully synchronous — signal
+   * handlers with an in-flight execa child never get an async continuation
+   * (signal-exit re-raises the signal once the sync portion returns).
+   * No-op when the daemon's pid file is missing (nothing to clean up).
+   */
+  terminateSync(): void {
+    this.terminateDaemon();
+  }
+
+  /**
+   * Kill the session daemon via its pid file. Relies on agent-browser's
+   * state-dir layout (`~/.agent-browser/<session>.pid`, confirmed for 0.26–0.27);
+   * callers must treat `false` as "use the graceful path instead".
+   *
+   * Escalation is required: the 0.26–0.27 daemon honors SIGTERM only while idle —
+   * a signal delivered mid-command (the wedged wait we're cleaning up after)
+   * is dropped. So: SIGTERM, brief synchronous poll, and as a last resort
+   * SIGTERM the daemon's children (Chrome) before SIGKILLing the daemon, so
+   * the kill can't orphan a browser.
+   */
+  private terminateDaemon(): boolean {
+    const pid = this.readDaemonPid();
+    if (pid === undefined) return false;
+    // Capture children before any kill so the escalation path still knows
+    // which Chrome to take down.
+    const children = childPidsSync(pid);
+    try {
+      process.kill(pid, "SIGTERM");
+      const deadline = Date.now() + DAEMON_TERM_POLL_MS;
+      while (Date.now() < deadline) {
+        sleepSync(50);
+        if (!isAlive(pid)) return true;
+      }
+      for (const child of children) {
+        try {
+          process.kill(child, "SIGTERM");
+        } catch {
+          // already gone
+        }
+      }
+      process.kill(pid, "SIGKILL");
+      return true;
+    } catch {
+      // ESRCH between checks means the daemon exited — that's a success.
+      return !isAlive(pid);
+    }
+  }
+
+  private readDaemonPid(): number | undefined {
+    try {
+      const raw = readFileSync(
+        join(
+          this.opts.stateDir ?? join(homedir(), ".agent-browser"),
+          `${this.opts.session}.pid`,
+        ),
+        "utf8",
+      );
+      const pid = Number(raw.trim());
+      return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async doctor(): Promise<{
@@ -578,11 +668,32 @@ export class AgentBrowserAdapter implements BrowserBackend {
       ...this.globalArgs,
       ...argv,
     ];
+    // Every invocation carries a hard deadline so a wedged daemon can never
+    // hang a run: execa SIGTERMs the child at `timeout` (SIGKILL 5s later).
+    const timeoutMs =
+      invokeOpts.timeoutMs ??
+      this.opts.defaultTimeoutMs ??
+      DEFAULT_COMMAND_TIMEOUT_MS;
     const result = await execa(this.binary, fullArgv, {
       reject: false,
       cwd: this.opts.cwd,
-      timeout: invokeOpts.timeoutMs ?? this.opts.defaultTimeoutMs,
+      timeout: timeoutMs,
     });
+    if (result.timedOut) {
+      this.sawChildTimeout = true;
+      const stderr = typeof result.stderr === "string" ? result.stderr : "";
+      return {
+        ok: false,
+        stdout: typeof result.stdout === "string" ? result.stdout : "",
+        stderr: [
+          `timed out after ${timeoutMs}ms — killed \`${this.binary} ${argv.join(" ")}\` (agent-browser daemon may be unresponsive)`,
+          ...(stderr.trim() ? [stderr.trim()] : []),
+        ].join("\n"),
+        exitCode: result.exitCode ?? -1,
+        durationMs: Date.now() - start,
+        argv: fullArgv,
+      };
+    }
     return {
       ok: result.exitCode === 0,
       stdout: typeof result.stdout === "string" ? result.stdout : "",
@@ -598,6 +709,61 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
 const DEFAULT_LOCATOR_TIMEOUT_MS = 10000;
 const POLL_INTERVAL_MS = 250;
+
+/**
+ * Hard per-invocation deadline when nothing more specific applies. This is a
+ * backstop against a wedged daemon, not the primary timeout — agent-browser's
+ * own command timeouts (and spec-level `timeoutMs`) fire well before it.
+ */
+const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+
+/**
+ * Extra time granted to the child past the spec's own `timeoutMs` so
+ * agent-browser's richer timeout error wins when the daemon is healthy; the
+ * kill only fires when the child failed to enforce its own deadline.
+ */
+const CHILD_KILL_GRACE_MS = 5_000;
+
+/** Deadline for a child that was given an explicit step-level timeout. */
+function childDeadline(stepTimeoutMs: number | undefined): number | undefined {
+  return stepTimeoutMs === undefined
+    ? undefined
+    : stepTimeoutMs + CHILD_KILL_GRACE_MS;
+}
+
+/** How long the SIGTERM attempt waits for the daemon to exit. */
+const DAEMON_TERM_POLL_MS = 1_500;
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Synchronous sleep — usable inside signal handlers where timers never fire. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Direct child pids of `pid` (the daemon's Chrome). Best-effort, darwin/linux. */
+function childPidsSync(pid: number): number[] {
+  try {
+    const r = spawnSync("pgrep", ["-P", String(pid)], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+    if (typeof r.stdout !== "string") return [];
+    return r.stdout
+      .split("\n")
+      .map((line) => Number(line.trim()))
+      .filter((n) => Number.isInteger(n) && n > 1);
+  } catch {
+    return [];
+  }
+}
 
 /** Backoff schedule for transient daemon-busy retries (dogfood P2 #14). */
 const DAEMON_BUSY_BACKOFF_MS = [300, 1200];

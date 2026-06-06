@@ -155,4 +155,14 @@ export interface BrowserBackend {
 
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;
+
+  /**
+   * Forceful teardown for signal-time cleanup (SIGINT/SIGTERM). Must be
+   * fully SYNCHRONOUS: with an in-flight execa child, signal-exit re-raises
+   * the signal as soon as the handler's synchronous portion returns, so any
+   * async continuation silently never runs. Unlike `close()`, this must not
+   * queue behind in-flight backend work — kill owned processes directly.
+   * Optional: backends without owned processes can omit it.
+   */
+  terminateSync?(): void;
 }

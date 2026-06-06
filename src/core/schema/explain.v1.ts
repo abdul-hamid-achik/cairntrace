@@ -125,6 +125,22 @@ export const RulesDocSchema = z
         deepDataLocation: z.string(),
       })
       .strict(),
+    /** Optional (added in 1.6): Cairn-enforced per-step deadlines. */
+    stepTimeouts: z
+      .object({
+        summary: z.string(),
+        defaultMs: z.number().int().positive(),
+        graceMs: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    /** Optional (added in 1.6): blocked artifact-dependent outcomes report skipped. */
+    blockedOutcomes: z
+      .object({
+        summary: z.string(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type RulesDoc = z.infer<typeof RulesDocSchema>;

@@ -6,6 +6,7 @@ import { runSpec } from "../../core/runner/Runner";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
+import { trackBackend } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 
@@ -87,6 +88,7 @@ async function runSingle(
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts));
+  const untrack = trackBackend(backend);
   const interactive = format === "md" && isInteractive();
   const listener = interactive
     ? makeInteractiveListener({ color: colorEnabled(opts) })
@@ -116,6 +118,7 @@ async function runSingle(
   } catch (e) {
     handleParseError(e as Error, format, specPath);
   } finally {
+    untrack();
     await backend.close().catch(() => undefined);
   }
   process.exit(exitCode);
@@ -155,6 +158,7 @@ async function runBatch(
       ...backendOpts(opts),
       session: `${sessionRoot}-w${idx}`,
     });
+    const untrack = trackBackend(backend);
     try {
       const vars = parseVarFlags(opts.var);
       const r = await runSpec({
@@ -192,6 +196,7 @@ async function runBatch(
       }
       return synthesizeErroredResult(specPath, err);
     } finally {
+      untrack();
       await backend.close().catch(() => undefined);
     }
   });

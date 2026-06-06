@@ -23,6 +23,7 @@ export interface RunEvent {
     | "step.failed"
     | "outcome.passed"
     | "outcome.failed"
+    | "outcome.skipped"
     | "artifact.screenshot"
     | "artifact.snapshot"
     | "artifact.download"

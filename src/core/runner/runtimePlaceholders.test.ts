@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectUnresolvedRuntimeRefs,
   deepMapStrings,
   resolveResponsePlaceholders,
 } from "./runtimePlaceholders";
@@ -51,6 +52,54 @@ describe("resolveResponsePlaceholders", () => {
         responses,
       ),
     ).toBe("Bearer tok-123");
+  });
+});
+
+describe("collectUnresolvedRuntimeRefs", () => {
+  const artifacts = {
+    template: {
+      kind: "download" as const,
+      path: "/runs/x/downloads/template.xlsx",
+      relativePath: "downloads/template.xlsx",
+    },
+  };
+
+  it("reports artifact refs that were never produced, anywhere in the value", () => {
+    const verifier = {
+      xlsx: { path: "${artifacts.missing.path}", sheets: [{ name: "Data" }] },
+    };
+    expect(collectUnresolvedRuntimeRefs(verifier, artifacts)).toEqual([
+      "artifacts.missing",
+    ]);
+  });
+
+  it("is empty when all refs resolve", () => {
+    const verifier = {
+      script: { fixtures: { templatePath: "${artifacts.template.path}" } },
+    };
+    expect(collectUnresolvedRuntimeRefs(verifier, artifacts)).toEqual([]);
+  });
+
+  it("reports request refs missing from captured responses", () => {
+    const verifier = {
+      script: { fixtures: { token: "${requests.auth.body.token}" } },
+    };
+    expect(collectUnresolvedRuntimeRefs(verifier, artifacts, {})).toEqual([
+      "requests.auth",
+    ]);
+    expect(
+      collectUnresolvedRuntimeRefs(verifier, artifacts, { auth: { body: {} } }),
+    ).toEqual([]);
+  });
+
+  it("dedupes repeated references to the same missing name", () => {
+    const verifier = {
+      xlsx: { path: "${artifacts.gone.path}" },
+      note: "${artifacts.gone.relativePath}",
+    };
+    expect(collectUnresolvedRuntimeRefs(verifier, {})).toEqual([
+      "artifacts.gone",
+    ]);
   });
 });
 

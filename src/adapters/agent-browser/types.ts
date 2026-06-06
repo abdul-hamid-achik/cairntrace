@@ -16,7 +16,12 @@ export interface AgentBrowserOptions {
   profile?: string;
   /** Initial auth state file to load (--state). */
   initialStatePath?: string;
-  /** Per-command timeout in milliseconds; agent-browser exits non-zero on timeout. */
+  /**
+   * Per-command hard deadline in milliseconds, enforced by Cairn: the child
+   * process is killed (SIGTERM, then SIGKILL) and the step fails with a
+   * timeout error. Default 60s. Steps with their own `timeoutMs` get that
+   * value plus a small grace period instead.
+   */
   defaultTimeoutMs?: number;
   /**
    * How long interactive steps poll the snapshot for a semantic locator to
@@ -25,6 +30,11 @@ export interface AgentBrowserOptions {
   locatorTimeoutMs?: number;
   /** Where screenshot files land (--screenshot-dir). */
   screenshotDir?: string;
+  /**
+   * agent-browser's state/socket directory holding `<session>.pid` files.
+   * Default `~/.agent-browser`; overridable for tests.
+   */
+  stateDir?: string;
   /** Cap on the agent-browser stdout size (--max-output). */
   maxOutput?: number;
   /** Enable verbose agent-browser logging (--debug). */
