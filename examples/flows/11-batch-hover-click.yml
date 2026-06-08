@@ -1,0 +1,44 @@
+# Cairntrace example spec — composite batch step
+#
+# Demonstrates: a `batch` step running hover → click in ONE backend invocation.
+# On agent-browser this maps to `agent-browser batch --bail`, keeping the chain
+# inside a single process so transient UI state (here, the hover-revealed
+# Upload data button) is acted on without depending on cross-invocation state.
+# This is the robust pattern for popovers/menus that close when the pointer
+# moves or when the page re-renders between commands.
+#
+# Run against the demo app served at http://localhost:8787 (see examples/README.md).
+#
+version: 1
+name: batch_hover_click
+intent: open the subcontractor import dialog via the hover-only Upload data action
+environment: local
+preconditions:
+  commands:
+    - run: "echo demo-app must be running on :8787"
+outcomes:
+  - id: dialog_opened
+    description: clicking the hover-revealed Upload data button opens the import dialog
+    verify:
+      text:
+        contains: Upload dialog open
+  - id: no_console_errors
+    description: the interaction produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - id: open_table
+    open: http://localhost:8787/table-actions.html
+  - id: open_import_modal
+    batch:
+      - hover:
+          by: selector
+          selector: "#subcontractor-table thead tr"
+      - click:
+          by: selector
+          selector: '.table-header-hover-actions button[aria-label="Upload data"]'
+  - id: wait_for_dialog
+    wait:
+      text: Upload dialog open
+      timeoutMs: 5000

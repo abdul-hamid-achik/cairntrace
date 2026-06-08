@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Table Hover Actions</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 4rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; }
+      th { background: #f8f8f8; }
+
+      /*
+       * The action buttons live in the header but are hidden until the header
+       * row is hovered — the classic "hover reveals a popover you then click"
+       * pattern. With display:none they aren't in the accessibility tree (or
+       * clickable) unless the pointer is over the header. A `batch` step runs
+       * the hover + click in one invocation so it never depends on the pointer
+       * staying put across separate CLI calls (which a backend may or may not
+       * preserve). See examples/flows/11-batch-hover-click.yml.
+       */
+      .table-header-hover-actions { display: none; margin-left: 0.75rem; }
+      #subcontractor-table thead tr:hover .table-header-hover-actions { display: inline-block; }
+
+      #import-dialog[hidden] { display: none; }
+      #import-dialog { margin-top: 1.5rem; padding: 1rem; border: 2px solid #1e7e34; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Subcontractors</h1>
+      <p id="status">Hover the table header to reveal row actions.</p>
+    </header>
+    <main>
+      <table id="subcontractor-table" aria-label="Subcontractors">
+        <thead>
+          <tr>
+            <th>
+              Company
+              <span class="table-header-hover-actions">
+                <button type="button" aria-label="Upload data">Upload data</button>
+              </span>
+            </th>
+            <th>Workers</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr role="row"><td>Acme Concrete</td><td>12</td></tr>
+          <tr role="row"><td>Bedrock Steel</td><td>7</td></tr>
+        </tbody>
+      </table>
+
+      <section id="import-dialog" hidden aria-label="Import dialog">
+        <h2>Import subcontractor data</h2>
+        <p>Upload dialog open</p>
+      </section>
+    </main>
+    <script>
+      // Reveal the dialog when the (hover-only) action button is clicked.
+      document
+        .querySelector('.table-header-hover-actions button[aria-label="Upload data"]')
+        .addEventListener("click", () => {
+          document.getElementById("import-dialog").hidden = false;
+          document.getElementById("status").textContent = "Import dialog opened.";
+        });
+    </script>
+  </body>
+</html>

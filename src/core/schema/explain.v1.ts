@@ -88,6 +88,7 @@ export const StepDocSchema = z
       "scroll",
       "snapshot",
       "use",
+      "batch",
     ]),
     kind: z.enum([
       "navigation",

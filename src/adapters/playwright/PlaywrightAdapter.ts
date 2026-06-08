@@ -7,7 +7,12 @@ import type {
   Page,
   Request,
 } from "playwright";
-import type { Locator, Step, WaitCondition } from "../../core/schema/spec.v1";
+import type {
+  BatchSubStep,
+  Locator,
+  Step,
+  WaitCondition,
+} from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -106,6 +111,13 @@ export class PlaywrightAdapter implements BrowserBackend {
             direction === "left" ? -px : direction === "right" ? px : 0;
           const dy = direction === "up" ? -px : direction === "down" ? px : 0;
           await page.mouse.wheel(dx, dy);
+        }
+      } else if ("batch" in step) {
+        // Same browser context — interactions run in-process, so hover/focus
+        // state already persists across the chain. Run them in order; --bail
+        // parity means the first throw fails the step.
+        for (const sub of step.batch) {
+          await this.runBatchSubStep(page, sub);
         }
       } else if ("snapshot" in step) {
         // Snapshot is captured by the Runner via .snapshot() — no-op here.
@@ -406,6 +418,38 @@ export class PlaywrightAdapter implements BrowserBackend {
         );
       case "selector":
         return this.page.locator(loc.selector);
+    }
+  }
+
+  /** Run one selector-only `batch` sub-step in the live page context. */
+  private async runBatchSubStep(page: Page, sub: BatchSubStep): Promise<void> {
+    const timeout = this.opts.defaultTimeoutMs;
+    if ("click" in sub) {
+      await this.resolveLocator(sub.click).click({ timeout });
+    } else if ("hover" in sub) {
+      await this.resolveLocator(sub.hover).hover({ timeout });
+    } else if ("fill" in sub) {
+      const { value, ...loc } = sub.fill;
+      await this.resolveLocator(loc as Locator).fill(value, { timeout });
+    } else if ("upload" in sub) {
+      const { path, ...loc } = sub.upload;
+      await this.resolveLocator(loc as Locator).setInputFiles(path, { timeout });
+    } else if ("press" in sub) {
+      await page.keyboard.press(sub.press);
+    } else if ("scroll" in sub) {
+      if ("to" in sub.scroll) {
+        await this.resolveLocator(sub.scroll.to).scrollIntoViewIfNeeded({
+          timeout,
+        });
+      } else {
+        const px = sub.scroll.px ?? DEFAULT_SCROLL_PX;
+        const { direction } = sub.scroll;
+        const dx = direction === "left" ? -px : direction === "right" ? px : 0;
+        const dy = direction === "up" ? -px : direction === "down" ? px : 0;
+        await page.mouse.wheel(dx, dy);
+      }
+    } else if ("wait" in sub) {
+      await this.applyWait(page, sub.wait);
     }
   }
 

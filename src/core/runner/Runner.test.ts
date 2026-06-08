@@ -213,6 +213,72 @@ steps:
     });
   });
 
+  it("dispatches a batch step as a single composite interaction", async () => {
+    const specPath = await writeSpec(
+      "batch",
+      `version: 1
+name: batch_demo
+intent: hover then click the revealed popover in one invocation
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: open_import_modal
+    batch:
+      - hover: { by: selector, selector: "#subcontractor-table" }
+      - click: { by: selector, selector: ".hover-actions button" }
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.id).toBe("open_import_modal");
+    // The whole batch is one dispatched step, not expanded into N steps.
+    expect(backend.stepLog).toHaveLength(1);
+    expect(backend.stepLog[0]).toMatchObject({
+      batch: [
+        { hover: { by: "selector", selector: "#subcontractor-table" } },
+        { click: { by: "selector", selector: ".hover-actions button" } },
+      ],
+    });
+  });
+
+  it("fails the run when a batch step fails, with batch diagnostics", async () => {
+    const specPath = await writeSpec(
+      "batch_fail",
+      `version: 1
+name: batch_fail
+intent: a failing batch step fails the run
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: chain
+    batch:
+      - hover: { by: selector, selector: "#row" }
+      - click: { by: selector, selector: "#missing" }
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("batch failed at sub-step #2 (click #missing)");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.status).toBe("failed");
+    expect(result.steps[0]!.error).toContain("sub-step #2");
+    // A failed batch still writes a diagnostics artifact for the step.
+    expect(result.artifacts.diagnostics?.[0]).toMatch(/^diagnostics\/001_chain/);
+  });
+
   it("resolves config vars before parsing schema-required step fields", async () => {
     await writeFile(
       join(workDir, "cairntrace.config.yml"),

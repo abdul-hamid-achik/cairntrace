@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Step } from "../../../core/schema/spec.v1";
 import {
+  batchSubStepToArgv,
   locatorToArgv,
   stepToArgv,
   waitConditionToArgv,
@@ -263,5 +264,51 @@ describe("stepToArgv", () => {
   it("use: throws — must be expanded by the runner before adapter dispatch", () => {
     const step = { use: "login_admin" } as Step;
     expect(() => stepToArgv(step)).toThrow(/must be expanded/);
+  });
+
+  it("batch: throws — handled by AgentBrowserAdapter.batch, not stepToArgv", () => {
+    const step = {
+      batch: [
+        { hover: { by: "selector", selector: "#a" } },
+        { click: { by: "selector", selector: "#b" } },
+      ],
+    } as Step;
+    expect(() => stepToArgv(step)).toThrow(/handled by AgentBrowserAdapter/);
+  });
+});
+
+describe("batchSubStepToArgv", () => {
+  it("maps each selector sub-step to a single command", () => {
+    expect(
+      batchSubStepToArgv({ click: { by: "selector", selector: "#go" } }),
+    ).toEqual(["click", "#go"]);
+    expect(
+      batchSubStepToArgv({ hover: { by: "selector", selector: ".row" } }),
+    ).toEqual(["hover", ".row"]);
+    expect(
+      batchSubStepToArgv({
+        fill: { by: "selector", selector: "#name", value: "Acme" },
+      }),
+    ).toEqual(["fill", "#name", "Acme"]);
+    expect(
+      batchSubStepToArgv({
+        upload: { by: "selector", selector: "input[type=file]", path: "./a.xlsx" },
+      }),
+    ).toEqual(["upload", "input[type=file]", "./a.xlsx"]);
+    expect(batchSubStepToArgv({ press: "Enter" })).toEqual(["press", "Enter"]);
+  });
+
+  it("maps scroll (direction + to) and wait sub-steps", () => {
+    expect(batchSubStepToArgv({ scroll: { direction: "down", px: 200 } })).toEqual([
+      "scroll",
+      "down",
+      "200",
+    ]);
+    expect(
+      batchSubStepToArgv({ scroll: { to: { by: "selector", selector: "#end" } } }),
+    ).toEqual(["scrollintoview", "#end"]);
+    expect(
+      batchSubStepToArgv({ wait: { text: "Saved", timeoutMs: 5000 } }),
+    ).toEqual(["wait", "--text", "Saved", "--timeout", "5000"]);
   });
 });

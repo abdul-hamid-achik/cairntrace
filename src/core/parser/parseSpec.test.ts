@@ -49,6 +49,67 @@ outcomes:
     await expect(parseSpec(path)).rejects.toThrow();
   });
 
+  it("accepts a selector-only batch step", async () => {
+    const path = join(dir, "batch_ok.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: batch_ok
+intent: composite batch step
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - batch:
+      - hover: { by: selector, selector: "#row" }
+      - click: { by: selector, selector: ".actions button" }
+`,
+    );
+    const r = await parseSpec(path);
+    const step = r.spec.steps![0]!;
+    expect("batch" in step && step.batch).toHaveLength(2);
+  });
+
+  it("rejects semantic locators inside a batch step", async () => {
+    const path = join(dir, "batch_semantic.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: batch_semantic
+intent: semantic locators are not allowed in batch
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - batch:
+      - hover: { by: selector, selector: "#row" }
+      - click: { by: role, role: button, name: Upload }
+`,
+    );
+    await expect(parseSpec(path)).rejects.toThrow();
+  });
+
+  it("rejects a batch step with fewer than 2 sub-steps", async () => {
+    const path = join(dir, "batch_single.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: batch_single
+intent: a one-item batch should be a normal step
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - batch:
+      - click: { by: selector, selector: "#go" }
+`,
+    );
+    await expect(parseSpec(path)).rejects.toThrow();
+  });
+
   it("inlines `use:` steps from imported actions", async () => {
     const actionPath = join(dir, "login.yml");
     await writeFile(

@@ -192,7 +192,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated in-page API call and captures the response, `wait` waits for text/notText/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, and `use` invokes an imported reusable action.",
+        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated in-page API call and captures the response, `wait` waits for text/notText/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation.",
+      },
+      {
+        title: "Batch Steps",
+        body: "`batch` runs ≥2 selector sub-steps in a SINGLE backend invocation (agent-browser `batch --bail`), so transient UI state — a hover popover, focus, an open menu — survives long enough to act on it instead of being lost to a fresh CLI process per step. Sub-steps are `click`/`hover`/`fill`/`upload`/`press`/`scroll`/`wait` and must use `by: selector` (semantic locators need their own snapshot round-trip, which would break the single invocation). The first failing sub-step fails the whole step. Artifact placeholders are not resolved inside batch sub-steps; use a top-level `upload`/`download` step for those.",
       },
       {
         title: "Locators",
@@ -237,6 +241,18 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "  - open: /scanner",
           '  - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }',
           "  - press: Enter",
+        ].join("\n"),
+      },
+      {
+        title: "batch: hover then click the revealed popover button",
+        language: "yaml",
+        code: [
+          "steps:",
+          "  - batch:",
+          '      - hover: { by: selector, selector: "${vars.subContractorTableSelector}" }',
+          "      - click:",
+          "          by: selector",
+          "          selector: '.table-header-hover-actions button[aria-label=\"Upload data\"]'",
         ].join("\n"),
       },
     ],

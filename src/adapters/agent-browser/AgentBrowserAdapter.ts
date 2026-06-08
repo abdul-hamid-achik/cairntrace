@@ -7,7 +7,12 @@ import {
   parseSnapshot,
   type SnapshotElement,
 } from "../../core/healer/snapshotParser";
-import type { DownloadStep, Locator, Step } from "../../core/schema/spec.v1";
+import type {
+  BatchStep,
+  DownloadStep,
+  Locator,
+  Step,
+} from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -18,7 +23,11 @@ import type {
   ScreenshotResult,
   SnapshotResult,
 } from "../browserBackend";
-import { stepToArgv, waitConditionToArgv } from "./commandBuilder";
+import {
+  batchSubStepToArgv,
+  stepToArgv,
+  waitConditionToArgv,
+} from "./commandBuilder";
 import {
   buildGlobalArgs,
   parseEnvelope,
@@ -56,6 +65,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /* ----- step dispatch ----- */
 
   async runStep(step: Step): Promise<InvocationResult> {
+    if ("batch" in step) return this.runBatchStep(step);
     if ("download" in step) return this.runDownloadStep(step);
     if ("click" in step) return this.runInteractiveStep(step.click, "click");
     if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
@@ -430,6 +440,23 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   /* ----- internals ----- */
 
+  /**
+   * Run a `batch` composite step as a single `agent-browser batch --bail`
+   * invocation so transient UI state (a hover popover, focus) survives across
+   * the sub-step chain. The hard-deadline timeout from invoke() applies to the
+   * whole batch. On failure, name the sub-step that bailed.
+   */
+  private async runBatchStep(step: BatchStep): Promise<InvocationResult> {
+    const commands = step.batch.map((sub) => batchSubStepToArgv(sub));
+    const r = await this.batch(commands, { bail: true });
+    if (r.ok) return r.raw;
+    return {
+      ...r.raw,
+      ok: false,
+      stderr: describeBatchFailure(commands, r.raw),
+    };
+  }
+
   private async runDownloadStep(step: DownloadStep): Promise<InvocationResult> {
     const { saveAs, assign: _assign, timeoutMs, ...locator } = step.download;
     if (locator.by === "selector") {
@@ -767,6 +794,46 @@ function childPidsSync(pid: number): number[] {
 
 /** Backoff schedule for transient daemon-busy retries (dogfood P2 #14). */
 const DAEMON_BUSY_BACKOFF_MS = [300, 1200];
+
+/**
+ * Build a step error for a failed `batch --bail`. agent-browser emits a JSON
+ * array of per-command results on stdout; with --bail the run stops at the
+ * first failure, so the array length tells us which sub-step bailed. Falls back
+ * to raw stderr when the output can't be parsed.
+ */
+export function describeBatchFailure(
+  commands: string[][],
+  raw: { stdout: string; stderr: string; exitCode: number },
+): string {
+  const stderr = raw.stderr.trim();
+  let results: Array<Record<string, unknown>> = [];
+  try {
+    const parsed = JSON.parse(raw.stdout.trim()) as unknown;
+    if (Array.isArray(parsed)) results = parsed as Array<Record<string, unknown>>;
+  } catch {
+    // non-JSON output — fall through to the stderr-only message
+  }
+  const failedIdx = results.findIndex(
+    (res) =>
+      res &&
+      (res["success"] === false ||
+        res["ok"] === false ||
+        typeof res["error"] === "string"),
+  );
+  // With --bail the failing command is the last one that produced a result.
+  const idx = failedIdx >= 0 ? failedIdx : results.length;
+  if (idx >= 0 && idx < commands.length) {
+    const cmd = commands[idx]!.join(" ");
+    const inner =
+      (failedIdx >= 0 && typeof results[failedIdx]?.["error"] === "string"
+        ? (results[failedIdx]!["error"] as string)
+        : "") ||
+      stderr ||
+      `exit ${raw.exitCode}`;
+    return `batch failed at sub-step #${idx + 1} (${cmd}): ${inner}`;
+  }
+  return stderr || `batch failed (exit ${raw.exitCode})`;
+}
 
 export function isTransientDaemonError(stderr: string): boolean {
   return /os error 35|Resource temporarily unavailable|daemon may be busy/i.test(

@@ -1,5 +1,6 @@
 import {
   openPath,
+  type BatchSubStep,
   type ClickStep,
   type DownloadStep,
   type FillStep,
@@ -156,6 +157,27 @@ export function scrollStepToArgv(step: ScrollStep): string[] {
   );
 }
 
+/**
+ * Map one `batch` sub-step to agent-browser argv (without global flags).
+ * Sub-steps are selector-only by schema, so every one maps to a single command
+ * with no snapshot resolution — that's what keeps the whole batch a single
+ * invocation. Used by AgentBrowserAdapter.batch().
+ */
+export function batchSubStepToArgv(sub: BatchSubStep): string[] {
+  if ("click" in sub) return ["click", sub.click.selector];
+  if ("hover" in sub) return ["hover", sub.hover.selector];
+  if ("fill" in sub) return ["fill", sub.fill.selector, sub.fill.value];
+  if ("upload" in sub) return ["upload", sub.upload.selector, sub.upload.path];
+  if ("press" in sub) return ["press", sub.press];
+  if ("scroll" in sub) {
+    if ("to" in sub.scroll) return ["scrollintoview", sub.scroll.to.selector];
+    const argv = ["scroll", sub.scroll.direction];
+    if (sub.scroll.px !== undefined) argv.push(String(sub.scroll.px));
+    return argv;
+  }
+  return waitConditionToArgv(sub.wait);
+}
+
 /* ----- top-level dispatch ----- */
 
 /**
@@ -181,6 +203,11 @@ export function stepToArgv(step: Step): string[] {
   if ("request" in step) {
     throw new Error(
       "request steps are handled by the runner before adapter dispatch",
+    );
+  }
+  if ("batch" in step) {
+    throw new Error(
+      "batch steps are handled by AgentBrowserAdapter.batch before adapter dispatch",
     );
   }
   if ("use" in step) {

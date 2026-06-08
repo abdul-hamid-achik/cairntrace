@@ -328,6 +328,76 @@ export const UseStepSchema = z
   .strict();
 export type UseStep = z.infer<typeof UseStepSchema>;
 
+/* ----- batch (composite single-invocation step) ----- */
+
+/**
+ * Sub-steps allowed inside a `batch`. Restricted to actions that map to one
+ * agent-browser command WITHOUT a snapshot round-trip, so the whole block runs
+ * as a single backend invocation — which is the entire point of `batch`: the
+ * hover state survives long enough to click the popover button it reveals.
+ *
+ * Semantic locators (`by: role|label|text`) need their own snapshot resolution
+ * (the strict-matching path in AgentBrowserAdapter) and so are deliberately
+ * NOT accepted here — a batch that re-snapshotted between sub-steps wouldn't
+ * preserve transient UI state. Use selector locators inside `batch`, or split
+ * the semantic interactions into separate top-level steps.
+ */
+const batchClickSchema = z.object({ click: SelectorLocatorSchema }).strict();
+const batchHoverSchema = z.object({ hover: SelectorLocatorSchema }).strict();
+const batchFillSchema = z
+  .object({
+    fill: SelectorLocatorSchema.extend({ value: z.string() }).strict(),
+  })
+  .strict();
+const batchUploadSchema = z
+  .object({
+    upload: SelectorLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+  })
+  .strict();
+const batchPressSchema = z.object({ press: z.string().min(1) }).strict();
+const batchScrollSchema = z
+  .object({
+    scroll: z.union([
+      z
+        .object({
+          direction: z.enum(["up", "down", "left", "right"]),
+          px: z.number().int().positive().optional(),
+        })
+        .strict(),
+      z.object({ to: SelectorLocatorSchema }).strict(),
+    ]),
+  })
+  .strict();
+const batchWaitSchema = z.object({ wait: WaitConditionSchema }).strict();
+
+export const BatchSubStepSchema = z.union([
+  batchClickSchema,
+  batchHoverSchema,
+  batchFillSchema,
+  batchUploadSchema,
+  batchPressSchema,
+  batchScrollSchema,
+  batchWaitSchema,
+]);
+export type BatchSubStep = z.infer<typeof BatchSubStepSchema>;
+
+/**
+ * Run a chain of selector interactions in ONE backend invocation. On
+ * agent-browser this maps to `agent-browser batch --bail`, so intermediate
+ * state (hover popovers, focus, transient menus) persists across the chain
+ * instead of being lost to a fresh CLI process per step. `--bail` semantics:
+ * the first failing sub-step fails the whole batch step.
+ */
+export const BatchStepSchema = z
+  .object({
+    ...stepCommon,
+    batch: z
+      .array(BatchSubStepSchema)
+      .min(2, "batch requires at least 2 sub-steps; use a normal step for one"),
+  })
+  .strict();
+export type BatchStep = z.infer<typeof BatchStepSchema>;
+
 export const StepSchema = z.union([
   OpenStepSchema,
   ClickStepSchema,
@@ -342,6 +412,7 @@ export const StepSchema = z.union([
   ScrollStepSchema,
   SnapshotStepSchema,
   UseStepSchema,
+  BatchStepSchema,
 ]);
 export type Step = z.infer<typeof StepSchema>;
 

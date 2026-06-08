@@ -76,6 +76,12 @@ per-agent code paths.
 - For authenticated API calls use the typed `request` step (in-page fetch,
   cookies included, `assign:` + `${requests.<name>.body.X}` splicing) — not a
   node-script verifier full of fetch glue.
+- When a transient UI state must survive across interactions (a hover that
+  reveals a popover you then click), use a `batch` step: ≥2 selector-only
+  sub-steps run in one backend invocation (agent-browser `batch --bail`) so
+  the state isn't lost between them. Semantic locators are not allowed inside
+  `batch` — they need a snapshot round-trip that would defeat the single
+  invocation; use `by: selector` there, or separate top-level steps.
 - Hydration-sensitive first interactions: prefer
   `open: { path, waitUntil: networkidle }` over a separate
   `wait: { load: … }` step.
@@ -121,6 +127,12 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   success on zero matches. The adapter resolves semantic locators against
   `snapshot -i`, scrolls the `@ref` into view, acts on the ref, and records
   the resolved element as step evidence.
+- `batch` steps are the exception that runs through agent-browser's native
+  `batch --bail`: each selector sub-step maps to one command via
+  `batchSubStepToArgv`, joined and quoted with `quoteIfNeeded`. This is the
+  only path that issues multiple interactions per invocation (to preserve
+  hover/focus state); it's selector-only precisely because there's no
+  per-sub-step snapshot resolution.
 - Transient `os error 35` / daemon-busy failures are retried twice with
   backoff inside `invoke()`.
 - Every invocation carries a hard execa `timeout` (60s default; step-level

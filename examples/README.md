@@ -15,6 +15,7 @@ examples/
 │   ├── api.html                       page that fetches /api/inventory and renders items
 │   ├── api-broken.html                page that fetches /api/broken (returns 500)
 │   ├── import.html                    workbook download/upload demo
+│   ├── table-actions.html             hover-reveal row actions (batch step demo)
 │   └── server.ts                      bun server on :8787 with static + JSON routes
 ├── transforms/
 │   └── make-invalid-template.ts       Node transform that creates an invalid upload fixture
@@ -30,7 +31,8 @@ examples/
     ├── 07-config-driven.yml           uses cairntrace.config.yml for baseUrl + ${vars.X}
     ├── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
     ├── 09-imported-drift.yml          drift inside an imported action; heal patches the action file
-    └── 10-artifact-xlsx.yml           download → Node verifier → xlsx verifier → transform → upload
+    ├── 10-artifact-xlsx.yml           download → Node verifier → xlsx verifier → transform → upload
+    └── 11-batch-hover-click.yml       batch step: hover → click a popover in one invocation
 ```
 
 ## Heal demo (`cairn spec heal`)

@@ -12,6 +12,7 @@
  *   /api.html          → page that fetches /api/inventory
  *   /api-broken.html   → page that fetches /api/broken (returns 500)
  *   /import.html       → template download + upload demo
+ *   /table-actions.html→ hover-reveal row actions (batch step demo)
  *   /api/inventory     → 200 JSON with three items
  *   /api/broken        → 500 JSON error
  *   /template.xlsx     → generated workbook fixture
@@ -70,6 +71,7 @@ const server = Bun.serve({
 console.log(`Cairntrace demo serving at http://localhost:${server.port}/`);
 console.log(`  /                /api.html        /api-broken.html`);
 console.log(`  /dashboard.html  /import.html     /template.xlsx`);
+console.log(`  /table-actions.html`);
 console.log(`  /api/inventory   /api/broken`);
 
 function makeTemplateWorkbook(): Buffer {

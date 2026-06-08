@@ -202,7 +202,7 @@ Run `cairn run <spec> --cold-start --json` before declaring a spec done.
 Current step keys:
 
 `open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`,
-`request`, `wait`, `press`, `scroll`, `snapshot`, `use`.
+`request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`.
 
 Interactive steps use locators with `by: role`, `by: label`, `by: text`, or
 `by: selector`. Prefer role and label locators when possible; they are clearer
@@ -226,6 +226,20 @@ included) and captures the response for later steps:
 ```yaml
 - request: { method: POST, url: /api/qr-token, expectStatus: 200, assign: qr }
 - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }
+```
+
+`batch` runs a chain of selector interactions in **one** backend invocation
+(agent-browser `batch --bail`), so transient UI state survives — e.g. a hover
+that reveals a popover stays open long enough to click the button inside it.
+Sub-steps are selector-only (`click`, `hover`, `fill`, `upload`, `press`,
+`scroll`, `wait`); the first failing sub-step fails the step:
+
+```yaml
+- batch:
+    - hover: { by: selector, selector: "#subcontractor-table" }
+    - click:
+        by: selector
+        selector: '.table-header-hover-actions button[aria-label="Upload data"]'
 ```
 
 **Verifiers**

@@ -541,6 +541,73 @@ describe("child timeout enforcement", () => {
   });
 });
 
+describe("batch step", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("runs the whole chain as one `batch --json --bail` invocation", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "[]",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-test" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#subcontractor-table" } },
+        {
+          click: {
+            by: "selector",
+            selector: '.hover-actions button[aria-label="Upload data"]',
+          },
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    // Exactly one CLI invocation — that's the whole point of batch.
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    const argv = execaMock.mock.calls[0]![1] as string[];
+    expect(argv).toEqual([
+      "--session",
+      "batch-test",
+      "batch",
+      "--json",
+      "--bail",
+      "hover #subcontractor-table",
+      // selector has spaces + quotes → quoted and escaped for the batch parser
+      'click ".hover-actions button[aria-label=\\"Upload data\\"]"',
+    ]);
+  });
+
+  it("fails the step and names the bailing sub-step", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: JSON.stringify([
+        { success: true },
+        { success: false, error: "element not found: #missing" },
+      ]),
+      stderr: "batch stopped at command 2",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-fail" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#missing" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("sub-step #2");
+    expect(result.stderr).toContain("click #missing");
+    expect(result.stderr).toContain("element not found");
+    expect(execaMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("daemon teardown", () => {
   beforeEach(() => {
     execaMock.mockReset();

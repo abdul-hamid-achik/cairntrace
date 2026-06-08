@@ -1064,6 +1064,12 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
     return { kind: "transform", file, input, saveAs, assign };
   }
   if ("open" in step) return { kind: "open", url: openPath(step) };
+  if ("batch" in step) {
+    return {
+      kind: "batch",
+      subSteps: step.batch.map((sub) => Object.keys(sub)[0] ?? "?"),
+    };
+  }
   if ("request" in step) {
     return {
       kind: "request",
@@ -1099,6 +1105,20 @@ function diagnosticNeedles(step: Step): string[] {
   }
   if ("scroll" in step && "to" in step.scroll)
     add(locatorNeedle(step.scroll.to));
+  if ("batch" in step) {
+    for (const sub of step.batch) {
+      if ("click" in sub) add(sub.click.selector);
+      else if ("hover" in sub) add(sub.hover.selector);
+      else if ("fill" in sub) add(sub.fill.selector);
+      else if ("upload" in sub) add(sub.upload.selector);
+      else if ("scroll" in sub && "to" in sub.scroll)
+        add(sub.scroll.to.selector);
+      else if ("wait" in sub) {
+        if ("text" in sub.wait) add(sub.wait.text);
+        if ("notText" in sub.wait) add(sub.wait.notText);
+      }
+    }
+  }
   return values.slice(0, 10);
 }
 
