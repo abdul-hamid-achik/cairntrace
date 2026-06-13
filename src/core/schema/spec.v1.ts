@@ -134,8 +134,8 @@ const transformTargetSchema = z
  * Typed authenticated API call (the promotion of the fetch+cookie glue that
  * kept reappearing in `script` verifiers). Runs `fetch` in the browser page
  * context with `credentials: "include"`, so the browser session's cookies
- * ride along on both backends. Relative `url` resolves against the current
- * page origin.
+ * ride along on both backends. Relative `url` resolves against config
+ * `baseUrl` when present, otherwise against the current page origin.
  *
  * `assign` names the captured response: the full envelope is written to
  * `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`),
@@ -523,6 +523,10 @@ export const SpecSchema = z
     environment: z.string().optional(),
     backend: BackendSchema.optional(),
     mode: z.enum(["normal", "debug"]).default("normal"),
+    /** Spec-local `${vars.X}` values. Config env vars < spec vars < CLI --var. */
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional(),
 
     /**
      * Browser viewport for this spec. Overrides the environment-level

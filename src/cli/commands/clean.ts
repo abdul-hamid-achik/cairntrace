@@ -1,8 +1,6 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { loadConfig } from "../../core/config/loader";
 import { pruneRuns, type PruneResult } from "../../core/artifacts/retention";
 import { emit, resolveFormat } from "../format";
+import { resolveArtifactRootContext } from "../runRefs";
 
 export interface CleanOptions {
   keep?: string;
@@ -32,16 +30,16 @@ const DEFAULT_KEEP_RUNS = 10;
 export async function cleanCommand(opts: CleanOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
 
-  // loadConfig only uses the path's dirname for discovery — probe from cwd.
-  const loaded = await loadConfig(
-    resolve(process.cwd(), "cairn-clean-probe"),
-    opts.config,
-  ).catch(() => undefined);
-
-  const artifactRoot =
-    opts.artifactRoot ??
-    loaded?.config.artifactRoot ??
-    join(homedir(), ".cairntrace", "runs");
+  let artifactRoot: string;
+  let keepRunsFromConfig: number | undefined;
+  try {
+    const resolved = await resolveArtifactRootContext(opts);
+    artifactRoot = resolved.artifactRoot;
+    keepRunsFromConfig = resolved.loaded?.config.retention?.keepRuns;
+  } catch (e) {
+    process.stderr.write(`cairn clean: ${(e as Error).message}\n`);
+    process.exit(2);
+  }
 
   let keepRuns: number;
   if (opts.all) {
@@ -55,7 +53,7 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
       process.exit(2);
     }
   } else {
-    keepRuns = loaded?.config.retention?.keepRuns ?? DEFAULT_KEEP_RUNS;
+    keepRuns = keepRunsFromConfig ?? DEFAULT_KEEP_RUNS;
   }
 
   const pruned = await pruneRuns(artifactRoot, { keepRuns });

@@ -45,14 +45,14 @@ export async function resolveSpecRuntimeContext(
     ? specPath
     : resolve(opts.cwd ?? process.cwd(), specPath);
   const loaded = await loadConfig(absSpecPath, opts.configPath);
-  const specEnvironment = await peekSpecEnvironment(absSpecPath);
+  const specSettings = await peekSpecSettings(absSpecPath);
   const envName =
     opts.envOverride ??
-    specEnvironment ??
+    specSettings.environment ??
     loaded?.config.defaultEnvironment ??
     "local";
   const envConfig = loaded?.config.environments[envName];
-  const vars = { ...envConfig?.vars, ...opts.vars };
+  const vars = { ...envConfig?.vars, ...specSettings.vars, ...opts.vars };
 
   return {
     specPath: absSpecPath,
@@ -64,16 +64,31 @@ export async function resolveSpecRuntimeContext(
   };
 }
 
-async function peekSpecEnvironment(
-  specPath: string,
-): Promise<string | undefined> {
+async function peekSpecSettings(specPath: string): Promise<{
+  environment?: string;
+  vars?: Record<string, ConfigVarValue>;
+}> {
   const text = await readFile(specPath, "utf8");
   const raw = parseYaml(text) as unknown;
-  if (!raw || typeof raw !== "object") return undefined;
+  if (!raw || typeof raw !== "object") return {};
   const environment = (raw as { environment?: unknown }).environment;
-  return typeof environment === "string" && environment.length > 0
-    ? environment
-    : undefined;
+  const vars = (raw as { vars?: unknown }).vars;
+  return {
+    ...(typeof environment === "string" && environment.length > 0
+      ? { environment }
+      : {}),
+    ...(isVarsRecord(vars) ? { vars } : {}),
+  };
+}
+
+function isVarsRecord(value: unknown): value is Record<string, ConfigVarValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (v) =>
+      typeof v === "string" || typeof v === "number" || typeof v === "boolean",
+  );
 }
 
 function loadedConfigFields(

@@ -45,22 +45,7 @@ export async function verifyCommand(
 
   try {
     if (opts.stamp) {
-      // Stamp mode: re-parse the YAML as raw object, write a fresh contractHash, save.
-      const text = await readFile(specPath, "utf8");
-      const raw = parseYaml(text);
-      const spec = SpecSchema.parse(raw);
-      const hash = computeContractHash(spec);
-      const updated = { ...spec, contractHash: hash };
-      const header = extractHeader(text);
-      const out =
-        header +
-        yamlStringify(updated, {
-          indent: 2,
-          lineWidth: 100,
-          defaultStringType: "PLAIN",
-          defaultKeyType: "PLAIN",
-        });
-      await writeFile(specPath, out);
+      const hash = await stampSpecContractHash(specPath);
       result.status = "stamped";
       result.contractHash = hash;
     } else {
@@ -99,6 +84,26 @@ export async function verifyCommand(
   process.stdout.write(emit(format, result, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
   process.exit(exitCode);
+}
+
+export async function stampSpecContractHash(specPath: string): Promise<string> {
+  // Stamp mode: re-parse the YAML as raw object, write a fresh contractHash, save.
+  const text = await readFile(specPath, "utf8");
+  const raw = parseYaml(text);
+  const spec = SpecSchema.parse(raw);
+  const hash = computeContractHash(spec);
+  const updated = { ...spec, contractHash: hash };
+  const header = extractHeader(text);
+  const out =
+    header +
+    yamlStringify(updated, {
+      indent: 2,
+      lineWidth: 100,
+      defaultStringType: "PLAIN",
+      defaultKeyType: "PLAIN",
+    });
+  await writeFile(specPath, out);
+  return hash;
 }
 
 function coldStartLint(

@@ -24,6 +24,16 @@ async function writeSpec(name: string, body: string): Promise<string> {
   return p;
 }
 
+async function writeSpecIn(
+  dir: string,
+  name: string,
+  body: string,
+): Promise<string> {
+  const p = join(dir, `${name}.yml`);
+  await writeFile(p, body);
+  return p;
+}
+
 describe("runSpec e2e (mock backend)", () => {
   it("produces a complete run dir with passing outcomes", async () => {
     const specPath = await writeSpec(
@@ -276,7 +286,9 @@ steps:
     expect(result.steps[0]!.status).toBe("failed");
     expect(result.steps[0]!.error).toContain("sub-step #2");
     // A failed batch still writes a diagnostics artifact for the step.
-    expect(result.artifacts.diagnostics?.[0]).toMatch(/^diagnostics\/001_chain/);
+    expect(result.artifacts.diagnostics?.[0]).toMatch(
+      /^diagnostics\/001_chain/,
+    );
   });
 
   it("resolves config vars before parsing schema-required step fields", async () => {
@@ -768,7 +780,7 @@ steps:
     );
     expect(envelope).toMatchObject({
       method: "POST",
-      url: "/api/qr-token",
+      url: "http://localhost:8080/api/qr-token",
       status: 200,
       body: { token: "tok-123" },
     });
@@ -776,6 +788,204 @@ steps:
     expect(backend.stepLog[0]).toMatchObject({
       fill: { by: "label", name: "Scanner code", value: "tok-123" },
     });
+  });
+
+  it("resolves request-first relative URLs against config baseUrl", async () => {
+    const dir = await mkdtemp(join(workDir, "request-base-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://host
+`,
+    );
+    const specPath = await writeSpecIn(
+      dir,
+      "request_first",
+      `version: 1
+name: request_first
+intent: relative request URLs can run before any open
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/test/login-as
+      expectStatus: 200
+      assign: login
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      headers: {},
+      body: { ok: true },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.lastEvaluatedScript).toContain(
+      'fetch("http://host/api/test/login-as"',
+    );
+    const envelope = JSON.parse(
+      await readFile(join(result.runDir, "requests/login.json"), "utf8"),
+    );
+    expect(envelope.url).toBe("http://host/api/test/login-as");
+  });
+
+  it("fails request-first relative URLs clearly when no baseUrl exists", async () => {
+    const dir = await mkdtemp(join(workDir, "request-no-base-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local: {}
+`,
+    );
+    const specPath = await writeSpecIn(
+      dir,
+      "request_no_base",
+      `version: 1
+name: request_no_base
+intent: relative request URLs need an origin
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/test/login-as
+      assign: login
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.error).toContain(
+      'request: relative URL "/api/test/login-as" needs a baseUrl',
+    );
+    expect(backend.lastEvaluatedScript).not.toContain("fetch(");
+  });
+
+  it("resolves relative request URLs against the current page after open", async () => {
+    const dir = await mkdtemp(join(workDir, "request-after-open-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local: {}
+`,
+    );
+    const specPath = await writeSpecIn(
+      dir,
+      "request_after_open",
+      `version: 1
+name: request_after_open
+intent: relative request URLs can use a prior open as origin
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: open_app
+    open: http://host/admin/page
+  - id: fetch_state
+    request:
+      method: GET
+      url: /api/state
+      expectStatus: 200
+      assign: state
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      headers: {},
+      body: { ok: true },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.lastEvaluatedScript).toContain(
+      'fetch("http://host/api/state"',
+    );
+    const envelope = JSON.parse(
+      await readFile(join(result.runDir, "requests/state.json"), "utf8"),
+    );
+    expect(envelope.url).toBe("http://host/api/state");
+  });
+
+  it("joins runtime request placeholders in open paths without double slashes", async () => {
+    const dir = await mkdtemp(join(workDir, "request-open-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://host/
+`,
+    );
+
+    for (const [name, capturedUrl] of [
+      ["leading_slash", "/play?id=1"],
+      ["bare_path", "play?id=1"],
+    ] as const) {
+      const specPath = await writeSpecIn(
+        dir,
+        `request_open_${name}`,
+        `version: 1
+name: request_open_${name}
+intent: captured URLs can drive the next open
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/game
+      expectStatus: 200
+      assign: game
+  - id: open_game
+    open: "\${requests.game.body.url}"
+`,
+      );
+      const backend = new MockBrowserBackend();
+      backend.enqueueEvalResult({
+        status: 200,
+        ok: true,
+        headers: {},
+        body: { url: capturedUrl },
+      });
+
+      const result = await runSpec({ specPath, backend, artifactRoot });
+
+      expect(result.status).toBe("passed");
+      expect(backend.stepLog[0]).toMatchObject({
+        open: "http://host/play?id=1",
+      });
+    }
   });
 
   it("fails the request step when expectStatus does not match", async () => {

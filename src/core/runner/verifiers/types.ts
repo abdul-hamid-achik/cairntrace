@@ -32,6 +32,8 @@ export interface VerifierContext {
   artifacts?: Record<string, ArtifactRef>;
   /** Captured request-step responses, for ${requests.<name>.…} in fixtures. */
   responses?: Record<string, unknown>;
+  /** Config-resolved baseUrl for relative browser-side HTTP checks. */
+  baseUrl?: string;
   /**
    * Resolved config/CLI vars for the active environment. Exposed to script
    * verifiers as `ctx.vars` (Node) / `vars` (browser) so each var doesn't

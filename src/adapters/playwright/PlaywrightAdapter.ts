@@ -433,7 +433,9 @@ export class PlaywrightAdapter implements BrowserBackend {
       await this.resolveLocator(loc as Locator).fill(value, { timeout });
     } else if ("upload" in sub) {
       const { path, ...loc } = sub.upload;
-      await this.resolveLocator(loc as Locator).setInputFiles(path, { timeout });
+      await this.resolveLocator(loc as Locator).setInputFiles(path, {
+        timeout,
+      });
     } else if ("press" in sub) {
       await page.keyboard.press(sub.press);
     } else if ("scroll" in sub) {

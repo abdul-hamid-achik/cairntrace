@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { BrowserBackend, InvocationResult } from "../adapters/browserBackend";
+import type {
+  BrowserBackend,
+  InvocationResult,
+} from "../adapters/browserBackend";
 import { closeTrackedBackends, trackBackend } from "./cleanup";
 
 function fakeBackend(overrides: Partial<BrowserBackend> = {}): BrowserBackend {

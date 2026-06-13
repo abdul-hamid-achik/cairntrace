@@ -232,6 +232,59 @@ export const FileVerifierSchema = z
   .strict();
 export type FileVerifier = z.infer<typeof FileVerifierSchema>;
 
+/** #10 — fetch JSON from the app and assert a simple JSON path. */
+const httpJsonMatcherShape = {
+  equals: z.unknown().optional(),
+  contains: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  matches: z.string().optional(),
+  atLeast: z.number().optional(),
+  atMost: z.number().optional(),
+  exists: z.boolean().optional(),
+};
+
+export const HttpJsonMatcherSchema = z
+  .object(httpJsonMatcherShape)
+  .strict()
+  .refine(
+    (m) =>
+      [m.equals, m.contains, m.matches, m.atLeast, m.atMost, m.exists].filter(
+        (x) => x !== undefined,
+      ).length === 1,
+    {
+      message:
+        "exactly one of: equals, contains, matches, atLeast, atMost, exists",
+    },
+  );
+export type HttpJsonMatcher = z.infer<typeof HttpJsonMatcherSchema>;
+
+export const HttpJsonVerifierSchema = z
+  .object({
+    httpJson: z
+      .object({
+        url: z.string().min(1),
+        jsonPath: z.string().min(1).default("$"),
+        ...httpJsonMatcherShape,
+      })
+      .strict()
+      .refine(
+        (m) =>
+          [
+            m.equals,
+            m.contains,
+            m.matches,
+            m.atLeast,
+            m.atMost,
+            m.exists,
+          ].filter((x) => x !== undefined).length === 1,
+        {
+          message:
+            "exactly one of: equals, contains, matches, atLeast, atMost, exists",
+        },
+      ),
+  })
+  .strict();
+export type HttpJsonVerifier = z.infer<typeof HttpJsonVerifierSchema>;
+
 /**
  * Escape hatch — page-evaluated JS returning { ok, evidence }.
  * `evidence` is truncated per §13b; untruncated form goes to outcomes/<id>.raw.json.
@@ -266,6 +319,7 @@ export const VerifierSchema = z.union([
   CountVerifierSchema,
   XlsxVerifierSchema,
   FileVerifierSchema,
+  HttpJsonVerifierSchema,
   ScriptVerifierSchema,
 ]);
 export type Verifier = z.infer<typeof VerifierSchema>;
@@ -281,6 +335,7 @@ export const VerifierKindSchema = z.enum([
   "count",
   "xlsx",
   "file",
+  "httpJson",
   "script",
 ]);
 export type VerifierKind = z.infer<typeof VerifierKindSchema>;
@@ -302,6 +357,8 @@ export const isCountVerifier = (v: Verifier): v is CountVerifier =>
   "count" in v;
 export const isXlsxVerifier = (v: Verifier): v is XlsxVerifier => "xlsx" in v;
 export const isFileVerifier = (v: Verifier): v is FileVerifier => "file" in v;
+export const isHttpJsonVerifier = (v: Verifier): v is HttpJsonVerifier =>
+  "httpJson" in v;
 export const isScriptVerifier = (v: Verifier): v is ScriptVerifier =>
   "script" in v;
 
@@ -315,5 +372,6 @@ export const verifierKind = (v: Verifier): VerifierKind => {
   if (isCountVerifier(v)) return "count";
   if (isXlsxVerifier(v)) return "xlsx";
   if (isFileVerifier(v)) return "file";
+  if (isHttpJsonVerifier(v)) return "httpJson";
   return "script";
 };

@@ -11,6 +11,11 @@ import {
   type Spec,
   type Step,
 } from "../schema/spec.v1";
+import {
+  hasRuntimeUrlPlaceholder,
+  isRelativeUrl,
+  joinUrl,
+} from "../runner/url";
 
 export interface ParseResult {
   /** Parsed spec as written on disk (with `use:` placeholders, no inlining). */
@@ -80,11 +85,11 @@ export async function parseSpec(
     : resolve(opts.cwd ?? process.cwd(), specPath);
 
   const env = opts.env ?? (process.env as Record<string, string | undefined>);
-  const vars = opts.vars ?? {};
   const baseUrl = opts.baseUrl;
 
   const rawSource = await readFile(absPath, "utf8");
   const rawSpec = SpecSchema.parse(parseYaml(rawSource));
+  const vars = { ...rawSpec.vars, ...opts.vars };
   const raw = loadAndParseSource(rawSource, absPath, env, vars, baseUrl);
   const spec = SpecSchema.parse(raw);
 
@@ -124,7 +129,13 @@ export async function parseSpec(
   // `resolved.steps`; `origins[i].step` remains the raw file step so heal
   // patches the file's actual content.
   const stepsWithBaseUrl = origins.map(({ step }) => {
-    if (!baseUrl || !("open" in step) || !isRelativeUrl(openPath(step))) {
+    const path = "open" in step ? openPath(step) : "";
+    if (
+      !baseUrl ||
+      !("open" in step) ||
+      !isRelativeUrl(path) ||
+      hasRuntimeUrlPlaceholder(path)
+    ) {
       return step;
     }
     return typeof step.open === "string"
@@ -264,15 +275,4 @@ function substitute(
     }
     return match;
   });
-}
-
-/** True when `url` is missing an http:/https: scheme (path-like). */
-function isRelativeUrl(url: string): boolean {
-  return !/^https?:\/\//i.test(url);
-}
-
-function joinUrl(base: string, path: string): string {
-  const b = base.replace(/\/$/, "");
-  if (path.startsWith("/")) return `${b}${path}`;
-  return `${b}/${path}`;
 }

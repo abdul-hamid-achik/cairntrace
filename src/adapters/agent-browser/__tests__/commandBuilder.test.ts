@@ -292,20 +292,24 @@ describe("batchSubStepToArgv", () => {
     ).toEqual(["fill", "#name", "Acme"]);
     expect(
       batchSubStepToArgv({
-        upload: { by: "selector", selector: "input[type=file]", path: "./a.xlsx" },
+        upload: {
+          by: "selector",
+          selector: "input[type=file]",
+          path: "./a.xlsx",
+        },
       }),
     ).toEqual(["upload", "input[type=file]", "./a.xlsx"]);
     expect(batchSubStepToArgv({ press: "Enter" })).toEqual(["press", "Enter"]);
   });
 
   it("maps scroll (direction + to) and wait sub-steps", () => {
-    expect(batchSubStepToArgv({ scroll: { direction: "down", px: 200 } })).toEqual([
-      "scroll",
-      "down",
-      "200",
-    ]);
     expect(
-      batchSubStepToArgv({ scroll: { to: { by: "selector", selector: "#end" } } }),
+      batchSubStepToArgv({ scroll: { direction: "down", px: 200 } }),
+    ).toEqual(["scroll", "down", "200"]);
+    expect(
+      batchSubStepToArgv({
+        scroll: { to: { by: "selector", selector: "#end" } },
+      }),
     ).toEqual(["scrollintoview", "#end"]);
     expect(
       batchSubStepToArgv({ wait: { text: "Saved", timeoutMs: 5000 } }),

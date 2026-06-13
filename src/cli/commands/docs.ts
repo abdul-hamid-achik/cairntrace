@@ -92,11 +92,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Core Loop",
-        body: "Write intent and outcomes as the contract. Add steps as repairable hints. Run `cairn run <spec> --cold-start --json`; inspect `agent_context.md` and outcome evidence; heal locator drift with `cairn spec heal` when the UI changes.",
+        body: "Write intent and outcomes as the contract. Add steps as repairable hints. Use `cairn snapshot <url> --json` when you need locator inventory, then run `cairn run <spec> --cold-start --json`; inspect `agent_context.md` and outcome evidence; heal locator drift with `cairn spec heal` when the UI changes.",
       },
       {
         title: "Machine-Readable Surfaces",
-        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn spec verify`, `cairn spec heal`, and `cairn diff` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing.",
+        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn snapshot`, `cairn import playwright`, `cairn spec verify`, `cairn spec heal`, and `cairn diff` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing.",
       },
     ],
     examples: [
@@ -131,11 +131,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config Variables",
-        body: "Config-backed `${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Override vars at the CLI with repeatable `--var key=value`; config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
+        body: "`${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Vars merge in this order: config environment vars < top-level spec `vars:` < repeatable CLI `--var key=value`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
       },
       {
         title: "Viewport And Retention",
         body: "Set the browser viewport per environment (`environments.<env>.viewport: { width, height }`) or per spec (top-level `viewport:`); spec wins. Bound artifact disk usage with `retention: { keepRuns: N }` (newest N runs per spec, pruned after every run) or `cairn clean [--keep N | --all]`. Traces follow `artifacts.capture.trace` — the on-failure default deletes the trace zip on passing runs.",
+      },
+      {
+        title: "Authoring Helpers",
+        body: "`cairn snapshot <url>` opens a page and reports role and `data-testid` locators for agent-friendly step authoring. `cairn import playwright <file>` converts common Playwright `page.goto`, locator actions, request calls, and `expect` assertions into reviewable YAML with TODO comments for unmapped lines. `cairn run <dir> --junit reports/cairn.xml` expands YAML specs recursively for CI, skipping `actions/` and `_*.yml` drafts. `--stamp-if-green` stamps contract hashes only after every requested spec passes.",
       },
     ],
     examples: [
@@ -171,6 +175,8 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         language: "yaml",
         code: [
           "# flows/table-import.yml",
+          "vars:",
+          "  connectionPath: /connection/from-spec",
           "steps:",
           '  - open: "${vars.connectionPath}"',
           "",
@@ -180,6 +186,14 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    baseUrl: http://localhost:8080",
           "    vars:",
           "      connectionPath: /connection/abc",
+        ].join("\n"),
+      },
+      {
+        title: "locator inventory",
+        language: "bash",
+        code: [
+          "cairn snapshot /settings --config cairntrace.config.yml --json",
+          "cairn snapshot http://localhost:8787/dashboard.html --roles --testids",
         ].join("\n"),
       },
     ],
@@ -204,7 +218,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Request Steps",
-        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against the current page origin. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
+        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin. A request-first relative URL therefore needs `environments.<env>.baseUrl`. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
       },
       {
         title: "Reusable Actions",
@@ -265,7 +279,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Typed Verifiers",
-        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, and `file` cover common UI, navigation, network, console, workbook, and on-disk assertions. `file` polls a glob (filename wildcards, relative to the spec dir) until a matching file exists and optionally contains a needle — built for file-based test doubles like local email captures.",
+        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, and `httpJson` cover common UI, navigation, network, console, workbook, on-disk, and backend-JSON assertions. `file` polls a glob (filename wildcards, relative to the spec dir) until a matching file exists and optionally contains a needle. `httpJson` fetches JSON in the browser session with cookies, resolves relative URLs through config `baseUrl` or the current page origin, walks a simple dotted JSON path like `$.game.score`, and applies `equals`/`contains`/`matches`/numeric/`exists` matchers.",
       },
       {
         title: "Script Escape Hatch",
@@ -294,6 +308,13 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    description: page has no console errors",
           "    verify:",
           "      console: { errorsMax: 0 }",
+          "  - id: backend_state_matches",
+          "    description: backend state reflects the seeded game",
+          "    verify:",
+          "      httpJson:",
+          "        url: /api/test/state?gameId=${requests.game.body.gameId}",
+          '        jsonPath: "$.roshan.alive"',
+          "        equals: false",
         ].join("\n"),
       },
     ],
@@ -402,14 +423,14 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Agent Handoff",
-        body: "Use `cairn context latest` or MCP `cairn_context` to hand an agent the compact markdown summary instead of flooding context with every raw artifact.",
+        body: "Use `cairn context latest` or MCP `cairn_context` to hand an agent the compact markdown summary instead of flooding context with every raw artifact. The CLI resolves `latest` inside `--artifact-root`, config `artifactRoot`, or the global default, in that order.",
       },
     ],
     examples: [
       {
         title: "inspect latest run",
         language: "bash",
-        code: "cairn context latest\ncairn context latest --path",
+        code: "cairn context latest\ncairn context latest --path\ncairn context latest --artifact-root tests/bdd/runs",
       },
     ],
     relatedTopics: ["downloads", "mcp", "verifiers"],

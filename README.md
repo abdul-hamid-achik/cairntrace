@@ -128,6 +128,8 @@ Useful variants:
 ./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright
 ./bin/cairn run examples/flows/01-dashboard-nav.yml --mock
 ./bin/cairn run examples/flows/01-dashboard-nav.yml examples/flows/02-row-count.yml --parallel 2 --json
+./bin/cairn run examples/flows/01-dashboard-nav.yml examples/flows/02-row-count.yml --junit ./.cairntrace/junit.xml --json
+./bin/cairn snapshot /dashboard.html --config examples/cairntrace.config.yml --json
 ./bin/cairn spec heal examples/flows/06-drifted-link.yml
 ```
 
@@ -178,6 +180,7 @@ For your own specs, validate and stamp the behavior contract:
 ```bash
 ./bin/cairn spec verify flows/dashboard_nav.yml --json
 ./bin/cairn spec verify flows/dashboard_nav.yml --stamp
+./bin/cairn run flows/dashboard_nav.yml --cold-start --stamp-if-green
 ```
 
 `intent + outcomes` are the contract. `steps` are hints. `cairn spec heal`
@@ -221,7 +224,9 @@ error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
 ```
 
 `request` makes an authenticated API call from the page (browser cookies
-included) and captures the response for later steps:
+included) and captures the response for later steps. Relative request URLs
+resolve against config `baseUrl` when present, so request-first setup actions
+can run before any `open`:
 
 ```yaml
 - request: { method: POST, url: /api/qr-token, expectStatus: 200, assign: qr }
@@ -247,12 +252,13 @@ Sub-steps are selector-only (`click`, `hover`, `fill`, `upload`, `press`,
 Outcome verifier keys:
 
 `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`,
-`xlsx`, `file`, `script`.
+`xlsx`, `file`, `httpJson`, `script`.
 
 Use typed verifiers for normal UI, URL, network, console, count, workbook,
-and on-disk checks (`file` polls a glob, e.g. a local email driver's capture
-files). Use `script` when the assertion is product-specific or needs browser
-or Node code.
+on-disk checks (`file` polls a glob, e.g. a local email driver's capture
+files), and backend JSON state (`httpJson` fetches with browser cookies and
+asserts a simple JSON path). Use `script` when the assertion is
+product-specific or needs browser or Node code.
 
 When a step fails before producing an artifact, outcomes that reference the
 missing `${artifacts.<name>.…}` / `${requests.<name>.…}` report `skipped`
@@ -270,8 +276,10 @@ Ctrl-C / SIGTERM during a run tears down the run's own agent-browser session
 **Config**
 
 `cairntrace.config.yml` can provide `baseUrl`, environment vars, artifact root,
-and project settings. Config-backed placeholders such as `${vars.connectionPath}`
-resolve before spec validation, so they can appear in required fields.
+and project settings. Placeholders such as `${vars.connectionPath}` resolve
+before spec validation, so they can appear in required fields. Vars merge as
+config environment vars < top-level spec `vars:` < repeatable CLI
+`--var key=value`.
 
 ```yaml
 version: 1
@@ -294,6 +302,7 @@ Use the same config for validation and runs:
 ```bash
 ./bin/cairn spec verify flows/dashboard.yml --config cairntrace.config.yml --json
 ./bin/cairn run flows/dashboard.yml --config cairntrace.config.yml --cold-start --json
+./bin/cairn snapshot /dashboard --config cairntrace.config.yml --json
 ```
 
 Override vars per invocation without touching YAML:
@@ -325,7 +334,9 @@ traces/
 ```
 
 `agent_context.md` is the compact handoff file for coding agents. Use
-`./bin/cairn context latest` to print it.
+`./bin/cairn context latest` to print it. `context` and `diff` resolve
+`latest`/`previous` inside `--artifact-root`, config `artifactRoot`, or the
+global default, in that order.
 
 Disk usage is bounded by `retention.keepRuns` in the config (pruned after
 every run) and by `cairn clean [--keep N | --all]`. Traces follow the
@@ -338,32 +349,36 @@ Common commands:
 
 | Command | Purpose |
 | --- | --- |
-| `cairn run <spec...>` | Run one or more specs. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`. |
-| `cairn clean` | Prune old run directories (`--keep N` per spec, or `--all`). |
+| `cairn run <spec...>` | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping `actions/` and `_*.yml` drafts. |
+| `cairn clean` | Prune old run directories (`--keep N` per spec, or `--all`; honors `--config` and `--artifact-root`). |
 | `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
-| `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path` for the file path. |
+| `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
+| `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path`, `--config`, or `--artifact-root`. |
 | `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
 | `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
-| `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network. |
+| `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
 | `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
 | `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session. |
 | `cairn login <name> --url <url>` | Open a headed login flow and save a checkpoint. |
 | `cairn export playwright <spec>` | Emit an `@playwright/test` spec from a Cairntrace spec. |
+| `cairn import playwright <file>` | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines. |
 | `cairn mcp` | Start the MCP server on stdio. |
 
 Structured output is available on commands wired with format flags:
 
 ```bash
 ./bin/cairn run examples/flows/01-dashboard-nav.yml --json
+./bin/cairn snapshot /dashboard.html --config examples/cairntrace.config.yml --json
+./bin/cairn import playwright tests/example.spec.ts --json
 ./bin/cairn spec verify examples/flows/01-dashboard-nav.yml --format yaml
 ./bin/cairn docs verifiers --json
 ./bin/cairn diff previous latest --format md
 ```
 
 Commands with structured output today: `run`, `doctor`, `clean`, `explain`,
-`docs`, `diff`, `spec verify`, `spec heal`, `checkpoint list`, and
-`checkpoint show`.
+`docs`, `snapshot`, `diff`, `import playwright`, `spec verify`, `spec heal`,
+`checkpoint list`, and `checkpoint show`.
 
 Stable exit codes:
 
@@ -428,7 +443,8 @@ separate so the core stays deterministic and testable.
 ## Advanced Workflows
 
 - **Hybrid API + UI flows:** `request` fetches with the browser session's
-  cookies, captures the response, and later steps splice fields via
+  cookies, resolves relative URLs through config `baseUrl` when present,
+  captures the response, and later steps splice fields via
   `${requests.<name>.body.<field>}` — e.g. fetch a QR token via API, then
   `fill` it into the scanner UI.
 - **Download artifacts:** `download` clicks a locator and saves the file under
@@ -439,6 +455,15 @@ separate so the core stays deterministic and testable.
   validation metadata.
 - **Custom assertions:** `script` runs browser or Node code and returns
   `{ ok, evidence }`.
+- **Locator inventory:** `cairn snapshot <url> --json` returns role and
+  `data-testid` locators before you author or repair steps.
+- **Suite CI:** `cairn run flows --junit reports/cairn.xml` expands a
+  directory of specs recursively and writes JUnit XML for CI dashboards.
+- **Contract stamping after proof:** `cairn run <spec-or-dir> --stamp-if-green`
+  stamps `contractHash` only when every requested spec passes.
+- **Playwright import:** `cairn import playwright <file>` converts common
+  Playwright actions and assertions to Cairntrace YAML, preserving TODO
+  comments for unmapped lines that need human review.
 - **Playwright export:** `cairn export playwright <spec>` emits a normal
   `@playwright/test` file when a Cairntrace spec is stable enough for CI.
 

@@ -10,9 +10,11 @@ import { doctorCommand } from "./commands/doctor";
 import { docsCommand } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
+import { importPlaywrightCommand } from "./commands/import";
 import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
 import { runCommand } from "./commands/run";
+import { snapshotCommand } from "./commands/snapshot";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
 import { verifyCommand } from "./commands/spec/verify";
@@ -54,6 +56,12 @@ addFormatFlags(
       "1",
     )
     .option("--artifact-root <path>", "override artifact root directory")
+    .option("--junit <file>", "write a JUnit XML report")
+    .option(
+      "--stamp-if-green",
+      "write contractHash only after all requested specs pass",
+      false,
+    )
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
@@ -102,12 +110,33 @@ addFormatFlags(
     ),
 ).action((topic: string | undefined, opts) => docsCommand(topic, opts));
 
+addFormatFlags(
+  program
+    .command("snapshot <url>")
+    .description("Inspect a page and print agent-facing locator inventory")
+    .option("--roles", "include accessibility role locators", false)
+    .option("--testids", "include data-testid locators", false)
+    .option("--env <name>", "environment override for config baseUrl")
+    .option("--headed", "show the browser window", false)
+    .option("--mock", "use the in-memory mock backend", false)
+    .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((url: string, opts) => snapshotCommand(url, opts));
+
 program
   .command("context <run>")
   .description(
     "Print or locate the agent_context.md for a run ('latest' is allowed)",
   )
   .option("--path", "print the file path instead of contents", false)
+  .option("--artifact-root <path>", "override artifact root directory")
+  .option(
+    "--config <path>",
+    "explicit cairntrace.config.yml (overrides auto-discovery)",
+  )
   .action((run: string, opts) => contextCommand(run, opts));
 
 addFormatFlags(
@@ -115,6 +144,11 @@ addFormatFlags(
     .command("diff <runA> <runB>")
     .description(
       "Structurally compare two runs (outcomes / steps / console / network); each arg is a run id, absolute path, or 'latest'/'previous'",
+    )
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
 ).action((a: string, b: string, opts) => diffCommand(a, b, opts));
 
@@ -138,6 +172,21 @@ exportCmd
   )
   .option("--stdout", "print to stdout instead of writing", false)
   .action((p: string, opts) => exportPlaywrightCommand(p, opts));
+
+const importCmd = program
+  .command("import")
+  .description("Import tests from another framework");
+
+addFormatFlags(
+  importCmd
+    .command("playwright <file>")
+    .description("Convert a @playwright/test .spec.ts file to Cairntrace YAML")
+    .option(
+      "--out <file>",
+      "where to write (defaults to <source-dir>/<test-title>.yml)",
+    )
+    .option("--stdout", "print YAML to stdout instead of writing", false),
+).action((p: string, opts) => importPlaywrightCommand(p, opts));
 
 program
   .command("login <name>")

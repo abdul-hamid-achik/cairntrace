@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { verifyCommand } from "./verify";
+import { stampSpecContractHash, verifyCommand } from "./verify";
 
 class ExitIntercept extends Error {
   constructor(public readonly code: number) {
@@ -189,5 +189,31 @@ steps:
     const result = await runVerify(specPath, { json: true, env: "staging" });
     expect(result.code).toBe(0);
     expect(JSON.parse(result.stdout).status).toBe("valid");
+  });
+});
+
+describe("stampSpecContractHash", () => {
+  it("preserves leading comments and writes the computed contract hash", async () => {
+    const specPath = join(dir, "stamp-helper.yml");
+    await writeFile(
+      specPath,
+      `# keep this comment
+
+version: 1
+name: stamp_helper
+intent: helper stamps contracts
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+`,
+    );
+
+    const hash = await stampSpecContractHash(specPath);
+    const text = await readFile(specPath, "utf8");
+    expect(hash).toMatch(/^sha256:/);
+    expect(text.startsWith("# keep this comment\n\n")).toBe(true);
+    expect(text).toContain(`contractHash: ${hash}`);
   });
 });

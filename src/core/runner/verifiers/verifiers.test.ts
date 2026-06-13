@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { MockBrowserBackend } from "../../../adapters/mock/MockBrowserBackend";
 import { evaluateConsole } from "./console";
 import { evaluateCount } from "./count";
+import { evaluateHttpJson } from "./httpJson";
 import { evaluateNetwork } from "./network";
 import { evaluateNoFailedRequests } from "./noFailedRequests";
 import { evaluateNotText } from "./notText";
@@ -146,6 +147,134 @@ describe("console", () => {
     b.pushConsoleEntry({ type: "error", text: "boom" });
     const r = await evaluateConsole({ console: { errorsMax: 0 } }, b);
     expect(r.passed).toBe(false);
+  });
+});
+
+describe("httpJson", () => {
+  it("fetches JSON with baseUrl and matches a JSON path", async () => {
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      body: { roshan: { alive: false } },
+    });
+
+    const r = await evaluateHttpJson(
+      {
+        httpJson: {
+          url: "/api/test/state",
+          jsonPath: "$.roshan.alive",
+          equals: false,
+        },
+      },
+      b,
+      { baseUrl: "http://host" },
+    );
+
+    expect(r.passed).toBe(true);
+    expect(b.lastEvaluatedScript).toContain(
+      'fetch("http://host/api/test/state"',
+    );
+    expect(r.raw).toMatchObject({
+      url: "http://host/api/test/state",
+      actual: false,
+    });
+  });
+
+  it("resolves relative URLs against the current page when baseUrl is absent", async () => {
+    const b = new MockBrowserBackend();
+    b.setUrl("http://host/admin/page");
+    b.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      body: { count: 4 },
+    });
+
+    const r = await evaluateHttpJson(
+      {
+        httpJson: {
+          url: "api/state",
+          jsonPath: "$.count",
+          atLeast: 3,
+        },
+      },
+      b,
+    );
+
+    expect(r.passed).toBe(true);
+    expect(b.lastEvaluatedScript).toContain(
+      'fetch("http://host/admin/api/state"',
+    );
+  });
+
+  it("supports contains, matches, atMost, and exists matchers", async () => {
+    const cases = [
+      {
+        verifier: {
+          httpJson: {
+            url: "https://host/state",
+            jsonPath: "$.tags",
+            contains: "ready",
+          },
+        },
+        body: { tags: ["ready", "live"] },
+      },
+      {
+        verifier: {
+          httpJson: {
+            url: "https://host/state",
+            jsonPath: "$.name",
+            matches: "^game-",
+          },
+        },
+        body: { name: "game-123" },
+      },
+      {
+        verifier: {
+          httpJson: {
+            url: "https://host/state",
+            jsonPath: "$.score",
+            atMost: 10,
+          },
+        },
+        body: { score: 10 },
+      },
+      {
+        verifier: {
+          httpJson: {
+            url: "https://host/state",
+            jsonPath: "$.missing",
+            exists: false,
+          },
+        },
+        body: { score: 10 },
+      },
+    ] as const;
+
+    for (const c of cases) {
+      const b = new MockBrowserBackend();
+      b.enqueueEvalResult({ status: 200, ok: true, body: c.body });
+      const r = await evaluateHttpJson(c.verifier, b);
+      expect(r.passed).toBe(true);
+    }
+  });
+
+  it("fails clearly when a relative URL has no origin", async () => {
+    const b = new MockBrowserBackend();
+    const r = await evaluateHttpJson(
+      {
+        httpJson: {
+          url: "/api/state",
+          jsonPath: "$.ok",
+          equals: true,
+        },
+      },
+      b,
+    );
+
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("needs a baseUrl");
+    expect(b.lastEvaluatedScript).toBe("");
   });
 });
 

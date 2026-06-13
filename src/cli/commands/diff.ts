@@ -1,10 +1,10 @@
-import { readdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
 import { diffRuns, type RunDiff } from "../../core/diff/runDiff";
 import { emit, resolveFormat } from "../format";
+import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 
 export interface DiffOptions {
+  artifactRoot?: string;
+  config?: string;
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -27,8 +27,9 @@ export async function diffCommand(
   let dirA: string | undefined;
   let dirB: string | undefined;
   try {
-    dirA = await resolveRunRef(refA);
-    dirB = await resolveRunRef(refB);
+    const runsRoot = await resolveArtifactRoot(opts);
+    dirA = await resolveRunRef(refA, runsRoot);
+    dirB = await resolveRunRef(refB, runsRoot);
   } catch (e) {
     process.stderr.write(`cairn diff: ${(e as Error).message}\n`);
     process.exit(2);
@@ -41,32 +42,6 @@ export async function diffCommand(
   const result = await diffRuns(dirA, dirB);
   process.stdout.write(emit(format, result, renderMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
-}
-
-async function resolveRunRef(ref: string): Promise<string> {
-  const runsRoot = join(homedir(), ".cairntrace", "runs");
-  if (ref === "latest" || ref === "previous") {
-    const entries = await readdir(runsRoot).catch(() => [] as string[]);
-    const dirs = await Promise.all(
-      entries.map(async (name) => {
-        try {
-          const s = await stat(join(runsRoot, name));
-          return { name, mtime: s.mtimeMs, isDir: s.isDirectory() };
-        } catch {
-          return { name, mtime: 0, isDir: false };
-        }
-      }),
-    );
-    const sorted = dirs
-      .filter((d) => d.isDir)
-      .toSorted((a, b) => b.mtime - a.mtime);
-    const idx = ref === "latest" ? 0 : 1;
-    const pick = sorted[idx];
-    if (!pick) throw new Error(`no run available at slot ${ref}`);
-    return join(runsRoot, pick.name);
-  }
-  if (isAbsolute(ref)) return ref;
-  return join(runsRoot, ref);
 }
 
 function renderMarkdown(d: RunDiff): string {

@@ -4,6 +4,7 @@ import {
   isConsoleVerifier,
   isCountVerifier,
   isFileVerifier,
+  isHttpJsonVerifier,
   isNetworkVerifier,
   isNoFailedRequestsVerifier,
   isNotTextVerifier,
@@ -15,6 +16,7 @@ import {
 import { evaluateConsole } from "./verifiers/console";
 import { evaluateCount } from "./verifiers/count";
 import { evaluateFile } from "./verifiers/file";
+import { evaluateHttpJson } from "./verifiers/httpJson";
 import { evaluateNetwork } from "./verifiers/network";
 import { evaluateNoFailedRequests } from "./verifiers/noFailedRequests";
 import { evaluateNotText } from "./verifiers/notText";
@@ -86,6 +88,7 @@ async function dispatch(
     if (isCountVerifier(v)) return await evaluateCount(v, backend);
     if (isXlsxVerifier(v)) return await evaluateXlsx(v, ctx);
     if (isFileVerifier(v)) return await evaluateFile(v, ctx);
+    if (isHttpJsonVerifier(v)) return await evaluateHttpJson(v, backend, ctx);
     if (isScriptVerifier(v)) return await evaluateScript(v, backend, ctx);
   } catch (e) {
     return {

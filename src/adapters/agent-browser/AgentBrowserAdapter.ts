@@ -809,7 +809,8 @@ export function describeBatchFailure(
   let results: Array<Record<string, unknown>> = [];
   try {
     const parsed = JSON.parse(raw.stdout.trim()) as unknown;
-    if (Array.isArray(parsed)) results = parsed as Array<Record<string, unknown>>;
+    if (Array.isArray(parsed))
+      results = parsed as Array<Record<string, unknown>>;
   } catch {
     // non-JSON output — fall through to the stderr-only message
   }

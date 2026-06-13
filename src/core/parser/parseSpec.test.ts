@@ -348,6 +348,35 @@ steps:
     });
   });
 
+  it("leaves runtime-placeholder open paths unjoined until runner execution", async () => {
+    const path = join(dir, "with_runtime_open.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: with_runtime_open
+intent: runtime open placeholders are joined after substitution
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: ok }
+steps:
+  - id: from_request
+    open: "\${requests.game.body.url}"
+  - id: from_artifact
+    open: { path: "\${artifacts.page.relativePath}", waitUntil: networkidle }
+`,
+    );
+    const r = await parseSpec(path, { baseUrl: "http://localhost:9999" });
+    const steps = r.resolved.steps!;
+    expect((steps[0] as { open: string }).open).toBe(
+      "${requests.game.body.url}",
+    );
+    expect((steps[1] as { open: { path: string } }).open.path).toBe(
+      "${artifacts.page.relativePath}",
+    );
+  });
+
   it("substitutes ${baseUrl} inside string fields", async () => {
     const path = join(dir, "baseurl_var.yml");
     await writeFile(
@@ -390,6 +419,50 @@ steps:
     await expect(parseSpec(path)).rejects.toBeInstanceOf(
       MissingTemplateVariableError,
     );
+  });
+
+  it("uses spec-level vars for substitution and lets parser opts override them", async () => {
+    const path = join(dir, "spec_vars.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: spec_vars
+intent: spec vars can supply required fields
+vars:
+  connectionPath: /from-spec
+  expectedLabel: From spec
+outcomes:
+  - id: label_visible
+    description: label is visible
+    verify:
+      text: { contains: "\${vars.expectedLabel}" }
+steps:
+  - open: "\${vars.connectionPath}"
+`,
+    );
+
+    const fromSpec = await parseSpec(path);
+    expect((fromSpec.spec.steps![0] as { open: string }).open).toBe(
+      "/from-spec",
+    );
+    const specVerify = fromSpec.spec.outcomes[0]!.verify as {
+      text: { contains: string };
+    };
+    expect(specVerify.text.contains).toBe("From spec");
+
+    const overridden = await parseSpec(path, {
+      vars: {
+        connectionPath: "/from-cli",
+        expectedLabel: "From CLI",
+      },
+    });
+    expect((overridden.spec.steps![0] as { open: string }).open).toBe(
+      "/from-cli",
+    );
+    const overriddenVerify = overridden.spec.outcomes[0]!.verify as {
+      text: { contains: string };
+    };
+    expect(overriddenVerify.text.contains).toBe("From CLI");
   });
 
   it("validates contractHash against the raw unresolved contract", async () => {

@@ -1,5 +1,12 @@
-import { isAbsolute as isAbsolutePath } from "node:path";
+import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  basename,
+  dirname,
+  isAbsolute as isAbsolutePath,
+  resolve,
+} from "node:path";
 import { addEnospcHint } from "../../core/artifacts/retention";
+import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
@@ -9,6 +16,7 @@ import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
+import { stampSpecContractHash } from "./spec/verify";
 
 export interface RunCommandOptions {
   env?: string;
@@ -25,6 +33,10 @@ export interface RunCommandOptions {
   parallel?: string;
   /** Repeatable `--var key=value` overrides; win over config env vars. */
   var?: string[];
+  /** Write a JUnit XML report to this file. */
+  junit?: string;
+  /** Stamp contract hashes only when the entire run invocation passes. */
+  stampIfGreen?: boolean;
   /** Commander sets this to false when `--no-color` is passed. */
   color?: boolean;
 }
@@ -59,8 +71,16 @@ export async function runCommand(
   opts: RunCommandOptions,
 ): Promise<void> {
   const parallel = Math.max(1, Number(opts.parallel ?? "1"));
+  let expandedSpecs: string[];
 
-  if (specs.length === 0) {
+  try {
+    expandedSpecs = await expandSpecArgs(specs);
+  } catch (e) {
+    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    process.exit(2);
+  }
+
+  if (expandedSpecs.length === 0) {
     process.stderr.write("cairn run: at least one spec path is required\n");
     process.exit(2);
   }
@@ -72,12 +92,12 @@ export async function runCommand(
     process.exit(2);
   }
 
-  if (specs.length === 1 && parallel === 1) {
-    await runSingle(specs[0]!, opts);
+  if (expandedSpecs.length === 1 && parallel === 1) {
+    await runSingle(expandedSpecs[0]!, opts);
     return;
   }
 
-  await runBatch(specs, parallel, opts);
+  await runBatch(expandedSpecs, parallel, opts);
 }
 
 /* ----- single-spec path (preserves v0.0 behavior) ----- */
@@ -110,13 +130,27 @@ async function runSingle(
       ...(listener ? { listener } : {}),
     });
     exitCode = result.exitCode;
+    if (!(await stampIfGreen(opts, [result]))) {
+      exitCode = 2;
+      return;
+    }
+    if (!(await writeJUnitIfRequested(opts, [result]))) {
+      exitCode = 2;
+      return;
+    }
 
     if (!interactive) {
       process.stdout.write(emit(format, result, renderRunMarkdown));
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     }
   } catch (e) {
-    handleParseError(e as Error, format, specPath);
+    const result = synthesizeErroredResult(specPath, e as Error);
+    exitCode = result.exitCode;
+    if (!(await writeJUnitIfRequested(opts, [result]))) {
+      exitCode = 2;
+      return;
+    }
+    emitErroredResult(result, format);
   } finally {
     untrack();
     await backend.close().catch(() => undefined);
@@ -221,6 +255,13 @@ async function runBatch(
     exitCode,
   };
 
+  if (!(await stampIfGreen(opts, results))) {
+    process.exit(2);
+  }
+  if (!(await writeJUnitIfRequested(opts, results))) {
+    process.exit(2);
+  }
+
   if (format === "json" || format === "yaml") {
     process.stdout.write(emit(format, batch, () => ""));
   } else {
@@ -249,14 +290,96 @@ function colorEnabled(opts: RunCommandOptions): boolean {
   );
 }
 
-function handleParseError(err: Error, format: string, specPath: string): void {
+function emitErroredResult(result: RunResult, format: string): void {
   // Errored runs go through the same synthesizeErroredResult path as
   // mid-run failures so consumers see a schema-valid RunResult either way.
-  const result = synthesizeErroredResult(specPath, err);
   if (format === "json" || format === "yaml") {
     process.stdout.write(emit(format, result, renderRunMarkdown));
   } else {
-    process.stderr.write(`cairn run: ${err.message}\n`);
+    const failed = result.steps.find((s) => s.status === "failed");
+    process.stderr.write(`cairn run: ${failed?.error ?? "run errored"}\n`);
+  }
+}
+
+export async function expandSpecArgs(
+  args: string[],
+  cwd = process.cwd(),
+): Promise<string[]> {
+  const out: string[] = [];
+  for (const arg of args) {
+    const abs = isAbsolutePath(arg) ? arg : resolve(cwd, arg);
+    const s = await stat(abs).catch(() => undefined);
+    if (!s) {
+      out.push(arg);
+      continue;
+    }
+    if (!s.isDirectory()) {
+      out.push(arg);
+      continue;
+    }
+    out.push(...(await collectSpecFiles(abs)));
+  }
+  return out;
+}
+
+async function collectSpecFiles(dir: string): Promise<string[]> {
+  const entries = (await readdir(dir, { withFileTypes: true })).toSorted(
+    (a, b) => a.name.localeCompare(b.name),
+  );
+  const out: string[] = [];
+  for (const entry of entries) {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "actions") continue;
+      out.push(...(await collectSpecFiles(path)));
+      continue;
+    }
+    if (
+      entry.isFile() &&
+      /\.ya?ml$/i.test(entry.name) &&
+      !basename(entry.name).startsWith("_")
+    ) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+async function writeJUnitIfRequested(
+  opts: RunCommandOptions,
+  results: RunResult[],
+): Promise<boolean> {
+  if (!opts.junit) return true;
+  const outPath = isAbsolutePath(opts.junit)
+    ? opts.junit
+    : resolve(process.cwd(), opts.junit);
+  try {
+    await mkdir(dirname(outPath), { recursive: true });
+    await writeFile(outPath, renderJUnit(results));
+    return true;
+  } catch (e) {
+    process.stderr.write(
+      `cairn run: could not write JUnit report: ${(e as Error).message}\n`,
+    );
+    return false;
+  }
+}
+
+async function stampIfGreen(
+  opts: RunCommandOptions,
+  results: RunResult[],
+): Promise<boolean> {
+  if (!opts.stampIfGreen) return true;
+  if (results.some((r) => r.status !== "passed")) return true;
+  try {
+    const paths = new Set(results.map((r) => r.spec.path));
+    for (const specPath of paths) await stampSpecContractHash(specPath);
+    return true;
+  } catch (e) {
+    process.stderr.write(
+      `cairn run: could not stamp contract hash: ${(e as Error).message}\n`,
+    );
+    return false;
   }
 }
 

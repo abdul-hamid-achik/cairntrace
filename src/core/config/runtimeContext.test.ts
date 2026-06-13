@@ -123,4 +123,50 @@ steps:
     expect(ctx.envName).toBe("local");
     expect(ctx.vars.connectionPath).toBe("/from-cli");
   });
+
+  it("merges vars as config env < spec vars < CLI vars", async () => {
+    const projectRoot = join(dir, "spec-vars-project");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    vars:
+      scenario: from-config
+      untouched: keep-me
+      cliOnly: from-config
+`,
+    );
+    const specPath = join(flowsDir, "spec-vars.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: spec_vars_runtime
+intent: spec vars override config vars
+vars:
+  scenario: from-spec
+  specOnly: yes
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      vars: { cliOnly: "from-cli" },
+    });
+
+    expect(ctx.vars).toEqual({
+      scenario: "from-spec",
+      untouched: "keep-me",
+      cliOnly: "from-cli",
+      specOnly: "yes",
+    });
+  });
 });

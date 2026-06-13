@@ -33,9 +33,9 @@ export function buildExplain(): ExplainResult {
     commands: [
       {
         name: "run",
-        summary: "Run a behavioral spec; emit machine-readable result",
+        summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -75,6 +75,19 @@ export function buildExplain(): ExplainResult {
               "Run N specs concurrently, each in its own browser session",
           },
           {
+            name: "--junit",
+            type: "string",
+            description:
+              "Write a JUnit XML report for CI. Directory inputs expand recursively, skipping actions/ and _*.yml drafts.",
+          },
+          {
+            name: "--stamp-if-green",
+            type: "boolean",
+            default: false,
+            description:
+              "Write fresh contractHash values only after every requested spec passes",
+          },
+          {
             name: "--config",
             type: "string",
             description:
@@ -109,6 +122,54 @@ export function buildExplain(): ExplainResult {
         outputSchema: "urn:cairntrace.dev:run:v1",
       },
       {
+        name: "snapshot",
+        summary: "Inspect a page and return agent-facing locator inventory",
+        synopsis:
+          "cairn snapshot <url> [--roles] [--testids] [--env <name>] [--backend agent-browser|playwright|mock] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--roles",
+            type: "boolean",
+            default: false,
+            description:
+              "Include accessibility role locators. If neither --roles nor --testids is set, both are included.",
+          },
+          {
+            name: "--testids",
+            type: "boolean",
+            default: false,
+            description:
+              "Include data-testid locators. If neither --roles nor --testids is set, both are included.",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Environment override for config baseUrl",
+          },
+          {
+            name: "--backend",
+            type: "enum",
+            values: ["agent-browser", "playwright", "mock"],
+            default: "agent-browser",
+            description: "Browser backend",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml for resolving relative URLs",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "navigation or backend error" },
+      },
+      {
         name: "clean",
         summary: "Prune old run directories from the artifact root",
         synopsis:
@@ -130,6 +191,12 @@ export function buildExplain(): ExplainResult {
             name: "--artifact-root",
             type: "string",
             description: "Artifact root to clean",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
           },
         ],
         exitCodes: { "0": "success", "2": "bad arguments" },
@@ -222,13 +289,25 @@ export function buildExplain(): ExplainResult {
       {
         name: "context",
         summary: "Print or locate the agent_context.md for a run",
-        synopsis: "cairn context <run-id|latest> [--path]",
+        synopsis:
+          "cairn context <run-id|latest> [--path] [--artifact-root <path>] [--config <path>]",
         flags: [
           {
             name: "--path",
             type: "boolean",
             default: false,
             description: "Print the file path instead of contents",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
           },
         ],
         exitCodes: { "0": "success", "2": "no such run" },
@@ -257,8 +336,19 @@ export function buildExplain(): ExplainResult {
         summary:
           "Structurally compare two runs by outcomes, steps, console, and network",
         synopsis:
-          "cairn diff <runA> <runB> [--format json|yaml|md] (each arg: run id, absolute path, or 'latest'/'previous')",
+          "cairn diff <runA> <runB> [--artifact-root <path>] [--config <path>] [--format json|yaml|md] (each arg: run id, absolute path, or 'latest'/'previous')",
         flags: [
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
           {
             name: "--format",
             type: "enum",
@@ -359,6 +449,35 @@ export function buildExplain(): ExplainResult {
             type: "boolean",
             default: false,
             description: "Print to stdout instead of writing",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "error" },
+      },
+      {
+        name: "import playwright",
+        summary:
+          "Convert a @playwright/test file into reviewable Cairntrace YAML",
+        synopsis:
+          "cairn import playwright <file> [--out <file>] [--stdout] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--out",
+            type: "string",
+            description:
+              "Where to write (defaults to <source-dir>/<test-title>.yml)",
+          },
+          {
+            name: "--stdout",
+            type: "boolean",
+            default: false,
+            description: "Print generated YAML to stdout instead of writing",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Report output format when writing a file",
           },
         ],
         exitCodes: { "0": "success", "2": "error" },
@@ -470,7 +589,7 @@ export function buildExplain(): ExplainResult {
         id: "request",
         kind: "network",
         summary:
-          "Authenticated API call via in-page fetch (browser cookies included); assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
+          "Authenticated API call via in-page fetch (browser cookies included); relative URLs use config baseUrl when present, so setup requests can run before open; assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
         yamlExample:
           "steps:\n  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, expectStatus: 200, assign: qr }\n  - fill: { by: label, name: Scanner code, value: '${requests.qr.body.token}' }",
       },
@@ -676,6 +795,34 @@ export function buildExplain(): ExplainResult {
             default: 10000,
             description: "Poll deadline",
           },
+        ],
+      },
+      {
+        id: "httpJson",
+        kind: "network",
+        summary:
+          "Fetch app JSON in the browser session and assert a simple JSON path without a script verifier",
+        yamlExample:
+          'verify:\n  httpJson:\n    url: /api/test/state?gameId=${requests.game.body.gameId}\n    jsonPath: "$.roshan.alive"\n    equals: false',
+        parameters: [
+          {
+            name: "url",
+            type: "string",
+            description:
+              "URL to fetch; relative paths use config baseUrl or the current page origin",
+          },
+          {
+            name: "jsonPath",
+            type: "string",
+            default: "$",
+            description: "Simple dotted path, e.g. $.game.score",
+          },
+          { name: "equals", type: "string", oneOfGroup: "matcher" },
+          { name: "contains", type: "string", oneOfGroup: "matcher" },
+          { name: "matches", type: "regex", oneOfGroup: "matcher" },
+          { name: "atLeast", type: "number", oneOfGroup: "matcher" },
+          { name: "atMost", type: "number", oneOfGroup: "matcher" },
+          { name: "exists", type: "boolean", oneOfGroup: "matcher" },
         ],
       },
       {

@@ -37,6 +37,7 @@ import {
   resolveRuntimeFilePath,
 } from "./runtimePlaceholders";
 import { generateRunId } from "./runId";
+import { isRelativeUrl, joinUrl, resolveUrl } from "./url";
 import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
 
 /**
@@ -266,7 +267,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       Object.keys(responses).length > 0
         ? deepMapStrings(step, (s) => resolveResponsePlaceholders(s, responses))
         : step;
-    let stepToRun = substituted;
+    let stepToRun = resolveOpenStep(substituted, {
+      baseUrl: runtime.baseUrl,
+      artifacts: namedArtifacts,
+    });
     let pendingDownload:
       | {
           assign: string;
@@ -274,27 +278,26 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           absolutePath: string;
         }
       | undefined;
-    if ("download" in substituted) {
-      const relativePath = downloadRelativePath(substituted.download.saveAs);
+    if ("download" in stepToRun) {
+      const relativePath = downloadRelativePath(stepToRun.download.saveAs);
       const absolutePath = writer.resolve(relativePath);
       pendingDownload = {
-        assign:
-          substituted.download.assign ?? artifactNameFromPath(relativePath),
+        assign: stepToRun.download.assign ?? artifactNameFromPath(relativePath),
         relativePath,
         absolutePath,
       };
       await ensureParentDir(absolutePath);
       stepToRun = {
-        ...substituted,
-        download: { ...substituted.download, saveAs: absolutePath },
+        ...stepToRun,
+        download: { ...stepToRun.download, saveAs: absolutePath },
       };
-    } else if ("upload" in substituted) {
+    } else if ("upload" in stepToRun) {
       stepToRun = {
-        ...substituted,
+        ...stepToRun,
         upload: {
-          ...substituted.upload,
+          ...stepToRun.upload,
           path: resolveUploadPath(
-            substituted.upload.path,
+            stepToRun.upload.path,
             runDir,
             namedArtifacts,
           ),
@@ -311,6 +314,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           step: stepToRun,
           backend: opts.backend,
           requestIndex: i + 1,
+          baseUrl: runtime.baseUrl,
         });
         if (!requested.ok) {
           stepStatus = "failed";
@@ -340,9 +344,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
             status: requested.response.status,
           });
         }
-      } else if ("transform" in step) {
+      } else if ("transform" in stepToRun) {
         const transformed = await runTransformStep({
-          step,
+          step: stepToRun,
           runDir,
           specDir: dirname(specPath),
           artifacts: namedArtifacts,
@@ -544,6 +548,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
     responses,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     vars: runtime.vars,
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
@@ -749,6 +754,23 @@ function resolveUploadPath(
   return resolved;
 }
 
+function resolveOpenStep(
+  step: Step,
+  opts: {
+    baseUrl?: string;
+    artifacts: Record<string, ArtifactRef>;
+  },
+): Step {
+  if (!("open" in step)) return step;
+  const path = resolveArtifactPlaceholders(openPath(step), opts.artifacts);
+  const resolvedPath =
+    opts.baseUrl && isRelativeUrl(path) ? joinUrl(opts.baseUrl, path) : path;
+  if (resolvedPath === openPath(step)) return step;
+  return typeof step.open === "string"
+    ? { ...step, open: resolvedPath }
+    : { ...step, open: { ...step.open, path: resolvedPath } };
+}
+
 /** The captured envelope a request step produces. */
 interface RequestResponse {
   url: string;
@@ -768,14 +790,18 @@ async function runRequestStep(opts: {
   step: RequestStep;
   backend: BrowserBackend;
   requestIndex: number;
+  baseUrl?: string;
 }): Promise<
   | { ok: true; assign: string; response: RequestResponse }
   | { ok: false; error: string }
 > {
   const req = opts.step.request;
   const assign = req.assign ?? `request_${opts.requestIndex}`;
+  const resolved = await resolveRequestUrl(req.url, opts);
+  if (!resolved.ok) return resolved;
+  const request = { ...req, url: resolved.url };
 
-  const result = await opts.backend.evaluate(buildRequestScript(req));
+  const result = await opts.backend.evaluate(buildRequestScript(request));
   if (!result.ok) {
     return {
       ok: false,
@@ -795,13 +821,13 @@ async function runRequestStep(opts: {
   if (parsed && typeof parsed["requestError"] === "string") {
     return {
       ok: false,
-      error: `request failed: ${parsed["requestError"]} (${req.method} ${req.url})`,
+      error: `request failed: ${parsed["requestError"]} (${request.method} ${request.url})`,
     };
   }
 
   const response: RequestResponse = {
-    url: req.url,
-    method: req.method,
+    url: request.url,
+    method: request.method,
     status: typeof parsed["status"] === "number" ? parsed["status"] : 0,
     ok: Boolean(parsed["ok"]),
     headers:
@@ -811,20 +837,37 @@ async function runRequestStep(opts: {
     body: parsed["body"],
   };
 
-  if (req.expectStatus !== undefined) {
-    const allowed = Array.isArray(req.expectStatus)
-      ? req.expectStatus
-      : [req.expectStatus];
+  if (request.expectStatus !== undefined) {
+    const allowed = Array.isArray(request.expectStatus)
+      ? request.expectStatus
+      : [request.expectStatus];
     if (!allowed.includes(response.status)) {
       const bodyExcerpt = JSON.stringify(response.body)?.slice(0, 300) ?? "";
       return {
         ok: false,
-        error: `request status ${response.status} not in expectStatus [${allowed.join(", ")}] (${req.method} ${req.url}) body: ${bodyExcerpt}`,
+        error: `request status ${response.status} not in expectStatus [${allowed.join(", ")}] (${request.method} ${request.url}) body: ${bodyExcerpt}`,
       };
     }
   }
 
   return { ok: true, assign, response };
+}
+
+async function resolveRequestUrl(
+  url: string,
+  opts: { baseUrl?: string; backend: BrowserBackend },
+): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  if (!isRelativeUrl(url)) return { ok: true, url };
+  if (opts.baseUrl) return { ok: true, url: joinUrl(opts.baseUrl, url) };
+
+  const currentUrl = await opts.backend.getUrl().catch(() => "about:blank");
+  if (currentUrl === "about:blank" || currentUrl.startsWith("about:blank")) {
+    return {
+      ok: false,
+      error: `request: relative URL "${url}" needs a baseUrl (config environments.<env>.baseUrl) or a prior open`,
+    };
+  }
+  return { ok: true, url: resolveUrl(currentUrl, url) };
 }
 
 function buildRequestScript(req: RequestStep["request"]): string {

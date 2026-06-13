@@ -1,14 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execa } from "execa";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
+import {
+  resolveArtifactRoot,
+  resolveRunRef,
+  type ArtifactRootOptions,
+} from "../cli/runRefs";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
 import { computeContractHash } from "../core/contractHash";
@@ -176,10 +180,21 @@ export function buildMcpServer(): McpServer {
           )
           .optional()
           .describe("Run id; defaults to 'latest'"),
+        artifactRoot: z
+          .string()
+          .optional()
+          .describe("Override run artifact root directory"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml"),
       },
     },
-    async ({ runId }) => {
-      const resolved = await resolveRunDir(runId ?? "latest");
+    async ({ runId, artifactRoot, config }) => {
+      const resolved = await resolveRunDir(runId ?? "latest", {
+        ...(artifactRoot !== undefined ? { artifactRoot } : {}),
+        ...(config !== undefined ? { config } : {}),
+      });
       if (!resolved) {
         return {
           content: [{ type: "text", text: "no runs found" }],
@@ -473,32 +488,15 @@ async function runDoctorChecks(): Promise<
 
 async function resolveRunDir(
   ref: string,
+  opts: ArtifactRootOptions = {},
 ): Promise<{ runId: string; runDir: string } | undefined> {
-  const root = join(homedir(), ".cairntrace", "runs");
-  if (ref === "latest") {
-    let entries: string[];
-    try {
-      entries = await readdir(root);
-    } catch {
-      return undefined;
-    }
-    const dirs = await Promise.all(
-      entries.map(async (name) => {
-        try {
-          const s = await stat(join(root, name));
-          return { name, mtime: s.mtimeMs, isDir: s.isDirectory() };
-        } catch {
-          return { name, mtime: 0, isDir: false };
-        }
-      }),
-    );
-    const latest = dirs
-      .filter((d) => d.isDir)
-      .toSorted((a, b) => b.mtime - a.mtime)[0];
-    if (!latest) return undefined;
-    return { runId: latest.name, runDir: join(root, latest.name) };
+  const root = await resolveArtifactRoot(opts);
+  try {
+    const runDir = await resolveRunRef(ref, root);
+    return { runId: basename(runDir), runDir };
+  } catch {
+    return undefined;
   }
-  return { runId: ref, runDir: join(root, ref) };
 }
 
 async function writeScaffold(

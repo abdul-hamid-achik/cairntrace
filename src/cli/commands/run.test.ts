@@ -1,6 +1,9 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RunResultSchema } from "../../core/schema/run.v1";
-import { synthesizeErroredResult } from "./run";
+import { expandSpecArgs, synthesizeErroredResult } from "./run";
 
 describe("synthesizeErroredResult", () => {
   it("produces a RunResult that parses against the v1 wire schema", () => {
@@ -57,5 +60,32 @@ describe("parseVarFlags", () => {
   it("returns an empty bag for undefined", async () => {
     const { parseVarFlags } = await import("./run");
     expect(parseVarFlags(undefined)).toEqual({});
+  });
+});
+
+describe("expandSpecArgs", () => {
+  it("expands directories recursively while skipping actions and underscore specs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-expand-"));
+    await mkdir(join(dir, "flows", "nested"), { recursive: true });
+    await mkdir(join(dir, "flows", "actions"), { recursive: true });
+    await writeFile(join(dir, "flows", "a.yml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "nested", "b.yaml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "_draft.yml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "actions", "login.yml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "notes.txt"), "notes\n");
+
+    await expect(expandSpecArgs(["flows"], dir)).resolves.toEqual([
+      join(dir, "flows", "a.yml"),
+      join(dir, "flows", "nested", "b.yaml"),
+    ]);
+  });
+
+  it("preserves explicit files and missing paths", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-expand-"));
+    await writeFile(join(dir, "_explicit.yml"), "version: 1\n");
+
+    await expect(
+      expandSpecArgs(["_explicit.yml", "missing.yml"], dir),
+    ).resolves.toEqual(["_explicit.yml", "missing.yml"]);
   });
 });
