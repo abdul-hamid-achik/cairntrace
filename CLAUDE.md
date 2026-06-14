@@ -27,6 +27,9 @@ all coding agents. Read that file first — everything below assumes you have.
 - Playwright Chromium gets `--no-sandbox` and `--disable-dev-shm-usage`
   automatically when `CI` is truthy. Use `CAIRN_PLAYWRIGHT_LAUNCH_ARGS` only
   when a runner needs different flags.
+- Playwright `wait` and browser `evaluate` paths are hard-bounded by
+  Cairntrace-side timers, defaulting to 30000ms unless a specific timeout is
+  supplied.
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:

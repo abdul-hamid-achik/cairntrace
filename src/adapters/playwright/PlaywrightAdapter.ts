@@ -739,7 +739,19 @@ export class PlaywrightAdapter implements BrowserBackend {
   }
 
   private async applyWait(page: Page, cond: WaitCondition): Promise<void> {
-    const timeout = cond.timeoutMs ?? this.opts.defaultTimeoutMs ?? 30_000;
+    const timeout = cond.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+    await withTimeout(
+      this.applyPlaywrightWait(page, cond, timeout),
+      timeout,
+      `wait timed out after ${timeout}ms`,
+    );
+  }
+
+  private async applyPlaywrightWait(
+    page: Page,
+    cond: WaitCondition,
+    timeout: number,
+  ): Promise<void> {
     if ("text" in cond) {
       // String form sidesteps needing the DOM lib for tsc.
       await page.waitForFunction(
@@ -772,6 +784,7 @@ export class PlaywrightAdapter implements BrowserBackend {
 const DEFAULT_SCROLL_PX = 400;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
+const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 
 class TimeoutError extends Error {}

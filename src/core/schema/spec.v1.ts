@@ -171,6 +171,12 @@ const requestTargetSchema = z
 
 /* ----- wait conditions ----- */
 
+/**
+ * `wait` is an explicit polling step. Playwright wraps text/notText/load waits
+ * in a Cairntrace-side hard timeout (30000ms default, or `timeoutMs`) so a page
+ * caught in navigation churn fails the step instead of waiting on Playwright's
+ * own timeout forever.
+ */
 export const WaitConditionSchema = z.union([
   z
     .object({

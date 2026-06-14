@@ -310,6 +310,81 @@ describe("PlaywrightAdapter evaluate", () => {
   });
 });
 
+describe("PlaywrightAdapter wait", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("hard-bounds text waits with the step timeout", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    const waitForFunction = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { waitForFunction });
+
+    const pending = adapter.runStep({
+      wait: { text: "AWAITING ORDERS", timeoutMs: 25 },
+    });
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await pending;
+
+    expect(waitForFunction).toHaveBeenCalledWith(
+      `document.body.innerText.includes("AWAITING ORDERS")`,
+      undefined,
+      { timeout: 25 },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      stderr: "wait timed out after 25ms",
+      exitCode: 1,
+    });
+  });
+
+  it("uses a 30s default hard bound for wait steps", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 10 });
+    const waitForFunction = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { waitForFunction });
+
+    const pending = adapter.runStep({
+      wait: { notText: "Loading" },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+
+    expect(waitForFunction).toHaveBeenCalledWith(
+      `!document.body.innerText.includes("Loading")`,
+      undefined,
+      { timeout: 30_000 },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      stderr: "wait timed out after 30000ms",
+    });
+  });
+
+  it("hard-bounds load-state waits with the step timeout", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    const waitForLoadState = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { waitForLoadState });
+
+    const pending = adapter.runStep({
+      wait: { load: "networkidle", timeoutMs: 25 },
+    });
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await pending;
+
+    expect(waitForLoadState).toHaveBeenCalledWith("networkidle", {
+      timeout: 25,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      stderr: "wait timed out after 25ms",
+      exitCode: 1,
+    });
+  });
+});
+
 describe("PlaywrightAdapter launch", () => {
   const originalCi = process.env.CI;
   const originalLaunchArgs = process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS;
@@ -406,7 +481,7 @@ function installCookieBridgeContext(
 
 function installPage(
   adapter: PlaywrightAdapter,
-  page: { evaluate: (js: string) => Promise<unknown> },
+  page: Record<string, unknown>,
 ): void {
   (
     adapter as unknown as {

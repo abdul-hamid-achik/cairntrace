@@ -296,6 +296,10 @@ step first.
 Cairn enforces a hard deadline on every browser-backend invocation (60s
 default; a step's own `timeoutMs` plus a 5s grace period when set). A hung
 browser command is killed and the step fails with a normal timeout error.
+Playwright `wait` and browser `evaluate` paths are additionally wrapped in a
+Cairntrace-side timer, defaulting to 30000ms unless the step supplies
+`timeoutMs`, so navigation churn cannot leave the run waiting on Playwright's
+own timeout forever.
 Ctrl-C / SIGTERM during a run tears down the run's own agent-browser session
 (daemon and Chrome) before exiting with the conventional 130/143 exit code.
 

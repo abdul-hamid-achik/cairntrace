@@ -96,6 +96,10 @@ per-agent code paths.
 - Hydration-sensitive first interactions: prefer
   `open: { path, waitUntil: networkidle }` over a separate
   `wait: { load: … }` step.
+- Playwright `wait` steps and browser `evaluate` calls are hard-bounded by
+  Cairntrace-side timers (30000ms default, or the step/verifier timeout when
+  supplied), so page navigation churn should fail the step instead of wedging
+  the suite.
 - Every spec must satisfy the **cold-start contract**: it must be replayable
   from a fresh browser session. Satisfy via one of:
   1. `imports: [actions/login_admin.yml]` + `steps: [{ use: login_admin }]`
