@@ -49,7 +49,7 @@ export function importPlaywright(
       id: "todo_assertion",
       description:
         "TODO replace with the behavior this Playwright test asserts",
-      verify: { text: { contains: "TODO_replace_me" }, region: "page" },
+      verify: { text: { contains: "TODO_replace_me" } },
     });
   }
 
@@ -87,22 +87,58 @@ export function importPlaywright(
 function findFirstTest(
   source: string,
 ): { title: string; body: string } | undefined {
-  const m =
-    /test(?:\.\w+)?\(\s*(['"`])([\s\S]*?)\1\s*,\s*async\s*\([^)]*\)\s*=>\s*\{/m.exec(
-      source,
-    );
-  if (!m || m.index === undefined) return undefined;
-  const bodyStart = m.index + m[0].length;
+  const re = /\btest(?:\.(\w+))?\s*\(/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source))) {
+    if (m[1] === "describe") continue;
+    const parsed = parseTestAt(source, m.index + m[0].length);
+    if (parsed) return parsed;
+  }
+  return undefined;
+}
+
+function parseTestAt(
+  source: string,
+  titleStart: number,
+): { title: string; body: string } | undefined {
+  let i = skipWhitespace(source, titleStart);
+  const quote = source[i];
+  if (quote !== "'" && quote !== '"' && quote !== "`") return undefined;
+  const titleEnd = readQuoted(source, i);
+  if (titleEnd < 0) return undefined;
+  const title = source.slice(i + 1, titleEnd);
+  i = skipWhitespace(source, titleEnd + 1);
+  if (source[i] !== ",") return undefined;
+  const rest = source.slice(i);
+  const arrow = /^,\s*async\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.exec(
+    rest,
+  );
+  if (!arrow) return undefined;
+  const bodyStart = i + arrow[0].length;
   let depth = 1;
-  for (let i = bodyStart; i < source.length; i++) {
-    const ch = source[i];
+  for (let j = bodyStart; j < source.length; j++) {
+    const ch = source[j];
     if (ch === "{") depth++;
     if (ch === "}") depth--;
     if (depth === 0) {
-      return { title: m[2]!, body: source.slice(bodyStart, i) };
+      return { title, body: source.slice(bodyStart, j) };
     }
   }
-  return { title: m[2]!, body: source.slice(bodyStart) };
+  return { title, body: source.slice(bodyStart) };
+}
+
+function skipWhitespace(source: string, index: number): number {
+  let i = index;
+  while (/\s/.test(source[i] ?? "")) i++;
+  return i;
+}
+
+function readQuoted(source: string, quoteIndex: number): number {
+  const quote = source[quoteIndex];
+  for (let i = quoteIndex + 1; i < source.length; i++) {
+    if (source[i] === quote && source[i - 1] !== "\\") return i;
+  }
+  return -1;
 }
 
 function shouldIgnore(line: string): boolean {
@@ -164,9 +200,11 @@ function mapStep(line: string): Step | undefined {
 }
 
 function mapOutcome(line: string, idx: number): Outcome | undefined {
-  const url = /^await\s+expect\(page\)\.toHaveURL\((.+?)\);?$/.exec(line);
-  if (url) {
-    const arg = url[1]!.trim();
+  const assertion = parseExpectAssertion(line);
+  if (!assertion) return undefined;
+
+  if (assertion.target === "page" && assertion.matcher === "toHaveURL") {
+    const arg = assertion.args.trim();
     const matcher = regexLiteral(arg);
     if (matcher) {
       return outcome(idx, "url_matches", "page URL matches", {
@@ -181,18 +219,8 @@ function mapOutcome(line: string, idx: number): Outcome | undefined {
     }
   }
 
-  const visible = /^await\s+expect\((page\..+?)\)\.toBeVisible\(\s*\);?$/.exec(
-    line,
-  );
-  if (visible) {
-    const locText = locatorText(visible[1]!);
-    if (locText) {
-      return outcome(idx, "text_visible", "expected text is visible", {
-        text: { contains: locText },
-        region: "page",
-      });
-    }
-    const loc = locator(visible[1]!);
+  if (assertion.matcher === "toBeVisible") {
+    const loc = locator(assertion.target);
     if (loc?.by === "selector") {
       return outcome(idx, "element_visible", "expected element is visible", {
         count: { selector: loc.selector, atLeast: 1 },
@@ -203,16 +231,22 @@ function mapOutcome(line: string, idx: number): Outcome | undefined {
         count: { role: loc.role, atLeast: 1 },
       });
     }
+    if (loc?.by === "text") {
+      return outcome(idx, "text_visible", "expected text is visible", {
+        count: { text: loc.text, atLeast: 1 },
+      });
+    }
   }
 
-  const contains =
-    /^await\s+expect\((page\..+?)\)\.toContainText\((.+?)\);?$/.exec(line);
-  if (contains) {
-    const text = literal(contains[2]!);
+  if (assertion.matcher === "toContainText") {
+    const text = literal(assertion.args);
     if (text !== undefined) {
+      const loc = locator(assertion.target);
       return outcome(idx, "text_contains", "expected text is present", {
-        text: { contains: text },
-        region: "page",
+        text: {
+          contains: text,
+          ...(loc?.by === "selector" ? { region: loc.selector } : {}),
+        },
       });
     }
   }
@@ -234,7 +268,8 @@ function outcome(
 }
 
 function locator(input: string): Locator | undefined {
-  const testId = /^page\.getByTestId\((.+?)\)$/.exec(input);
+  const receiver = "(?:[A-Za-z_$][\\w$]*\\.)?";
+  const testId = new RegExp(`^${receiver}getByTestId\\((.+?)\\)$`).exec(input);
   if (testId) {
     const id = literal(testId[1]!);
     if (id !== undefined) {
@@ -242,7 +277,7 @@ function locator(input: string): Locator | undefined {
     }
   }
 
-  const role = /^page\.getByRole\((.+?)\)$/.exec(input);
+  const role = new RegExp(`^${receiver}getByRole\\((.+?)\\)$`).exec(input);
   if (role) {
     const args = splitTopLevelArgs(role[1]!);
     const roleName = literal(args[0] ?? "");
@@ -252,19 +287,19 @@ function locator(input: string): Locator | undefined {
     }
   }
 
-  const label = /^page\.getByLabel\((.+?)\)$/.exec(input);
+  const label = new RegExp(`^${receiver}getByLabel\\((.+?)\\)$`).exec(input);
   if (label) {
     const name = literal(label[1]!);
     if (name !== undefined) return { by: "label", name };
   }
 
-  const text = /^page\.getByText\((.+?)\)$/.exec(input);
+  const text = new RegExp(`^${receiver}getByText\\((.+?)\\)$`).exec(input);
   if (text) {
     const value = literal(text[1]!);
     if (value !== undefined) return { by: "text", text: value };
   }
 
-  const selector = /^page\.locator\((.+?)\)$/.exec(input);
+  const selector = new RegExp(`^${receiver}locator\\((.+?)\\)$`).exec(input);
   if (selector) {
     const value = literal(selector[1]!);
     if (value !== undefined) return { by: "selector", selector: value };
@@ -273,10 +308,55 @@ function locator(input: string): Locator | undefined {
   return undefined;
 }
 
-function locatorText(input: string): string | undefined {
-  const text = /^page\.getByText\((.+?)\)$/.exec(input);
-  if (text) return literal(text[1]!);
-  return undefined;
+interface ParsedExpectAssertion {
+  target: string;
+  matcher: "toHaveURL" | "toBeVisible" | "toContainText";
+  args: string;
+}
+
+function parseExpectAssertion(line: string): ParsedExpectAssertion | undefined {
+  const prefix = /^await\s+expect\(/.exec(line);
+  if (!prefix) return undefined;
+  const targetStart = prefix[0].length;
+  const targetEnd = matchingParen(line, targetStart - 1);
+  if (targetEnd < 0) return undefined;
+  const target = line.slice(targetStart, targetEnd).trim();
+  const rest = line.slice(targetEnd + 1).trim();
+  const matcher = /^\.(toHaveURL|toBeVisible|toContainText)\(/.exec(rest);
+  if (!matcher) return undefined;
+  const argsStart = matcher[0].length;
+  const argsEnd = matchingParen(rest, argsStart - 1);
+  if (argsEnd < 0) return undefined;
+  const tail = rest.slice(argsEnd + 1).trim();
+  if (tail && tail !== ";") return undefined;
+  return {
+    target,
+    matcher: matcher[1] as ParsedExpectAssertion["matcher"],
+    args: rest.slice(argsStart, argsEnd).trim(),
+  };
+}
+
+function matchingParen(input: string, openIndex: number): number {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = openIndex; i < input.length; i++) {
+    const ch = input[i]!;
+    const prev = input[i - 1];
+    if (quote) {
+      if (ch === quote && prev !== "\\") quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 function literal(input: string): string | undefined {

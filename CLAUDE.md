@@ -17,9 +17,11 @@ all coding agents. Read that file first — everything below assumes you have.
   short-lived tmp files only.
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
-  that timing; do it when asked, following the "Releasing" checklist in
-  AGENTS.md (annotated `vX.Y.Z` tag → push → `gh release create`; never a
-  floating `latest` tag).
+  that timing. When asked, follow the "Releasing" checklist in AGENTS.md:
+  choose the SemVer increment, bump only `package.json`, create an annotated
+  `vX.Y.Z` tag, push, then run `gh release create`. Use patch releases for
+  fixes/docs/polish, and never create a floating `latest` tag or rewrite old
+  releases unless the user explicitly asks to rewrite release history.
 
 ## Useful one-liners
 

@@ -17,22 +17,32 @@ describe("text", () => {
   it("passes when contains matches", async () => {
     const b = new MockBrowserBackend();
     b.setPageText("Coupon applied successfully");
-    const r = await evaluateText(
-      { text: { contains: "Coupon applied" }, region: "page" },
-      b,
-    );
+    const r = await evaluateText({ text: { contains: "Coupon applied" } }, b);
     expect(r.passed).toBe(true);
   });
 
   it("fails when the text is absent", async () => {
     const b = new MockBrowserBackend();
     b.setPageText("Invalid campaign");
-    const r = await evaluateText(
-      { text: { contains: "Coupon applied" }, region: "page" },
-      b,
-    );
+    const r = await evaluateText({ text: { contains: "Coupon applied" } }, b);
     expect(r.passed).toBe(false);
     expect(r.actual).toContain("not found");
+  });
+
+  it("uses nested region and still accepts the legacy sibling region", async () => {
+    const b = new MockBrowserBackend();
+    b.setRegionText("#ticker", "objective dead");
+    const nested = await evaluateText(
+      { text: { contains: "dead", region: "#ticker" } },
+      b,
+    );
+    const legacy = await evaluateText(
+      { text: { contains: "dead" }, region: "#ticker" },
+      b,
+    );
+
+    expect(nested.passed).toBe(true);
+    expect(legacy.passed).toBe(true);
   });
 });
 
@@ -41,7 +51,7 @@ describe("notText", () => {
     const b = new MockBrowserBackend();
     b.setPageText("All good");
     const r = await evaluateNotText(
-      { notText: { contains: "Something went wrong" }, region: "page" },
+      { notText: { contains: "Something went wrong" } },
       b,
     );
     expect(r.passed).toBe(true);
@@ -51,10 +61,20 @@ describe("notText", () => {
     const b = new MockBrowserBackend();
     b.setPageText("Something went wrong");
     const r = await evaluateNotText(
-      { notText: { contains: "Something went wrong" }, region: "page" },
+      { notText: { contains: "Something went wrong" } },
       b,
     );
     expect(r.passed).toBe(false);
+  });
+
+  it("uses nested region for absence checks", async () => {
+    const b = new MockBrowserBackend();
+    b.setRegionText("#toast", "All good");
+    const r = await evaluateNotText(
+      { notText: { contains: "Something went wrong", region: "#toast" } },
+      b,
+    );
+    expect(r.passed).toBe(true);
   });
 });
 

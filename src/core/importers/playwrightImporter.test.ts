@@ -49,7 +49,7 @@ describe("importPlaywright", () => {
       {
         id: "text_visible_2",
         description: "expected text is visible",
-        verify: { text: { contains: "Saved" }, region: "page" },
+        verify: { count: { text: "Saved", atLeast: 1 } },
       },
     ]);
 
@@ -77,7 +77,67 @@ describe("importPlaywright", () => {
     expect(imported.yaml).toContain("# TODO: await expect.poll");
     expect(imported.spec.outcomes[0]).toMatchObject({
       id: "todo_assertion",
-      verify: { text: { contains: "TODO_replace_me" }, region: "page" },
+      verify: { text: { contains: "TODO_replace_me" } },
+    });
+  });
+
+  it("uses the nested test title and maps fixture locator assertions", async () => {
+    const imported = importPlaywright(
+      [
+        "import { test, expect } from '@playwright/test';",
+        "",
+        "test.describe('Game Screen', () => {",
+        "  test('game screen renders objective state', async ({ gamePage }) => {",
+        "    await expect(gamePage.getByTestId('objective-ticker')).toBeVisible();",
+        "    await expect(gamePage.getByRole('button', { name: 'Start' })).toBeVisible();",
+        "    await expect(getByText('Roshan')).toBeVisible();",
+        "    await expect(gamePage.getByTestId('objective-ticker')).toContainText('dead');",
+        "  });",
+        "});",
+      ].join("\n"),
+    );
+
+    expect(imported.spec.intent).toBe("game screen renders objective state");
+    expect(imported.spec.name).toBe("game_screen_renders_objective_state");
+    expect(imported.todos).toEqual([]);
+    expect(imported.spec.outcomes).toEqual([
+      {
+        id: "element_visible",
+        description: "expected element is visible",
+        verify: {
+          count: {
+            selector: '[data-testid="objective-ticker"]',
+            atLeast: 1,
+          },
+        },
+      },
+      {
+        id: "role_visible_2",
+        description: "expected role is visible",
+        verify: { count: { role: "button", atLeast: 1 } },
+      },
+      {
+        id: "text_visible_3",
+        description: "expected text is visible",
+        verify: { count: { text: "Roshan", atLeast: 1 } },
+      },
+      {
+        id: "text_contains_4",
+        description: "expected text is present",
+        verify: {
+          text: {
+            contains: "dead",
+            region: '[data-testid="objective-ticker"]',
+          },
+        },
+      },
+    ]);
+
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-import-pw-fixture-"));
+    const specPath = join(dir, "game_screen_renders_objective_state.yml");
+    await writeFile(specPath, imported.yaml);
+    await expect(parseSpec(specPath)).resolves.toMatchObject({
+      spec: { name: "game_screen_renders_objective_state" },
     });
   });
 });

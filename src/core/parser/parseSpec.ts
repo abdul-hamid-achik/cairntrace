@@ -64,6 +64,13 @@ export interface ParseOptions {
    * start with `http://` or `https://`). Also substituted as `${baseUrl}`.
    */
   baseUrl?: string;
+  /** Built-in runtime placeholders for per-run/per-worker identity. */
+  runtime?: RuntimeTemplateContext;
+}
+
+export interface RuntimeTemplateContext {
+  workerIndex?: number;
+  runToken?: string;
 }
 
 /**
@@ -90,13 +97,26 @@ export async function parseSpec(
   const rawSource = await readFile(absPath, "utf8");
   const rawSpec = SpecSchema.parse(parseYaml(rawSource));
   const vars = { ...rawSpec.vars, ...opts.vars };
-  const raw = loadAndParseSource(rawSource, absPath, env, vars, baseUrl);
+  const raw = loadAndParseSource(
+    rawSource,
+    absPath,
+    env,
+    vars,
+    baseUrl,
+    opts.runtime,
+  );
   const spec = SpecSchema.parse(raw);
 
   const actionsByName = new Map<string, LoadedAction>();
   for (const importPath of spec.imports ?? []) {
     const resolvedImport = resolveImportPath(importPath, dirname(absPath));
-    const importRaw = await loadAndParse(resolvedImport, env, vars, baseUrl);
+    const importRaw = await loadAndParse(
+      resolvedImport,
+      env,
+      vars,
+      baseUrl,
+      opts.runtime,
+    );
     const action = ReusableActionSchema.parse(importRaw);
     actionsByName.set(action.name, { action, path: resolvedImport });
   }
@@ -210,9 +230,10 @@ async function loadAndParse(
   env: Record<string, string | undefined>,
   vars: Record<string, string | number | boolean>,
   baseUrl: string | undefined,
+  runtime: RuntimeTemplateContext | undefined,
 ): Promise<unknown> {
   const text = await readFile(absPath, "utf8");
-  return loadAndParseSource(text, absPath, env, vars, baseUrl);
+  return loadAndParseSource(text, absPath, env, vars, baseUrl, runtime);
 }
 
 function loadAndParseSource(
@@ -221,6 +242,7 @@ function loadAndParseSource(
   env: Record<string, string | undefined>,
   vars: Record<string, string | number | boolean>,
   baseUrl: string | undefined,
+  runtime: RuntimeTemplateContext | undefined,
 ): unknown {
   const substituted = substitute(
     text,
@@ -229,6 +251,7 @@ function loadAndParseSource(
     dirname(absPath),
     baseUrl,
     absPath,
+    runtime,
   );
   return parseYaml(substituted);
 }
@@ -256,10 +279,13 @@ function substitute(
   projectRoot: string,
   baseUrl: string | undefined,
   filePath: string,
+  runtime: RuntimeTemplateContext | undefined,
 ): string {
   return text.replace(/\$\{([\w.]+)\}/g, (match, key: string) => {
     if (key === "project.root") return projectRoot;
     if (key === "baseUrl") return baseUrl ?? "";
+    if (key === "worker.index") return String(runtime?.workerIndex ?? 0);
+    if (key === "run.token") return runtime?.runToken ?? "verify";
     const dotIdx = key.indexOf(".");
     if (dotIdx < 0) return match;
     const ns = key.slice(0, dotIdx);
@@ -271,8 +297,17 @@ function substitute(
       const v = vars[name];
       if (v === undefined)
         throw new MissingTemplateVariableError(name, filePath);
-      return String(v);
+      return renderRuntimePlaceholders(String(v), runtime);
     }
     return match;
   });
+}
+
+function renderRuntimePlaceholders(
+  value: string,
+  runtime: RuntimeTemplateContext | undefined,
+): string {
+  return value
+    .replace(/\$\{worker\.index\}/g, String(runtime?.workerIndex ?? 0))
+    .replace(/\$\{run\.token\}/g, runtime?.runToken ?? "verify");
 }

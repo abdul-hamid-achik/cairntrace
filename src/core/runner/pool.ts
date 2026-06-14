@@ -5,7 +5,7 @@
 export async function runPool<T, R>(
   items: readonly T[],
   parallel: number,
-  work: (item: T, index: number) => Promise<R>,
+  work: (item: T, index: number, workerIndex: number) => Promise<R>,
 ): Promise<R[]> {
   const width = Math.max(1, Math.floor(parallel));
   const results: R[] = Array.from({ length: items.length });
@@ -17,7 +17,7 @@ export async function runPool<T, R>(
         while (true) {
           const idx = next++;
           if (idx >= items.length) return;
-          results[idx] = await work(items[idx]!, idx);
+          results[idx] = await work(items[idx]!, idx, w);
         }
       })(),
     );

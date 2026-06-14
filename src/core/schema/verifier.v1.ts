@@ -14,6 +14,8 @@ export const TextMatcherSchema = z
     equals: z.string().optional(),
     contains: z.string().optional(),
     matches: z.string().optional(), // regex source
+    /** Optional selector region for text/notText checks. */
+    region: z.string().optional(),
   })
   .strict()
   .refine(
@@ -74,7 +76,8 @@ export type HttpMethod = z.infer<typeof HttpMethodSchema>;
 export const TextVerifierSchema = z
   .object({
     text: TextMatcherSchema,
-    region: z.string().default("page"),
+    /** Legacy v1.8 shape; prefer text.region. */
+    region: z.string().optional(),
   })
   .strict();
 export type TextVerifier = z.infer<typeof TextVerifierSchema>;
@@ -83,10 +86,19 @@ export type TextVerifier = z.infer<typeof TextVerifierSchema>;
 export const NotTextVerifierSchema = z
   .object({
     notText: TextMatcherSchema,
-    region: z.string().default("page"),
+    /** Legacy v1.8 shape; prefer notText.region. */
+    region: z.string().optional(),
   })
   .strict();
 export type NotTextVerifier = z.infer<typeof NotTextVerifierSchema>;
+
+export function textVerifierRegion(v: TextVerifier): string {
+  return v.text.region ?? v.region ?? "page";
+}
+
+export function notTextVerifierRegion(v: NotTextVerifier): string {
+  return v.notText.region ?? v.region ?? "page";
+}
 
 /** #3 — URL post-condition */
 export const UrlVerifierSchema = z

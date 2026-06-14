@@ -15,6 +15,8 @@ import {
   isScriptVerifier,
   isTextVerifier,
   isUrlVerifier,
+  notTextVerifierRegion,
+  textVerifierRegion,
 } from "../schema/verifier.v1";
 import type { Locator, Outcome, Spec, Step } from "../schema/spec.v1";
 
@@ -276,8 +278,10 @@ function renderWhenComment(when: string): string {
 
 function renderOutcome(outcome: Outcome): string[] {
   const v = outcome.verify;
-  if (isTextVerifier(v)) return renderTextOutcome(v.text, v.region, false);
-  if (isNotTextVerifier(v)) return renderTextOutcome(v.notText, v.region, true);
+  if (isTextVerifier(v))
+    return renderTextOutcome(v.text, textVerifierRegion(v), false);
+  if (isNotTextVerifier(v))
+    return renderTextOutcome(v.notText, notTextVerifierRegion(v), true);
   if (isUrlVerifier(v)) return renderUrlOutcome(v.url);
   if (isCountVerifier(v)) return renderCountOutcome(v);
   if (isNetworkVerifier(v)) return renderNetworkOutcome(v);

@@ -1,18 +1,23 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
-import type { TextMatcher, TextVerifier } from "../../schema/verifier.v1";
+import {
+  textVerifierRegion,
+  type TextMatcher,
+  type TextVerifier,
+} from "../../schema/verifier.v1";
 import type { VerifierEvaluation } from "./types";
 
 export async function evaluateText(
   verifier: TextVerifier,
   backend: BrowserBackend,
 ): Promise<VerifierEvaluation> {
-  const haystack = await backend.getText(verifier.region);
+  const region = textVerifierRegion(verifier);
+  const haystack = await backend.getText(region);
   const { expected, passed } = matchText(haystack, verifier.text);
   return {
     passed,
-    expected: `text ${expected} in region ${JSON.stringify(verifier.region)}`,
+    expected: `text ${expected} in region ${JSON.stringify(region)}`,
     actual: passed
-      ? `match found in region ${JSON.stringify(verifier.region)}`
+      ? `match found in region ${JSON.stringify(region)}`
       : `not found. region text was: ${truncate(haystack, 200)}`,
   };
 }

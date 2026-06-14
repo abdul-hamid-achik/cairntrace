@@ -131,7 +131,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config Variables",
-        body: "`${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Vars merge in this order: config environment vars < top-level spec `vars:` < repeatable CLI `--var key=value`. Missing vars fail with a clear `missing vars.X` error. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
+        body: "`${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Vars merge in this order: config environment vars < top-level spec `vars:` < repeatable CLI `--var key=value`. Missing vars fail with a clear `missing vars.X` error. Built-ins `${worker.index}` and `${run.token}` are also available; use them in vars such as `testUser: player-${worker.index}-${run.token}` to isolate realtime/stateful backends. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
       },
       {
         title: "Viewport And Retention",
@@ -139,7 +139,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Authoring Helpers",
-        body: "`cairn snapshot <url>` opens a page and reports role and `data-testid` locators for agent-friendly step authoring. `cairn import playwright <file>` converts common Playwright `page.goto`, locator actions, request calls, and `expect` assertions into reviewable YAML with TODO comments for unmapped lines. `cairn run <dir> --junit reports/cairn.xml` expands YAML specs recursively for CI, skipping `actions/` and `_*.yml` drafts. `--stamp-if-green` stamps contract hashes only after every requested spec passes.",
+        body: "`cairn snapshot <url>` opens a page and reports role and `data-testid` locators for agent-friendly step authoring. `cairn import playwright <file>` converts common Playwright `page.goto`, locator actions, request calls, and `expect` assertions into reviewable YAML with TODO comments for unmapped lines. `cairn run <dir> --junit reports/cairn.xml` expands YAML specs recursively for CI, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. `--stamp-if-green` stamps contract hashes only after every requested spec passes.",
       },
     ],
     examples: [
@@ -177,6 +177,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "# flows/table-import.yml",
           "vars:",
           "  connectionPath: /connection/from-spec",
+          "  testUser: player-${worker.index}-${run.token}",
           "steps:",
           '  - open: "${vars.connectionPath}"',
           "",
@@ -218,7 +219,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Request Steps",
-        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin. A request-first relative URL therefore needs `environments.<env>.baseUrl`. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
+        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin. If the first step is a request and the browser is still on `about:blank`, Cairntrace first navigates to the request origin so the fetch has a real app origin. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
       },
       {
         title: "Reusable Actions",
@@ -279,7 +280,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Typed Verifiers",
-        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, and `httpJson` cover common UI, navigation, network, console, workbook, on-disk, and backend-JSON assertions. `file` polls a glob (filename wildcards, relative to the spec dir) until a matching file exists and optionally contains a needle. `httpJson` fetches JSON in the browser session with cookies, resolves relative URLs through config `baseUrl` or the current page origin, walks a simple dotted JSON path like `$.game.score`, and applies `equals`/`contains`/`matches`/numeric/`exists` matchers.",
+        body: "`text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, and `httpJson` cover common UI, navigation, network, console, workbook, on-disk, and backend-JSON assertions. `text.region` and `notText.region` optionally scope text checks to a selector; the old sibling `region` shape is still accepted for compatibility. `file` polls a glob (filename wildcards, relative to the spec dir) until a matching file exists and optionally contains a needle. `httpJson` fetches JSON in the browser session with cookies, resolves relative URLs through config `baseUrl` or the current page origin, walks a simple dotted JSON path like `$.game.score`, and applies `equals`/`contains`/`matches`/numeric/`exists` matchers.",
       },
       {
         title: "Script Escape Hatch",
@@ -308,6 +309,12 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    description: page has no console errors",
           "    verify:",
           "      console: { errorsMax: 0 }",
+          "  - id: objective_ticker_updates",
+          "    description: objective ticker shows state",
+          "    verify:",
+          "      text:",
+          "        contains: dead",
+          "        region: '[data-testid=\"objective-ticker\"]'",
           "  - id: backend_state_matches",
           "    description: backend state reflects the seeded game",
           "    verify:",

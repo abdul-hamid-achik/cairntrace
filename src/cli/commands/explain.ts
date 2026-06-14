@@ -589,7 +589,7 @@ export function buildExplain(): ExplainResult {
         id: "request",
         kind: "network",
         summary:
-          "Authenticated API call via in-page fetch (browser cookies included); relative URLs use config baseUrl when present, so setup requests can run before open; assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
+          "Authenticated API call via in-page fetch (browser cookies included); relative URLs use config baseUrl when present, and request-first steps establish the request origin before fetch; assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
         yamlExample:
           "steps:\n  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, expectStatus: 200, assign: qr }\n  - fill: { by: label, name: Scanner code, value: '${requests.qr.body.token}' }",
       },
@@ -639,7 +639,8 @@ export function buildExplain(): ExplainResult {
         id: "text",
         kind: "ui",
         summary: "Text appears on the page",
-        yamlExample: 'verify:\n  text: { equals: "Coupon applied" }',
+        yamlExample:
+          "verify:\n  text:\n    contains: dead\n    region: '[data-testid=\"objective-ticker\"]'",
         parameters: [
           {
             name: "equals",
@@ -663,7 +664,8 @@ export function buildExplain(): ExplainResult {
             name: "region",
             type: "string",
             default: "page",
-            description: "selector or 'page'",
+            description:
+              "optional selector or 'page'; nested under text (legacy sibling region is still accepted)",
           },
         ],
       },
@@ -671,7 +673,8 @@ export function buildExplain(): ExplainResult {
         id: "notText",
         kind: "ui",
         summary: "Text does NOT appear on the page",
-        yamlExample: 'verify:\n  notText: { contains: "Something went wrong" }',
+        yamlExample:
+          'verify:\n  notText:\n    contains: "Something went wrong"\n    region: page',
         parameters: [
           {
             name: "equals",
@@ -690,6 +693,13 @@ export function buildExplain(): ExplainResult {
             type: "regex",
             description: "regex source",
             oneOfGroup: "matcher",
+          },
+          {
+            name: "region",
+            type: "string",
+            default: "page",
+            description:
+              "optional selector or 'page'; nested under notText (legacy sibling region is still accepted)",
           },
         ],
       },

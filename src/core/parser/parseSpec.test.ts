@@ -465,6 +465,40 @@ steps:
     expect(overriddenVerify.text.contains).toBe("From CLI");
   });
 
+  it("supports nested text regions and built-in runtime placeholders", async () => {
+    const path = join(dir, "runtime_placeholders.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: runtime_placeholders
+intent: built-in runtime placeholders resolve
+vars:
+  userId: "user-\${worker.index}-\${run.token}"
+outcomes:
+  - id: ticker
+    description: ticker contains objective state
+    verify:
+      text:
+        contains: "\${vars.userId}"
+        region: '[data-testid="objective-ticker"]'
+steps:
+  - open: "/users/\${vars.userId}"
+`,
+    );
+
+    const r = await parseSpec(path, {
+      runtime: { workerIndex: 7, runToken: "abc123" },
+    });
+
+    expect(r.spec.outcomes[0]!.verify).toEqual({
+      text: {
+        contains: "user-7-abc123",
+        region: '[data-testid="objective-ticker"]',
+      },
+    });
+    expect(r.spec.steps?.[0]).toEqual({ open: "/users/user-7-abc123" });
+  });
+
   it("validates contractHash against the raw unresolved contract", async () => {
     const path = join(dir, "hash_with_var.yml");
     const rawSpec = {
@@ -477,7 +511,6 @@ steps:
           description: "path is visible",
           verify: {
             text: { contains: "${vars.expectedPath}" },
-            region: "page",
           },
         },
       ],

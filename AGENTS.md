@@ -18,6 +18,9 @@ Agents author + run + heal those specs via the `cairn` CLI or the MCP server.
   cloning `github.com/abdul-hamid-achik/cairntrace`, running `bun install`,
   and using `./bin/cairn` (optionally symlinked onto `$PATH`). Releases are
   git tags mirrored as GitHub release pages.
+- Versioning: SemVer tags are the release record. All `v1.x.y` tags are
+  Cairntrace v1; do not rewrite old tags/releases just to make the visible
+  numbering look cleaner.
 
 ## Architecture in 60 seconds
 
@@ -206,21 +209,41 @@ Only promote to a typed verifier when 3+ real specs would benefit.
 - Run `bun run verify`. It must be green.
 - Smoke-test against the demo app if you touched anything in the run/heal
   pipeline (see `examples/README.md`).
-- Tag intentionally — significant feature sets get a `vX.Y.Z` git tag with a
-  release-note style commit message. Bump `package.json` `version` in the
-  same commit. Push tags and create releases only when the user asks.
+- Version intentionally — choose patch/minor/major using the release rules
+  below. Bump `package.json` `version` in the release commit. Push tags and
+  create releases only when the user asks.
 
 ## Releasing (on the user's request only)
 
+Cairntrace uses SemVer tags mirrored to GitHub releases.
+
+- Patch: bug fixes, docs, importer/exporter polish, verifier fixes, runtime
+  reliability work, or follow-up work that does not expand the CLI/schema
+  surface in a meaningful way.
+- Minor: new agent-callable commands, new typed steps/verifiers, new stable
+  schema/artifact fields, or substantial non-breaking behavior.
+- Major: breaking CLI flags, spec schema, artifact schema, MCP contracts, or
+  migration-heavy behavior changes.
+
+Before cutting a release:
+
+- Inspect `git status --short` and make sure every file in the commit belongs
+  to the release.
+- Run `bun run verify`. It must be green.
+- Smoke-test the demo app if runner, heal, backend, importer/exporter, or
+  artifact behavior changed.
+- Bump only `package.json`'s `version`; the README install guide deliberately
+  hardcodes no version and resolves the newest tag dynamically.
+- Do not delete, recreate, or rename old GitHub releases/tags unless the user
+  explicitly asks to rewrite release history.
+
 ```bash
-git tag -a vX.Y.Z -m "<release-note style message>"
-git push origin main vX.Y.Z
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
 gh release create vX.Y.Z --title vX.Y.Z --generate-notes
 ```
 
 - `vX.Y.Z` tags are the **only** tag kind. Do not create or move a floating
   `latest` tag — GitHub marks the newest release "Latest" automatically, and
   `<repo>/releases/latest` always points at it.
-- The README install guide deliberately hardcodes no version; it resolves the
-  newest tag with `git tag --sort=-v:refname`. Nothing in the docs needs a
-  version bump at release time — only `package.json`.

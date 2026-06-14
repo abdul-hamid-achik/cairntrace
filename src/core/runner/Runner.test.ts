@@ -785,7 +785,8 @@ steps:
       body: { token: "tok-123" },
     });
     // The fill step received the spliced token value.
-    expect(backend.stepLog[0]).toMatchObject({
+    expect(backend.stepLog[0]).toEqual({ open: "http://localhost:8080" });
+    expect(backend.stepLog[1]).toMatchObject({
       fill: { by: "label", name: "Scanner code", value: "tok-123" },
     });
   });
@@ -832,6 +833,8 @@ steps:
     const result = await runSpec({ specPath, backend, artifactRoot });
 
     expect(result.status).toBe("passed");
+    expect(result.steps).toHaveLength(1);
+    expect(backend.stepLog[0]).toEqual({ open: "http://host" });
     expect(backend.lastEvaluatedScript).toContain(
       'fetch("http://host/api/test/login-as"',
     );
@@ -982,7 +985,7 @@ steps:
       const result = await runSpec({ specPath, backend, artifactRoot });
 
       expect(result.status).toBe("passed");
-      expect(backend.stepLog[0]).toMatchObject({
+      expect(backend.stepLog[backend.stepLog.length - 1]).toMatchObject({
         open: "http://host/play?id=1",
       });
     }
@@ -1049,6 +1052,39 @@ steps:
 
     expect(result.status).toBe("passed");
     expect(backend.viewportLog).toEqual([{ width: 390, height: 844 }]);
+  });
+
+  it("resolves worker and run placeholders through runSpec vars", async () => {
+    const specPath = await writeSpec(
+      "runtime_identity",
+      `version: 1
+name: runtime_identity
+intent: runtime placeholders derive isolated identities
+vars:
+  testUser: "player-\${worker.index}-\${run.token}"
+outcomes:
+  - id: no_errors
+    description: no errors
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: "/session/\${vars.testUser}"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      workerIndex: 3,
+      runToken: "abc123",
+    });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toEqual({
+      open: "http://localhost:8080/session/player-3-abc123",
+    });
   });
 
   it("cold-start defaults to off without CI=true", async () => {

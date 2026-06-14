@@ -84,6 +84,10 @@ export interface RunOptions {
   listener?: ProgressListener;
   /** Path to a cairntrace.config.yml. Disables auto-discovery from the spec dir. */
   configPath?: string;
+  /** Worker slot for `${worker.index}`. Defaults to 0. */
+  workerIndex?: number;
+  /** Per-run token for `${run.token}`. Defaults to a generated token. */
+  runToken?: string;
 }
 
 /**
@@ -95,6 +99,8 @@ export interface RunOptions {
  * interface, so a MockBrowserBackend works for tests and `--mock` runs.
  */
 export async function runSpec(opts: RunOptions): Promise<RunResult> {
+  const workerIndex = opts.workerIndex ?? 0;
+  const runToken = opts.runToken ?? generateRunToken();
   const runtime = await resolveSpecRuntimeContext(opts.specPath, {
     ...(opts.environmentOverride !== undefined
       ? { envOverride: opts.environmentOverride }
@@ -102,14 +108,19 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
     ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
   });
+  const resolvedVars = resolveRuntimeVars(runtime.vars, {
+    workerIndex,
+    runToken,
+  });
   const {
     spec,
     resolved,
     path: specPath,
   } = await parseSpec(opts.specPath, {
     ...(opts.env ? { env: opts.env } : {}),
-    vars: runtime.vars,
+    vars: resolvedVars,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+    runtime: { workerIndex, runToken },
   });
 
   const env = runtime.envName;
@@ -350,7 +361,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           runDir,
           specDir: dirname(specPath),
           artifacts: namedArtifacts,
-          vars: runtime.vars,
+          vars: resolvedVars,
         });
         if (!transformed.ok) {
           stepStatus = "failed";
@@ -549,7 +560,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     artifacts: namedArtifacts,
     responses,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
-    vars: runtime.vars,
+    vars: resolvedVars,
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
   const evaluated = await evaluateOutcomes(
@@ -754,6 +765,26 @@ function resolveUploadPath(
   return resolved;
 }
 
+function generateRunToken(): string {
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function resolveRuntimeVars(
+  vars: Record<string, string | number | boolean>,
+  runtime: { workerIndex: number; runToken: string },
+): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    out[key] =
+      typeof value === "string"
+        ? value
+            .replace(/\$\{worker\.index\}/g, String(runtime.workerIndex))
+            .replace(/\$\{run\.token\}/g, runtime.runToken)
+        : value;
+  }
+  return out;
+}
+
 function resolveOpenStep(
   step: Step,
   opts: {
@@ -800,6 +831,8 @@ async function runRequestStep(opts: {
   const resolved = await resolveRequestUrl(req.url, opts);
   if (!resolved.ok) return resolved;
   const request = { ...req, url: resolved.url };
+  const origin = await ensureRequestOrigin(opts.backend, request.url);
+  if (!origin.ok) return origin;
 
   const result = await opts.backend.evaluate(buildRequestScript(request));
   if (!result.ok) {
@@ -868,6 +901,37 @@ async function resolveRequestUrl(
     };
   }
   return { ok: true, url: resolveUrl(currentUrl, url) };
+}
+
+async function ensureRequestOrigin(
+  backend: BrowserBackend,
+  requestUrl: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const currentUrl = await backend.getUrl().catch(() => "about:blank");
+  if (!(currentUrl === "about:blank" || currentUrl.startsWith("about:blank"))) {
+    return { ok: true };
+  }
+  if (!/^https?:\/\//i.test(requestUrl)) return { ok: true };
+
+  let origin: string;
+  try {
+    origin = new URL(requestUrl).origin;
+  } catch {
+    return { ok: true };
+  }
+
+  const opened = await backend.runStep({ open: origin });
+  if (!opened.ok) {
+    return {
+      ok: false,
+      error: `request: could not establish app origin ${origin} before fetch: ${
+        opened.stderr.trim() ||
+        opened.stdout.trim() ||
+        `exit ${opened.exitCode}`
+      }`,
+    };
+  }
+  return { ok: true };
 }
 
 function buildRequestScript(req: RequestStep["request"]): string {

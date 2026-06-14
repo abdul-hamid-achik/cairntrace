@@ -27,6 +27,15 @@ describe("runPool", () => {
     expect(out).toEqual([1, 2, 3]);
   });
 
+  it("passes the worker slot to the work function", async () => {
+    const seen: number[] = [];
+    await runPool([1, 2, 3, 4], 2, async (_n, _idx, workerIndex) => {
+      seen.push(workerIndex);
+    });
+
+    expect(new Set(seen)).toEqual(new Set([0, 1]));
+  });
+
   it("propagates errors from work fn", async () => {
     await expect(
       runPool([1, 2, 3], 2, async (n) => {

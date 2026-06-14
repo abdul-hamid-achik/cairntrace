@@ -226,7 +226,8 @@ error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
 `request` makes an authenticated API call from the page (browser cookies
 included) and captures the response for later steps. Relative request URLs
 resolve against config `baseUrl` when present, so request-first setup actions
-can run before any `open`:
+can run before any `open`; if the browser is still on `about:blank`, Cairntrace
+first navigates to the request origin so the fetch has a real app origin:
 
 ```yaml
 - request: { method: POST, url: /api/qr-token, expectStatus: 200, assign: qr }
@@ -260,6 +261,15 @@ files), and backend JSON state (`httpJson` fetches with browser cookies and
 asserts a simple JSON path). Use `script` when the assertion is
 product-specific or needs browser or Node code.
 
+Scope `text` / `notText` checks with nested `region`:
+
+```yaml
+verify:
+  text:
+    contains: dead
+    region: '[data-testid="objective-ticker"]'
+```
+
 When a step fails before producing an artifact, outcomes that reference the
 missing `${artifacts.<name>.…}` / `${requests.<name>.…}` report `skipped`
 ("blocked") instead of a misleading missing-file failure — fix the failed
@@ -279,7 +289,8 @@ Ctrl-C / SIGTERM during a run tears down the run's own agent-browser session
 and project settings. Placeholders such as `${vars.connectionPath}` resolve
 before spec validation, so they can appear in required fields. Vars merge as
 config environment vars < top-level spec `vars:` < repeatable CLI
-`--var key=value`.
+`--var key=value`. Built-ins `${worker.index}` and `${run.token}` can derive
+isolated users or tenants for realtime/stateful backends.
 
 ```yaml
 version: 1
@@ -292,6 +303,7 @@ environments:
     viewport: { width: 1280, height: 800 }
     vars:
       dashboardPath: /dashboard.html
+      testUser: player-${worker.index}-${run.token}
 ```
 
 Specs can also set a top-level `viewport: { width, height }`, which wins over
@@ -349,7 +361,7 @@ Common commands:
 
 | Command | Purpose |
 | --- | --- |
-| `cairn run <spec...>` | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping `actions/` and `_*.yml` drafts. |
+| `cairn run <spec...>` | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. |
 | `cairn clean` | Prune old run directories (`--keep N` per spec, or `--all`; honors `--config` and `--artifact-root`). |
 | `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
@@ -447,6 +459,9 @@ separate so the core stays deterministic and testable.
   captures the response, and later steps splice fields via
   `${requests.<name>.body.<field>}` — e.g. fetch a QR token via API, then
   `fill` it into the scanner UI.
+- **Realtime/stateful isolation:** use `${worker.index}` and `${run.token}` in
+  `vars:` to derive a unique user or tenant per spec run, e.g.
+  `testUser: player-${worker.index}-${run.token}`.
 - **Download artifacts:** `download` clicks a locator and saves the file under
   `downloads/`, optionally assigning it as `${artifacts.<name>.path}`.
 - **Transform artifacts:** `transform` runs a Node-side script to turn a
@@ -458,7 +473,8 @@ separate so the core stays deterministic and testable.
 - **Locator inventory:** `cairn snapshot <url> --json` returns role and
   `data-testid` locators before you author or repair steps.
 - **Suite CI:** `cairn run flows --junit reports/cairn.xml` expands a
-  directory of specs recursively and writes JUnit XML for CI dashboards.
+  directory of specs recursively, skips imported `actions/` and `_`-prefixed
+  drafts, and writes JUnit XML for CI dashboards.
 - **Contract stamping after proof:** `cairn run <spec-or-dir> --stamp-if-green`
   stamps `contractHash` only when every requested spec passes.
 - **Playwright import:** `cairn import playwright <file>` converts common
@@ -483,6 +499,24 @@ browser adapters, also smoke-test against the demo app in `examples/`.
 
 More contributor guidance lives in [AGENTS.md](./AGENTS.md). That file is the
 canonical instruction set for coding agents working in this repo.
+
+## Release Policy
+
+Cairntrace is distributed through git tags and GitHub release pages only; it is
+not published to npm or GitHub Packages. The install guide intentionally
+doesn't hardcode a version because users can pin the newest tag with
+`git tag --sort=-v:refname`.
+
+The project follows SemVer tags (`vX.Y.Z`). All `v1.x.y` releases are
+Cairntrace v1, so normal maintenance should add the next patch or minor tag
+instead of rewriting old releases. Use patch releases for fixes, docs, and
+polish; use minor releases for new non-breaking CLI/schema behavior; reserve
+major releases for breaking contracts.
+
+For a release, bump `package.json`'s `version`, run `bun run verify`, create an
+annotated `vX.Y.Z` tag, push `main` and the tag, then create the GitHub release
+with `gh release create`. Do not create a floating `latest` tag — GitHub keeps
+`/releases/latest` pointed at the newest release automatically.
 
 ## Security
 

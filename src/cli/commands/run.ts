@@ -127,6 +127,7 @@ async function runSingle(
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
       ...(Object.keys(vars).length > 0 ? { vars } : {}),
+      workerIndex: 0,
       ...(listener ? { listener } : {}),
     });
     exitCode = result.exitCode;
@@ -187,53 +188,60 @@ async function runBatch(
   // and network logs across specs). Playwright/Mock ignore the field but
   // it's harmless for them.
   const sessionRoot = `cairntrace-${process.pid}`;
-  const results = await runPool(specs, parallel, async (specPath, idx) => {
-    const backend = createBackend({
-      ...backendOpts(opts),
-      session: `${sessionRoot}-w${idx}`,
-    });
-    const untrack = trackBackend(backend);
-    try {
-      const vars = parseVarFlags(opts.var);
-      const r = await runSpec({
-        specPath,
-        backend,
-        ...(opts.artifactRoot !== undefined
-          ? { artifactRoot: opts.artifactRoot }
-          : {}),
-        ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
-        ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
-        ...(opts.config !== undefined ? { configPath: opts.config } : {}),
-        ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  const results = await runPool(
+    specs,
+    parallel,
+    async (specPath, idx, workerIndex) => {
+      const backend = createBackend({
+        ...backendOpts(opts),
+        session: `${sessionRoot}-w${workerIndex}`,
       });
-      if (interactive) {
-        const mark =
-          r.status === "passed"
-            ? "\x1b[32m✓\x1b[0m"
-            : r.status === "failed"
-              ? "\x1b[31m✗\x1b[0m"
-              : "\x1b[33m·\x1b[0m";
-        process.stdout.write(
-          `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
-            r.outcomes.filter((o) => o.status === "passed").length
-          }/${r.outcomes.length} outcomes)\n`,
-        );
+      const untrack = trackBackend(backend);
+      try {
+        const vars = parseVarFlags(opts.var);
+        const r = await runSpec({
+          specPath,
+          backend,
+          ...(opts.artifactRoot !== undefined
+            ? { artifactRoot: opts.artifactRoot }
+            : {}),
+          ...(opts.coldStart !== undefined
+            ? { coldStart: opts.coldStart }
+            : {}),
+          ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
+          ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+          ...(Object.keys(vars).length > 0 ? { vars } : {}),
+          workerIndex,
+        });
+        if (interactive) {
+          const mark =
+            r.status === "passed"
+              ? "\x1b[32m✓\x1b[0m"
+              : r.status === "failed"
+                ? "\x1b[31m✗\x1b[0m"
+                : "\x1b[33m·\x1b[0m";
+          process.stdout.write(
+            `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
+              r.outcomes.filter((o) => o.status === "passed").length
+            }/${r.outcomes.length} outcomes)\n`,
+          );
+        }
+        return r;
+      } catch (e) {
+        // Synthesize an errored RunResult so the batch survives.
+        const err = e as Error;
+        if (interactive) {
+          process.stdout.write(
+            `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+          );
+        }
+        return synthesizeErroredResult(specPath, err);
+      } finally {
+        untrack();
+        await backend.close().catch(() => undefined);
       }
-      return r;
-    } catch (e) {
-      // Synthesize an errored RunResult so the batch survives.
-      const err = e as Error;
-      if (interactive) {
-        process.stdout.write(
-          `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
-        );
-      }
-      return synthesizeErroredResult(specPath, err);
-    } finally {
-      untrack();
-      await backend.close().catch(() => undefined);
-    }
-  });
+    },
+  );
 
   const totalDurationMs = Date.now() - tStart;
   const summary = {
