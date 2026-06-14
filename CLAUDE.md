@@ -21,7 +21,12 @@ all coding agents. Read that file first — everything below assumes you have.
   release notes.
 - Request steps are no longer documented as page-only fetches. Playwright uses
   an out-of-page, context-cookie-sharing transport with a 30000ms default
-  timeout; agent-browser currently relies on the bounded evaluate fallback.
+  timeout. Under Bun, the cookie bridge runs in a subprocess so the parent can
+  kill it at `timeoutMs`; agent-browser currently relies on the bounded
+  evaluate fallback.
+- Playwright Chromium gets `--no-sandbox` and `--disable-dev-shm-usage`
+  automatically when `CI` is truthy. Use `CAIRN_PLAYWRIGHT_LAUNCH_ARGS` only
+  when a runner needs different flags.
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:

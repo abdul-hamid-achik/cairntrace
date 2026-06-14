@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { spawn } from "node:child_process";
 import { chromium } from "playwright";
 import type {
   APIRequestContext,
@@ -36,10 +38,19 @@ export interface PlaywrightAdapterOptions {
   /**
    * Internal/test override. Bun exposes a relative IncomingMessage.url to
    * Playwright's APIRequestContext Set-Cookie parser, so the default uses a
-   * cookie bridge under Bun and APIRequestContext elsewhere.
+   * subprocess cookie bridge under Bun and APIRequestContext elsewhere.
    */
-  requestMode?: "api" | "cookie-bridge";
+  requestMode?: RequestMode;
+  /**
+   * Chromium launch args. Defaults to CI hardening args when CI is truthy;
+   * set an explicit empty array to suppress them in tests or local overrides.
+   */
+  launchArgs?: string[];
+  /** Internal/test override for the isolated subprocess fetch program. */
+  isolatedFetchScript?: string;
 }
+
+type RequestMode = "api" | "cookie-bridge" | "subprocess-cookie-bridge";
 
 /**
  * Playwright BrowserBackend.
@@ -422,7 +433,11 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   private async ensureBrowser(): Promise<Browser> {
     if (this.browser) return this.browser;
-    this.browser = await chromium.launch({ headless: !this.opts.headed });
+    const args = this.launchArgs();
+    this.browser = await chromium.launch({
+      headless: !this.opts.headed,
+      ...(args.length > 0 ? { args } : {}),
+    });
     return this.browser;
   }
 
@@ -444,8 +459,16 @@ export class PlaywrightAdapter implements BrowserBackend {
     req: BackendRequest,
     timeoutMs: number,
   ): Promise<BackendResponse> {
-    if (this.useCookieBridge()) {
+    const mode = this.resolveRequestMode();
+    if (mode === "cookie-bridge") {
       return this.fetchRequestWithCookieBridge(context, req, timeoutMs);
+    }
+    if (mode === "subprocess-cookie-bridge") {
+      return this.fetchRequestWithSubprocessCookieBridge(
+        context,
+        req,
+        timeoutMs,
+      );
     }
     return this.fetchRequestWithApiContext(context, req, timeoutMs);
   }
@@ -482,12 +505,10 @@ export class PlaywrightAdapter implements BrowserBackend {
     req: BackendRequest,
     timeoutMs: number,
   ): Promise<BackendResponse> {
-    const headers = new Headers(req.headers ?? {});
-    if (!headers.has("cookie")) {
-      const cookieHeader = serializeCookies(await context.cookies(req.url));
-      if (cookieHeader) headers.set("cookie", cookieHeader);
-    }
-    const body = encodeRequestBody(req.body, headers);
+    const { headers, body } = await this.prepareCookieBridgeRequest(
+      context,
+      req,
+    );
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -522,9 +543,65 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
   }
 
-  private useCookieBridge(): boolean {
-    if (this.opts.requestMode) return this.opts.requestMode === "cookie-bridge";
-    return Boolean(process.versions.bun);
+  private async fetchRequestWithSubprocessCookieBridge(
+    context: BrowserContext,
+    req: BackendRequest,
+    timeoutMs: number,
+  ): Promise<BackendResponse> {
+    const { headers, body } = await this.prepareCookieBridgeRequest(
+      context,
+      req,
+    );
+    const result = await runIsolatedFetch(
+      {
+        url: req.url,
+        method: req.method,
+        headers: headersToRecord(headers),
+        ...(body !== undefined ? { body: serializeBodyForChild(body) } : {}),
+        timeoutMs,
+      },
+      timeoutMs,
+      this.opts.isolatedFetchScript ?? ISOLATED_FETCH_SCRIPT,
+    );
+    const cookies = parseSetCookieHeaders(
+      result.setCookieHeaders,
+      result.url || req.url,
+    );
+    if (cookies.length > 0) {
+      await context.addCookies(cookies);
+    }
+    return {
+      ok: true,
+      status: result.status,
+      headers: result.headers,
+      body: parseResponseBody(result.text),
+    };
+  }
+
+  private async prepareCookieBridgeRequest(
+    context: BrowserContext,
+    req: BackendRequest,
+  ): Promise<{ headers: Headers; body: EncodedRequestBody }> {
+    const headers = new Headers(req.headers ?? {});
+    if (!headers.has("cookie")) {
+      const cookieHeader = serializeCookies(await context.cookies(req.url));
+      if (cookieHeader) headers.set("cookie", cookieHeader);
+    }
+    return { headers, body: encodeRequestBody(req.body, headers) };
+  }
+
+  private resolveRequestMode(): RequestMode {
+    if (this.opts.requestMode) return this.opts.requestMode;
+    return hasBunRuntime() ? "subprocess-cookie-bridge" : "api";
+  }
+
+  private launchArgs(): string[] {
+    if (this.opts.launchArgs) return this.opts.launchArgs;
+    const envArgs = parseLaunchArgsEnv(
+      process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS,
+    );
+    if (envArgs.length > 0) return envArgs;
+    return isTruthyEnv(process.env.CI) ? DEFAULT_CI_CHROMIUM_ARGS : [];
   }
 
   private async ensurePage(): Promise<Page> {
@@ -695,8 +772,33 @@ export class PlaywrightAdapter implements BrowserBackend {
 const DEFAULT_SCROLL_PX = 400;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
+const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 
 class TimeoutError extends Error {}
+
+type EncodedRequestBody = string | Uint8Array | undefined;
+
+interface ChildBody {
+  kind: "text" | "base64";
+  value: string;
+}
+
+interface IsolatedFetchPayload {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: ChildBody;
+  timeoutMs: number;
+}
+
+interface IsolatedFetchResult {
+  ok: true;
+  status: number;
+  url: string;
+  headers: Record<string, string>;
+  setCookieHeaders: string[];
+  text: string;
+}
 
 function withTimeout<T>(
   promise: Promise<T>,
@@ -713,6 +815,196 @@ function withTimeout<T>(
     if (timer) clearTimeout(timer);
   });
 }
+
+function runIsolatedFetch(
+  payload: IsolatedFetchPayload,
+  timeoutMs: number,
+  script: string,
+): Promise<IsolatedFetchResult> {
+  return new Promise<IsolatedFetchResult>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--eval", script], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new TimeoutError(`request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const settle = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timer);
+      return true;
+    };
+    const resolveOnce = (value: IsolatedFetchResult): void => {
+      if (settle()) resolve(value);
+    };
+    const rejectOnce = (err: Error): void => {
+      if (settle()) reject(err);
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (err) => rejectOnce(err));
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      try {
+        resolveOnce(parseIsolatedFetchResult(stdout));
+      } catch (e) {
+        const fallback =
+          stderr.trim() ||
+          (signal
+            ? `request subprocess exited with signal ${signal}`
+            : `request subprocess exited with code ${code ?? "unknown"}`);
+        rejectOnce(new Error((e as Error).message || fallback));
+      }
+    });
+    child.stdin?.end(JSON.stringify(payload));
+  });
+}
+
+function parseIsolatedFetchResult(stdout: string): IsolatedFetchResult {
+  if (!stdout.trim()) throw new Error("request subprocess returned no output");
+  const parsed = JSON.parse(stdout) as
+    | IsolatedFetchResult
+    | { ok: false; error?: string };
+  if (parsed.ok === true) return parsed;
+  throw new Error(parsed.error || "request subprocess failed");
+}
+
+function serializeBodyForChild(
+  body: Exclude<EncodedRequestBody, undefined>,
+): ChildBody {
+  if (typeof body === "string") return { kind: "text", value: body };
+  return {
+    kind: "base64",
+    value: Buffer.from(body).toString("base64"),
+  };
+}
+
+function parseLaunchArgsEnv(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/\s+/)
+    .map((arg) => arg.trim())
+    .filter(Boolean);
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value !== undefined && value !== "" && value !== "0";
+}
+
+function hasBunRuntime(): boolean {
+  return Boolean(process.versions.bun);
+}
+
+const ISOLATED_FETCH_SCRIPT = String.raw`
+const chunks = [];
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", async () => {
+  let payload;
+  try {
+    payload = JSON.parse(chunks.join(""));
+    const headers = new Headers(payload.headers || {});
+    let body;
+    if (payload.body?.kind === "text") {
+      body = payload.body.value;
+    } else if (payload.body?.kind === "base64") {
+      body = Buffer.from(payload.body.value, "base64");
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), payload.timeoutMs);
+    try {
+      const response = await fetch(payload.url, {
+        method: payload.method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      clearTimeout(timer);
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        status: response.status,
+        url: response.url || payload.url,
+        headers: headersToRecord(response.headers),
+        setCookieHeaders: getSetCookieHeaders(response.headers),
+        text,
+      }));
+    } catch (error) {
+      clearTimeout(timer);
+      const message =
+        error && error.name === "AbortError"
+          ? "request timed out after " + payload.timeoutMs + "ms"
+          : error && error.message
+            ? error.message
+            : String(error);
+      process.stdout.write(JSON.stringify({ ok: false, error: message }));
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    process.stdout.write(JSON.stringify({ ok: false, error: message }));
+    process.exitCode = 1;
+  }
+});
+
+function headersToRecord(headers) {
+  const out = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
+function getSetCookieHeaders(headers) {
+  if (typeof headers.getSetCookie === "function") {
+    return headers.getSetCookie();
+  }
+  const raw = typeof headers.raw === "function" ? headers.raw() : undefined;
+  if (raw && raw["set-cookie"]) return raw["set-cookie"];
+  const single = headers.get("set-cookie");
+  return single ? splitSetCookieHeader(single) : [];
+}
+
+function splitSetCookieHeader(value) {
+  const out = [];
+  let start = 0;
+  let inExpires = false;
+  for (let i = 0; i < value.length; i++) {
+    if (value.slice(i, i + 8).toLowerCase() === "expires=") {
+      inExpires = true;
+      i += 7;
+      continue;
+    }
+    if (inExpires && value[i] === ";") {
+      inExpires = false;
+      continue;
+    }
+    if (!inExpires && value[i] === ",") {
+      out.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(value.slice(start).trim());
+  return out.filter(Boolean);
+}
+`;
 
 function parseResponseBody(text: string): unknown {
   try {
@@ -732,7 +1024,7 @@ function serializeCookies(cookies: ContextCookie[]): string {
 function encodeRequestBody(
   body: unknown,
   headers: Headers,
-): string | Uint8Array | undefined {
+): EncodedRequestBody {
   if (body === undefined) return undefined;
   if (typeof body === "string") return body;
   if (body instanceof Uint8Array) return body;

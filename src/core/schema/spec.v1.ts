@@ -134,9 +134,11 @@ const transformTargetSchema = z
  * Typed authenticated API call (the promotion of the fetch+cookie glue that
  * kept reappearing in `script` verifiers). Backends with a native request
  * primitive execute it out of page while sharing the browser context's cookie
- * jar; older backends fall back to a timeout-bounded page fetch with
- * `credentials: "include"`. Relative `url` resolves against config `baseUrl`
- * when present, otherwise against the current page origin.
+ * jar. The Playwright Bun bridge runs in an isolated subprocess so the parent
+ * can enforce `timeoutMs` even if native fetch stalls; older backends fall back
+ * to a timeout-bounded page fetch with `credentials: "include"`. Relative
+ * `url` resolves against config `baseUrl` when present, otherwise against the
+ * current page origin.
  *
  * `assign` names the captured response: the full envelope is written to
  * `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`),

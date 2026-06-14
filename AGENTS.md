@@ -84,7 +84,9 @@ per-agent code paths.
   cookies included, `assign:` + `${requests.<name>.body.X}` splicing) — not a
   node-script verifier full of fetch glue. Playwright executes request steps
   out of page with browser-context cookie sharing and a 30000ms default timeout;
-  backends without native request support use a bounded page-fetch fallback.
+  under Bun, the cookie bridge runs in a subprocess so the parent can kill it
+  at `timeoutMs` even if native fetch stalls. Backends without native request
+  support use a bounded page-fetch fallback.
 - When a transient UI state must survive across interactions (a hover that
   reveals a popover you then click), use a `batch` step: ≥2 selector-only
   sub-steps run in one backend invocation (agent-browser `batch --bail`) so
@@ -128,8 +130,11 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   browser binary with `bunx playwright install chromium`. The adapter uses
   `locator.ariaSnapshot()`, whose output the heal `snapshotParser` reads.
   Request steps run out of page with context-cookie sharing (`browserContext.request`
-  when safe, Bun-safe cookie bridge under Bun), so they send page cookies,
-  persist `Set-Cookie`, and are not coupled to page evaluation.
+  when safe, isolated Bun cookie bridge under Bun), so they send page cookies,
+  persist `Set-Cookie`, and are not coupled to page evaluation. In CI,
+  Playwright Chromium launches with `--no-sandbox` and
+  `--disable-dev-shm-usage` by default; override with
+  `CAIRN_PLAYWRIGHT_LAUNCH_ARGS` when a runner needs different flags.
 
 ### agent-browser quirks (when reading `AgentBrowserAdapter.ts`):
 

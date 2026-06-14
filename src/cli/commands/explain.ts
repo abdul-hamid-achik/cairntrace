@@ -589,7 +589,7 @@ export function buildExplain(): ExplainResult {
         id: "request",
         kind: "network",
         summary:
-          "Authenticated API call with browser-session cookies and a hard timeout; Playwright runs it out of page with browser-context cookie sharing, while backends without native request support use a bounded page-fetch fallback; assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
+          "Authenticated API call with browser-session cookies and a hard timeout; Playwright runs it out of page with browser-context cookie sharing and an isolated Bun bridge, while backends without native request support use a bounded page-fetch fallback; assign captures the response for ${requests.<name>.body.<field>} splicing into later steps",
         yamlExample:
           "steps:\n  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, timeoutMs: 15000, expectStatus: 200, assign: qr }\n  - fill: { by: label, name: Scanner code, value: '${requests.qr.body.token}' }",
       },
@@ -913,7 +913,7 @@ export function buildExplain(): ExplainResult {
       },
       stepTimeouts: {
         summary:
-          "Cairn enforces hard deadlines on backend invocations; request steps default to 30000ms, and hung browser/evaluate commands fail with timeout errors instead of wedging the run",
+          "Cairn enforces hard deadlines on backend invocations; request steps default to 30000ms, Playwright's Bun request bridge is parent-bounded, and hung browser/evaluate commands fail with timeout errors instead of wedging the run",
         defaultMs: 60_000,
         graceMs: 5_000,
       },

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { chromium } from "playwright";
 import { PlaywrightAdapter } from "./PlaywrightAdapter";
 
 describe("PlaywrightAdapter request", () => {
@@ -136,6 +137,57 @@ describe("PlaywrightAdapter request", () => {
     });
   });
 
+  it("uses the subprocess cookie bridge without parent-process fetch", async () => {
+    const adapter = new PlaywrightAdapter({
+      requestMode: "subprocess-cookie-bridge",
+    });
+    installCookieBridgeContext(adapter, {
+      cookies: async () => [],
+      addCookies: async () => {},
+    });
+    const parentFetch = vi.fn(() => {
+      throw new Error("parent fetch should not run");
+    });
+    vi.stubGlobal("fetch", parentFetch);
+
+    const result = await adapter.request({
+      method: "GET",
+      url: "data:application/json,%7B%22ok%22%3Atrue%7D",
+      timeoutMs: 5_000,
+    });
+
+    expect(parentFetch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: true,
+      status: 200,
+      body: { ok: true },
+    });
+  });
+
+  it("hard-bounds an unresponsive subprocess cookie bridge", async () => {
+    const adapter = new PlaywrightAdapter({
+      requestMode: "subprocess-cookie-bridge",
+      isolatedFetchScript:
+        "setInterval(() => {}, 1000); process.stdin.resume();",
+    });
+    installCookieBridgeContext(adapter, {
+      cookies: async () => [],
+      addCookies: async () => {},
+    });
+
+    const result = await adapter.request({
+      method: "GET",
+      url: "data:text/plain,unused",
+      timeoutMs: 80,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 0,
+      error: "request timed out after 80ms",
+    });
+  });
+
   it("returns a transport failure instead of throwing on request errors", async () => {
     const adapter = new PlaywrightAdapter({ requestMode: "api" });
     const fetch = vi.fn(async () => {
@@ -258,6 +310,64 @@ describe("PlaywrightAdapter evaluate", () => {
   });
 });
 
+describe("PlaywrightAdapter launch", () => {
+  const originalCi = process.env.CI;
+  const originalLaunchArgs = process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS;
+
+  afterEach(() => {
+    restoreEnv("CI", originalCi);
+    restoreEnv("CAIRN_PLAYWRIGHT_LAUNCH_ARGS", originalLaunchArgs);
+    vi.restoreAllMocks();
+  });
+
+  it("adds Chromium CI hardening args when CI is truthy", async () => {
+    process.env.CI = "true";
+    delete process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS;
+    const launch = vi
+      .spyOn(chromium, "launch")
+      .mockResolvedValue(fakeBrowser() as never);
+
+    const adapter = new PlaywrightAdapter();
+    await ensureBrowser(adapter);
+
+    expect(launch).toHaveBeenCalledWith({
+      headless: true,
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+  });
+
+  it("allows explicit Playwright launch args to override CI defaults", async () => {
+    process.env.CI = "true";
+    const launch = vi
+      .spyOn(chromium, "launch")
+      .mockResolvedValue(fakeBrowser() as never);
+
+    const adapter = new PlaywrightAdapter({ launchArgs: ["--custom-arg"] });
+    await ensureBrowser(adapter);
+
+    expect(launch).toHaveBeenCalledWith({
+      headless: true,
+      args: ["--custom-arg"],
+    });
+  });
+
+  it("reads Playwright launch args from the environment", async () => {
+    delete process.env.CI;
+    process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS = "--foo --bar=baz";
+    const launch = vi
+      .spyOn(chromium, "launch")
+      .mockResolvedValue(fakeBrowser() as never);
+
+    const adapter = new PlaywrightAdapter();
+    await ensureBrowser(adapter);
+
+    expect(launch).toHaveBeenCalledWith({
+      headless: true,
+      args: ["--foo", "--bar=baz"],
+    });
+  });
+});
+
 function installContext(
   adapter: PlaywrightAdapter,
   fetch: (url: string, options: unknown) => Promise<unknown>,
@@ -303,6 +413,26 @@ function installPage(
       page: typeof page;
     }
   ).page = page;
+}
+
+async function ensureBrowser(adapter: PlaywrightAdapter): Promise<unknown> {
+  return (
+    adapter as unknown as {
+      ensureBrowser: () => Promise<unknown>;
+    }
+  ).ensureBrowser();
+}
+
+function fakeBrowser(): { close: () => Promise<void> } {
+  return { close: async () => {} };
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
 }
 
 function apiResponse(

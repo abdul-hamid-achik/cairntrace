@@ -78,6 +78,10 @@ with `--backend playwright`, inspect Playwright traces, or export specs to
 bunx playwright install chromium
 ```
 
+On CI, the Playwright backend launches Chromium with `--no-sandbox` and
+`--disable-dev-shm-usage` when `CI` is truthy. Set
+`CAIRN_PLAYWRIGHT_LAUNCH_ARGS` to override the launch args for a runner.
+
 ### 4. Verify the install
 
 ```bash
@@ -226,11 +230,12 @@ error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
 `request` makes an authenticated API call with the browser session's cookies
 and captures the response for later steps. On the Playwright backend, request
 steps run out of page through a browser-context cookie transport
-(`APIRequestContext` when safe, with a Bun-safe cookie bridge under Bun), so
-they share the browser context's cookie jar and apply a real timeout. Backends
-without a native request primitive use a bounded page-fetch fallback. Relative
-request URLs resolve against config `baseUrl` when present, so request-first
-setup actions can run before any `open` when `baseUrl` is configured:
+(`APIRequestContext` when safe; an isolated Bun cookie bridge with a
+parent-enforced timeout under Bun), so they share the browser context's cookie
+jar and apply a real timeout. Backends without a native request primitive use a
+bounded page-fetch fallback. Relative request URLs resolve against config
+`baseUrl` when present, so request-first setup actions can run before any
+`open` when `baseUrl` is configured:
 
 ```yaml
 - request:
@@ -470,7 +475,8 @@ separate so the core stays deterministic and testable.
   response, and later steps splice fields via
   `${requests.<name>.body.<field>}` — e.g. fetch a QR token via API, then
   `fill` it into the scanner UI. Playwright runs request steps out of page with
-  browser-context cookie sharing and a 30000ms default timeout.
+  browser-context cookie sharing and a 30000ms default timeout; under Bun the
+  cookie bridge runs in a subprocess so a stalled fetch cannot wedge the run.
 - **Realtime/stateful isolation:** use `${worker.index}` and `${run.token}` in
   `vars:` to derive a unique user or tenant per spec run, e.g.
   `testUser: player-${worker.index}-${run.token}`.
