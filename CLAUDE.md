@@ -15,6 +15,10 @@ all coding agents. Read that file first — everything below assumes you have.
 - Do not introduce a `scripts/` folder for ad-hoc utilities — the user has
   flagged it as a pattern they dislike. CLI subcommands, test files, or
   short-lived tmp files only.
+- Do not commit one-off markdown notes, scratch plans, or temporary feature
+  checklists. Markdown belongs in the repo only when it is maintained project
+  documentation such as README, agent instructions, docs pages, changelogs, or
+  release notes.
 - Request steps are no longer documented as page-only fetches. Playwright uses
   an out-of-page, context-cookie-sharing transport with a 30000ms default
   timeout; agent-browser currently relies on the bounded evaluate fallback.

@@ -64,6 +64,10 @@ per-agent code paths.
   format are the agent interface.
 - Do **not** add a `scripts/` folder for ad-hoc dev tooling. Use a CLI
   subcommand, a test file, or a tmp file you delete afterward.
+- Do **not** commit one-off markdown notes, scratch plans, or temporary feature
+  checklists. Commit markdown only when it is maintained project documentation
+  such as `README.md`, `AGENTS.md`, `CLAUDE.md`, docs pages, changelogs, or
+  release notes.
 
 ## Rules for agents authoring specs
 
