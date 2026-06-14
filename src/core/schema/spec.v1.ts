@@ -132,10 +132,11 @@ const transformTargetSchema = z
 
 /**
  * Typed authenticated API call (the promotion of the fetch+cookie glue that
- * kept reappearing in `script` verifiers). Runs `fetch` in the browser page
- * context with `credentials: "include"`, so the browser session's cookies
- * ride along on both backends. Relative `url` resolves against config
- * `baseUrl` when present, otherwise against the current page origin.
+ * kept reappearing in `script` verifiers). Backends with a native request
+ * primitive execute it out of page while sharing the browser context's cookie
+ * jar; older backends fall back to a timeout-bounded page fetch with
+ * `credentials: "include"`. Relative `url` resolves against config `baseUrl`
+ * when present, otherwise against the current page origin.
  *
  * `assign` names the captured response: the full envelope is written to
  * `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`),
@@ -152,6 +153,7 @@ const requestTargetSchema = z
     headers: z.record(z.string(), z.string()).optional(),
     /** Objects are JSON-encoded (content-type: application/json unless overridden); strings are sent raw. */
     body: z.unknown().optional(),
+    /** Per-request hard deadline. Defaults to 30000ms. */
     timeoutMs: z.number().int().positive().optional(),
     /** Fail the step unless the response status is (one of) these. Omit to accept any completed response. */
     expectStatus: z

@@ -15,6 +15,9 @@ all coding agents. Read that file first — everything below assumes you have.
 - Do not introduce a `scripts/` folder for ad-hoc utilities — the user has
   flagged it as a pattern they dislike. CLI subcommands, test files, or
   short-lived tmp files only.
+- Request steps are no longer documented as page-only fetches. Playwright uses
+  an out-of-page, context-cookie-sharing transport with a 30000ms default
+  timeout; agent-browser currently relies on the bounded evaluate fallback.
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:

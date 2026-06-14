@@ -223,16 +223,27 @@ error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
 - open: { path: /admin, waitUntil: networkidle, timeoutMs: 45000 }
 ```
 
-`request` makes an authenticated API call from the page (browser cookies
-included) and captures the response for later steps. Relative request URLs
-resolve against config `baseUrl` when present, so request-first setup actions
-can run before any `open`; if the browser is still on `about:blank`, Cairntrace
-first navigates to the request origin so the fetch has a real app origin:
+`request` makes an authenticated API call with the browser session's cookies
+and captures the response for later steps. On the Playwright backend, request
+steps run out of page through a browser-context cookie transport
+(`APIRequestContext` when safe, with a Bun-safe cookie bridge under Bun), so
+they share the browser context's cookie jar and apply a real timeout. Backends
+without a native request primitive use a bounded page-fetch fallback. Relative
+request URLs resolve against config `baseUrl` when present, so request-first
+setup actions can run before any `open` when `baseUrl` is configured:
 
 ```yaml
-- request: { method: POST, url: /api/qr-token, expectStatus: 200, assign: qr }
+- request:
+    method: POST
+    url: /api/qr-token
+    timeoutMs: 15000 # default: 30000
+    expectStatus: 200
+    assign: qr
 - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }
 ```
+
+Request-step calls are mirrored into run network evidence, so `network` and
+`noFailedRequests` outcomes can assert on API calls made by the spec itself.
 
 `batch` runs a chain of selector interactions in **one** backend invocation
 (agent-browser `batch --bail`), so transient UI state survives — e.g. a hover
@@ -454,11 +465,12 @@ separate so the core stays deterministic and testable.
 
 ## Advanced Workflows
 
-- **Hybrid API + UI flows:** `request` fetches with the browser session's
-  cookies, resolves relative URLs through config `baseUrl` when present,
-  captures the response, and later steps splice fields via
+- **Hybrid API + UI flows:** `request` uses the browser session's cookies,
+  resolves relative URLs through config `baseUrl` when present, captures the
+  response, and later steps splice fields via
   `${requests.<name>.body.<field>}` — e.g. fetch a QR token via API, then
-  `fill` it into the scanner UI.
+  `fill` it into the scanner UI. Playwright runs request steps out of page with
+  browser-context cookie sharing and a 30000ms default timeout.
 - **Realtime/stateful isolation:** use `${worker.index}` and `${run.token}` in
   `vars:` to derive a unique user or tenant per spec run, e.g.
   `testUser: player-${worker.index}-${run.token}`.

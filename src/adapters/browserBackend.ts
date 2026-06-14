@@ -52,6 +52,26 @@ export interface NetworkEntry {
   [extra: string]: unknown;
 }
 
+export interface BackendRequest {
+  method: string;
+  /** Absolute URL. The runner resolves spec-relative URLs before dispatch. */
+  url: string;
+  headers?: Record<string, string>;
+  /** Objects are JSON-encoded by capable backends; strings are sent raw. */
+  body?: unknown;
+  /** Hard request deadline in milliseconds. */
+  timeoutMs?: number;
+}
+
+export interface BackendResponse {
+  /** Transport success: true when a response was received, regardless of HTTP status. */
+  ok: boolean;
+  status: number;
+  headers: Record<string, string>;
+  body: unknown;
+  error?: string;
+}
+
 export interface ConsoleEntry {
   type: "log" | "warn" | "error" | "info" | "debug";
   text: string;
@@ -126,8 +146,19 @@ export interface BrowserBackend {
    */
   setViewport?(width: number, height: number): Promise<void>;
 
+  /* ----- HTTP request escape hatch ----- */
+  /**
+   * Execute an HTTP request outside the page while sharing the browser
+   * context's cookies when the backend supports it. Backends without a native
+   * request primitive omit this and the runner uses a bounded evaluate fallback.
+   */
+  request?(req: BackendRequest): Promise<BackendResponse>;
+
   /* ----- script escape hatch ----- */
-  evaluate(js: string): Promise<InvocationResult>;
+  evaluate(
+    js: string,
+    opts?: { timeoutMs?: number },
+  ): Promise<InvocationResult>;
 
   /* ----- state / checkpoints ----- */
   saveState(path: string): Promise<InvocationResult>;

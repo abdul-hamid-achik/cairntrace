@@ -35,7 +35,7 @@ Runner
         ↓ each step:
               when: predicate?  → maybe skip
               ${requests.<name>.…} placeholders spliced from captured responses
-              request: → fetch in page context (runner-handled, not adapter)
+              request: → backend.request when available; bounded page-fetch fallback
               runStep(step) on the BrowserBackend  (AgentBrowserAdapter or MockBrowserBackend)
               capture snapshot/screenshot per artifacts policy
         ↓ OutcomeEvaluator (text / notText / url / network / noFailedRequests / console / count / xlsx / file / script)
@@ -76,9 +76,11 @@ per-agent code paths.
   step with diagnostics; multiple matches are an error unless the locator
   carries `nth:`. Use `exact: true` for case-sensitive matching. Targets are
   auto-scrolled into view.
-- For authenticated API calls use the typed `request` step (in-page fetch,
+- For authenticated API calls use the typed `request` step (browser-session
   cookies included, `assign:` + `${requests.<name>.body.X}` splicing) — not a
-  node-script verifier full of fetch glue.
+  node-script verifier full of fetch glue. Playwright executes request steps
+  out of page with browser-context cookie sharing and a 30000ms default timeout;
+  backends without native request support use a bounded page-fetch fallback.
 - When a transient UI state must survive across interactions (a hover that
   reveals a popover you then click), use a `batch` step: ≥2 selector-only
   sub-steps run in one backend invocation (agent-browser `batch --bail`) so
@@ -121,6 +123,9 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   `--backend playwright` to `cairn run` or `cairn spec heal`. Install the
   browser binary with `bunx playwright install chromium`. The adapter uses
   `locator.ariaSnapshot()`, whose output the heal `snapshotParser` reads.
+  Request steps run out of page with context-cookie sharing (`browserContext.request`
+  when safe, Bun-safe cookie bridge under Bun), so they send page cookies,
+  persist `Set-Cookie`, and are not coupled to page evaluation.
 
 ### agent-browser quirks (when reading `AgentBrowserAdapter.ts`):
 

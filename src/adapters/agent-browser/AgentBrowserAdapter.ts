@@ -249,8 +249,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * Evaluate JS in the page and return the raw stdout.
    * The script-verifier evaluator parses the JSON-shaped result.
    */
-  async evaluate(js: string): Promise<InvocationResult> {
-    return this.invoke(["eval", js]);
+  async evaluate(
+    js: string,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<InvocationResult> {
+    return this.invoke(["eval", js], opts);
   }
 
   /* ----- state / checkpoint support ----- */

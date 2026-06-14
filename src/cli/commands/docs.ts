@@ -207,7 +207,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated in-page API call and captures the response, `wait` waits for text/notText/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation.",
+        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated API call and captures the response, `wait` waits for text/notText/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation.",
       },
       {
         title: "Batch Steps",
@@ -219,7 +219,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Request Steps",
-        body: "`request` runs `fetch` in the page with browser cookies (`credentials: include`); relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin. If the first step is a request and the browser is still on `about:blank`, Cairntrace first navigates to the request origin so the fetch has a real app origin. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows.",
+        body: "`request` uses the browser session's cookies but is timeout-bounded. On the Playwright backend it runs out of page through a browser-context cookie transport (`APIRequestContext` when safe, with a Bun-safe cookie bridge under Bun), which sends existing context cookies and persists `Set-Cookie` responses back into the browser context. Backends without a native request primitive use a bounded page-fetch fallback. Relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin; request-first relative URLs therefore need `baseUrl`. The default request timeout is 30000ms, and `timeoutMs` overrides it per step. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows. Request-step calls are also mirrored into network evidence so `network` and `noFailedRequests` verifiers can match them.",
       },
       {
         title: "Reusable Actions",
@@ -252,7 +252,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         code: [
           "steps:",
           "  - use: login_admin",
-          "  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, expectStatus: 200, assign: qr }",
+          "  - request: { method: POST, url: /api/qr-token, body: { memberId: 42 }, timeoutMs: 15000, expectStatus: 200, assign: qr }",
           "  - open: /scanner",
           '  - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }',
           "  - press: Enter",
@@ -493,7 +493,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Playwright",
-        body: "You do not need Playwright's browser binary to run specs with the agent-browser backend. Use `--backend playwright` when you specifically need native traces, HAR/video-style debugging, Playwright parity, or a pre-export CI confidence check.",
+        body: "You do not need Playwright's browser binary to run specs with the agent-browser backend. Use `--backend playwright` when you specifically need native traces, HAR/video-style debugging, Playwright parity, or a pre-export CI confidence check. Playwright `request` steps run out of page with browser-context cookie sharing while applying a hard per-request timeout.",
       },
       {
         title: "Mock",

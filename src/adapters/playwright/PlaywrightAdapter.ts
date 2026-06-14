@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import type {
+  APIRequestContext,
   Browser,
   BrowserContext,
   ConsoleMessage,
@@ -14,6 +15,8 @@ import type {
   WaitCondition,
 } from "../../core/schema/spec.v1";
 import type {
+  BackendRequest,
+  BackendResponse,
   BrowserBackend,
   ConsoleEntry,
   InvocationResult,
@@ -30,6 +33,12 @@ export interface PlaywrightAdapterOptions {
   defaultTimeoutMs?: number;
   /** Path to a storage-state JSON to seed the initial context. */
   initialStatePath?: string;
+  /**
+   * Internal/test override. Bun exposes a relative IncomingMessage.url to
+   * Playwright's APIRequestContext Set-Cookie parser, so the default uses a
+   * cookie bridge under Bun and APIRequestContext elsewhere.
+   */
+  requestMode?: "api" | "cookie-bridge";
 }
 
 /**
@@ -233,14 +242,22 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
   }
 
-  async evaluate(js: string): Promise<InvocationResult> {
+  async evaluate(
+    js: string,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<InvocationResult> {
     const start = Date.now();
     const page = await this.ensurePage();
+    const timeoutMs = opts.timeoutMs ?? this.evaluateTimeoutMs();
     try {
       // The script verifier passes a complete expression like `(function(){...})()`.
       // Playwright's evaluate treats a string as an expression to eval in the
       // page; passing it through unwrapped preserves the IIFE's return value.
-      const result = await page.evaluate(js);
+      const result = await withTimeout(
+        page.evaluate(js),
+        timeoutMs,
+        `evaluate timed out after ${timeoutMs}ms`,
+      );
       // JSON.stringify(undefined) returns undefined (the value), so guard.
       const stdout = result === undefined ? "null" : JSON.stringify(result);
       return {
@@ -252,7 +269,49 @@ export class PlaywrightAdapter implements BrowserBackend {
         argv: ["eval"],
       };
     } catch (e) {
+      if (e instanceof TimeoutError) {
+        return {
+          ok: false,
+          stdout: "",
+          stderr: e.message,
+          exitCode: 124,
+          durationMs: Date.now() - start,
+          argv: ["eval"],
+        };
+      }
       return failure((e as Error).message, Date.now() - start);
+    }
+  }
+
+  async request(req: BackendRequest): Promise<BackendResponse> {
+    const start = Date.now();
+    const context = await this.ensureContext();
+    const timeoutMs = req.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    try {
+      const response = await withTimeout(
+        this.fetchRequest(context, req, timeoutMs),
+        timeoutMs,
+        `request timed out after ${timeoutMs}ms`,
+      );
+      this.recordSyntheticRequest(req, {
+        status: response.status,
+        durationMs: Date.now() - start,
+      });
+      return response;
+    } catch (e) {
+      const message = (e as Error).message;
+      this.recordSyntheticRequest(req, {
+        status: 0,
+        durationMs: Date.now() - start,
+        error: message,
+      });
+      return {
+        ok: false,
+        status: 0,
+        headers: {},
+        body: null,
+        error: message,
+      };
     }
   }
 
@@ -367,19 +426,111 @@ export class PlaywrightAdapter implements BrowserBackend {
     return this.browser;
   }
 
+  private async ensureContext(): Promise<BrowserContext> {
+    if (this.context) return this.context;
+    await this.ensureBrowser();
+    this.context = await this.browser!.newContext({
+      ...(this.opts.initialStatePath
+        ? { storageState: this.opts.initialStatePath }
+        : {}),
+      acceptDownloads: true,
+      ...(this.viewport ? { viewport: this.viewport } : {}),
+    });
+    return this.context;
+  }
+
+  private async fetchRequest(
+    context: BrowserContext,
+    req: BackendRequest,
+    timeoutMs: number,
+  ): Promise<BackendResponse> {
+    if (this.useCookieBridge()) {
+      return this.fetchRequestWithCookieBridge(context, req, timeoutMs);
+    }
+    return this.fetchRequestWithApiContext(context, req, timeoutMs);
+  }
+
+  private async fetchRequestWithApiContext(
+    context: BrowserContext,
+    req: BackendRequest,
+    timeoutMs: number,
+  ): Promise<BackendResponse> {
+    const fetchOptions: NonNullable<Parameters<APIRequestContext["fetch"]>[1]> =
+      {
+        method: req.method,
+        headers: req.headers,
+        timeout: timeoutMs,
+        failOnStatusCode: false,
+        maxRedirects: 20,
+      };
+    if (req.body !== undefined) {
+      fetchOptions.data = req.body as typeof fetchOptions.data;
+    }
+
+    const response = await context.request.fetch(req.url, fetchOptions);
+    const text = await response.text();
+    return {
+      ok: true,
+      status: response.status(),
+      headers: response.headers(),
+      body: parseResponseBody(text),
+    };
+  }
+
+  private async fetchRequestWithCookieBridge(
+    context: BrowserContext,
+    req: BackendRequest,
+    timeoutMs: number,
+  ): Promise<BackendResponse> {
+    const headers = new Headers(req.headers ?? {});
+    if (!headers.has("cookie")) {
+      const cookieHeader = serializeCookies(await context.cookies(req.url));
+      if (cookieHeader) headers.set("cookie", cookieHeader);
+    }
+    const body = encodeRequestBody(req.body, headers);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(req.url, {
+        method: req.method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      const text = await response.text();
+      const cookies = parseSetCookieHeaders(
+        getSetCookieHeaders(response.headers),
+        response.url || req.url,
+      );
+      if (cookies.length > 0) {
+        await context.addCookies(cookies);
+      }
+      return {
+        ok: true,
+        status: response.status,
+        headers: headersToRecord(response.headers),
+        body: parseResponseBody(text),
+      };
+    } catch (e) {
+      if ((e as Error).name === "AbortError") {
+        throw new TimeoutError(`request timed out after ${timeoutMs}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private useCookieBridge(): boolean {
+    if (this.opts.requestMode) return this.opts.requestMode === "cookie-bridge";
+    return Boolean(process.versions.bun);
+  }
+
   private async ensurePage(): Promise<Page> {
     if (this.page) return this.page;
-    await this.ensureBrowser();
-    if (!this.context) {
-      this.context = await this.browser!.newContext({
-        ...(this.opts.initialStatePath
-          ? { storageState: this.opts.initialStatePath }
-          : {}),
-        acceptDownloads: true,
-        ...(this.viewport ? { viewport: this.viewport } : {}),
-      });
-    }
-    this.page = await this.context.newPage();
+    const context = await this.ensureContext();
+    this.page = await context.newPage();
     if (this.viewport) {
       await this.page.setViewportSize(this.viewport);
     }
@@ -493,6 +644,23 @@ export class PlaywrightAdapter implements BrowserBackend {
     });
   }
 
+  private recordSyntheticRequest(
+    req: BackendRequest,
+    result: { status: number; durationMs: number; error?: string },
+  ): void {
+    this.networkLog.push({
+      id: `request-step-${this.networkLog.length + 1}`,
+      url: req.url,
+      method: req.method,
+      status: result.status,
+      resourceType: "fetch",
+      startedAt: new Date().toISOString(),
+      durationMs: result.durationMs,
+      source: "cairntrace.request",
+      ...(result.error ? { error: result.error } : {}),
+    });
+  }
+
   private async applyWait(page: Page, cond: WaitCondition): Promise<void> {
     const timeout = cond.timeoutMs ?? this.opts.defaultTimeoutMs ?? 30_000;
     if ("text" in cond) {
@@ -512,12 +680,193 @@ export class PlaywrightAdapter implements BrowserBackend {
       await page.waitForLoadState(cond.load, { timeout });
     }
   }
+
+  private evaluateTimeoutMs(): number {
+    return Math.max(
+      this.opts.defaultTimeoutMs ?? 0,
+      DEFAULT_EVALUATE_TIMEOUT_MS,
+    );
+  }
 }
 
 /* ----- helpers ----- */
 
 /** Matches agent-browser's default `scroll <dir>` distance closely enough. */
 const DEFAULT_SCROLL_PX = 400;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
+
+class TimeoutError extends Error {}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new TimeoutError(message)), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function parseResponseBody(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+type ContextCookie = Awaited<ReturnType<BrowserContext["cookies"]>>[number];
+type CookieToAdd = Parameters<BrowserContext["addCookies"]>[0][number];
+
+function serializeCookies(cookies: ContextCookie[]): string {
+  return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+
+function encodeRequestBody(
+  body: unknown,
+  headers: Headers,
+): string | Uint8Array | undefined {
+  if (body === undefined) return undefined;
+  if (typeof body === "string") return body;
+  if (body instanceof Uint8Array) return body;
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  return JSON.stringify(body);
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
+function getSetCookieHeaders(headers: Headers): string[] {
+  const extended = headers as Headers & {
+    getSetCookie?: () => string[];
+    raw?: () => Record<string, string[]>;
+  };
+  if (typeof extended.getSetCookie === "function") {
+    return extended.getSetCookie();
+  }
+  const raw = typeof extended.raw === "function" ? extended.raw() : undefined;
+  if (raw?.["set-cookie"]) return raw["set-cookie"];
+  const single = headers.get("set-cookie");
+  return single ? splitSetCookieHeader(single) : [];
+}
+
+function splitSetCookieHeader(value: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let inExpires = false;
+  for (let i = 0; i < value.length; i++) {
+    if (value.slice(i, i + 8).toLowerCase() === "expires=") {
+      inExpires = true;
+      i += 7;
+      continue;
+    }
+    if (inExpires && value[i] === ";") {
+      inExpires = false;
+      continue;
+    }
+    if (!inExpires && value[i] === ",") {
+      out.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(value.slice(start).trim());
+  return out.filter(Boolean);
+}
+
+function parseSetCookieHeaders(
+  values: string[],
+  responseUrl: string,
+): CookieToAdd[] {
+  return values
+    .map((value) => parseSetCookieHeader(value, responseUrl))
+    .filter((cookie): cookie is CookieToAdd => Boolean(cookie));
+}
+
+function parseSetCookieHeader(
+  header: string,
+  responseUrl: string,
+): CookieToAdd | undefined {
+  const url = new URL(responseUrl);
+  const parts = header
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const [nameValue, ...attrs] = parts;
+  if (!nameValue) return undefined;
+  const equals = nameValue.indexOf("=");
+  if (equals <= 0) return undefined;
+
+  const cookie: CookieToAdd = {
+    name: nameValue.slice(0, equals),
+    value: nameValue.slice(equals + 1),
+    domain: url.hostname,
+    path: defaultCookiePath(url.pathname),
+  };
+
+  for (const attr of attrs) {
+    const attrEquals = attr.indexOf("=");
+    const key =
+      attrEquals === -1
+        ? attr.toLowerCase()
+        : attr.slice(0, attrEquals).toLowerCase();
+    const value = attrEquals === -1 ? "" : attr.slice(attrEquals + 1);
+    if (key === "domain" && value) {
+      if (!domainMatches(url.hostname, value)) return undefined;
+      cookie.domain = value;
+    } else if (key === "path" && value.startsWith("/")) {
+      cookie.path = value;
+    } else if (key === "expires") {
+      const expires = Date.parse(value);
+      if (Number.isFinite(expires)) cookie.expires = Math.floor(expires / 1000);
+    } else if (key === "max-age") {
+      const seconds = Number(value);
+      if (Number.isFinite(seconds)) {
+        cookie.expires = Math.floor(Date.now() / 1000 + seconds);
+      }
+    } else if (key === "httponly") {
+      cookie.httpOnly = true;
+    } else if (key === "secure") {
+      cookie.secure = true;
+    } else if (key === "samesite") {
+      const sameSite = normalizeSameSite(value);
+      if (sameSite) cookie.sameSite = sameSite;
+    }
+  }
+
+  return cookie;
+}
+
+function defaultCookiePath(pathname: string): string {
+  const lastSlash = pathname.lastIndexOf("/");
+  return lastSlash <= 0 ? "/" : pathname.slice(0, lastSlash);
+}
+
+function domainMatches(hostname: string, domain: string): boolean {
+  const normalized = domain.startsWith(".") ? domain.slice(1) : domain;
+  return hostname === normalized || hostname.endsWith(`.${normalized}`);
+}
+
+function normalizeSameSite(value: string): CookieToAdd["sameSite"] | undefined {
+  const lower = value.toLowerCase();
+  if (lower === "strict") return "Strict";
+  if (lower === "lax") return "Lax";
+  if (lower === "none") return "None";
+  return undefined;
+}
 
 /**
  * Cairntrace semantic-name semantics: whole-name, case-insensitive by

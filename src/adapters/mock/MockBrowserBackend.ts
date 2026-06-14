@@ -2,6 +2,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { openPath, type Step } from "../../core/schema/spec.v1";
 import type {
+  BackendRequest,
+  BackendResponse,
   BrowserBackend,
   ConsoleEntry,
   InvocationResult,
@@ -41,7 +43,10 @@ export class MockBrowserBackend implements BrowserBackend {
   private stepFailureMessage = "mock step failure";
   /** Recorded steps for assertions in tests. */
   public readonly stepLog: Step[] = [];
+  public readonly requestLog: BackendRequest[] = [];
   public lastEvaluatedScript = "";
+  public lastEvaluateOptions: { timeoutMs?: number } | undefined;
+  public lastRequest: BackendRequest | undefined;
 
   /* ----- scripting hooks for tests ----- */
 
@@ -152,8 +157,56 @@ export class MockBrowserBackend implements BrowserBackend {
     this.viewportLog.push({ width, height });
   }
 
-  async evaluate(_js: string): Promise<InvocationResult> {
+  async request(req: BackendRequest): Promise<BackendResponse> {
+    this.lastRequest = req;
+    this.requestLog.push(req);
+    const raw = this.scriptQueue.shift() ?? {
+      status: 200,
+      ok: true,
+      headers: {},
+      body: { ok: true },
+    };
+    if (
+      raw &&
+      typeof raw === "object" &&
+      typeof (raw as Record<string, unknown>)["requestError"] === "string"
+    ) {
+      const error = String((raw as Record<string, unknown>)["requestError"]);
+      this.networkLog.push({
+        url: req.url,
+        method: req.method,
+        status: 0,
+        resourceType: "fetch",
+        source: "cairntrace.request",
+        error,
+      });
+      return { ok: false, status: 0, headers: {}, body: null, error };
+    }
+    const envelope =
+      raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const status =
+      typeof envelope["status"] === "number" ? envelope["status"] : 200;
+    const headers =
+      envelope["headers"] && typeof envelope["headers"] === "object"
+        ? (envelope["headers"] as Record<string, string>)
+        : {};
+    const body = "body" in envelope ? envelope["body"] : raw;
+    this.networkLog.push({
+      url: req.url,
+      method: req.method,
+      status,
+      resourceType: "fetch",
+      source: "cairntrace.request",
+    });
+    return { ok: true, status, headers, body };
+  }
+
+  async evaluate(
+    _js: string,
+    _opts: { timeoutMs?: number } = {},
+  ): Promise<InvocationResult> {
     this.lastEvaluatedScript = _js;
+    this.lastEvaluateOptions = _opts;
     if (this.scriptQueue.length === 0 && _js.includes("expectedTextExcerpts")) {
       return {
         ok: true,

@@ -2,9 +2,10 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { BrowserBackend } from "../../adapters/browserBackend";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import type { RunResult } from "../schema/run.v1";
-import { runSpec } from "./Runner";
+import { DEFAULT_REQUEST_TIMEOUT_MS, runSpec } from "./Runner";
 
 let workDir: string;
 let artifactRoot: string;
@@ -32,6 +33,16 @@ async function writeSpecIn(
   const p = join(dir, `${name}.yml`);
   await writeFile(p, body);
   return p;
+}
+
+function withoutNativeRequest(backend: MockBrowserBackend): BrowserBackend {
+  return new Proxy(backend, {
+    get(target, prop) {
+      if (prop === "request") return undefined;
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as BrowserBackend;
 }
 
 describe("runSpec e2e (mock backend)", () => {
@@ -771,9 +782,12 @@ steps:
     const result = await runSpec({ specPath, backend, artifactRoot });
 
     expect(result.status).toBe("passed");
-    // The request fetch ran in page context with session cookies.
-    expect(backend.lastEvaluatedScript).toContain('credentials: "include"');
-    expect(backend.lastEvaluatedScript).toContain("/api/qr-token");
+    expect(backend.requestLog[0]).toMatchObject({
+      method: "POST",
+      url: "http://localhost:8080/api/qr-token",
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
+    expect(backend.lastEvaluatedScript).not.toContain("/api/qr-token");
     expect(result.artifacts.requests).toEqual({ qr: "requests/qr.json" });
     const envelope = JSON.parse(
       await readFile(join(result.runDir, "requests/qr.json"), "utf8"),
@@ -785,8 +799,7 @@ steps:
       body: { token: "tok-123" },
     });
     // The fill step received the spliced token value.
-    expect(backend.stepLog[0]).toEqual({ open: "http://localhost:8080" });
-    expect(backend.stepLog[1]).toMatchObject({
+    expect(backend.stepLog[0]).toMatchObject({
       fill: { by: "label", name: "Scanner code", value: "tok-123" },
     });
   });
@@ -834,10 +847,12 @@ steps:
 
     expect(result.status).toBe("passed");
     expect(result.steps).toHaveLength(1);
-    expect(backend.stepLog[0]).toEqual({ open: "http://host" });
-    expect(backend.lastEvaluatedScript).toContain(
-      'fetch("http://host/api/test/login-as"',
-    );
+    expect(backend.stepLog).toEqual([]);
+    expect(backend.requestLog[0]).toMatchObject({
+      method: "POST",
+      url: "http://host/api/test/login-as",
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
     const envelope = JSON.parse(
       await readFile(join(result.runDir, "requests/login.json"), "utf8"),
     );
@@ -882,6 +897,7 @@ steps:
       'request: relative URL "/api/test/login-as" needs a baseUrl',
     );
     expect(backend.lastEvaluatedScript).not.toContain("fetch(");
+    expect(backend.requestLog).toEqual([]);
   });
 
   it("resolves relative request URLs against the current page after open", async () => {
@@ -927,13 +943,153 @@ steps:
     const result = await runSpec({ specPath, backend, artifactRoot });
 
     expect(result.status).toBe("passed");
-    expect(backend.lastEvaluatedScript).toContain(
-      'fetch("http://host/api/state"',
-    );
+    expect(backend.stepLog[0]).toMatchObject({
+      open: "http://host/admin/page",
+    });
+    expect(backend.requestLog[0]).toMatchObject({
+      method: "GET",
+      url: "http://host/api/state",
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    });
     const envelope = JSON.parse(
       await readFile(join(result.runDir, "requests/state.json"), "utf8"),
     );
     expect(envelope.url).toBe("http://host/api/state");
+  });
+
+  it("passes explicit request timeouts to native backend requests", async () => {
+    const specPath = await writeSpec(
+      "request_timeout",
+      `version: 1
+name: request_timeout
+intent: request timeout is backend-visible
+environment: local
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/seed
+      timeoutMs: 1234
+      expectStatus: 200
+      assign: seed
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      headers: {},
+      body: { ok: true },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.requestLog[0]).toMatchObject({
+      url: "http://localhost:8080/api/seed",
+      timeoutMs: 1234,
+    });
+  });
+
+  it("keeps request-step calls visible to network verifiers", async () => {
+    const specPath = await writeSpec(
+      "request_network_parity",
+      `version: 1
+name: request_network_parity
+intent: request steps appear in network evidence
+environment: local
+outcomes:
+  - id: request_seen
+    description: seed call is captured in network log
+    verify:
+      network:
+        method: POST
+        urlContains: /api/seed
+        status: { equals: 201 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/seed
+      expectStatus: 201
+      assign: seed
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 201,
+      ok: true,
+      headers: {},
+      body: { id: 1 },
+    });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.outcomes[0]).toMatchObject({
+      id: "request_seen",
+      status: "passed",
+    });
+  });
+
+  it("falls back to bounded in-page fetch when the backend has no native request", async () => {
+    const dir = await mkdtemp(join(workDir, "request-fallback-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://host
+`,
+    );
+    const specPath = await writeSpecIn(
+      dir,
+      "request_fallback",
+      `version: 1
+name: request_fallback
+intent: backends without request still use bounded fetch
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed
+    request:
+      method: POST
+      url: /api/test/login-as
+      timeoutMs: 1234
+      expectStatus: 200
+      assign: login
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      headers: {},
+      body: { ok: true },
+    });
+    const result = await runSpec({
+      specPath,
+      backend: withoutNativeRequest(backend),
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toEqual({ open: "http://host" });
+    expect(backend.lastEvaluatedScript).toContain(
+      'fetch("http://host/api/test/login-as"',
+    );
+    expect(backend.lastEvaluatedScript).toContain("AbortSignal.timeout(1234)");
+    expect(backend.lastEvaluateOptions).toEqual({ timeoutMs: 1234 });
   });
 
   it("joins runtime request placeholders in open paths without double slashes", async () => {

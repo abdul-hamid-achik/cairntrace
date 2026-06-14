@@ -813,9 +813,8 @@ interface RequestResponse {
 }
 
 /**
- * Execute a `request` step as `fetch` in the browser page context via
- * backend.evaluate — cookies ride along (credentials: include) on every
- * backend, so authenticated API calls need no cookie glue.
+ * Execute a `request` step through the backend's out-of-page request primitive
+ * when available, falling back to bounded page-context fetch for older backends.
  */
 async function runRequestStep(opts: {
   step: RequestStep;
@@ -830,11 +829,39 @@ async function runRequestStep(opts: {
   const assign = req.assign ?? `request_${opts.requestIndex}`;
   const resolved = await resolveRequestUrl(req.url, opts);
   if (!resolved.ok) return resolved;
-  const request = { ...req, url: resolved.url };
+  const timeoutMs = req.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const request = { ...req, url: resolved.url, timeoutMs };
+
+  if (typeof opts.backend.request === "function") {
+    const backendResponse = await opts.backend.request({
+      method: request.method,
+      url: request.url,
+      headers: request.headers,
+      body: request.body,
+      timeoutMs,
+    });
+    if (!backendResponse.ok) {
+      return {
+        ok: false,
+        error: `request failed: ${backendResponse.error ?? "unknown error"} (${request.method} ${request.url})`,
+      };
+    }
+    return applyExpectStatus(assign, request, {
+      url: request.url,
+      method: request.method,
+      status: backendResponse.status,
+      ok: backendResponse.status >= 200 && backendResponse.status < 400,
+      headers: backendResponse.headers,
+      body: backendResponse.body,
+    });
+  }
+
   const origin = await ensureRequestOrigin(opts.backend, request.url);
   if (!origin.ok) return origin;
 
-  const result = await opts.backend.evaluate(buildRequestScript(request));
+  const result = await opts.backend.evaluate(buildRequestScript(request), {
+    timeoutMs,
+  });
   if (!result.ok) {
     return {
       ok: false,
@@ -870,6 +897,19 @@ async function runRequestStep(opts: {
     body: parsed["body"],
   };
 
+  return applyExpectStatus(assign, request, response);
+}
+
+function applyExpectStatus(
+  assign: string,
+  request: RequestStep["request"],
+  response: RequestResponse,
+):
+  | { ok: true; assign: string; response: RequestResponse }
+  | {
+      ok: false;
+      error: string;
+    } {
   if (request.expectStatus !== undefined) {
     const allowed = Array.isArray(request.expectStatus)
       ? request.expectStatus
@@ -885,6 +925,8 @@ async function runRequestStep(opts: {
 
   return { ok: true, assign, response };
 }
+
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 async function resolveRequestUrl(
   url: string,
