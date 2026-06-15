@@ -40,7 +40,7 @@ Runner
               capture snapshot/screenshot per artifacts policy
         ↓ OutcomeEvaluator (text / notText / url / network / noFailedRequests / console / count / xlsx / file / script)
         ↓ ArtifactWriter
-              run.{json,yaml,md}  report.{html,json}  report.theme.json
+              run.{json,yaml,md}  report.{html,json}
               agent_context.md  events.ndjson
               outcomes/<id>.md (+ .raw.json sidecar for script)
               snapshots/  screenshots/  console/  network/  spec.resolved.yml
@@ -58,9 +58,10 @@ per-agent code paths.
 - Keep headless CLI behavior working even if the TUI changes.
 - Every agent-callable command must support `--format json|yaml|md` and have
   a stable JSON schema. No interactive prompts on `--json`/`--yaml` paths.
-- Run artifacts include `report.html`, `report.json`, and `report.theme.json`.
-  Keep report output redacted, self-contained, print-friendly, and themeable
-  through `cairntrace.config.yml` `report.theme` / `report.colors`.
+- Run artifacts include `report.html` and `report.json`. Keep report output
+  redacted, self-contained, print-friendly, and themeable through
+  `cairntrace.config.yml` `report.theme` / `report.colors`; do not add a
+  separate report theme config file.
 - Exit codes are meaningful: 0 success, 1 outcome-failure, 2 errored,
   3 cold-start gate, 4 lint, 5 heal-no-progress, 6 contract-hash mismatch.
 - Prefer small adapters over coupling core logic to agent-browser or Playwright.

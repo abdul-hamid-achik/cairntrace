@@ -647,7 +647,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const artifacts: RunArtifacts = {
     report: "report.html",
     reportJson: "report.json",
-    reportTheme: "report.theme.json",
     agentContext: "agent_context.md",
     events: "events.ndjson",
     console: "console/errors.ndjson",

@@ -90,7 +90,6 @@ steps:
     expect(runJson.status).toBe("passed");
     expect(runJson.artifacts.report).toBe("report.html");
     expect(runJson.artifacts.reportJson).toBe("report.json");
-    expect(runJson.artifacts.reportTheme).toBe("report.theme.json");
 
     const runYaml = await readFile(join(result.runDir, "run.yaml"), "utf8");
     expect(runYaml).toContain("name: happy");
@@ -104,6 +103,7 @@ steps:
     );
     expect(reportJson.summary.outcomes.passed).toBe(2);
     expect(reportJson.theme.selected).toBe("cairn");
+    expect(reportJson.theme.available.midnight.label).toBe("Midnight");
 
     const reportHtml = await readFile(
       join(result.runDir, "report.html"),
@@ -111,11 +111,6 @@ steps:
     );
     expect(reportHtml).toContain("Cairntrace Report");
     expect(reportHtml).toContain("Print / Save PDF");
-
-    const reportTheme = JSON.parse(
-      await readFile(join(result.runDir, "report.theme.json"), "utf8"),
-    );
-    expect(reportTheme.available.midnight.label).toBe("Midnight");
 
     const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
     expect(ctx).toContain("# Cairntrace Run Context");

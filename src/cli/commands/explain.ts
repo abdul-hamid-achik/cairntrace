@@ -930,7 +930,7 @@ export function buildExplain(): ExplainResult {
       report: {
         defaultTheme: "cairn",
         themes: ["cairn", "graphite", "midnight", "contrast"],
-        artifacts: ["report.html", "report.json", "report.theme.json"],
+        artifacts: ["report.html", "report.json"],
       },
     },
   };

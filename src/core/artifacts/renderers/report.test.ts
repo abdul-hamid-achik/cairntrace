@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunResult } from "../../schema/run.v1";
-import {
-  buildReportModel,
-  renderReportHtml,
-  renderReportJson,
-  renderReportTheme,
-} from "./report";
+import { buildReportModel, renderReportHtml, renderReportJson } from "./report";
 
 describe("report renderer", () => {
   it("builds a structured report model with summary counts and artifact links", () => {
@@ -65,15 +60,14 @@ describe("report renderer", () => {
     });
 
     const html = renderReportHtml(model);
-    const themeJson = JSON.parse(renderReportTheme(model));
     const reportJson = JSON.parse(renderReportJson(model));
 
     expect(model.theme.selected).toBe("midnight");
     expect(html).toContain('data-theme="midnight"');
     expect(html).toContain("--accent: #ff00aa;");
     expect(html).toContain("--surface: rgb(10, 20, 30);");
-    expect(themeJson.tokens.accent).toBe("#ff00aa");
-    expect(themeJson.available.cairn.label).toBe("Cairn");
+    expect(reportJson.theme.tokens.accent).toBe("#ff00aa");
+    expect(reportJson.theme.available.cairn.label).toBe("Cairn");
     expect(reportJson.theme.tokens.surface).toBe("rgb(10, 20, 30)");
   });
 
@@ -153,7 +147,6 @@ function sampleRun(
     artifacts: {
       report: "report.html",
       reportJson: "report.json",
-      reportTheme: "report.theme.json",
       agentContext: "agent_context.md",
       events: "events.ndjson",
       screenshots: ["screenshots/step_submit.png"],

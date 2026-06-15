@@ -55,7 +55,6 @@ export const RunArtifactsSchema = z
   .object({
     report: RelativePathSchema.optional(),
     reportJson: RelativePathSchema.optional(),
-    reportTheme: RelativePathSchema.optional(),
     agentContext: RelativePathSchema,
     events: RelativePathSchema,
     screenshots: z.array(RelativePathSchema).optional(),

@@ -11,7 +11,6 @@ import {
   buildReportModel,
   renderReportHtml,
   renderReportJson,
-  renderReportTheme,
 } from "./renderers/report";
 import { renderYaml } from "./renderers/yaml";
 
@@ -61,7 +60,7 @@ const IDENTITY_REDACTOR: ArtifactRedactor = {
  * Path convention:
  *   runDir/                            (absolute; created lazily)
  *   ├── run.json | run.yaml | run.md
- *   ├── report.html | report.json | report.theme.json
+ *   ├── report.html | report.json
  *   ├── events.ndjson
  *   ├── agent_context.md
  *   ├── screenshots/                   (created on first capture)
@@ -105,10 +104,6 @@ export class ArtifactWriter {
       buildReportModel(redacted, { config: this.opts.report }),
     );
     await writeFile(this.resolve("report.json"), renderReportJson(report));
-    await writeFile(
-      this.resolve("report.theme.json"),
-      renderReportTheme(report),
-    );
     await writeFile(
       this.resolve("report.html"),
       this.redactor.text(renderReportHtml(report)),

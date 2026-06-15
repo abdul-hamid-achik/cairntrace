@@ -85,6 +85,7 @@ export interface ReportModel {
     label: string;
     tokens: ReportThemeTokens;
     overrides: ReportColorOverrides;
+    available: Record<ReportThemeName, ReportThemeDefinition>;
   };
   reproduce: string;
 }
@@ -209,6 +210,7 @@ export function buildReportModel(
       label: baseTheme.label,
       tokens,
       overrides,
+      available: REPORT_THEMES,
     },
     reproduce: `cairn run ${result.spec.path} --env ${result.environment}`,
   };
@@ -216,18 +218,6 @@ export function buildReportModel(
 
 export function renderReportJson(model: ReportModel): string {
   return renderJson(model);
-}
-
-export function renderReportTheme(model: ReportModel): string {
-  return renderJson({
-    $schema: "urn:cairntrace.dev:report-theme:v1",
-    version: "1",
-    selected: model.theme.selected,
-    label: model.theme.label,
-    tokens: model.theme.tokens,
-    overrides: model.theme.overrides,
-    available: REPORT_THEMES,
-  });
 }
 
 export function renderReportHtml(model: ReportModel): string {
@@ -630,11 +620,6 @@ function buildArtifactLinks(result: RunResult): ReportArtifactLink[] {
       label: "Report data",
       path: artifacts.reportJson ?? "report.json",
       kind: "report-json",
-    },
-    {
-      label: "Report theme",
-      path: artifacts.reportTheme ?? "report.theme.json",
-      kind: "report-theme",
     },
     { label: "Agent context", path: artifacts.agentContext, kind: "context" },
     { label: "Events", path: artifacts.events, kind: "events" },
