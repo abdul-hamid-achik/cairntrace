@@ -422,7 +422,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Core Files",
-        body: "Run directories include `run.{json,yaml,md}`, `agent_context.md`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, and network logs.",
+        body: "Run directories include `run.{json,yaml,md}`, `report.html`, `report.json`, `report.theme.json`, `agent_context.md`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, and network logs.",
+      },
+      {
+        title: "Reports",
+        body: "`report.html` is self-contained and print-friendly for sharing or saving as PDF. It summarizes status, timing, outcomes, steps, and artifact links. `report.json` exposes the same redacted report model for custom renderers, and `report.theme.json` records the selected theme, token overrides, and built-in themes. Configure styling with `report.theme: cairn|graphite|midnight|contrast` and `report.colors` in `cairntrace.config.yml`.",
       },
       {
         title: "Downloads And Diagnostics",

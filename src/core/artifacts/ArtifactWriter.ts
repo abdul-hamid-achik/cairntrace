@@ -1,11 +1,18 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ReportConfig } from "../schema/config.v1";
 import type { RunResult } from "../schema/run.v1";
 import type { Spec } from "../schema/spec.v1";
 import { renderAgentContext } from "./agentContext";
 import { renderEvidenceMarkdown, type EvidenceInput } from "./evidence";
 import { renderJson } from "./renderers/json";
 import { renderRunMarkdown } from "./renderers/markdown";
+import {
+  buildReportModel,
+  renderReportHtml,
+  renderReportJson,
+  renderReportTheme,
+} from "./renderers/report";
 import { renderYaml } from "./renderers/yaml";
 
 /**
@@ -39,6 +46,10 @@ export interface ArtifactRedactor {
   text(input: string): string;
 }
 
+export interface ArtifactWriterOptions {
+  report?: ReportConfig;
+}
+
 const IDENTITY_REDACTOR: ArtifactRedactor = {
   value: <T>(input: T) => input,
   text: (input: string) => input,
@@ -50,6 +61,7 @@ const IDENTITY_REDACTOR: ArtifactRedactor = {
  * Path convention:
  *   runDir/                            (absolute; created lazily)
  *   ├── run.json | run.yaml | run.md
+ *   ├── report.html | report.json | report.theme.json
  *   ├── events.ndjson
  *   ├── agent_context.md
  *   ├── screenshots/                   (created on first capture)
@@ -63,6 +75,7 @@ export class ArtifactWriter {
   constructor(
     public readonly runDir: string,
     private readonly redactor: ArtifactRedactor = IDENTITY_REDACTOR,
+    private readonly opts: ArtifactWriterOptions = {},
   ) {}
 
   async ensureDirs(): Promise<void> {
@@ -86,6 +99,19 @@ export class ArtifactWriter {
     await writeFile(
       this.resolve("run.md"),
       this.redactor.text(renderRunMarkdown(redacted)),
+    );
+
+    const report = this.redactor.value(
+      buildReportModel(redacted, { config: this.opts.report }),
+    );
+    await writeFile(this.resolve("report.json"), renderReportJson(report));
+    await writeFile(
+      this.resolve("report.theme.json"),
+      renderReportTheme(report),
+    );
+    await writeFile(
+      this.resolve("report.html"),
+      this.redactor.text(renderReportHtml(report)),
     );
   }
 

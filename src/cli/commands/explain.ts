@@ -927,6 +927,11 @@ export function buildExplain(): ExplainResult {
       workflowRoots: ["./flows"],
       defaultEnvironment: "local",
       defaultBackend: "agent-browser",
+      report: {
+        defaultTheme: "cairn",
+        themes: ["cairn", "graphite", "midnight", "contrast"],
+        artifacts: ["report.html", "report.json", "report.theme.json"],
+      },
     },
   };
 }
@@ -962,6 +967,11 @@ export function explainToMarkdown(e: ExplainResult): string {
     `- artifactRoot: ${e.config.artifactRoot}`,
     `- defaultEnvironment: ${e.config.defaultEnvironment}`,
     `- defaultBackend: ${e.config.defaultBackend}`,
+    ...(e.config.report
+      ? [
+          `- reports: ${e.config.report.artifacts.join(", ")} (default theme: ${e.config.report.defaultTheme})`,
+        ]
+      : []),
     "",
     "## Agent Docs",
     `- topics: ${DOC_TOPICS.join(", ")}`,

@@ -51,6 +51,52 @@ export const RetentionConfigSchema = z
   .strict();
 export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
 
+export const ReportThemeNameSchema = z.enum([
+  "cairn",
+  "graphite",
+  "midnight",
+  "contrast",
+]);
+export type ReportThemeName = z.infer<typeof ReportThemeNameSchema>;
+
+const ReportColorValueSchema = z
+  .string()
+  .min(1)
+  .max(80)
+  .refine(
+    (value) => !/[;{}<>]/.test(value),
+    "report colors must be CSS color values without ; { } < >",
+  );
+
+export const ReportColorOverridesSchema = z
+  .object({
+    background: ReportColorValueSchema.optional(),
+    surface: ReportColorValueSchema.optional(),
+    surfaceAlt: ReportColorValueSchema.optional(),
+    ink: ReportColorValueSchema.optional(),
+    muted: ReportColorValueSchema.optional(),
+    line: ReportColorValueSchema.optional(),
+    accent: ReportColorValueSchema.optional(),
+    accentText: ReportColorValueSchema.optional(),
+    success: ReportColorValueSchema.optional(),
+    warning: ReportColorValueSchema.optional(),
+    danger: ReportColorValueSchema.optional(),
+    info: ReportColorValueSchema.optional(),
+    codeBg: ReportColorValueSchema.optional(),
+  })
+  .strict();
+export type ReportColorOverrides = z.infer<typeof ReportColorOverridesSchema>;
+
+export const ReportConfigSchema = z
+  .object({
+    /** Theme used by generated report.html / report.json artifacts. */
+    theme: ReportThemeNameSchema.optional(),
+    /** Optional CSS color token overrides for the selected report theme. */
+    colors: ReportColorOverridesSchema.optional(),
+  })
+  .strict();
+export type ReportConfig = z.infer<typeof ReportConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.literal(1),
@@ -63,6 +109,8 @@ export const ConfigSchema = z
     secrets: SecretsConfigSchema.optional(),
     /** Artifact-root pruning policy (see `cairn clean`). */
     retention: RetentionConfigSchema.optional(),
+    /** Human-readable report artifact styling. */
+    report: ReportConfigSchema.optional(),
   })
   .strict();
 export type Config = z.infer<typeof ConfigSchema>;

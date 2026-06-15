@@ -100,6 +100,7 @@ formatting in the YAML are preserved by `--apply` (uses the `yaml` package's
 
    ```
    run.json | run.yaml | run.md
+   report.html | report.json | report.theme.json
    agent_context.md
    events.ndjson
    outcomes/

@@ -57,6 +57,11 @@ environments:
       companyId: 123
   staging:
     baseUrl: https://staging.example.com
+report:
+  theme: graphite
+  colors:
+    accent: "#256f7d"
+    surface: "rgb(243, 245, 242)"
 `,
     );
     const specPath = join(projectRoot, "flows", "spec.yml");
@@ -71,6 +76,8 @@ environments:
     expect(loaded?.config.environments["staging"]?.baseUrl).toBe(
       "https://staging.example.com",
     );
+    expect(loaded?.config.report?.theme).toBe("graphite");
+    expect(loaded?.config.report?.colors?.surface).toBe("rgb(243, 245, 242)");
     expect(loaded?.path).toBe(configPath);
   });
 

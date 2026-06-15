@@ -139,7 +139,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     spec.redaction,
     opts.env ?? (process.env as Record<string, string | undefined>),
   );
-  const writer = new ArtifactWriter(runDir, redactor);
+  const writer = new ArtifactWriter(
+    runDir,
+    redactor,
+    runtime.config?.report ? { report: runtime.config.report } : {},
+  );
   await writer.ensureDirs();
   await writer.writeResolvedSpec(resolved);
 
@@ -641,6 +645,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   const artifacts: RunArtifacts = {
+    report: "report.html",
+    reportJson: "report.json",
+    reportTheme: "report.theme.json",
     agentContext: "agent_context.md",
     events: "events.ndjson",
     console: "console/errors.ndjson",

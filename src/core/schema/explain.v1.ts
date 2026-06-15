@@ -152,6 +152,14 @@ export const ConfigDocSchema = z
     workflowRoots: z.array(z.string()),
     defaultEnvironment: z.string(),
     defaultBackend: BackendSchema,
+    report: z
+      .object({
+        defaultTheme: z.string(),
+        themes: z.array(z.string()),
+        artifacts: z.array(z.string()),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;

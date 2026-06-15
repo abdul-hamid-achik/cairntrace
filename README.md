@@ -318,6 +318,11 @@ version: 1
 defaultEnvironment: local
 retention:
   keepRuns: 20 # newest N runs per spec; pruned after every run
+report:
+  theme: cairn # cairn | graphite | midnight | contrast
+  colors:
+    accent: "#0f766e"
+    surface: "#fbfdf9"
 environments:
   local:
     baseUrl: http://localhost:${env.APP_PORT} # ${env.X} works in config text
@@ -351,6 +356,9 @@ unless config or flags override the artifact root. The important files are:
 
 ```text
 run.json | run.yaml | run.md
+report.html
+report.json
+report.theme.json
 agent_context.md
 events.ndjson
 spec.resolved.yml
@@ -365,6 +373,13 @@ requests/
 diagnostics/
 traces/
 ```
+
+`report.html` is a self-contained, print-friendly report for sharing or saving
+as PDF. It includes summary cards, outcome/step tables, artifact links, and a
+theme switcher. `report.json` exposes the same redacted report model for custom
+renderers, while `report.theme.json` lists the selected theme, color tokens, and
+all built-in themes. Configure styling with `report.theme` and `report.colors`
+in `cairntrace.config.yml`.
 
 `agent_context.md` is the compact handoff file for coding agents. Use
 `./bin/cairn context latest` to print it. `context` and `diff` resolve

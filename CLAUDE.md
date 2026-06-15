@@ -19,6 +19,10 @@ all coding agents. Read that file first — everything below assumes you have.
   checklists. Markdown belongs in the repo only when it is maintained project
   documentation such as README, agent instructions, docs pages, changelogs, or
   release notes.
+- Run directories include `report.html`, `report.json`, and
+  `report.theme.json`. Keep reporting changes self-contained, redacted,
+  print-friendly, and compatible with `report.theme` / `report.colors` in
+  `cairntrace.config.yml`.
 - Request steps are no longer documented as page-only fetches. Playwright uses
   an out-of-page, context-cookie-sharing transport with a 30000ms default
   timeout. Under Bun, the cookie bridge runs in a subprocess so the parent can

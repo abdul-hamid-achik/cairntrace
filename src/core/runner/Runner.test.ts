@@ -88,6 +88,9 @@ steps:
     ) as RunResult;
     expect(runJson.spec.name).toBe("happy");
     expect(runJson.status).toBe("passed");
+    expect(runJson.artifacts.report).toBe("report.html");
+    expect(runJson.artifacts.reportJson).toBe("report.json");
+    expect(runJson.artifacts.reportTheme).toBe("report.theme.json");
 
     const runYaml = await readFile(join(result.runDir, "run.yaml"), "utf8");
     expect(runYaml).toContain("name: happy");
@@ -95,6 +98,24 @@ steps:
     const runMd = await readFile(join(result.runDir, "run.md"), "utf8");
     expect(runMd).toContain("# Run: happy");
     expect(runMd).toContain("PASSED");
+
+    const reportJson = JSON.parse(
+      await readFile(join(result.runDir, "report.json"), "utf8"),
+    );
+    expect(reportJson.summary.outcomes.passed).toBe(2);
+    expect(reportJson.theme.selected).toBe("cairn");
+
+    const reportHtml = await readFile(
+      join(result.runDir, "report.html"),
+      "utf8",
+    );
+    expect(reportHtml).toContain("Cairntrace Report");
+    expect(reportHtml).toContain("Print / Save PDF");
+
+    const reportTheme = JSON.parse(
+      await readFile(join(result.runDir, "report.theme.json"), "utf8"),
+    );
+    expect(reportTheme.available.midnight.label).toBe("Midnight");
 
     const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
     expect(ctx).toContain("# Cairntrace Run Context");
