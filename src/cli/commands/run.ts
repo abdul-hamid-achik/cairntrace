@@ -1,19 +1,26 @@
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import {
   basename,
   dirname,
   isAbsolute as isAbsolutePath,
+  join,
   resolve,
 } from "node:path";
 import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
+import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
+import {
+  startWebServer,
+  type WebServerHandle,
+} from "../../core/runner/webServer";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
-import { trackBackend } from "../cleanup";
+import { trackBackend, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { stampSpecContractHash } from "./spec/verify";
@@ -39,6 +46,8 @@ export interface RunCommandOptions {
   stampIfGreen?: boolean;
   /** Commander sets this to false when `--no-color` is passed. */
   color?: boolean;
+  /** Commander sets this to false when `--no-web-server` is passed. */
+  webServer?: boolean;
 }
 
 /**
@@ -92,12 +101,110 @@ export async function runCommand(
     process.exit(2);
   }
 
-  if (expandedSpecs.length === 1 && parallel === 1) {
-    await runSingle(expandedSpecs[0]!, opts);
-    return;
+  // Bring up the configured webServer (if any) once for the whole invocation,
+  // before any spec runs. A boot/setup failure here is fatal (exit 2).
+  let server: WebServerHandle | undefined;
+  let untrackServer: (() => void) | undefined;
+  try {
+    server = await maybeStartWebServer(
+      expandedSpecs[0]!,
+      opts,
+      // Track for signal teardown the instant the server is spawned — before
+      // readiness/setup — so a SIGINT/SIGTERM during a slow boot can't orphan it.
+      (terminateSync) => {
+        untrackServer = trackWebServer({ terminateSync });
+      },
+    );
+  } catch (e) {
+    untrackServer?.();
+    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    process.exit(2);
   }
 
-  await runBatch(expandedSpecs, parallel, opts);
+  // Own the single process.exit so the finally can always tear the server down
+  // (process.exit inside runSingle/runBatch would skip finally and orphan it).
+  let exitCode: ExitCode = 2;
+  try {
+    exitCode =
+      expandedSpecs.length === 1 && parallel === 1
+        ? await runSingle(expandedSpecs[0]!, opts)
+        : await runBatch(expandedSpecs, parallel, opts);
+  } finally {
+    if (server) {
+      if (server.startedByUs && exitCode !== 0) {
+        const logTail = server.tailLog(80).trim();
+        if (logTail) {
+          process.stderr.write(
+            `\ncairn run: web server log (last 80 lines${server.logPath ? `, full: ${server.logPath}` : ""}):\n${logTail}\n`,
+          );
+        }
+      }
+      await server.stop().catch(() => undefined);
+      untrackServer?.();
+    }
+  }
+  process.exit(exitCode);
+}
+
+/**
+ * Resolve config for the invocation and, if it declares a `webServer`, start it
+ * once. Returns undefined when there is no config, no `webServer`, or
+ * `--no-web-server` was passed. Throws (fatal) on a boot/setup failure.
+ */
+async function maybeStartWebServer(
+  firstSpec: string,
+  opts: RunCommandOptions,
+  onSpawn: (terminateSync: () => void) => void,
+): Promise<WebServerHandle | undefined> {
+  if (opts.webServer === false) return undefined; // --no-web-server
+
+  const firstSpecAbs = isAbsolutePath(firstSpec)
+    ? firstSpec
+    : resolve(process.cwd(), firstSpec);
+  // Unknown/unreadable first arg: let the normal spec-run path report it.
+  if (!(await stat(firstSpecAbs).catch(() => undefined))) return undefined;
+
+  const vars = parseVarFlags(opts.var);
+  const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  });
+  const cfg = ctx.config?.webServer;
+  if (!cfg) return undefined;
+
+  // Run-scope readiness validation: a bare baseUrl satisfies it even when the
+  // block sets neither url nor waitForText (the schema can't see baseUrl).
+  if (!cfg.url && !cfg.waitForText && !ctx.baseUrl) {
+    throw new Error(
+      "webServer needs `url`, `waitForText`, or an environment `baseUrl` for readiness",
+    );
+  }
+
+  const coldStart = opts.coldStart ?? isTruthyEnv(process.env.CI);
+  const configDir = ctx.configPath
+    ? dirname(ctx.configPath)
+    : dirname(firstSpecAbs);
+  const artifactRoot =
+    opts.artifactRoot ??
+    ctx.config?.artifactRoot ??
+    join(homedir(), ".cairntrace", "runs");
+  const interactive = resolveFormat(opts, "md") === "md" && isInteractive();
+
+  return startWebServer(cfg, {
+    configDir,
+    coldStart,
+    artifactRoot,
+    onSpawn,
+    ...(ctx.baseUrl !== undefined ? { baseUrl: ctx.baseUrl } : {}),
+    ...(interactive
+      ? { log: (m: string) => process.stderr.write(`${m}\n`) }
+      : {}),
+  });
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value !== undefined && value !== "" && value !== "0";
 }
 
 /* ----- single-spec path (preserves v0.0 behavior) ----- */
@@ -105,7 +212,7 @@ export async function runCommand(
 async function runSingle(
   specPath: string,
   opts: RunCommandOptions,
-): Promise<void> {
+): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts));
   const untrack = trackBackend(backend);
@@ -132,12 +239,10 @@ async function runSingle(
     });
     exitCode = result.exitCode;
     if (!(await stampIfGreen(opts, [result]))) {
-      exitCode = 2;
-      return;
+      return 2;
     }
     if (!(await writeJUnitIfRequested(opts, [result]))) {
-      exitCode = 2;
-      return;
+      return 2;
     }
 
     if (!interactive) {
@@ -148,15 +253,14 @@ async function runSingle(
     const result = synthesizeErroredResult(specPath, e as Error);
     exitCode = result.exitCode;
     if (!(await writeJUnitIfRequested(opts, [result]))) {
-      exitCode = 2;
-      return;
+      return 2;
     }
     emitErroredResult(result, format);
   } finally {
     untrack();
     await backend.close().catch(() => undefined);
   }
-  process.exit(exitCode);
+  return exitCode;
 }
 
 /* ----- multi-spec path ----- */
@@ -170,7 +274,7 @@ async function runBatch(
   specs: string[],
   parallel: number,
   opts: RunCommandOptions,
-): Promise<void> {
+): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const interactive = format === "md" && isInteractive();
   const tStart = Date.now();
@@ -264,10 +368,10 @@ async function runBatch(
   };
 
   if (!(await stampIfGreen(opts, results))) {
-    process.exit(2);
+    return 2;
   }
   if (!(await writeJUnitIfRequested(opts, results))) {
-    process.exit(2);
+    return 2;
   }
 
   if (format === "json" || format === "yaml") {
@@ -277,7 +381,7 @@ async function runBatch(
     process.stdout.write("\n");
   }
 
-  process.exit(exitCode);
+  return exitCode;
 }
 
 /* ----- helpers ----- */

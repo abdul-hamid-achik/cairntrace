@@ -72,6 +72,10 @@ addFormatFlags(
       collectRepeatable,
       [] as string[],
     )
+    .option(
+      "--no-web-server",
+      "skip the config webServer lifecycle (manage the server yourself)",
+    )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
 

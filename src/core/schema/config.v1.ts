@@ -97,6 +97,56 @@ export const ReportConfigSchema = z
   .strict();
 export type ReportConfig = z.infer<typeof ReportConfigSchema>;
 
+/**
+ * Server lifecycle for the whole `cairn run` invocation (build → boot →
+ * readiness → setup → teardown), the same role Playwright's `webServer` plays.
+ * One server is shared by all specs; it starts once before the pool and stops
+ * once after (parallel-safe). See `src/core/runner/webServer.ts`.
+ *
+ * Readiness is satisfied by `url` (an HTTP probe), `waitForText` (a stdout/stderr
+ * substring), or — when neither is set — the resolved environment `baseUrl`. The
+ * schema is structural only; the run-scope loader rejects a block that supplies
+ * none of the three once the baseUrl is known (a schema `.refine` can't see it,
+ * because `baseUrl` lives on the environment, not on `webServer`).
+ */
+export const WebServerConfigSchema = z
+  .object({
+    /** Command that starts the server, e.g. "node .output/server/index.mjs". */
+    command: z.string().min(1),
+    /**
+     * Optional one-shot build/prepare command, run ONCE before `command` —
+     * but skipped when an existing server is reused. e.g. "bun run build".
+     */
+    build: z.string().min(1).optional(),
+    /**
+     * Readiness probe URL: cairn polls it until it answers (any HTTP response,
+     * incl. 3xx/4xx — "the socket accepts and the app replies"). Defaults to the
+     * resolved environment `baseUrl`. Usable together with `waitForText`.
+     */
+    url: z.string().url().optional(),
+    /** Or treat the server ready once this substring appears on stdout/stderr. */
+    waitForText: z.string().min(1).optional(),
+    /** Extra env for the spawned process, merged over process.env. ${env.X} ok. */
+    env: z.record(z.string()).optional(),
+    /** Working directory for build/command (default: the config file's dir). */
+    cwd: z.string().optional(),
+    /**
+     * Reuse a server already answering `url` instead of spawning one (and skip
+     * `build`/`setup`/`teardown` of a server cairn didn't start). Default: true,
+     * except it flips to false under `--cold-start` or a truthy `CI` so CI always
+     * boots fresh. An explicit value here always wins.
+     */
+    reuseExisting: z.boolean().optional(),
+    /** Max ms to wait for readiness before failing the run. Default 60000. */
+    readyTimeoutMs: z.number().int().positive().optional(),
+    /** Shell commands run AFTER the server is ready, BEFORE specs. */
+    setup: z.array(z.string().min(1)).optional(),
+    /** Shell commands run AFTER specs (teardown), best-effort, non-fatal. */
+    teardown: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+export type WebServerConfig = z.infer<typeof WebServerConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.literal(1),
@@ -111,6 +161,8 @@ export const ConfigSchema = z
     retention: RetentionConfigSchema.optional(),
     /** Human-readable report artifact styling. */
     report: ReportConfigSchema.optional(),
+    /** Optional server lifecycle for `cairn run` (build/boot/ready/teardown). */
+    webServer: WebServerConfigSchema.optional(),
   })
   .strict();
 export type Config = z.infer<typeof ConfigSchema>;

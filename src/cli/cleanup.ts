@@ -16,7 +16,13 @@ import type { BrowserBackend } from "../adapters/browserBackend";
  */
 
 const active = new Set<BrowserBackend>();
+const activeServers = new Set<WebServerLike>();
 let handlersInstalled = false;
+
+/** The slice of a webServer handle the signal path needs (see webServer.ts). */
+export interface WebServerLike {
+  terminateSync(): void;
+}
 
 /**
  * Track a backend for signal-time cleanup. Returns an untrack function —
@@ -27,6 +33,21 @@ export function trackBackend(backend: BrowserBackend): () => void {
   installSignalHandlers();
   return () => {
     active.delete(backend);
+  };
+}
+
+/**
+ * Track a started webServer so Ctrl-C / SIGTERM tears the server (and its
+ * process tree) down before exit, alongside the browser session. Returns an
+ * untrack function — call it from the `finally` that calls `handle.stop()`.
+ * Reused servers register a no-op `terminateSync`, so a stale stamp never kills
+ * a server cairn didn't start.
+ */
+export function trackWebServer(handle: WebServerLike): () => void {
+  activeServers.add(handle);
+  installSignalHandlers();
+  return () => {
+    activeServers.delete(handle);
   };
 }
 
@@ -49,6 +70,14 @@ export function closeTrackedBackends(): void {
     }
   }
   active.clear();
+  for (const server of activeServers) {
+    try {
+      server.terminateSync();
+    } catch {
+      // Cleanup must never block the exit path.
+    }
+  }
+  activeServers.clear();
 }
 
 function installSignalHandlers(): void {

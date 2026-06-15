@@ -35,7 +35,7 @@ export function buildExplain(): ExplainResult {
         name: "run",
         summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--no-web-server] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -105,6 +105,13 @@ export function buildExplain(): ExplainResult {
               "Runtime var override (key=value); repeatable, wins over config env vars",
           },
           {
+            name: "--no-web-server",
+            type: "boolean",
+            default: false,
+            description:
+              "Skip the config `webServer` block (build/boot/ready/teardown) when you manage the server yourself. Otherwise cairn starts it once for the whole invocation, reusing an already-running one unless --cold-start/CI forces a fresh boot.",
+          },
+          {
             name: "--format",
             type: "enum",
             values: ["json", "yaml", "md"],
@@ -115,7 +122,7 @@ export function buildExplain(): ExplainResult {
         exitCodes: {
           "0": "all outcomes passed",
           "1": "one or more outcomes failed",
-          "2": "errored (browser crash, spec parse failure)",
+          "2": "errored (browser crash, spec parse failure, webServer boot/setup failure)",
           "3": "cold-start gate not satisfied",
           "6": "contract hash mismatch",
         },

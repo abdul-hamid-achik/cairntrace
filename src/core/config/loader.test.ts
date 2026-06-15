@@ -101,6 +101,97 @@ report:
   });
 });
 
+describe("loadConfig webServer", () => {
+  async function loadWebServerConfig(body: string) {
+    const projectDir = join(dir, `webserver-${Math.random().toString(36).slice(2)}`);
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(join(projectDir, "cairntrace.config.yml"), body);
+    return loadConfig(specPath);
+  }
+
+  it("parses a full webServer block", async () => {
+    const loaded = await loadWebServerConfig(
+      `version: 1
+environments:
+  local:
+    baseUrl: http://127.0.0.1:3000
+webServer:
+  build: bun run build
+  command: node .output/server/index.mjs
+  url: http://127.0.0.1:3000
+  env:
+    HOST: 127.0.0.1
+    PORT: "3000"
+  reuseExisting: true
+  readyTimeoutMs: 60000
+  setup: ["redis-cli -n 1 flushdb"]
+  teardown: ["redis-cli -n 1 flushdb"]
+`,
+    );
+    const ws = loaded?.config.webServer;
+    expect(ws?.command).toBe("node .output/server/index.mjs");
+    expect(ws?.build).toBe("bun run build");
+    expect(ws?.url).toBe("http://127.0.0.1:3000");
+    expect(ws?.env?.["PORT"]).toBe("3000");
+    expect(ws?.reuseExisting).toBe(true);
+    expect(ws?.readyTimeoutMs).toBe(60000);
+    expect(ws?.setup).toEqual(["redis-cli -n 1 flushdb"]);
+    expect(ws?.teardown).toEqual(["redis-cli -n 1 flushdb"]);
+  });
+
+  it("accepts a minimal block (command + waitForText, no url)", async () => {
+    const loaded = await loadWebServerConfig(
+      `version: 1
+environments:
+  local: {}
+webServer:
+  command: bun run start
+  waitForText: Listening on
+`,
+    );
+    expect(loaded?.config.webServer?.command).toBe("bun run start");
+    expect(loaded?.config.webServer?.waitForText).toBe("Listening on");
+    expect(loaded?.config.webServer?.url).toBeUndefined();
+  });
+
+  it("rejects unknown keys in webServer (.strict())", async () => {
+    await expect(
+      loadWebServerConfig(
+        `version: 1
+environments:
+  local: {}
+webServer:
+  command: node server.js
+  bogusKey: nope
+`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("substitutes ${env.X} into webServer url and env before parsing", async () => {
+    process.env["CAIRN_WS_PORT"] = "4321";
+    try {
+      const loaded = await loadWebServerConfig(
+        `version: 1
+environments:
+  local: {}
+webServer:
+  command: node server.js
+  url: http://127.0.0.1:\${env.CAIRN_WS_PORT}
+  env:
+    PORT: "\${env.CAIRN_WS_PORT}"
+`,
+      );
+      expect(loaded?.config.webServer?.url).toBe("http://127.0.0.1:4321");
+      expect(loaded?.config.webServer?.env?.["PORT"]).toBe("4321");
+    } finally {
+      delete process.env["CAIRN_WS_PORT"];
+    }
+  });
+});
+
 describe("loadConfig env substitution", () => {
   it("substitutes ${env.X} in config text before parsing", async () => {
     const projectDir = join(dir, "env-subst");

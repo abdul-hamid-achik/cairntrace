@@ -503,6 +503,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Mock",
         body: "`--mock` is for Cairntrace tests and fast smoke checks. It does not validate real browser behavior.",
       },
+      {
+        title: "Web Server Lifecycle",
+        body: "Cairntrace does not start your app by default, but an optional `webServer:` block in `cairntrace.config.yml` lets `cairn run` own the build → boot → readiness → setup → teardown for the whole invocation (one server shared by every spec, started once before the pool and stopped once after — parallel-safe), the same role Playwright's `webServer` plays. Readiness is satisfied by `url` (an HTTP probe — any response, including 3xx/4xx, counts as up), `waitForText` (a stdout/stderr substring), or the resolved environment `baseUrl` when neither is set. `reuseExisting` defaults to true (reuse a server already answering the URL and skip its build/setup/teardown), but flips to false under `--cold-start` or a truthy `CI` so CI always boots fresh; an explicit value wins. `env:` is merged over `process.env` for the spawned process and the setup/teardown commands, and `${env.X}` substitutes in config text so dynamic ports need no per-run YAML. On readiness timeout, an early crash, or a non-zero run, the last 80 lines of the captured `web-server-<pid>.log` are surfaced. Boot/setup failures exit 2 (errored); teardown is best-effort. Ctrl-C tears the server (and its process tree) down. Pass `--no-web-server` to skip the block when you manage the server out of band. Under Bun the server is spawned with `Bun.spawn` and setup/teardown shell out through `Bun.$`.",
+      },
     ],
     examples: [
       {
@@ -512,6 +516,24 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "cairn run flows/import.yml --backend agent-browser",
           "cairn run flows/import.yml --backend playwright",
           "cairn run flows/import.yml --mock",
+        ].join("\n"),
+      },
+      {
+        title: "webServer block (cairntrace.config.yml)",
+        language: "yaml",
+        code: [
+          "environments:",
+          "  local: { baseUrl: http://127.0.0.1:3000 }",
+          "  ci: { baseUrl: http://localhost:${env.APP_PORT} }",
+          "webServer:",
+          "  build: bun run build           # once, skipped when a server is reused",
+          "  command: node .output/server/index.mjs",
+          "  url: http://127.0.0.1:3000     # readiness probe; defaults to baseUrl",
+          "  env: { HOST: 127.0.0.1, PORT: \"3000\" }",
+          "  reuseExisting: true            # default true; false under --cold-start/CI",
+          "  readyTimeoutMs: 60000",
+          "  setup:    [ \"redis-cli -n 1 flushdb\" ]   # after ready, before specs",
+          "  teardown: [ \"redis-cli -n 1 flushdb\" ]   # after specs, best-effort",
         ].join("\n"),
       },
     ],
