@@ -1,5 +1,8 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
+import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium } from "playwright";
 import type {
   APIRequestContext,
@@ -264,8 +267,8 @@ export class PlaywrightAdapter implements BrowserBackend {
       // The script verifier passes a complete expression like `(function(){...})()`.
       // Playwright's evaluate treats a string as an expression to eval in the
       // page; passing it through unwrapped preserves the IIFE's return value.
-      const result = await withTimeout(
-        page.evaluate(js),
+      const result = await this.hardBoundPageOperation(
+        () => page.evaluate(js),
         timeoutMs,
         `evaluate timed out after ${timeoutMs}ms`,
       );
@@ -740,8 +743,8 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   private async applyWait(page: Page, cond: WaitCondition): Promise<void> {
     const timeout = cond.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
-    await withTimeout(
-      this.applyPlaywrightWait(page, cond, timeout),
+    await this.hardBoundPageOperation(
+      () => this.applyPlaywrightWait(page, cond, timeout),
       timeout,
       `wait timed out after ${timeout}ms`,
     );
@@ -776,6 +779,86 @@ export class PlaywrightAdapter implements BrowserBackend {
       DEFAULT_EVALUATE_TIMEOUT_MS,
     );
   }
+
+  private async hardBoundPageOperation<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number,
+    message: string,
+  ): Promise<T> {
+    const watchdog = this.startBrowserKillWatchdog(timeoutMs, message);
+    try {
+      const promise = operation();
+      return watchdog.enabled
+        ? await promise
+        : await withTimeout(promise, timeoutMs, message);
+    } catch (e) {
+      if (watchdog.didFire()) {
+        this.resetBrowserRefs();
+        throw new TimeoutError(message);
+      }
+      throw e;
+    } finally {
+      watchdog.stop();
+    }
+  }
+
+  private startBrowserKillWatchdog(
+    timeoutMs: number,
+    message: string,
+  ): HardTimeoutWatchdog {
+    const pid = this.browserProcessPid();
+    if (!pid) return NOOP_HARD_TIMEOUT_WATCHDOG;
+
+    const markerPath = hardTimeoutMarkerPath();
+    const deadlineMs = Date.now() + timeoutMs;
+    const child = spawn(
+      process.execPath,
+      ["--eval", HARD_TIMEOUT_WATCHDOG_SCRIPT],
+      {
+        stdio: ["pipe", "ignore", "ignore"],
+        windowsHide: true,
+      },
+    );
+    child.on("error", () => {
+      // If the watchdog cannot start, the in-process timeout below still covers
+      // normal cases. Real browser runs should have a process pid and watchdog.
+    });
+    child.stdin?.end(
+      JSON.stringify({
+        pid,
+        timeoutMs,
+        markerPath,
+        message,
+        sigkillGraceMs: HARD_TIMEOUT_SIGKILL_GRACE_MS,
+      }),
+    );
+
+    return {
+      enabled: true,
+      didFire: () =>
+        existsSync(markerPath) ||
+        (Date.now() >= deadlineMs && !processIsAlive(pid)),
+      stop: () => {
+        child.kill("SIGTERM");
+        removeFileIfExists(markerPath);
+      },
+    };
+  }
+
+  private browserProcessPid(): number | undefined {
+    const proc = (
+      this.browser as unknown as
+        | { process?: () => { pid?: number } | undefined }
+        | undefined
+    )?.process?.();
+    return proc?.pid;
+  }
+
+  private resetBrowserRefs(): void {
+    this.browser = undefined;
+    this.context = undefined;
+    this.page = undefined;
+  }
 }
 
 /* ----- helpers ----- */
@@ -786,8 +869,21 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
+const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
 
 class TimeoutError extends Error {}
+
+interface HardTimeoutWatchdog {
+  enabled: boolean;
+  didFire(): boolean;
+  stop(): void;
+}
+
+const NOOP_HARD_TIMEOUT_WATCHDOG: HardTimeoutWatchdog = {
+  enabled: false,
+  didFire: () => false,
+  stop: () => {},
+};
 
 type EncodedRequestBody = string | Uint8Array | undefined;
 
@@ -923,6 +1019,63 @@ function isTruthyEnv(value: string | undefined): boolean {
 function hasBunRuntime(): boolean {
   return Boolean(process.versions.bun);
 }
+
+function hardTimeoutMarkerPath(): string {
+  return join(
+    tmpdir(),
+    `cairntrace-hard-timeout-${process.pid}-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}.json`,
+  );
+}
+
+function removeFileIfExists(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // best-effort cleanup
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const HARD_TIMEOUT_WATCHDOG_SCRIPT = String.raw`
+const fs = require("node:fs");
+
+const chunks = [];
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => {
+  const payload = JSON.parse(chunks.join(""));
+  setTimeout(() => {
+    try {
+      fs.writeFileSync(
+        payload.markerPath,
+        JSON.stringify({
+          pid: payload.pid,
+          message: payload.message,
+          firedAt: Date.now(),
+        }),
+      );
+    } catch {}
+    try {
+      process.kill(payload.pid, "SIGTERM");
+    } catch {}
+    setTimeout(() => {
+      try {
+        process.kill(payload.pid, "SIGKILL");
+      } catch {}
+    }, payload.sigkillGraceMs);
+  }, payload.timeoutMs);
+});
+`;
 
 const ISOLATED_FETCH_SCRIPT = String.raw`
 const chunks = [];

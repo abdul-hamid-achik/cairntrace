@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chromium } from "playwright";
 import { PlaywrightAdapter } from "./PlaywrightAdapter";
@@ -308,6 +309,32 @@ describe("PlaywrightAdapter evaluate", () => {
       argv: ["eval"],
     });
   });
+
+  it("uses an external watchdog to abort evaluate when a browser process is present", async () => {
+    const adapter = new PlaywrightAdapter();
+    const browserProcess = startHungProcess();
+    installBrowserProcess(adapter, browserProcess);
+    installPage(adapter, {
+      evaluate: vi.fn(() => rejectWhenProcessExits(browserProcess)),
+    });
+
+    try {
+      const result = await adapter.evaluate("(() => new Promise(() => {}))()", {
+        timeoutMs: 80,
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        stderr: "evaluate timed out after 80ms",
+        exitCode: 124,
+        argv: ["eval"],
+      });
+      expect(adapterInternals(adapter).browser).toBeUndefined();
+      expect(adapterInternals(adapter).page).toBeUndefined();
+    } finally {
+      stopProcess(browserProcess);
+    }
+  });
 });
 
 describe("PlaywrightAdapter wait", () => {
@@ -382,6 +409,31 @@ describe("PlaywrightAdapter wait", () => {
       stderr: "wait timed out after 25ms",
       exitCode: 1,
     });
+  });
+
+  it("uses an external watchdog to abort wait when a browser process is present", async () => {
+    const adapter = new PlaywrightAdapter();
+    const browserProcess = startHungProcess();
+    installBrowserProcess(adapter, browserProcess);
+    installPage(adapter, {
+      waitForFunction: vi.fn(() => rejectWhenProcessExits(browserProcess)),
+    });
+
+    try {
+      const result = await adapter.runStep({
+        wait: { text: "NEVER", timeoutMs: 80 },
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        stderr: "wait timed out after 80ms",
+        exitCode: 1,
+      });
+      expect(adapterInternals(adapter).browser).toBeUndefined();
+      expect(adapterInternals(adapter).page).toBeUndefined();
+    } finally {
+      stopProcess(browserProcess);
+    }
   });
 });
 
@@ -490,6 +542,24 @@ function installPage(
   ).page = page;
 }
 
+function installBrowserProcess(
+  adapter: PlaywrightAdapter,
+  browserProcess: ChildProcess,
+): void {
+  (
+    adapter as unknown as {
+      browser: { process: () => ChildProcess };
+    }
+  ).browser = { process: () => browserProcess };
+}
+
+function adapterInternals(adapter: PlaywrightAdapter): {
+  browser?: unknown;
+  page?: unknown;
+} {
+  return adapter as unknown as { browser?: unknown; page?: unknown };
+}
+
 async function ensureBrowser(adapter: PlaywrightAdapter): Promise<unknown> {
   return (
     adapter as unknown as {
@@ -500,6 +570,25 @@ async function ensureBrowser(adapter: PlaywrightAdapter): Promise<unknown> {
 
 function fakeBrowser(): { close: () => Promise<void> } {
   return { close: async () => {} };
+}
+
+function startHungProcess(): ChildProcess {
+  return spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+}
+
+function rejectWhenProcessExits(child: ChildProcess): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    child.once("exit", () => reject(new Error("Target closed")));
+  });
+}
+
+function stopProcess(child: ChildProcess): void {
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
 }
 
 function restoreEnv(name: string, value: string | undefined): void {
