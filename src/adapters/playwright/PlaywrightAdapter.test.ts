@@ -335,6 +335,35 @@ describe("PlaywrightAdapter evaluate", () => {
       stopProcess(browserProcess);
     }
   });
+
+  it("falls back to an in-process timeout floor when the watchdog never settles the op", async () => {
+    // Regression for the 30-min CI hang: a browser process is present (so the
+    // watchdog path is taken) but the page op never settles. Before the
+    // in-process floor, the watchdog-enabled branch did a bare `await` and hung
+    // forever. The floor must still resolve evaluate to a timeout result.
+    const adapter = new PlaywrightAdapter();
+    const browserProcess = startHungProcess();
+    installBrowserProcess(adapter, browserProcess);
+    installPage(adapter, {
+      evaluate: vi.fn(() => new Promise(() => {})),
+    });
+
+    try {
+      const result = await adapter.evaluate("(() => new Promise(() => {}))()", {
+        timeoutMs: 50,
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        stderr: "evaluate timed out after 50ms",
+        exitCode: 124,
+        argv: ["eval"],
+      });
+      expect(adapterInternals(adapter).browser).toBeUndefined();
+      expect(adapterInternals(adapter).page).toBeUndefined();
+    } finally {
+      stopProcess(browserProcess);
+    }
+  });
 });
 
 describe("PlaywrightAdapter wait", () => {

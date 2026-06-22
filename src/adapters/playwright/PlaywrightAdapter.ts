@@ -785,14 +785,26 @@ export class PlaywrightAdapter implements BrowserBackend {
     timeoutMs: number,
     message: string,
   ): Promise<T> {
+    // The browser-kill watchdog is the primary escalation — it SIGKILLs a wedged
+    // browser process so the in-page op rejects cleanly and its resources are
+    // freed. But a spawned watchdog can silently fail to fire (a sandboxed CI
+    // runner can deny the cross-process kill, and the child's spawn error is
+    // swallowed). A bare `await` on the op would then hang FOREVER — exactly the
+    // 30-minute CI stall this guards against. So ALWAYS race an in-process
+    // timeout floor too: when the watchdog is enabled the floor sits just past
+    // its kill deadline (let the clean kill win in the normal case); when it is
+    // disabled the floor IS the bound. Either way the await is guaranteed to
+    // settle within the floor, turning an unbounded hang into a timeout result.
     const watchdog = this.startBrowserKillWatchdog(timeoutMs, message);
+    const floorMs = watchdog.enabled
+      ? timeoutMs + HARD_TIMEOUT_SIGKILL_GRACE_MS + HARD_TIMEOUT_FLOOR_BUFFER_MS
+      : timeoutMs;
     try {
-      const promise = operation();
-      return watchdog.enabled
-        ? await promise
-        : await withTimeout(promise, timeoutMs, message);
+      return await withTimeout(operation(), floorMs, message);
     } catch (e) {
-      if (watchdog.didFire()) {
+      if (watchdog.didFire() || e instanceof TimeoutError) {
+        // Browser is (or may be) wedged — abandon the refs so the next operation
+        // spins up a fresh page instead of reusing a dead/hung one.
         this.resetBrowserRefs();
         throw new TimeoutError(message);
       }
@@ -870,6 +882,10 @@ const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
+// Extra slack added to the in-process timeout floor (over the watchdog's kill
+// deadline) so the clean browser-process kill wins in the normal case and the
+// floor only fires as a last resort when the external kill never lands.
+const HARD_TIMEOUT_FLOOR_BUFFER_MS = 1_000;
 
 class TimeoutError extends Error {}
 
