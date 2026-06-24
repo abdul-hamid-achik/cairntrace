@@ -1280,4 +1280,366 @@ steps:
     expect(result.coldStart).toBe(false);
     expect(backend.clearBrowserStateCalls).toBe(0);
   });
+
+  // ---- Video recording tests ----
+
+  it("does not record video by default (policy: never)", async () => {
+    const specPath = await writeSpec(
+      "video-default",
+      `version: 1
+name: video_default
+intent: video should not be recorded by default
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.video).toBeUndefined();
+    expect(backend.startVideoCalls).toBe(0);
+    expect(backend.stopVideoCalls).toBe(0);
+  });
+
+  it("records video when artifacts.capture.video is always", async () => {
+    const specPath = await writeSpec(
+      "video-always",
+      `version: 1
+name: video_always
+intent: video should be recorded when capture.video is always
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(backend.startVideoCalls).toBe(1);
+    expect(backend.stopVideoCalls).toBe(1);
+    // Video file should exist
+    const videoStat = await stat(join(result.runDir, result.artifacts.video!));
+    expect(videoStat.isFile()).toBe(true);
+  });
+
+  it("deletes video on passing run when policy is on-failure", async () => {
+    const specPath = await writeSpec(
+      "video-on-failure-pass",
+      `version: 1
+name: video_on_failure_pass
+intent: video should be deleted on pass with on-failure
+artifacts:
+  capture:
+    video: on-failure
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    // Video was recorded then deleted
+    expect(backend.startVideoCalls).toBe(1);
+    expect(backend.stopVideoCalls).toBe(1);
+    expect(result.artifacts.video).toBeUndefined();
+  });
+
+  it("keeps video on failing run when policy is on-failure", async () => {
+    const specPath = await writeSpec(
+      "video-on-failure-fail",
+      `version: 1
+name: video_on_failure_fail
+intent: video should be kept on failure with on-failure
+artifacts:
+  capture:
+    video: on-failure
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(backend.startVideoCalls).toBe(1);
+    expect(backend.stopVideoCalls).toBe(1);
+  });
+
+  it("includes video in agent_context.md when recorded", async () => {
+    const specPath = await writeSpec(
+      "video-context",
+      `version: 1
+name: video_context
+intent: video should appear in agent context
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
+    expect(ctx).toContain("## View the video");
+    expect(ctx).toContain("videos/mock-video.webm");
+  });
+
+  it("includes video link in report.html when recorded", async () => {
+    const specPath = await writeSpec(
+      "video-report",
+      `version: 1
+name: video_report
+intent: video should appear in report
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    const reportHtml = await readFile(
+      join(result.runDir, "report.html"),
+      "utf8",
+    );
+    expect(reportHtml).toContain("videos/mock-video.webm");
+  });
+
+  it("emits artifact.video events in events.ndjson", async () => {
+    const specPath = await writeSpec(
+      "video-events",
+      `version: 1
+name: video_events
+intent: video events should be in events.ndjson
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    const events = await readFile(join(result.runDir, "events.ndjson"), "utf8");
+    const videoEvents = events
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+      .filter((e: { type?: string }) => e.type === "artifact.video");
+    expect(videoEvents.length).toBe(2);
+    expect(videoEvents[0]).toMatchObject({ action: "start" });
+    expect(videoEvents[1]).toMatchObject({ action: "stop" });
+  });
+
+  it("passes slowMo and speed to startVideo when configured", async () => {
+    const specPath = await writeSpec(
+      "video-slowmo",
+      `version: 1
+name: video_slowmo
+intent: slowMo and speed should be passed to the backend
+artifacts:
+  capture:
+    video: always
+  video:
+    slowMo: 500
+    speed: 0.5
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(backend.startVideoCalls).toBe(1);
+    expect(backend.lastVideoOpts).toEqual({ slowMo: 500, speed: 0.5 });
+
+    // The artifact.video start event should include slowMo and speed.
+    const events = await readFile(join(result.runDir, "events.ndjson"), "utf8");
+    const videoStart = events
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+      .find(
+        (e: { type?: string; action?: string }) =>
+          e.type === "artifact.video" && e.action === "start",
+      );
+    expect(videoStart).toMatchObject({ slowMo: 500, speed: 0.5 });
+  });
+
+  it("uses default slowMo=0 and speed=1 when video config is absent", async () => {
+    const specPath = await writeSpec(
+      "video-defaults",
+      `version: 1
+name: video_defaults
+intent: default video config when not specified
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(backend.lastVideoOpts).toEqual({ slowMo: undefined, speed: undefined });
+  });
+});
+
+/**
+ * MockBrowserBackend with video recording support.
+ * Writes a real (empty) file to the requested path so the artifact
+ * writer's existence checks pass.
+ */
+class VideoMockBackend extends MockBrowserBackend {
+  startVideoCalls = 0;
+  stopVideoCalls = 0;
+  lastVideoOpts: { slowMo?: number; speed?: number } | undefined;
+
+  async startVideo(opts?: { slowMo?: number; speed?: number }): Promise<void> {
+    this.startVideoCalls++;
+    this.lastVideoOpts = opts;
+  }
+
+  async stopVideo(path: string): Promise<{ ok: boolean; path: string }> {
+    this.stopVideoCalls++;
+    try {
+      const { mkdir, writeFile: wf } = await import("node:fs/promises");
+      await mkdir(join(path, ".."), { recursive: true });
+      await wf(path, "");
+      return { ok: true, path };
+    } catch {
+      return { ok: false, path };
+    }
+  }
+}
+
+describe("agent_context.md Code Matches", () => {
+  it("includes code matches when investigate.json exists in the run dir", async () => {
+    const specPath = await writeSpec(
+      "code-matches",
+      `version: 1
+name: code_matches
+intent: agent_context should show investigate code matches
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+
+    // Simulate what `cairn investigate` writes
+    await writeFile(
+      join(result.runDir, "investigate.json"),
+      JSON.stringify({
+        runId: result.runId,
+        runDir: result.runDir,
+        codeMatches: [
+          { file: "src/auth/login.ts", line: 42, score: 0.89, snippet: "handleSubmit" },
+          { file: "src/router.ts", line: 15, score: 0.72 },
+        ],
+      }),
+    );
+
+    // Re-render agent_context.md by calling the function directly
+    const { renderAgentContext } = await import("../../core/artifacts/agentContext");
+    const { parseSpec } = await import("../../core/parser/parseSpec");
+    const parsed = await parseSpec(specPath);
+    const ctx = renderAgentContext(parsed.spec, result);
+    expect(ctx).toContain("## Code Matches");
+    expect(ctx).toContain("src/auth/login.ts:42 (score: 0.89): handleSubmit");
+    expect(ctx).toContain("src/router.ts:15 (score: 0.72)");
+    expect(ctx).toContain("codemap annotate");
+  });
+
+  it("does not include code matches when investigate.json is absent", async () => {
+    const specPath = await writeSpec(
+      "no-code-matches",
+      `version: 1
+name: no_code_matches
+intent: agent_context should not show code matches without investigate.json
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
+    expect(ctx).not.toContain("## Code Matches");
+  });
 });

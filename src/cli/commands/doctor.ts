@@ -42,6 +42,51 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
       : "agent-browser not on $PATH (cairn run will fail without --mock)",
   });
 
+  const fcheap = await tryExec("fcheap", ["--version"]);
+  checks.push({
+    name: "fcheap",
+    ok: fcheap.ok,
+    detail: fcheap.ok
+      ? fcheap.stdout.trim()
+      : "fcheap not on $PATH (cairn stash and --stash-on-failure will be unavailable)",
+  });
+
+  const vecgrep = await tryExec("vecgrep", ["version"]);
+  checks.push({
+    name: "vecgrep",
+    ok: vecgrep.ok,
+    detail: vecgrep.ok
+      ? vecgrep.stdout.trim()
+      : "vecgrep not on $PATH (cairn investigate --connect will be unavailable)",
+  });
+
+  const vidtrace = await tryExec("vidtrace", ["version"]);
+  checks.push({
+    name: "vidtrace",
+    ok: vidtrace.ok,
+    detail: vidtrace.ok
+      ? vidtrace.stdout.trim()
+      : "vidtrace not on $PATH (cairn audit video evidence extraction will be unavailable)",
+  });
+
+  const codemap = await tryExec("codemap", ["version"]);
+  checks.push({
+    name: "codemap",
+    ok: codemap.ok,
+    detail: codemap.ok
+      ? codemap.stdout.trim()
+      : "codemap not on $PATH (cairn annotate will be unavailable)",
+  });
+
+  const tvault = await tryExec("tvault", ["version"]);
+  checks.push({
+    name: "tvault",
+    ok: tvault.ok,
+    detail: tvault.ok
+      ? tvault.stdout.trim()
+      : "tvault not on $PATH (secrets.provider: tvault will be unavailable)",
+  });
+
   const artifactRoot = join(homedir(), ".cairntrace", "runs");
   const writable = await isWritableOrCreatable(artifactRoot);
   checks.push({

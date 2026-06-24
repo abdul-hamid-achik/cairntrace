@@ -35,10 +35,25 @@ export const EnvironmentConfigSchema = z
   .strict();
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
 
+export const SecretsProviderSchema = z.enum(["env", "tvault"]);
+export type SecretsProvider = z.infer<typeof SecretsProviderSchema>;
+
+export const TvaultConfigSchema = z
+  .object({
+    /** TinyVault project name to pull secrets from. */
+    project: z.string().min(1),
+    /** TinyVault identity name for sealed secrets (optional). */
+    identity: z.string().optional(),
+  })
+  .strict();
+export type TvaultConfig = z.infer<typeof TvaultConfigSchema>;
+
 export const SecretsConfigSchema = z
   .object({
-    provider: z.enum(["env"]),
+    provider: SecretsProviderSchema.default("env"),
     required: z.array(z.string()).optional(),
+    /** TinyVault config when provider is tvault. */
+    tvault: TvaultConfigSchema.optional(),
   })
   .strict();
 export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
@@ -147,6 +162,44 @@ export const WebServerConfigSchema = z
   .strict();
 export type WebServerConfig = z.infer<typeof WebServerConfigSchema>;
 
+export const StashConfigSchema = z
+  .object({
+    /** Enable fcheap stash integration (default: false). */
+    enabled: z.boolean().default(false),
+    /** Auto-stash failed runs: on-failure | never (default: never). */
+    autoStash: z.enum(["on-failure", "never"]).default("never"),
+    /** Tags applied to every auto-stashed run. */
+    tags: z.array(z.string()).optional(),
+  })
+  .strict();
+export type StashConfig = z.infer<typeof StashConfigSchema>;
+
+export const InvestigateConfigSchema = z
+  .object({
+    /** Default codebase directory for `cairn investigate --connect`. */
+    codebaseDir: z.string().optional(),
+    /** Default vecgrep search mode: semantic | keyword | hybrid. */
+    mode: z.enum(["semantic", "keyword", "hybrid"]).optional(),
+    /** Max code matches to return from fcheap connect. */
+    limit: z.number().int().positive().optional(),
+    /** Auto-investigate failed runs after they complete (best-effort). */
+    autoInvestigate: z.enum(["on-failure", "never"]).default("never"),
+  })
+  .strict();
+export type InvestigateConfig = z.infer<typeof InvestigateConfigSchema>;
+
+export const AnnotateConfigSchema = z
+  .object({
+    /** Enable codemap annotate integration (default: false). */
+    enabled: z.boolean().default(false),
+    /** Auto-annotate code matches from investigate results into codemap. */
+    autoAnnotate: z.enum(["on-investigate", "never"]).default("never"),
+    /** Default source label for annotations (default: cairntrace). */
+    source: z.string().optional(),
+  })
+  .strict();
+export type AnnotateConfig = z.infer<typeof AnnotateConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.literal(1),
@@ -163,6 +216,12 @@ export const ConfigSchema = z
     report: ReportConfigSchema.optional(),
     /** Optional server lifecycle for `cairn run` (build/boot/ready/teardown). */
     webServer: WebServerConfigSchema.optional(),
+    /** fcheap stash integration (save/list/search run artifacts). */
+    stash: StashConfigSchema.optional(),
+    /** Code investigation via fcheap connect (vecgrep) + vidtrace. */
+    investigate: InvestigateConfigSchema.optional(),
+    /** codemap annotation integration (pin run findings to code symbols). */
+    annotate: AnnotateConfigSchema.optional(),
   })
   .strict();
 export type Config = z.infer<typeof ConfigSchema>;

@@ -36,6 +36,7 @@ export interface RunEvent {
     | "artifact.transform"
     | "artifact.diagnostics"
     | "artifact.request"
+    | "artifact.video"
     | "viewport.set";
   [extra: string]: unknown;
 }
@@ -65,6 +66,7 @@ const IDENTITY_REDACTOR: ArtifactRedactor = {
  *   ├── agent_context.md
  *   ├── screenshots/                   (created on first capture)
  *   ├── snapshots/
+ *   ├── videos/                        (when video capture is enabled)
  *   └── outcomes/
  *       ├── results.json | .yaml | .md
  *       ├── <outcomeId>.md
@@ -81,6 +83,7 @@ export class ArtifactWriter {
     await mkdir(this.runDir, { recursive: true });
     await mkdir(join(this.runDir, "screenshots"), { recursive: true });
     await mkdir(join(this.runDir, "snapshots"), { recursive: true });
+    await mkdir(join(this.runDir, "videos"), { recursive: true });
     await mkdir(join(this.runDir, "downloads"), { recursive: true });
     await mkdir(join(this.runDir, "transforms"), { recursive: true });
     await mkdir(join(this.runDir, "diagnostics"), { recursive: true });

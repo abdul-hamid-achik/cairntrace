@@ -9,6 +9,9 @@ import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import {
+  isFcheapAvailable,
+} from "../cli/commands/stash";
+import {
   resolveArtifactRoot,
   resolveRunRef,
   type ArtifactRootOptions,
@@ -454,6 +457,555 @@ export function buildMcpServer(): McpServer {
     },
   );
 
+  server.registerTool(
+    "cairn_stash_save",
+    {
+      title: "Stash a run to fcheap",
+      description:
+        "Save a run directory to the fcheap stash vault for persistence, " +
+        "sharing, and cross-run search. Requires fcheap on $PATH.",
+      inputSchema: {
+        runId: z
+          .string()
+          .describe("Run id, 'latest', or 'previous'"),
+        artifactRoot: z
+          .string()
+          .optional()
+          .describe("Override run artifact root directory"),
+        tag: z
+          .array(z.string())
+          .optional()
+          .describe("Tags for this stash"),
+      },
+    },
+    async ({ runId, artifactRoot, tag }) => {
+      const available = await isFcheapAvailable();
+      if (!available) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const root = await resolveArtifactRoot(
+        artifactRoot ? { artifactRoot } : {},
+      );
+      const runDir = await resolveRunRef(runId, root);
+      // Capture stdout from the stash command by calling the function directly
+      const r = await execa("fcheap", [
+        "save", runDir,
+        "--tool", "cairntrace",
+        ...((tag ?? []).flatMap((t) => ["--tag", t])),
+        "--json",
+      ], { reject: false, timeout: 60_000 });
+      if (r.exitCode !== 0) {
+        return {
+          content: [{ type: "text", text: `fcheap save failed: ${r.stderr}` }],
+          isError: true,
+        };
+      }
+      const data = JSON.parse(r.stdout);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Stashed run ${runId} → ${data.stashId ?? data.id ?? "(unknown)"}`,
+          },
+        ],
+        structuredContent: {
+          stashId: data.stashId ?? data.id,
+          runId,
+          runDir,
+          tags: tag ?? [],
+        },
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_stash_list",
+    {
+      title: "List stashed runs",
+      description:
+        "List stashes in the fcheap vault, optionally filtered by tag or tool.",
+      inputSchema: {
+        tag: z.string().optional().describe("Filter by tag"),
+        tool: z.string().optional().describe("Filter by tool name"),
+      },
+    },
+    async ({ tag, tool }) => {
+      const available = await isFcheapAvailable();
+      if (!available) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const args = ["list", "--json"];
+      if (tag) args.push("--tag", tag);
+      if (tool) args.push("--tool", tool);
+      const r = await execa("fcheap", args, {
+        reject: false,
+        timeout: 60_000,
+      });
+      if (r.exitCode !== 0) {
+        return {
+          content: [{ type: "text", text: `fcheap list failed: ${r.stderr}` }],
+          isError: true,
+        };
+      }
+      const stashes = JSON.parse(r.stdout);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              Array.isArray(stashes) && stashes.length > 0
+                ? stashes
+                    .map(
+                      (s: { id: string; tool?: string; tags?: string[] }) =>
+                        `- ${s.id}${s.tool ? ` (${s.tool})` : ""}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`,
+                    )
+                    .join("\n")
+                : "(no stashes)",
+          },
+        ],
+        structuredContent: { stashes },
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_stash_search",
+    {
+      title: "Search stashed runs",
+      description:
+        "Search across all stashed run artifacts in the fcheap vault. " +
+        "Supports keyword (default), semantic, and hybrid search modes.",
+      inputSchema: {
+        query: z.string().describe("Search query"),
+        mode: z
+          .string()
+          .optional()
+          .describe("Search mode: keyword | semantic | hybrid (default: hybrid)"),
+        limit: z.number().optional().describe("Max results (default 20)"),
+      },
+    },
+    async ({ query, mode, limit }) => {
+      const available = await isFcheapAvailable();
+      if (!available) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
+            },
+          ],
+          isError: true,
+        };
+      }
+      const args = ["search", query, "--json"];
+      if (mode) args.push("--mode", mode);
+      if (limit) args.push("--limit", String(limit));
+      const r = await execa("fcheap", args, {
+        reject: false,
+        timeout: 60_000,
+      });
+      if (r.exitCode !== 0) {
+        return {
+          content: [{ type: "text", text: `fcheap search failed: ${r.stderr}` }],
+          isError: true,
+        };
+      }
+      const results = JSON.parse(r.stdout);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              Array.isArray(results) && results.length > 0
+                ? results
+                    .map(
+                      (s: { stashId: string; snippet: string; score?: number }) =>
+                        `- ${s.stashId}${s.score ? ` (${s.score.toFixed(2)})` : ""}: ${s.snippet}`,
+                    )
+                    .join("\n")
+                : `(no results for "${query}")`,
+          },
+        ],
+        structuredContent: { query, results },
+      };
+    },
+  );
+
+  /* ----- investigate ----- */
+
+  server.registerTool(
+    "cairn_investigate",
+    {
+      title: "Investigate a run for code matches",
+      description:
+        "Stash a run directory to fcheap and run fcheap connect (vecgrep) to " +
+        "find file:line code candidates responsible for the failure. " +
+        "Requires fcheap + vecgrep on $PATH.",
+      inputSchema: {
+        runId: z.string().describe("Run id, 'latest', or 'previous'"),
+        codebase: z.string().describe("Absolute path to the codebase to search"),
+        mode: z
+          .string()
+          .optional()
+          .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
+        limit: z
+          .number()
+          .optional()
+          .describe("Max code matches (default 10)"),
+      },
+    },
+    async (args) => {
+      const { runId, codebase } = args as {
+        runId: string;
+        codebase: string;
+        mode?: string;
+        limit?: number;
+      };
+
+      const root = await resolveArtifactRoot();
+      let runDir: string;
+      try {
+        runDir = await resolveRunRef(runId, root);
+      } catch {
+        return {
+          content: [{ type: "text", text: `Run "${runId}" not found` }],
+          isError: true,
+        };
+      }
+
+      // Stash the run
+      const stashR = await execa(
+        "fcheap",
+        ["save", runDir, "--tool", "cairntrace", "--json"],
+        { reject: false, timeout: 60_000 },
+      );
+      if (stashR.exitCode !== 0) {
+        return {
+          content: [{ type: "text", text: `fcheap save failed: ${stashR.stderr}` }],
+          isError: true,
+        };
+      }
+
+      const stashData = JSON.parse(stashR.stdout);
+      const stashId = stashData.stashId ?? stashData.id ?? stashData.path;
+
+      // Connect to codebase
+      const connectArgs = ["connect", stashId, codebase, "--json"];
+      if (args.mode) connectArgs.push("--mode", args.mode);
+      if (args.limit) connectArgs.push("--limit", String(args.limit));
+
+      const connectR = await execa("fcheap", connectArgs, {
+        reject: false,
+        timeout: 120_000,
+      });
+      if (connectR.exitCode !== 0) {
+        return {
+          content: [{ type: "text", text: `fcheap connect failed: ${connectR.stderr}` }],
+          isError: true,
+        };
+      }
+
+      const matches = JSON.parse(connectR.stdout);
+      const codeMatches = Array.isArray(matches) ? matches : matches?.matches ?? [];
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              codeMatches.length > 0
+                ? codeMatches
+                    .map(
+                      (m: { file?: string; line?: number; score?: number }) =>
+                        `- ${m.file ?? "?"}:${m.line ?? 0}${m.score ? ` (${m.score.toFixed(2)})` : ""}`,
+                    )
+                    .join("\n")
+                : "(no code matches found)",
+          },
+        ],
+        structuredContent: {
+          runId,
+          stashId,
+          codeMatches: codeMatches,
+        },
+      };
+    },
+  );
+
+  /* ----- audit ----- */
+
+  server.registerTool(
+    "cairn_audit",
+    {
+      title: "Audit a spec end-to-end (run + video + vidtrace + code matches)",
+      description:
+        "Run a spec with video recording, extract vidtrace evidence from " +
+        "the recording, stash to fcheap, and run fcheap connect to find " +
+        "code responsible for failures. Requires playwright + fcheap + vecgrep. " +
+        "vidtrace is optional (skipped if not installed).",
+      inputSchema: {
+        specPath: z.string().describe("Path to the spec YAML file"),
+        codebase: z
+          .string()
+          .describe("Absolute path to the codebase to search"),
+        speed: z
+          .number()
+          .optional()
+          .describe("Video playback speed 0.25-4.0 (default: none)"),
+        slowMo: z
+          .number()
+          .optional()
+          .describe("Delay in ms between actions during recording (0-5000)"),
+        mode: z
+          .string()
+          .optional()
+          .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
+        limit: z
+          .number()
+          .optional()
+          .describe("Max code matches (default 10)"),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment name override"),
+        coldStart: z
+          .boolean()
+          .optional()
+          .describe("Clear browser state before running (default: true)"),
+      },
+    },
+    async (args) => {
+      const specPath = args.specPath as string;
+      const codebase = args.codebase as string;
+
+      const { auditCommand } = await import("../cli/commands/investigate");
+      const opts: Record<string, unknown> = {
+        codebase,
+        connect: true,
+        coldStart: args.coldStart ?? true,
+      };
+      if (args.speed !== undefined) opts.speed = args.speed;
+      if (args.slowMo !== undefined) opts.slowMo = args.slowMo;
+      if (args.mode !== undefined) opts.mode = args.mode;
+      if (args.limit !== undefined) opts.limit = args.limit;
+      if (args.env !== undefined) opts.env = args.env;
+
+      // The audit command writes to stdout; we capture it by running with json format
+      opts.json = true;
+
+      await auditCommand(specPath, opts as never);
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Audit complete. See run artifacts for video, vidtrace evidence, and code matches.",
+          },
+        ],
+      };
+    },
+  );
+
+  /* ----- annotate (codemap) ----- */
+
+  server.registerTool(
+    "cairn_annotate",
+    {
+      title: "Annotate a code symbol with cairntrace findings",
+      description:
+        "Pin a note and/or external data (e.g. a cairntrace run finding) " +
+        "to a code symbol via codemap annotate. Requires codemap on $PATH. " +
+        "Persists across reindex — builds a knowledge layer over the code graph.",
+      inputSchema: {
+        symbol: z.string().describe("Symbol name (FQN) or file:line to annotate"),
+        note: z.string().describe("Free-form note text"),
+        source: z
+          .string()
+          .optional()
+          .describe("Source label (default: cairntrace)"),
+        data: z
+          .string()
+          .optional()
+          .describe("Opaque data payload (e.g. JSON from a cairntrace run)"),
+      },
+    },
+    async (args) => {
+      const symbol = args.symbol as string;
+      const note = args.note as string;
+      const source = (args.source as string | undefined) ?? "cairntrace";
+      const data = args.data as string | undefined;
+
+      // Check codemap availability
+      let codemapOk = false;
+      try {
+        const r = await execa("codemap", ["version"], { reject: false });
+        codemapOk = r.exitCode === 0;
+      } catch {
+        // not installed
+      }
+
+      if (!codemapOk) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "codemap not on $PATH. Install: brew install abdul-hamid-achik/tap/codemap",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const annotateArgs = [
+        "annotate", symbol,
+        "--source", source,
+        "--note", note,
+        ...(data ? ["--data", data] : []),
+        "--json",
+      ];
+
+      try {
+        const r = await execa("codemap", annotateArgs, {
+          reject: false,
+          timeout: 30_000,
+        });
+        if (r.exitCode !== 0) {
+          return {
+            content: [
+              { type: "text", text: `codemap annotate failed: ${r.stderr}` },
+            ],
+            isError: true,
+          };
+        }
+        const result = JSON.parse(r.stdout);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Annotated ${symbol} (id: ${result.id ?? "?"})${result.matched === false ? " — symbol not indexed, saved for later" : ""}`,
+            },
+          ],
+          structuredContent: {
+            symbol,
+            source,
+            note,
+            ...(data ? { data } : {}),
+            annotationId: result.id,
+            matched: result.matched ?? true,
+          },
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `codemap annotate error: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  /* ----- secrets (TinyVault) ----- */
+
+  server.registerTool(
+    "cairn_secrets_status",
+    {
+      title: "Check TinyVault secrets provider status",
+      description:
+        "Check if tvault is installed and list available secret keys from " +
+        "a TinyVault project. Returns metadata only — secret values are " +
+        "never returned to the AI context. Use vault_run_with_secrets for " +
+        "actual secret injection.",
+      inputSchema: {
+        project: z
+          .string()
+          .optional()
+          .describe("TinyVault project name to check keys for"),
+      },
+    },
+    async (args) => {
+      const project = args.project as string | undefined;
+
+      let tvaultOk = false;
+      try {
+        const r = await execa("tvault", ["version"], { reject: false });
+        tvaultOk = r.exitCode === 0;
+      } catch {
+        // not installed
+      }
+
+      const result: {
+        provider: string;
+        tvaultInstalled: boolean;
+        project?: string;
+        keys: string[];
+        error?: string;
+      } = {
+        provider: tvaultOk ? "tvault" : "env",
+        tvaultInstalled: tvaultOk,
+        keys: [],
+      };
+
+      if (tvaultOk && project) {
+        try {
+          const r = await execa(
+            "tvault",
+            ["list", "--project", project, "--json"],
+            { reject: false, timeout: 10_000 },
+          );
+          if (r.exitCode === 0) {
+            const data = JSON.parse(r.stdout);
+            result.project = project;
+            result.keys = Array.isArray(data)
+              ? data.map((k: string | { key?: string }) =>
+                  typeof k === "string" ? k : k.key ?? "",
+                ).filter(Boolean)
+              : data?.secrets?.map((s: { key: string }) => s.key) ?? [];
+          } else {
+            result.error = r.stderr || "tvault list failed";
+          }
+        } catch (e) {
+          result.error = (e as Error).message;
+        }
+      } else if (tvaultOk && !project) {
+        result.error = "pass project to list keys";
+      }
+
+      const textLines = [
+        `secrets: ${result.provider}`,
+        `tvault: ${result.tvaultInstalled ? "installed" : "not on $PATH"}`,
+        ...(result.project ? [`project: ${result.project}`] : []),
+        `keys: ${result.keys.length > 0 ? result.keys.join(", ") : "(none or not checked)"}`,
+        ...(result.error ? [`error: ${result.error}`] : []),
+      ];
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: textLines.join("\n"),
+          },
+        ],
+        structuredContent: result,
+      };
+    },
+  );
+
   return server;
 }
 
@@ -468,6 +1020,11 @@ async function runDoctorChecks(): Promise<
   for (const [name, args] of [
     ["bun", ["--version"]],
     ["agent-browser", ["--version"]],
+    ["fcheap", ["--version"]],
+    ["vecgrep", ["version"]],
+    ["vidtrace", ["version"]],
+    ["codemap", ["version"]],
+    ["tvault", ["version"]],
   ] as const) {
     try {
       const r = await execa(name, args, { reject: false });

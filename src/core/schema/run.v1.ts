@@ -67,6 +67,7 @@ export const RunArtifactsSchema = z
     console: RelativePathSchema.optional(),
     network: RelativePathSchema.optional(),
     trace: RelativePathSchema.optional(),
+    video: RelativePathSchema.optional(),
   })
   .strict();
 export type RunArtifacts = z.infer<typeof RunArtifactsSchema>;

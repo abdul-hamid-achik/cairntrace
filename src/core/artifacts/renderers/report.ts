@@ -632,6 +632,7 @@ function buildArtifactLinks(result: RunResult): ReportArtifactLink[] {
   addOptional(links, "Console errors", artifacts.console, "console");
   addOptional(links, "Network failures", artifacts.network, "network");
   addOptional(links, "Trace", artifacts.trace, "trace");
+  addOptional(links, "Video", artifacts.video, "video");
   for (const path of artifacts.screenshots ?? []) {
     links.push({ label: basenameLabel(path), path, kind: "screenshot" });
   }

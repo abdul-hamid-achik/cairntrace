@@ -371,6 +371,7 @@ transforms/
 requests/
 diagnostics/
 traces/
+videos/
 ```
 
 `report.html` is a self-contained, print-friendly report for sharing or saving
@@ -389,7 +390,142 @@ global default, in that order.
 Disk usage is bounded by `retention.keepRuns` in the config (pruned after
 every run) and by `cairn clean [--keep N | --all]`. Traces follow the
 `artifacts.capture.trace` policy — the `on-failure` default deletes the trace
-zip when the run passes.
+zip when the run passes. Videos follow `artifacts.capture.video` (default
+`never`) — opt in with `always` or `on-failure` for audit-grade `.webm`
+recordings. When steps execute too quickly to audit, set
+`artifacts.video.slowMo` (delay in ms between actions) and
+`artifacts.video.speed` (playback speed multiplier 0.25–4; values < 1 slow
+down via ffmpeg). The Playwright backend supports video natively; feed the
+recording to `vidtrace extract` for timestamped evidence extraction.
+
+### Stash Integration (fcheap)
+
+Cairntrace run directories are self-contained — perfect for stashing to
+[fcheap](https://github.com/abdul-hamid-achik/file.cheap) for persistence,
+sharing, and cross-run search. Requires `fcheap` on `$PATH`.
+
+```bash
+# Stash the latest run
+./bin/cairn stash save latest --tag regression
+
+# List stashes
+./bin/cairn stash list --tool cairntrace
+
+# Search across all stashed runs
+./bin/cairn stash search "redirected to /error"
+
+# Restore a stash to a directory
+./bin/cairn stash restore <stash-id> --to /tmp/run-restore
+```
+
+Auto-stash failed runs with `--stash-on-failure`:
+
+```bash
+./bin/cairn run flows/login.yml --stash-on-failure --cold-start
+```
+
+Or enable via config:
+
+```yaml
+# cairntrace.config.yml
+stash:
+  enabled: true
+  autoStash: on-failure   # or never (default)
+  tags: [regression, audit]
+```
+
+The MCP server exposes `cairn_stash_save`, `cairn_stash_list`, and
+`cairn_stash_search` tools that mirror the CLI. All degrade gracefully when
+fcheap isn't installed.
+
+### Investigate & Audit (fcheap connect + vecgrep + vidtrace)
+
+When a spec fails, `cairn investigate` stashes the run and runs `fcheap connect`
+to surface `file:line` code candidates responsible for the failure using
+[vecgrep](https://github.com/abdul-hamid-achik/vecgrep) semantic code search.
+Requires `fcheap` and `vecgrep` on `$PATH`.
+
+```bash
+# After a failed run, find the responsible code
+./bin/cairn investigate latest --codebase ~/projects/myapp
+
+# With specific search mode and limit
+./bin/cairn investigate latest --codebase ~/projects/myapp --mode semantic --limit 5
+```
+
+`cairn audit` is a convenience wrapper that runs a spec with video, extracts
+[vidtrace](https://github.com/abdul-hamid-achik/vidtrace) evidence from the
+recording, and connects it to the codebase — all in one command:
+
+```bash
+# Run spec with video, extract evidence, connect to code
+./bin/cairn audit flows/login.yml --codebase ~/projects/myapp --speed 0.5
+```
+
+Configure defaults via config:
+
+```yaml
+# cairntrace.config.yml
+investigate:
+  codebase: ./src          # default codebase path
+  mode: hybrid             # semantic | keyword | hybrid
+  limit: 10                # max code matches
+  keepStash: false         # keep fcheap stash after investigate
+```
+
+The MCP server exposes `cairn_investigate` and `cairn_audit` tools that mirror
+the CLI. Both degrade gracefully when fcheap/vecgrep/vidtrace aren't installed.
+
+### Annotate & Secrets (codemap + TinyVault)
+
+`cairn annotate` pins run evidence to a code graph symbol using
+[codemap](https://github.com/abdul-hamid-achik/codemap) annotations, building a
+knowledge layer of failure points that persists across reindexes. Requires
+`codemap` on `$PATH`.
+
+```bash
+# After investigate surfaces src/auth/login.ts:42 as a failure point
+./bin/cairn annotate src/auth/login.ts:42 \
+  --source cairntrace \
+  --note "login_flow spec fails: redirect to /error instead of /dashboard" \
+  --run-id latest
+
+# Annotate without a run reference
+./bin/cairn annotate handleSubmit --note "flaky on cold start"
+```
+
+`cairn secrets` manages [TinyVault](https://github.com/abdul-hamid-achik/tinyvault)
+secrets for authenticated specs — checking projects, listing keys, and
+exporting secrets without exposing values in the conversation. Requires `tvault`
+on `$PATH`.
+
+```bash
+# List vault projects
+./bin/cairn secrets list-projects
+
+# List secret keys in a project
+./bin/cairn secrets list-keys --project myapp-test
+
+# Export secrets to a .env file (values never printed)
+./bin/cairn secrets export-env --project myapp-test --output .env.test
+```
+
+Configure defaults via config:
+
+```yaml
+# cairntrace.config.yml
+codemap:
+  enabled: true
+  path: ~/projects/myapp   # default codebase path for annotate
+
+secrets:
+  provider: tvault          # tvault | none
+  project: myapp-test       # default vault project
+```
+
+The MCP server exposes `cairn_annotate`, `cairn_secrets_list_projects`,
+`cairn_secrets_list_keys`, and `cairn_secrets_export_env` tools that mirror the
+CLI. All degrade gracefully when codemap/tvault aren't installed.
 
 ## CLI Reference
 
@@ -403,7 +539,7 @@ Common commands:
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
 | `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
 | `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path`, `--config`, or `--artifact-root`. |
-| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, or `backends`. |
+| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `stash`, `investigate`, `annotate`, `mcp`, or `backends`. |
 | `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
 | `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
 | `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
@@ -411,6 +547,17 @@ Common commands:
 | `cairn login <name> --url <url>` | Open a headed login flow and save a checkpoint. |
 | `cairn export playwright <spec>` | Emit an `@playwright/test` spec from a Cairntrace spec. |
 | `cairn import playwright <file>` | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines. |
+| `cairn stash save <run-id>` | Stash a run directory to the fcheap vault for persistence and search. Supports `--tag`, `--tool`, `--source`. |
+| `cairn stash list` | List stashes, optionally filtered by `--tag` or `--tool`. |
+| `cairn stash info <stash-id>` | Show detailed metadata and file list for a stash. |
+| `cairn stash restore <stash-id>` | Restore a stash to a directory (`--to <dir>`). |
+| `cairn stash search <query>` | Search across all stashed runs. Supports `--mode keyword\|semantic\|hybrid` and `--limit`. |
+| `cairn investigate <run-id>` | Stash a run and run `fcheap connect` to find code responsible for failures. Supports `--codebase`, `--mode`, `--limit`, `--keep-stash`. |
+| `cairn audit <spec>` | Run a spec with video, extract vidtrace evidence, and connect to code. Supports `--codebase`, `--speed`, `--slow-mo`, `--mode`, `--limit`. |
+| `cairn annotate <symbol>` | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`. |
+| `cairn secrets list-projects` | List TinyVault projects. |
+| `cairn secrets list-keys` | List secret keys in a TinyVault project (`--project`). |
+| `cairn secrets export-env` | Export TinyVault secrets to a `.env` file without exposing values (`--project`, `--output`). |
 | `cairn mcp` | Start the MCP server on stdio. |
 
 Structured output is available on commands wired with format flags:

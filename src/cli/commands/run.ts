@@ -23,6 +23,7 @@ import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
+import { maybeAutoStash } from "./stash";
 import { stampSpecContractHash } from "./spec/verify";
 
 export interface RunCommandOptions {
@@ -48,6 +49,8 @@ export interface RunCommandOptions {
   color?: boolean;
   /** Commander sets this to false when `--no-web-server` is passed. */
   webServer?: boolean;
+  /** Auto-stash failed runs to fcheap. */
+  stashOnFailure?: boolean;
 }
 
 /**
@@ -245,6 +248,13 @@ async function runSingle(
       return 2;
     }
 
+    // Auto-stash failed runs to fcheap (best-effort, never fatal).
+    if (result.status !== "passed") {
+      await maybeAutoStash(result.runDir, result.runId, result.spec.name, {
+        stashOnFailure: opts.stashOnFailure ?? false,
+      });
+    }
+
     if (!interactive) {
       process.stdout.write(emit(format, result, renderRunMarkdown));
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
@@ -329,6 +339,12 @@ async function runBatch(
               r.outcomes.filter((o) => o.status === "passed").length
             }/${r.outcomes.length} outcomes)\n`,
           );
+        }
+        // Auto-stash failed runs to fcheap (best-effort, never fatal).
+        if (r.status !== "passed") {
+          await maybeAutoStash(r.runDir, r.runId, r.spec.name, {
+            stashOnFailure: opts.stashOnFailure ?? false,
+          });
         }
         return r;
       } catch (e) {

@@ -184,6 +184,26 @@ export interface BrowserBackend {
    */
   stopTrace?(path: string): Promise<{ ok: boolean; path: string }>;
 
+  /* ----- video recording ----- */
+  /**
+   * Enable video recording for the next context/page creation. Must be called
+   * before the browser context is created (the runner calls it before
+   * startTrace). Best-effort: backends without video support no-op. Playwright
+   * records at the context level via `recordVideo`; agent-browser does not
+   * support video recording today.
+   *
+   * @param opts.slowMo - delay (ms) between browser actions during recording
+   *   so the video is watchable when steps execute quickly.
+   * @param opts.speed - playback speed multiplier (0.25–4) applied via
+   *   ffmpeg post-processing; values < 1 slow down, > 1 speed up.
+   */
+  startVideo?(opts?: { slowMo?: number; speed?: number }): Promise<void>;
+  /**
+   * Stop recording and save the video to `path`. Returns whether the save
+   * succeeded so the runner can decide whether to record the artifact path.
+   */
+  stopVideo?(path: string): Promise<{ ok: boolean; path: string }>;
+
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;
 

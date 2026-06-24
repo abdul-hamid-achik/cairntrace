@@ -18,6 +18,22 @@ import { snapshotCommand } from "./commands/snapshot";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
 import { verifyCommand } from "./commands/spec/verify";
+import {
+  stashInfoCommand,
+  stashListCommand,
+  stashRestoreCommand,
+  stashSaveCommand,
+  stashSearchCommand,
+} from "./commands/stash";
+import {
+  investigateCommand,
+  auditCommand,
+} from "./commands/investigate";
+import { annotateCommand } from "./commands/annotate";
+import {
+  isTvaultAvailable,
+  getTvaultKeys,
+} from "./commands/secrets";
 import { CAIRN_VERSION } from "./version";
 
 const program = new Command();
@@ -75,6 +91,11 @@ addFormatFlags(
     .option(
       "--no-web-server",
       "skip the config webServer lifecycle (manage the server yourself)",
+    )
+    .option(
+      "--stash-on-failure",
+      "auto-stash failed run directories to fcheap (non-fatal if fcheap is missing)",
+      false,
     )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
@@ -271,5 +292,215 @@ checkpoint
   .command("delete <name>")
   .description("Remove a saved checkpoint")
   .action((name: string) => deleteCheckpointCommand(name));
+
+/* ----- stash (fcheap integration) ----- */
+
+const stash = program
+  .command("stash")
+  .description("Save, list, and search run artifacts via fcheap");
+
+addFormatFlags(
+  stash
+    .command("save <run-id>")
+    .description(
+      "Stash a run directory to the fcheap vault (run-id: run id, 'latest', or 'previous')",
+    )
+    .option(
+      "--tag <tag>",
+      "tag for this stash; repeatable",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option("--tool <name>", "tool name (default: cairntrace)")
+    .option("--source <path>", "source artifact path")
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runId: string, opts) => stashSaveCommand(runId, opts));
+
+addFormatFlags(
+  stash
+    .command("list")
+    .description("List stashes in the fcheap vault")
+    .option("--tag <tag>", "filter by tag")
+    .option("--tool <name>", "filter by tool name"),
+).action((opts) => stashListCommand(opts));
+
+addFormatFlags(
+  stash
+    .command("info <stash-id>")
+    .description("Get detailed info about a stash"),
+).action((stashId: string, opts) => stashInfoCommand(stashId, opts));
+
+addFormatFlags(
+  stash
+    .command("restore <stash-id>")
+    .description("Restore a stash to a directory")
+    .option(
+      "--to <dir>",
+      "target directory (default: a fresh temp dir)",
+    ),
+).action((stashId: string, opts) => stashRestoreCommand(stashId, opts));
+
+addFormatFlags(
+  stash
+    .command("search <query>")
+    .description("Search across all stashes")
+    .option("--mode <mode>", "search mode: keyword | semantic | hybrid")
+    .option("--limit <n>", "max results", "20"),
+).action((query: string, opts) => stashSearchCommand(query, opts));
+
+/* ----- investigate (fcheap connect + vecgrep) ----- */
+
+addFormatFlags(
+  program
+    .command("investigate <run-id>")
+    .description(
+      "Stash a run to fcheap and find code responsible for failures via vecgrep",
+    )
+    .option(
+      "--codebase <dir>",
+      "codebase directory to search with fcheap connect (vecgrep)",
+    )
+    .option(
+      "--connect",
+      "run fcheap connect to find code matches after stashing",
+      false,
+    )
+    .option(
+      "--query <query>",
+      "override the auto-extracted search query for vecgrep",
+    )
+    .option(
+      "--mode <mode>",
+      "vecgrep search mode: semantic | keyword | hybrid (default: hybrid)",
+    )
+    .option("--limit <n>", "max code matches to return", "10")
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runId: string, opts) => investigateCommand(runId, opts));
+
+/* ----- audit (run + video + vidtrace + investigate) ----- */
+
+addFormatFlags(
+  program
+    .command("audit <spec>")
+    .description(
+      "Run a spec with video, extract vidtrace evidence, and find code matches",
+    )
+    .option(
+      "--codebase <dir>",
+      "codebase directory to search with fcheap connect (vecgrep)",
+    )
+    .option(
+      "--connect",
+      "run fcheap connect to find code matches after stashing",
+      false,
+    )
+    .option(
+      "--mode <mode>",
+      "vecgrep search mode: semantic | keyword | hybrid",
+    )
+    .option("--limit <n>", "max code matches to return", "10")
+    .option("--env <name>", "environment override")
+    .option("--cold-start", "force fresh browser profile")
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((specPath: string, opts) => auditCommand(specPath, opts));
+
+/* ----- annotate (codemap integration) ----- */
+
+addFormatFlags(
+  program
+    .command("annotate <symbol>")
+    .description(
+      "Pin a note and/or data to a code symbol via codemap (codemap annotate wrapper)",
+    )
+    .option(
+      "--note <text>",
+      "free-form note text to attach to the symbol",
+    )
+    .option(
+      "--data <json>",
+      "opaque data payload (e.g. JSON from a cairntrace run)",
+    )
+    .option(
+      "--source <label>",
+      "annotation source label (default: cairntrace)",
+    )
+    .option(
+      "--from <symbol>",
+      "annotate a call path from→to instead of a single symbol",
+    )
+    .option(
+      "--to <symbol>",
+      "call path end symbol (use with --from)",
+    ),
+).action((symbol: string, opts) => annotateCommand(symbol, opts));
+
+/* ----- secrets (TinyVault integration) ----- */
+
+addFormatFlags(
+  program
+    .command("secrets")
+    .description("Check TinyVault secrets provider status and available keys")
+    .option(
+      "--project <name>",
+      "TinyVault project name (required when provider is tvault)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action(async (opts) => {
+  const { emit, resolveFormat } = await import("./format");
+  const format = resolveFormat(opts, "md");
+
+  const tvaultOk = await isTvaultAvailable();
+  const result: {
+    provider: string;
+    tvaultInstalled: boolean;
+    project?: string;
+    keys: string[];
+    error?: string;
+  } = {
+    provider: tvaultOk ? "tvault" : "env",
+    tvaultInstalled: tvaultOk,
+    keys: [],
+  };
+
+  const projectName = opts.project;
+  if (tvaultOk && projectName) {
+    const keys = await getTvaultKeys(projectName);
+    result.project = projectName;
+    result.keys = keys.keys;
+    if (keys.error) result.error = keys.error;
+  } else if (tvaultOk && !projectName) {
+    result.error = "pass --project <name> to list keys";
+  }
+
+  const md = [
+    `# Secrets status`,
+    "",
+    `- provider: ${result.provider}`,
+    `- tvault: ${result.tvaultInstalled ? "installed" : "not on $PATH"}`,
+    ...(result.project ? [`- project: ${result.project}`] : []),
+    ...(result.keys.length > 0
+      ? [`- keys: ${result.keys.join(", ")}`]
+      : ["- keys: (none or not checked)"]),
+    ...(result.error ? [`- error: ${result.error}`] : []),
+  ].join("\n");
+
+  process.stdout.write(emit(format, result, () => md));
+  if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+});
 
 await program.parseAsync(process.argv);

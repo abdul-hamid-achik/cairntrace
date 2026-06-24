@@ -539,6 +539,341 @@ export function buildExplain(): ExplainResult {
           "6": "contract hash mismatch",
         },
       },
+      {
+        name: "stash save",
+        summary: "Stash a run directory to the fcheap vault",
+        synopsis:
+          "cairn stash save <run-id> [--tag <tag>] [--tool <name>] [--source <path>] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--tag",
+            type: "string",
+            description: "Tag for this stash; repeatable",
+          },
+          {
+            name: "--tool",
+            type: "string",
+            default: "cairntrace",
+            description: "Tool name recorded in the stash manifest",
+          },
+          {
+            name: "--source",
+            type: "string",
+            description: "Source artifact path",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "Explicit cairntrace.config.yml",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "fcheap not installed or run not found" },
+      },
+      {
+        name: "stash list",
+        summary: "List stashes in the fcheap vault",
+        synopsis:
+          "cairn stash list [--tag <tag>] [--tool <name>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--tag",
+            type: "string",
+            description: "Filter by tag",
+          },
+          {
+            name: "--tool",
+            type: "string",
+            description: "Filter by tool name",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "fcheap not installed" },
+      },
+      {
+        name: "stash info",
+        summary: "Get detailed info about a stash",
+        synopsis: "cairn stash info <stash-id> [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "fcheap not installed or stash not found" },
+      },
+      {
+        name: "stash restore",
+        summary: "Restore a stash to a directory",
+        synopsis: "cairn stash restore <stash-id> [--to <dir>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--to",
+            type: "string",
+            description: "Target directory (default: a fresh temp dir)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "fcheap not installed or restore failed" },
+      },
+      {
+        name: "stash search",
+        summary: "Search across all stashed run artifacts",
+        synopsis:
+          "cairn stash search <query> [--mode keyword|semantic|hybrid] [--limit <n>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--mode",
+            type: "string",
+            description: "Search mode: keyword | semantic | hybrid",
+          },
+          {
+            name: "--limit",
+            type: "number",
+            default: 20,
+            description: "Max results",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "fcheap not installed" },
+      },
+      {
+        name: "investigate",
+        summary:
+          "Stash a run to fcheap and find code responsible for failures via vecgrep",
+        synopsis:
+          "cairn investigate <run-id> [--codebase <dir>] [--connect] [--query <q>] [--mode semantic|keyword|hybrid] [--limit <n>] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--codebase",
+            type: "string",
+            description: "Codebase directory to search with fcheap connect (vecgrep)",
+          },
+          {
+            name: "--connect",
+            type: "boolean",
+            default: false,
+            description: "Run fcheap connect to find code matches after stashing",
+          },
+          {
+            name: "--query",
+            type: "string",
+            description: "Override the auto-extracted search query for vecgrep",
+          },
+          {
+            name: "--mode",
+            type: "string",
+            description: "vecgrep search mode: semantic | keyword | hybrid",
+          },
+          {
+            name: "--limit",
+            type: "number",
+            default: 10,
+            description: "Max code matches to return",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "Explicit cairntrace.config.yml",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success (code matches returned or run stashed without --connect)",
+          "2": "fcheap/vecgrep not installed or run not found",
+        },
+      },
+      {
+        name: "audit",
+        summary:
+          "Run a spec with video, extract vidtrace evidence, and find code matches",
+        synopsis:
+          "cairn audit <spec> [--codebase <dir>] [--connect] [--speed <0.25-4.0>] [--slow-mo <ms>] [--mode semantic|keyword|hybrid] [--limit <n>] [--env <name>] [--cold-start] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--codebase",
+            type: "string",
+            description: "Codebase directory to search with fcheap connect (vecgrep)",
+          },
+          {
+            name: "--connect",
+            type: "boolean",
+            default: false,
+            description: "Run fcheap connect to find code matches after stashing",
+          },
+          {
+            name: "--speed",
+            type: "number",
+            description: "Video playback speed multiplier (0.25–4.0; <1 slows, >1 speeds up)",
+          },
+          {
+            name: "--slow-mo",
+            type: "number",
+            description: "Delay in ms between Playwright actions during recording (0–5000)",
+          },
+          {
+            name: "--mode",
+            type: "string",
+            description: "vecgrep search mode: semantic | keyword | hybrid",
+          },
+          {
+            name: "--limit",
+            type: "number",
+            default: 10,
+            description: "Max code matches to return",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Environment override",
+          },
+          {
+            name: "--cold-start",
+            type: "boolean",
+            default: false,
+            description: "Force fresh browser profile",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "Explicit cairntrace.config.yml",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success",
+          "2": "run failed or fcheap/vecgrep/vidtrace not installed",
+        },
+      },
+      {
+        name: "annotate",
+        summary:
+          "Pin a note and/or data to a code symbol via codemap annotate",
+        synopsis:
+          "cairn annotate <symbol> [--note <text>] [--data <json>] [--source <label>] [--from <sym>] [--to <sym>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--note",
+            type: "string",
+            description: "Free-form note text to attach to the symbol",
+          },
+          {
+            name: "--data",
+            type: "string",
+            description: "Opaque data payload (e.g. JSON from a cairntrace run)",
+          },
+          {
+            name: "--source",
+            type: "string",
+            default: "cairntrace",
+            description: "Annotation source label",
+          },
+          {
+            name: "--from",
+            type: "string",
+            description: "Annotate a call path from→to instead of a single symbol",
+          },
+          {
+            name: "--to",
+            type: "string",
+            description: "Call path end symbol (use with --from)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success",
+          "2": "codemap not installed or annotation failed",
+        },
+      },
+      {
+        name: "secrets",
+        summary: "Check TinyVault secrets provider status and available keys",
+        synopsis:
+          "cairn secrets [--project <name>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--project",
+            type: "string",
+            description: "TinyVault project name to list keys for",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "Explicit cairntrace.config.yml",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success",
+          "2": "tvault not installed or project not found",
+        },
+      },
     ],
     steps: [
       {
@@ -939,6 +1274,22 @@ export function buildExplain(): ExplainResult {
         themes: ["cairn", "graphite", "midnight", "contrast"],
         artifacts: ["report.html", "report.json"],
       },
+      capture: {
+        trace: {
+          default: "on-failure",
+          values: ["always", "on-failure", "never"],
+          summary:
+            "Playwright trace zip (screenshots + snapshots + sources); on-failure deletes the trace on passing runs",
+        },
+        video: {
+          default: "never",
+          values: ["always", "on-failure", "never"],
+          summary:
+            "Watchable .webm recording (Playwright only); opt in with always or on-failure for audit-grade recordings. Feed to vidtrace for timestamped evidence extraction.",
+          slowMo: "Delay in ms between Playwright actions (0–5000) so fast clicks are visible in the recording",
+          speed: "Playback speed multiplier (0.25–4.0); values < 1 slow down via ffmpeg atempo post-processing",
+        },
+      },
     },
   };
 }
@@ -977,6 +1328,16 @@ export function explainToMarkdown(e: ExplainResult): string {
     ...(e.config.report
       ? [
           `- reports: ${e.config.report.artifacts.join(", ")} (default theme: ${e.config.report.defaultTheme})`,
+        ]
+      : []),
+    ...(e.config.capture?.trace
+      ? [
+          `- trace capture: ${e.config.capture.trace.default} (${e.config.capture.trace.values.join(" | ")})`,
+        ]
+      : []),
+    ...(e.config.capture?.video
+      ? [
+          `- video capture: ${e.config.capture.video.default} (${e.config.capture.video.values.join(" | ")}); slowMo: ${e.config.capture.video.slowMo ?? "n/a"}, speed: ${e.config.capture.video.speed ?? "n/a"}`,
         ]
       : []),
     "",

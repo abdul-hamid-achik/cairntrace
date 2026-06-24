@@ -1,5 +1,7 @@
 import type { Spec } from "../schema/spec.v1";
 import type { RunResult } from "../schema/run.v1";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * Render the agent-neutral run context (plan §13 `agent_context.md`).
@@ -46,6 +48,7 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
       evidenceRefs.push(`- ${name}: ${path}`);
   }
   if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
+  if (result.artifacts.video) evidenceRefs.push(`- ${result.artifacts.video}`);
 
   const lines: string[] = [
     "# Cairntrace Run Context",
@@ -102,6 +105,20 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     );
   }
 
+  // Video hint — .webm files can be opened directly or fed to vidtrace for
+  // timestamped evidence extraction.
+  if (result.artifacts.video) {
+    lines.push(
+      "",
+      "## View the video",
+      "```bash",
+      `open ${result.runDir}/${result.artifacts.video}`,
+      "# or extract evidence with vidtrace:",
+      `vidtrace extract ${result.runDir}/${result.artifacts.video} --json`,
+      "```",
+    );
+  }
+
   lines.push(
     "",
     "## Suggested next steps",
@@ -113,6 +130,37 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     "- If steps failed because of UI drift rather than a real regression, run: cairn spec heal " +
       `${result.spec.path}`,
   );
+
+  // Code Matches — if `cairn investigate` produced an investigate.json,
+  // surface the file:line candidates here so agents can jump to the code.
+  const investigatePath = join(result.runDir, "investigate.json");
+  if (existsSync(investigatePath)) {
+    try {
+      const inv = JSON.parse(readFileSync(investigatePath, "utf-8"));
+      const matches: Array<{ file?: string; line?: number; score?: number; snippet?: string }> =
+        inv?.codeMatches ?? [];
+      if (matches.length > 0) {
+        lines.push(
+          "",
+          "## Code Matches",
+          "From `cairn investigate` — ranked `file:line` candidates responsible for the failure:",
+          "",
+        );
+        for (const m of matches) {
+          const score =
+            typeof m.score === "number" ? ` (score: ${m.score.toFixed(2)})` : "";
+          const snippet = m.snippet ? `: ${m.snippet}` : "";
+          lines.push(`- ${m.file ?? "(unknown)"}:${m.line ?? 0}${score}${snippet}`);
+        }
+        lines.push(
+          "",
+          "Annotate these symbols with: `codemap annotate <symbol> --source cairntrace --note \"<run-id> failed here\"`",
+        );
+      }
+    } catch {
+      // investigate.json is malformed or incomplete — skip silently
+    }
+  }
 
   return lines.join("\n") + "\n";
 }

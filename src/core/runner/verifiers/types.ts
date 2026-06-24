@@ -22,6 +22,8 @@ export interface VerifierContext {
   latestSnapshot?: string;
   /** Relative path to a trace artifact, if one was captured. */
   trace?: string;
+  /** Relative path to a video artifact, if one was captured. */
+  video?: string;
   /** Relative path to diagnostics captured after the latest failed step/outcome. */
   latestDiagnostics?: string;
   /** Absolute run directory for resolving relative artifact paths. */

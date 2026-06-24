@@ -146,6 +146,32 @@ export const RulesDocSchema = z
   .strict();
 export type RulesDoc = z.infer<typeof RulesDocSchema>;
 
+export const CapturePolicyDocSchema = z
+  .object({
+    /** Optional (added in 1.12): artifact capture policies for traces and video. */
+    trace: z
+      .object({
+        default: z.string(),
+        values: z.array(z.string()),
+        summary: z.string(),
+      })
+      .strict()
+      .optional(),
+    video: z
+      .object({
+        default: z.string(),
+        values: z.array(z.string()),
+        summary: z.string(),
+        slowMo: z.string().optional(),
+        speed: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+export type CapturePolicyDoc = z.infer<typeof CapturePolicyDocSchema>;
+
 export const ConfigDocSchema = z
   .object({
     artifactRoot: AbsolutePathSchema,
@@ -160,6 +186,8 @@ export const ConfigDocSchema = z
       })
       .strict()
       .optional(),
+    /** Optional (added in 1.12): capture policy overview for traces and video. */
+    capture: CapturePolicyDocSchema,
   })
   .strict();
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;
@@ -183,4 +211,5 @@ export const ExplainResultSchema = z
     config: ConfigDocSchema,
   })
   .strict();
+// NOTE: capture policy is nested under config.capture, not top-level.
 export type ExplainResult = z.infer<typeof ExplainResultSchema>;

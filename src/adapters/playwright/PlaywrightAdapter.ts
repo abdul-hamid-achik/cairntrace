@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -56,6 +57,30 @@ export interface PlaywrightAdapterOptions {
 type RequestMode = "api" | "cookie-bridge" | "subprocess-cookie-bridge";
 
 /**
+ * Build an ffmpeg `atempo` filter chain for arbitrary speed values.
+ * `atempo` only supports 0.5–2.0 per filter instance, so extreme values
+ * need chaining (e.g. speed=4 → atempo=2.0,atempo=2.0).
+ * Returns null when no audio adjustment is needed (speed=1).
+ */
+function buildAtempoChain(speed: number): string | null {
+  if (speed === 1) return null;
+  const filters: string[] = [];
+  let remaining = speed;
+  while (remaining > 2) {
+    filters.push("atempo=2.0");
+    remaining /= 2;
+  }
+  while (remaining < 0.5) {
+    filters.push("atempo=0.5");
+    remaining /= 0.5;
+  }
+  if (remaining !== 1) {
+    filters.push(`atempo=${remaining.toFixed(4)}`);
+  }
+  return filters.length > 0 ? filters.join(",") : null;
+}
+
+/**
  * Playwright BrowserBackend.
  *
  * Single-context, single-page model. Network and console events are buffered
@@ -75,6 +100,14 @@ export class PlaywrightAdapter implements BrowserBackend {
   private consoleLog: ConsoleEntry[] = [];
   /** Sticky viewport — re-applied when loadState rebuilds the page. */
   private viewport: { width: number; height: number } | undefined;
+  /** Set by startVideo() — enables recordVideo on the next context creation. */
+  private videoEnabled = false;
+  /** Temp directory where Playwright stores the raw .webm before saveAs. */
+  private videoTempDir: string | undefined;
+  /** Delay (ms) between browser actions during video recording. */
+  private videoSlowMo = 0;
+  /** Playback speed multiplier for ffmpeg post-processing (1 = original). */
+  private videoSpeed = 1;
 
   constructor(private readonly opts: PlaywrightAdapterOptions = {}) {}
 
@@ -356,6 +389,9 @@ export class PlaywrightAdapter implements BrowserBackend {
         storageState: path,
         acceptDownloads: true,
         ...(this.viewport ? { viewport: this.viewport } : {}),
+        ...(this.videoEnabled && this.videoTempDir
+          ? { recordVideo: { dir: this.videoTempDir } }
+          : {}),
       });
       this.page = await this.context.newPage();
       this.attachListeners(this.page);
@@ -386,18 +422,89 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
   }
 
-  async startTrace(): Promise<void> {
-    await this.ensureBrowser();
-    if (!this.context) {
-      this.context = await this.browser!.newContext({
-        ...(this.opts.initialStatePath
-          ? { storageState: this.opts.initialStatePath }
-          : {}),
-        acceptDownloads: true,
-      });
+  async startVideo(opts?: { slowMo?: number; speed?: number }): Promise<void> {
+    this.videoEnabled = true;
+    this.videoSlowMo = opts?.slowMo ?? 0;
+    this.videoSpeed = opts?.speed ?? 1;
+    // If a context already exists (unlikely at this point — the runner calls
+    // startVideo before any step), close it so the next ensureContext()
+    // creates one with recordVideo enabled.
+    if (this.context) {
+      try {
+        await this.context.close();
+      } catch {
+        // best-effort
+      }
+      this.context = undefined;
+      this.page = undefined;
     }
+    if (!this.videoTempDir) {
+      this.videoTempDir = await mkdtemp(join(tmpdir(), "cairntrace-video-"));
+    }
+  }
+
+  async stopVideo(path: string): Promise<{ ok: boolean; path: string }> {
+    if (!this.page || !this.videoEnabled) return { ok: false, path };
     try {
-      await this.context.tracing.start({
+      const video = this.page.video();
+      if (!video) return { ok: false, path };
+      // If speed is 1 (default), save directly — no ffmpeg needed.
+      if (this.videoSpeed === 1) {
+        await video.saveAs(path);
+        return { ok: true, path };
+      }
+      // Save to a temp file first, then re-encode with ffmpeg for speed.
+      const rawPath = join(this.videoTempDir ?? tmpdir(), "raw.webm");
+      await video.saveAs(rawPath);
+      const reencoded = await this.reencodeVideoSpeed(rawPath, path, this.videoSpeed);
+      // Clean up the raw file.
+      try { await rm(rawPath, { force: true }); } catch { /* best-effort */ }
+      return { ok: reencoded, path };
+    } catch {
+      return { ok: false, path };
+    }
+  }
+
+  /**
+   * Re-encode a video at a different playback speed using ffmpeg.
+   * Uses the `setpts` (video) + `atempo` (audio) filters.
+   * Returns true if ffmpeg succeeded and the output file exists.
+   */
+  private async reencodeVideoSpeed(
+    input: string,
+    output: string,
+    speed: number,
+  ): Promise<boolean> {
+    // setpts=PTS/speed for video; atempo=speed for audio.
+    // atempo only supports 0.5–2.0 per filter; chain for extreme values.
+    const videoFilter = `setpts=${(1 / speed).toFixed(4)}*PTS`;
+    const audioFilters = buildAtempoChain(speed);
+    const vf = audioFilters
+      ? `${videoFilter},${audioFilters}`
+      : videoFilter;
+    return new Promise((resolve) => {
+      const proc = spawn("ffmpeg", [
+        "-y", "-i", input,
+        "-vf", vf,
+        // Preserve audio sync by dropping/duplicating as needed.
+        ...(audioFilters ? ["-af", audioFilters] : []),
+        "-c:v", "libvpx-vp9", "-b:v", "1M",
+        ...(audioFilters ? ["-c:a", "libopus"] : ["-an"] as string[]),
+        output,
+      ], { stdio: ["ignore", "ignore", "ignore"] });
+      proc.on("error", () => resolve(false));
+      proc.on("exit", (code) => {
+        resolve(existsSync(output) && code === 0);
+      });
+    });
+  }
+
+  async startTrace(): Promise<void> {
+    // Use ensureContext so the video recordVideo option is included when
+    // startVideo was called first.
+    await this.ensureContext();
+    try {
+      await this.context!.tracing.start({
         screenshots: true,
         snapshots: true,
         sources: true,
@@ -426,6 +533,14 @@ export class PlaywrightAdapter implements BrowserBackend {
         this.context = undefined;
         this.page = undefined;
       }
+      // Clean up the video temp directory.
+      if (this.videoTempDir) {
+        await rm(this.videoTempDir, { recursive: true, force: true });
+        this.videoTempDir = undefined;
+      }
+      this.videoEnabled = false;
+      this.videoSlowMo = 0;
+      this.videoSpeed = 1;
       return success(Date.now() - start);
     } catch (e) {
       return failure((e as Error).message, Date.now() - start);
@@ -440,6 +555,9 @@ export class PlaywrightAdapter implements BrowserBackend {
     this.browser = await chromium.launch({
       headless: !this.opts.headed,
       ...(args.length > 0 ? { args } : {}),
+      // slowMo adds a delay between Playwright actions when video recording
+      // is enabled with slowMo > 0. This makes the video watchable.
+      ...(this.videoSlowMo > 0 ? { slowMo: this.videoSlowMo } : {}),
     });
     return this.browser;
   }
@@ -453,6 +571,9 @@ export class PlaywrightAdapter implements BrowserBackend {
         : {}),
       acceptDownloads: true,
       ...(this.viewport ? { viewport: this.viewport } : {}),
+      ...(this.videoEnabled && this.videoTempDir
+        ? { recordVideo: { dir: this.videoTempDir } }
+        : {}),
     });
     return this.context;
   }
@@ -870,6 +991,10 @@ export class PlaywrightAdapter implements BrowserBackend {
     this.browser = undefined;
     this.context = undefined;
     this.page = undefined;
+    // Note: we intentionally do NOT reset videoEnabled/videoTempDir here.
+    // resetBrowserRefs is called after a browser-kill watchdog fires; the
+    // next ensureContext() should still create a video-capable context, and
+    // the temp dir cleanup happens in close().
   }
 }
 

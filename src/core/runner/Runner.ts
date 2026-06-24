@@ -171,6 +171,29 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     await safe(async () => opts.backend.startTrace?.());
   }
 
+  // Start video recording. Same best-effort pattern as trace: backends
+  // without video support no-op. The default policy is `never` so videos are
+  // only recorded when the spec explicitly opts in.
+  if (policy.video !== "never") {
+    const videoConfig = spec.artifacts?.video;
+    await safe(async () =>
+      opts.backend.startVideo?.({
+        slowMo: videoConfig?.slowMo,
+        speed: videoConfig?.speed,
+      }),
+    );
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.video",
+      action: "start",
+      policy: policy.video,
+      ...(videoConfig?.slowMo ? { slowMo: videoConfig.slowMo } : {}),
+      ...(videoConfig?.speed && videoConfig.speed !== 1
+        ? { speed: videoConfig.speed }
+        : {}),
+    });
+  }
+
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
   // Resolves before checkpoint resume so the spec's own setup populates state
   // *after* the wipe.
@@ -550,6 +573,26 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
   }
 
+  // Stop video recording and save to videos/<backend>-video.webm.
+  const videoRelPath = `videos/${backendName}-video.webm`;
+  let videoPath: string | undefined;
+  if (policy.video !== "never") {
+    const videoResult = await safe(async () => {
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(writer.resolve("videos"), { recursive: true });
+      return opts.backend.stopVideo?.(writer.resolve(videoRelPath));
+    });
+    if (videoResult?.ok) {
+      videoPath = videoRelPath;
+    }
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.video",
+      action: "stop",
+      ...(videoPath ? { path: videoPath } : {}),
+    });
+  }
+
   // Evaluate outcomes.
   const failedStep = stepResults.find((s) => s.status === "failed")?.id;
   const ctx: VerifierContext = {
@@ -559,6 +602,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     latestSnapshot,
     latestDiagnostics,
     ...(tracePath ? { trace: tracePath } : {}),
+    ...(videoPath ? { video: videoPath } : {}),
     runDir,
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
@@ -598,6 +642,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
         ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
         ...(tracePath ? { trace: tracePath } : {}),
+        ...(videoPath ? { video: videoPath } : {}),
       },
       ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
       whyThisMatters: outcome.description,
@@ -644,6 +689,16 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     tracePath = undefined;
   }
 
+  // Same policy applies to video: a passing run with `on-failure` deletes
+  // the .webm to save disk (videos are larger than traces).
+  if (videoPath && status === "passed" && policy.video !== "always") {
+    await safe(async () => {
+      const { rm } = await import("node:fs/promises");
+      await rm(writer.resolve(videoRelPath), { force: true });
+    });
+    videoPath = undefined;
+  }
+
   const artifacts: RunArtifacts = {
     report: "report.html",
     reportJson: "report.json",
@@ -658,6 +713,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
+    ...(videoPath ? { video: videoPath } : {}),
   };
 
   const result: RunResult = {
@@ -716,12 +772,14 @@ function mergeCapturePolicy(spec: Spec): {
   screenshots: "always" | "on-failure" | "never";
   snapshots: "always" | "on-failure" | "never";
   trace: "always" | "on-failure" | "never";
+  video: "always" | "on-failure" | "never";
 } {
   const c = spec.artifacts?.capture ?? {};
   return {
     screenshots: c.screenshots ?? "on-failure",
     snapshots: c.snapshots ?? "always",
     trace: c.trace ?? "on-failure",
+    video: c.video ?? "never",
   };
 }
 

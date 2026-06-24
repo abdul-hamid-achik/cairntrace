@@ -479,6 +479,22 @@ export type Session = z.infer<typeof SessionSchema>;
 export const CapturePolicySchema = z.enum(["always", "on-failure", "never"]);
 export type CapturePolicy = z.infer<typeof CapturePolicySchema>;
 
+/**
+ * Video recording options. `slowMo` adds a delay (ms) between Playwright
+ * actions so the recording is watchable when steps execute quickly.
+ * `speed` (0.25–4) adjusts playback speed via ffmpeg post-processing;
+ * values < 1 slow down, values > 1 speed up. Defaults: slowMo=0, speed=1.
+ */
+export const VideoConfigSchema = z
+  .object({
+    /** Delay (ms) between browser actions during recording. */
+    slowMo: z.number().int().min(0).max(10_000).default(0),
+    /** Playback speed multiplier (0.25–4). Applied via ffmpeg post-processing. */
+    speed: z.number().min(0.25).max(4).default(1),
+  })
+  .strict();
+export type VideoConfig = z.infer<typeof VideoConfigSchema>;
+
 export const ArtifactsConfigSchema = z
   .object({
     capture: z
@@ -489,10 +505,13 @@ export const ArtifactsConfigSchema = z
         network: CapturePolicySchema.default("always"),
         storage: CapturePolicySchema.default("on-failure"),
         trace: CapturePolicySchema.default("on-failure"),
+        video: CapturePolicySchema.default("never"),
         agentContext: CapturePolicySchema.default("always"),
       })
       .strict()
       .partial(),
+    /** Video recording options. Ignored when capture.video is `never`. */
+    video: VideoConfigSchema.optional(),
   })
   .strict();
 export type ArtifactsConfig = z.infer<typeof ArtifactsConfigSchema>;
