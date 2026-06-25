@@ -1,3 +1,4 @@
+import { execa } from "execa";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -87,5 +88,152 @@ describe("expandSpecArgs", () => {
     await expect(
       expandSpecArgs(["_explicit.yml", "missing.yml"], dir),
     ).resolves.toEqual(["_explicit.yml", "missing.yml"]);
+  });
+});
+
+describe("services dry-run (end-to-end via CLI)", () => {
+  const binCairn = join(process.cwd(), "bin", "cairn");
+
+  async function runDryRun(
+    configYaml: string,
+    specYaml: string,
+    extraArgs: string[] = [],
+  ): Promise<{ stderr: string; exitCode: number | null }> {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-dryrun-"));
+    await writeFile(join(dir, "cairntrace.config.yml"), configYaml);
+    await writeFile(join(dir, "spec.yml"), specYaml);
+    const result = await execa(binCairn, [
+      "run",
+      join(dir, "spec.yml"),
+      "--config",
+      join(dir, "cairntrace.config.yml"),
+      "--mock",
+      "--services-dry-run",
+      "--no-web-server",
+      "--format",
+      "json",
+      ...extraArgs,
+    ]);
+    return { stderr: result.stderr, exitCode: result.exitCode ?? 0 };
+  }
+
+  it("prints dry-run plan with all services configured", async () => {
+    const { stderr } = await runDryRun(
+      `version: 1
+project: test-project
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+services:
+  docker:
+    command: "docker compose up -d"
+    reuseExisting: true
+  seed:
+    command: "yarn demo-import --mongo-include=queuelogs --mongo-include=eventlogs"
+    ttlSeconds: 3600
+  tmux:
+    session: graphite
+    windows:
+      - name: web-app
+        cwd: web-app
+        command: "yarn serve"
+        readyOn:
+          url: http://localhost:8080
+      - name: web-api
+        cwd: web-api
+        command: "yarn dev-watch"
+        readyOn:
+          text: "listening on"
+  teardown:
+    - "tmux kill-session -t graphite"
+    - "docker compose down"
+`,
+      `version: 1
+name: test_spec
+intent: Test dry-run.
+outcomes:
+  - id: out1
+    description: A text appears
+    verify: { text: "smoke" }
+steps:
+  - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
+  - wait: { text: smoke }
+`,
+    );
+
+    expect(stderr).toContain("services dry-run plan:");
+    expect(stderr).toContain("project: test-project");
+    expect(stderr).toContain("docker: docker compose up -d");
+    expect(stderr).toContain("reuseExisting: true");
+    expect(stderr).toContain("seed: yarn demo-import");
+    expect(stderr).toContain("ttlSeconds: 3600");
+    expect(stderr).toContain("tmux: session=graphite, 2 windows");
+    expect(stderr).toContain("teardown: 2 command(s)");
+  });
+
+  it("prints not-configured for missing phases", async () => {
+    const { stderr } = await runDryRun(
+      `version: 1
+project: minimal
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+services:
+  seed:
+    command: "echo seeded"
+    ttlSeconds: 0
+`,
+      `version: 1
+name: test_spec
+intent: Test dry-run.
+outcomes:
+  - id: out1
+    description: A text appears
+    verify: { text: "smoke" }
+steps:
+  - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
+  - wait: { text: smoke }
+`,
+    );
+
+    expect(stderr).toContain("services dry-run plan:");
+    expect(stderr).toContain("docker: (not configured)");
+    expect(stderr).toContain("seed: echo seeded");
+    expect(stderr).toContain("tmux: (not configured)");
+    expect(stderr).toContain("teardown: (none)");
+  });
+
+  it("truncates long seed commands in the plan output", async () => {
+    const longCmd = "yarn demo-import " + "--flag=value ".repeat(30);
+    const { stderr } = await runDryRun(
+      `version: 1
+project: long-cmd
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+services:
+  seed:
+    command: "${longCmd}"
+    ttlSeconds: 0
+`,
+      `version: 1
+name: test_spec
+intent: Test dry-run.
+outcomes:
+  - id: out1
+    description: A text appears
+    verify: { text: "smoke" }
+steps:
+  - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
+  - wait: { text: smoke }
+`,
+    );
+
+    expect(stderr).toContain("seed: ");
+    // The truncation should add "..." for commands over 80 chars
+    expect(stderr).toContain("...");
   });
 });

@@ -45,6 +45,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_investigate",
       "cairn_run",
       "cairn_secrets_status",
+      "cairn_services_status",
       "cairn_spec_heal",
       "cairn_spec_scaffold",
       "cairn_spec_verify",
@@ -346,6 +347,28 @@ steps:
     expect(sc.ok).toBe(false);
     expect(sc.errors.length).toBeGreaterThan(0);
     expect(r.isError).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_services_status returns a status result", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_services_status",
+      arguments: {},
+    });
+    const sc = r.structuredContent as {
+      hasServices: boolean;
+      project: string;
+      docker: { configured: boolean; running: boolean };
+      seed: { configured: boolean; expired: boolean };
+      tmux: { configured: boolean; sessionExists: boolean; windows: unknown[] };
+      errors: string[];
+    };
+    expect(sc).toHaveProperty("hasServices");
+    expect(sc).toHaveProperty("docker");
+    expect(sc).toHaveProperty("seed");
+    expect(sc).toHaveProperty("tmux");
+    expect(Array.isArray(sc.errors)).toBe(true);
     await c.close();
   });
 });

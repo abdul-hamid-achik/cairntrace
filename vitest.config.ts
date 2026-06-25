@@ -12,6 +12,7 @@ export default defineConfig({
         "src/core/runner/seedState.ts",
         "src/cli/cleanup.ts",
         "src/cli/commands/config/validate.ts",
+        "src/cli/commands/services/status.ts",
       ],
       thresholds: {
         statements: 80,

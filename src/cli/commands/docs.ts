@@ -818,6 +818,18 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Session Stash (fcheap)",
         body: "The `services.stash` block optionally saves the session artifacts (tmux pane captures, docker logs, seed output) to fcheap after teardown. Set `enabled: true` (default false) and choose which phases to capture with `capture: [tmux, docker, seed]` (default all). `tags: [services, graphite]` adds searchable tags. `autoStash: always` stashes on every stop; `on-failure` (default) only when the run has failures. This is best-effort — if fcheap isn't installed, stashing is silently skipped. Stashed artifacts persist beyond retention cleanup and are searchable via `cairn stash search`.",
       },
+      {
+        title: "Services Status",
+        body: "Run `cairn services status [--config <path>]` to check the current state of the services environment without starting anything. Reports: docker (running/stopped), seed (last run, TTL expiry, freshness), tmux (session exists, window pane tails). Supports `--format json|yaml|md`. Also available as the `cairn_services_status` MCP tool — agents can query the environment before deciding to run specs.",
+      },
+      {
+        title: "Dry-Run Mode",
+        body: "Pass `--services-dry-run` to `cairn run` to preview the services lifecycle plan without executing anything. Prints the docker/seed/tmux/teardown configuration to stderr, then returns a no-op handle. No docker commands run, no tmux session is created, no seed is executed. Use this to verify your `services:` block is correctly configured before a real run.",
+      },
+      {
+        title: "Lifecycle Events",
+        body: "The services lifecycle emits structured events via the `onEvent` callback. Each event has a `phase` (docker, seed, tmux, teardown, stash), an `action` (start, ready, skip, fail, done), a timestamp, and optional details (e.g., the seed freshness verdict, the tmux window name, the healthcheck result). These events are collected in the `ServicesHandle.events` array and can be written to `events.ndjson` by the runner for post-run diagnostics.",
+      },
     ],
     examples: [
       {
@@ -902,6 +914,16 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "validate config before running",
         language: "bash",
         code: "cairn config validate --config cairntrace.config.yml --json",
+      },
+      {
+        title: "check services environment status",
+        language: "bash",
+        code: "cairn services status --config cairntrace.config.yml --json",
+      },
+      {
+        title: "preview services lifecycle without executing",
+        language: "bash",
+        code: "cairn run flows/ --services-dry-run",
       },
     ],
     relatedTopics: ["backends", "secrets", "overview"],

@@ -88,6 +88,14 @@ export interface RunOptions {
   workerIndex?: number;
   /** Per-run token for `${run.token}`. Defaults to a generated token. */
   runToken?: string;
+  /** Services lifecycle events to prepend to events.ndjson (from startServices). */
+  servicesEvents?: Array<{
+    phase: string;
+    event: string;
+    message: string;
+    timestamp: string;
+    data?: Record<string, unknown>;
+  }>;
 }
 
 /**
@@ -146,6 +154,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   );
   await writer.ensureDirs();
   await writer.writeResolvedSpec(resolved);
+
+  // Prepend services lifecycle events (docker/seed/tmux/teardown) to
+  // events.ndjson so post-run diagnostics show the full environment lifecycle.
+  if (opts.servicesEvents && opts.servicesEvents.length > 0) {
+    await writer.appendServicesEvents(opts.servicesEvents);
+  }
 
   const startedAt = now.toISOString();
   await writer.appendEvent({

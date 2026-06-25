@@ -119,6 +119,13 @@ export function buildExplain(): ExplainResult {
               "Skip the config `services` block (docker/seed/tmux lifecycle) when you manage the environment yourself.",
           },
           {
+            name: "--services-dry-run",
+            type: "boolean",
+            default: false,
+            description:
+              "Preview the services lifecycle (docker/seed/tmux) without executing any commands. Prints the plan and returns a no-op handle.",
+          },
+          {
             name: "--format",
             type: "enum",
             values: ["json", "yaml", "md"],
@@ -897,6 +904,29 @@ export function buildExplain(): ExplainResult {
           "0": "success",
           "2": "tvault not installed or project not found",
         },
+      },
+      {
+        name: "services status",
+        summary:
+          "Check the status of the services environment (docker, seed freshness, tmux session)",
+        synopsis:
+          "cairn services status [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "error" },
       },
       {
         name: "config validate",

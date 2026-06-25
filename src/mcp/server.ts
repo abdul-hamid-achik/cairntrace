@@ -501,6 +501,55 @@ export function buildMcpServer(): McpServer {
   );
 
   server.registerTool(
+    "cairn_services_status",
+    {
+      title: "Check services environment status",
+      description:
+        "Check the status of the services environment configured in cairntrace.config.yml: " +
+        "docker containers, tmux session windows, and seed freshness. " +
+        "Returns a ServicesStatusResult with phase statuses and readiness.",
+      inputSchema: {
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+      },
+    },
+    async ({ config }) => {
+      try {
+        const { getServicesStatus } = await import(
+          "../cli/commands/services/status"
+        );
+        const result = await getServicesStatus({ config });
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.docker
+                ? result.tmux?.session
+                  ? `docker: ${
+                      result.docker.running ? "running" : "stopped"
+                    }\ntmux: session=${result.tmux.session} windows=${result.tmux.windows.length} healthy=${result.tmux.windows.every((w: { healthy?: boolean }) => w.healthy !== false)}`
+                  : `docker: ${result.docker.running ? "running" : "stopped"}`
+                : result.tmux?.session
+                  ? `tmux: session=${result.tmux.session} windows=${result.tmux.windows.length}`
+                  : "no services configured",
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
     "cairn_stash_save",
     {
       title: "Stash a run to fcheap",

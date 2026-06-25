@@ -37,7 +37,21 @@ export interface RunEvent {
     | "artifact.diagnostics"
     | "artifact.request"
     | "artifact.video"
-    | "viewport.set";
+    | "viewport.set"
+    | "services.docker.start"
+    | "services.docker.reuse"
+    | "services.docker.ready"
+    | "services.docker.fail"
+    | "services.docker.healthcheck"
+    | "services.seed.start"
+    | "services.seed.skip"
+    | "services.seed.complete"
+    | "services.seed.fail"
+    | "services.tmux.session-created"
+    | "services.tmux.reuse"
+    | "services.tmux.ready"
+    | "services.teardown.complete"
+    | "services.stash.complete";
   [extra: string]: unknown;
 }
 
@@ -168,6 +182,35 @@ export class ArtifactWriter {
       this.resolve("events.ndjson"),
       JSON.stringify(this.redactor.value(event)) + "\n",
     );
+  }
+
+  /**
+   * Write services lifecycle events (from startServices) to events.ndjson.
+   * Each ServicesEvent is mapped to a `services.<phase>.<event>` RunEvent.
+   */
+  async appendServicesEvents(
+    events: Array<{
+      phase: string;
+      event: string;
+      message: string;
+      timestamp: string;
+      data?: Record<string, unknown>;
+    }>,
+  ): Promise<void> {
+    for (const e of events) {
+      const type = `services.${e.phase}.${e.event}` as RunEvent["type"];
+      await appendFile(
+        this.resolve("events.ndjson"),
+        JSON.stringify(
+          this.redactor.value({
+            ts: e.timestamp,
+            type,
+            message: e.message,
+            ...(e.data ? { data: e.data } : {}),
+          }),
+        ) + "\n",
+      );
+    }
   }
 
   /** Used by the runner to write a resolved snapshot of the spec for this run. */

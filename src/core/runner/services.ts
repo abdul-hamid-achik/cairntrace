@@ -44,6 +44,8 @@ export interface StartServicesContext {
   secrets?: SecretsConfig;
   /** Optional narrator for interactive runs (stderr lifecycle lines). */
   log?: (message: string) => void;
+  /** Optional structured lifecycle event collector (for events.ndjson). */
+  onEvent?: (event: ServicesEvent) => void;
   /**
    * Invoked once, the instant a long-lived process is spawned (docker or tmux),
    * with a synchronous teardown bound to it. Lets the caller register
@@ -55,6 +57,8 @@ export interface StartServicesContext {
 export interface ServicesHandle {
   /** True when cairn started at least one phase (owns teardown). */
   startedByUs: boolean;
+  /** Structured lifecycle events collected during startServices(). */
+  events: ServicesEvent[];
   /** Run teardown commands (best-effort) then stop services. No-op when reused. */
   stop(): Promise<void>;
   /** Synchronous teardown for the signal path (Ctrl-C). No-op when reused. */
@@ -64,6 +68,20 @@ export interface ServicesHandle {
 /** Thrown for every services lifecycle failure; run.ts maps it to exit 2. */
 export class ServicesError extends Error {
   override name = "ServicesError";
+}
+
+/** A structured lifecycle event emitted at each phase boundary. */
+export interface ServicesEvent {
+  /** Phase: docker, seed, tmux, teardown, stash */
+  phase: "docker" | "seed" | "tmux" | "teardown" | "stash";
+  /** Event type: start, reuse, skip, ready, fail, healthcheck, complete. */
+  event: string;
+  /** Human-readable message. */
+  message: string;
+  /** ISO timestamp. */
+  timestamp: string;
+  /** Optional structured data (window name, exit code, etc.). */
+  data?: Record<string, unknown>;
 }
 
 const DEFAULT_DOCKER_TIMEOUT_MS = 120_000;
@@ -90,6 +108,24 @@ export async function startServices(
     teardownCommands: cfg.teardown ?? [],
     artifactsDir: undefined,
     artifacts: [],
+    events: [],
+  };
+
+  const emit = (
+    phase: ServicesEvent["phase"],
+    event: string,
+    message: string,
+    data?: Record<string, unknown>,
+  ) => {
+    const e: ServicesEvent = {
+      phase,
+      event,
+      message,
+      timestamp: new Date().toISOString(),
+      ...(data ? { data } : {}),
+    };
+    phases.events.push(e);
+    ctx.onEvent?.(e);
   };
 
   // If stash is configured, create a temp directory to capture artifacts into.
@@ -112,23 +148,25 @@ export async function startServices(
 
   // Phase 1: Docker
   if (cfg.docker) {
-    await startDocker(cfg.docker, ctx, coldStart, phases);
+    await startDocker(cfg.docker, ctx, coldStart, phases, emit);
   }
 
   // Phase 2: Conditional seed
   if (cfg.seed) {
-    await startSeed(cfg.seed, ctx);
+    await startSeed(cfg.seed, ctx, emit);
   }
 
   // Phase 3: tmux
   if (cfg.tmux) {
-    await startTmux(cfg.tmux, ctx, coldStart, phases);
+    await startTmux(cfg.tmux, ctx, coldStart, phases, emit);
   }
 
   const startedByUs = phases.dockerStarted || phases.tmuxSession !== undefined;
 
   return {
     startedByUs,
+    /** Structured lifecycle events collected during startServices. */
+    events: phases.events,
     stop: async () => {
       // Capture tmux pane output before tearing down (if stashing is enabled).
       if (phases.artifactsDir && phases.tmuxSession && cfg.stash?.enabled) {
@@ -187,7 +225,17 @@ interface PhaseState {
   /** Captured artifacts for fcheap stashing (tmux captures, docker logs, seed output). */
   artifactsDir: string | undefined;
   artifacts: { phase: string; file: string; label: string }[];
+  /** Structured lifecycle events collected during startServices. */
+  events: ServicesEvent[];
 }
+
+/** Emit callback type used by all phases. */
+type EmitFn = (
+  phase: ServicesEvent["phase"],
+  event: string,
+  message: string,
+  data?: Record<string, unknown>,
+) => void;
 
 /* ----- Phase 1: Docker ----- */
 
@@ -196,6 +244,7 @@ async function startDocker(
   ctx: StartServicesContext,
   coldStart: boolean,
   phases: PhaseState,
+  emit: EmitFn,
 ): Promise<void> {
   const reuse = cfg.reuseExisting ?? !coldStart;
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
@@ -207,13 +256,16 @@ async function startDocker(
     const running = await dockerComposeRunning(cwd);
     if (running) {
       ctx.log?.("services: docker — reusing running containers");
+      emit("docker", "reuse", "reusing running containers");
       return;
     }
   }
 
   ctx.log?.(`services: docker (${cfg.command})`);
+  emit("docker", "start", cfg.command);
   const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
   if (r.exitCode !== 0) {
+    emit("docker", "fail", `exit ${r.exitCode}`, { exitCode: r.exitCode });
     throw new ServicesError(
       `docker command failed (exit ${r.exitCode}): ${cfg.command}\n` +
         tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
@@ -223,8 +275,12 @@ async function startDocker(
   // Optional readiness check: a command whose exit 0 means infra is ready.
   if (cfg.readinessCheck) {
     ctx.log?.(`services: docker — readiness check (${cfg.readinessCheck})`);
+    emit("docker", "readiness-check", cfg.readinessCheck);
     const rc = await runShell(cfg.readinessCheck, { cwd, env });
     if (rc.exitCode !== 0) {
+      emit("docker", "fail", `readiness check exit ${rc.exitCode}`, {
+        exitCode: rc.exitCode,
+      });
       throw new ServicesError(
         `docker readiness check failed (exit ${rc.exitCode}): ${cfg.readinessCheck}\n` +
           tailText(`${rc.stdout}\n${rc.stderr}`, SHELL_TAIL_LINES),
@@ -234,6 +290,7 @@ async function startDocker(
 
   // Optional healthcheck: run once after readiness to verify infra health.
   if (cfg.healthcheck) {
+    emit("docker", "healthcheck", "running");
     const hcResult = await runHealthcheck(
       cfg.healthcheck,
       { cwd, env },
@@ -244,14 +301,26 @@ async function startDocker(
       ctx.log?.(
         `services: docker — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
       );
+      emit(
+        "docker",
+        "healthcheck",
+        `unhealthy after ${hcResult.consecutiveFailures} failures`,
+        {
+          healthy: false,
+          consecutiveFailures: hcResult.consecutiveFailures,
+        },
+      );
+    } else {
+      emit("docker", "healthcheck", "healthy");
     }
   }
 
   phases.dockerStarted = true;
   ctx.log?.("services: docker — ready");
+  emit("docker", "ready", "docker ready");
 }
 
-async function dockerComposeRunning(cwd: string): Promise<boolean> {
+export async function dockerComposeRunning(cwd: string): Promise<boolean> {
   try {
     const r = await execa("docker", ["compose", "ps", "--format", "json"], {
       cwd,
@@ -301,6 +370,7 @@ async function dockerComposeRunning(cwd: string): Promise<boolean> {
 async function startSeed(
   cfg: SeedConfig,
   ctx: StartServicesContext,
+  emit: EmitFn,
 ): Promise<void> {
   const store = new SeedStateStore();
   const state = await store.read(ctx.project);
@@ -308,6 +378,7 @@ async function startSeed(
 
   if (!check.shouldRun) {
     ctx.log?.(`services: seed — skipping (${check.reason})`);
+    emit("seed", "skip", check.reason);
     return;
   }
 
@@ -316,9 +387,11 @@ async function startSeed(
     const cwd = resolveCwd(cfg.cwd, ctx.configDir);
     const env = await resolveSeedEnv(cfg, ctx);
     ctx.log?.(`services: seed — freshness check (${cfg.freshnessCheck})`);
+    emit("seed", "freshness-check", cfg.freshnessCheck);
     const fr = await runShell(cfg.freshnessCheck, { cwd, env });
     if (fr.exitCode === 0) {
       ctx.log?.("services: seed — freshness check passed, skipping");
+      emit("seed", "skip", "freshness check passed");
       // Still record the freshness check as a successful "non-seed" so the
       // timestamp is updated for the next TTL window.
       await store.recordRun(ctx.project, cfg, 0);
@@ -327,6 +400,14 @@ async function startSeed(
     ctx.log?.(
       `services: seed — freshness check failed (exit ${fr.exitCode}), re-seeding`,
     );
+    emit(
+      "seed",
+      "freshness-check",
+      `failed (exit ${fr.exitCode}), re-seeding`,
+      {
+        exitCode: fr.exitCode,
+      },
+    );
   }
 
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
@@ -334,18 +415,21 @@ async function startSeed(
   const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
   ctx.log?.(`services: seed — running (${cfg.command})`);
+  emit("seed", "start", cfg.command);
   const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
 
   // Record the result regardless of exit code (failed seeds are tracked too).
   await store.recordRun(ctx.project, cfg, r.exitCode);
 
   if (r.exitCode !== 0) {
+    emit("seed", "fail", `exit ${r.exitCode}`, { exitCode: r.exitCode });
     throw new ServicesError(
       `seed command failed (exit ${r.exitCode}): ${cfg.command}\n` +
         tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
     );
   }
   ctx.log?.("services: seed — complete");
+  emit("seed", "complete", "seed complete");
 }
 
 /**
@@ -396,6 +480,7 @@ async function startTmux(
   ctx: StartServicesContext,
   coldStart: boolean,
   phases: PhaseState,
+  emit: EmitFn,
 ): Promise<void> {
   const reuse = cfg.reuseExisting ?? !coldStart;
 
@@ -404,6 +489,7 @@ async function startTmux(
     const exists = await tmuxSessionExists(cfg.session);
     if (exists) {
       ctx.log?.(`services: tmux — reusing session "${cfg.session}"`);
+      emit("tmux", "reuse", `reusing session "${cfg.session}"`);
       return;
     }
   }
@@ -419,6 +505,11 @@ async function startTmux(
   // Create the session with the first window, then add the rest.
   ctx.log?.(
     `services: tmux — creating session "${cfg.session}" with ${cfg.windows.length} windows`,
+  );
+  emit(
+    "tmux",
+    "start",
+    `creating session "${cfg.session}" with ${cfg.windows.length} windows`,
   );
   const firstWin = cfg.windows[0]!;
   const newSessionArgs = [
@@ -478,6 +569,7 @@ async function startTmux(
   }
 
   phases.tmuxSession = cfg.session;
+  emit("tmux", "session-created", `session "${cfg.session}" created`);
 
   // Wait for readiness on each window that has a readyOn config.
   const readyTimeoutMs = cfg.readyTimeoutMs ?? DEFAULT_TMUX_READY_MS;
@@ -485,12 +577,17 @@ async function startTmux(
   for (const win of cfg.windows) {
     if (!win.readyOn) continue;
     ctx.log?.(`services: tmux — waiting for "${win.name}" to be ready`);
+    emit("tmux", "ready-wait", `waiting for "${win.name}"`, {
+      window: win.name,
+    });
     await waitForTmuxWindow(cfg.session, win, deadline);
+    emit("tmux", "ready", `"${win.name}" ready`, { window: win.name });
   }
 
   // Run healthchecks for windows that have them.
   for (const win of cfg.windows) {
     if (!win.healthcheck) continue;
+    emit("tmux", "healthcheck", `checking ${win.name}`, { window: win.name });
     const winEnv = { ...process.env, ...cfg.env, ...win.env };
     const hcResult = await runHealthcheck(
       win.healthcheck,
@@ -502,10 +599,18 @@ async function startTmux(
       ctx.log?.(
         `services: tmux/${win.name} — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
       );
+      emit("tmux", "healthcheck", `unhealthy: ${win.name}`, {
+        window: win.name,
+        healthy: false,
+        consecutiveFailures: hcResult.consecutiveFailures,
+      });
+    } else {
+      emit("tmux", "healthcheck", `healthy: ${win.name}`, { window: win.name });
     }
   }
 
   ctx.log?.(`services: tmux — session "${cfg.session}" ready`);
+  emit("tmux", "ready", `session "${cfg.session}" ready`);
 }
 
 /**
@@ -575,7 +680,7 @@ async function setTmuxOption(
   });
 }
 
-async function tmuxSessionExists(session: string): Promise<boolean> {
+export async function tmuxSessionExists(session: string): Promise<boolean> {
   try {
     const r = await execa("tmux", ["has-session", "-t", session], {
       reject: false,
@@ -615,7 +720,7 @@ async function waitForTmuxWindow(
   }
 }
 
-async function captureTmuxPane(
+export async function captureTmuxPane(
   session: string,
   window: string,
 ): Promise<string> {
@@ -736,7 +841,7 @@ async function stashServicesArtifacts(
 
 /* ----- shared helpers ----- */
 
-function resolveCwd(cwd: string | undefined, configDir: string): string {
+export function resolveCwd(cwd: string | undefined, configDir: string): string {
   if (!cwd) return configDir;
   return isAbsolute(cwd) ? cwd : resolve(configDir, cwd);
 }

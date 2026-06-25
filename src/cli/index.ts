@@ -29,6 +29,7 @@ import { investigateCommand, auditCommand } from "./commands/investigate";
 import { annotateCommand } from "./commands/annotate";
 import { isTvaultAvailable, getTvaultKeys } from "./commands/secrets";
 import { configValidateCommand } from "./commands/config/validate";
+import { servicesStatusCommand } from "./commands/services/status";
 import { CAIRN_VERSION } from "./version";
 
 const program = new Command();
@@ -90,6 +91,11 @@ addFormatFlags(
     .option(
       "--no-services",
       "skip the config services lifecycle (docker/seed/tmux)",
+    )
+    .option(
+      "--services-dry-run",
+      "preview the services lifecycle plan without executing (prints what would happen)",
+      false,
     )
     .option(
       "--stash-on-failure",
@@ -504,5 +510,24 @@ addFormatFlags(
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
 ).action((opts) => configValidateCommand(opts));
+
+/* ----- services (status) ----- */
+
+const servicesCmd = program
+  .command("services")
+  .description("Cairntrace services lifecycle management");
+
+addFormatFlags(
+  servicesCmd
+    .command("status")
+    .description(
+      "Check the current state of the services environment (docker, seed, tmux)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option("--project <name>", "project name override (default: from config)"),
+).action((opts) => servicesStatusCommand(opts));
 
 await program.parseAsync(process.argv);

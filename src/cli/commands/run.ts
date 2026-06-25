@@ -52,6 +52,8 @@ export interface RunCommandOptions {
   webServer?: boolean;
   /** Commander sets this to false when `--no-services` is passed. */
   services?: boolean;
+  /** Preview the services lifecycle plan without executing. */
+  servicesDryRun?: boolean;
   /** Auto-stash failed runs to fcheap. */
   stashOnFailure?: boolean;
 }
@@ -154,8 +156,8 @@ export async function runCommand(
   try {
     exitCode =
       expandedSpecs.length === 1 && parallel === 1
-        ? await runSingle(expandedSpecs[0]!, opts)
-        : await runBatch(expandedSpecs, parallel, opts);
+        ? await runSingle(expandedSpecs[0]!, opts, svcHandle?.events)
+        : await runBatch(expandedSpecs, parallel, opts, svcHandle?.events);
   } finally {
     if (svcHandle) {
       await svcHandle.stop().catch(() => undefined);
@@ -273,6 +275,36 @@ async function maybeStartServices(
   const interactive = resolveFormat(opts, "md") === "md" && isInteractive();
   const project = ctx.config?.project ?? "cairntrace";
 
+  // --services-dry-run: print the plan, return a no-op handle, don't execute.
+  if (opts.servicesDryRun) {
+    const lines = [
+      "services dry-run plan:",
+      `  project: ${project}`,
+      `  cold-start: ${coldStart}`,
+      cfg.docker
+        ? `  docker: ${cfg.docker.command} (reuseExisting: ${cfg.docker.reuseExisting ?? !coldStart})`
+        : "  docker: (not configured)",
+      cfg.seed
+        ? `  seed: ${cfg.seed.command.slice(0, 80)}${
+            cfg.seed.command.length > 80 ? "..." : ""
+          } (ttlSeconds: ${cfg.seed.ttlSeconds ?? 0})`
+        : "  seed: (not configured)",
+      cfg.tmux
+        ? `  tmux: session=${cfg.tmux.session}, ${cfg.tmux.windows.length} windows (reuseExisting: ${cfg.tmux.reuseExisting ?? !coldStart})`
+        : "  tmux: (not configured)",
+      cfg.teardown
+        ? `  teardown: ${cfg.teardown.length} command(s)`
+        : "  teardown: (none)",
+    ];
+    process.stderr.write(lines.join("\n") + "\n");
+    return {
+      startedByUs: false,
+      events: [],
+      stop: async () => undefined,
+      terminateSync: () => undefined,
+    };
+  }
+
   return startServices(cfg, {
     configDir,
     coldStart,
@@ -290,6 +322,7 @@ async function maybeStartServices(
 async function runSingle(
   specPath: string,
   opts: RunCommandOptions,
+  servicesEvents?: ServicesHandle["events"],
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts));
@@ -312,6 +345,9 @@ async function runSingle(
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
       ...(Object.keys(vars).length > 0 ? { vars } : {}),
+      ...(servicesEvents !== undefined && servicesEvents.length > 0
+        ? { servicesEvents }
+        : {}),
       workerIndex: 0,
       ...(listener ? { listener } : {}),
     });
@@ -359,6 +395,7 @@ async function runBatch(
   specs: string[],
   parallel: number,
   opts: RunCommandOptions,
+  servicesEvents?: ServicesHandle["events"],
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const interactive = format === "md" && isInteractive();
@@ -400,6 +437,9 @@ async function runBatch(
           ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
           ...(opts.config !== undefined ? { configPath: opts.config } : {}),
           ...(Object.keys(vars).length > 0 ? { vars } : {}),
+          ...(servicesEvents !== undefined && servicesEvents.length > 0
+            ? { servicesEvents }
+            : {}),
           workerIndex,
         });
         if (interactive) {
