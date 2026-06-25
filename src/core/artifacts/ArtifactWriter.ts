@@ -35,6 +35,7 @@ export interface RunEvent {
     | "artifact.download"
     | "artifact.transform"
     | "artifact.diagnostics"
+    | "artifact.clip"
     | "artifact.request"
     | "artifact.eval"
     | "artifact.video"
