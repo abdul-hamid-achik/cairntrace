@@ -78,7 +78,7 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
       : "codemap not on $PATH (cairn annotate will be unavailable)",
   });
 
-  const tvault = await tryExec("tvault", ["version"]);
+  const tvault = await tryExec("tvault", ["--version"]);
   checks.push({
     name: "tvault",
     ok: tvault.ok,

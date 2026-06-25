@@ -13,7 +13,7 @@ import { execa } from "execa";
 
 export async function isTvaultAvailable(): Promise<boolean> {
   try {
-    const r = await execa("tvault", ["version"], { reject: false });
+    const r = await execa("tvault", ["--version"], { reject: false });
     return r.exitCode === 0;
   } catch {
     return false;

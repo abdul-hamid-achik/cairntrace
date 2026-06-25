@@ -1061,7 +1061,7 @@ export function buildMcpServer(): McpServer {
 
       let tvaultOk = false;
       try {
-        const r = await execa("tvault", ["version"], { reject: false });
+        const r = await execa("tvault", ["--version"], { reject: false });
         tvaultOk = r.exitCode === 0;
       } catch {
         // not installed
@@ -1148,7 +1148,7 @@ async function runDoctorChecks(): Promise<
     ["vecgrep", ["version"]],
     ["vidtrace", ["version"]],
     ["codemap", ["version"]],
-    ["tvault", ["version"]],
+    ["tvault", ["--version"]],
   ] as const) {
     try {
       const r = await execa(name, args, { reject: false });
