@@ -35,7 +35,7 @@ export function buildExplain(): ExplainResult {
         name: "run",
         summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--no-web-server] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--no-web-server] [--no-services] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -110,6 +110,13 @@ export function buildExplain(): ExplainResult {
             default: false,
             description:
               "Skip the config `webServer` block (build/boot/ready/teardown) when you manage the server yourself. Otherwise cairn starts it once for the whole invocation, reusing an already-running one unless --cold-start/CI forces a fresh boot.",
+          },
+          {
+            name: "--no-services",
+            type: "boolean",
+            default: false,
+            description:
+              "Skip the config `services` block (docker/seed/tmux lifecycle) when you manage the environment yourself.",
           },
           {
             name: "--format",
@@ -579,7 +586,10 @@ export function buildExplain(): ExplainResult {
             description: "Output format",
           },
         ],
-        exitCodes: { "0": "success", "2": "fcheap not installed or run not found" },
+        exitCodes: {
+          "0": "success",
+          "2": "fcheap not installed or run not found",
+        },
       },
       {
         name: "stash list",
@@ -620,12 +630,16 @@ export function buildExplain(): ExplainResult {
             description: "Output format",
           },
         ],
-        exitCodes: { "0": "success", "2": "fcheap not installed or stash not found" },
+        exitCodes: {
+          "0": "success",
+          "2": "fcheap not installed or stash not found",
+        },
       },
       {
         name: "stash restore",
         summary: "Restore a stash to a directory",
-        synopsis: "cairn stash restore <stash-id> [--to <dir>] [--format json|yaml|md]",
+        synopsis:
+          "cairn stash restore <stash-id> [--to <dir>] [--format json|yaml|md]",
         flags: [
           {
             name: "--to",
@@ -640,7 +654,10 @@ export function buildExplain(): ExplainResult {
             description: "Output format",
           },
         ],
-        exitCodes: { "0": "success", "2": "fcheap not installed or restore failed" },
+        exitCodes: {
+          "0": "success",
+          "2": "fcheap not installed or restore failed",
+        },
       },
       {
         name: "stash search",
@@ -679,13 +696,15 @@ export function buildExplain(): ExplainResult {
           {
             name: "--codebase",
             type: "string",
-            description: "Codebase directory to search with fcheap connect (vecgrep)",
+            description:
+              "Codebase directory to search with fcheap connect (vecgrep)",
           },
           {
             name: "--connect",
             type: "boolean",
             default: false,
-            description: "Run fcheap connect to find code matches after stashing",
+            description:
+              "Run fcheap connect to find code matches after stashing",
           },
           {
             name: "--query",
@@ -736,23 +755,27 @@ export function buildExplain(): ExplainResult {
           {
             name: "--codebase",
             type: "string",
-            description: "Codebase directory to search with fcheap connect (vecgrep)",
+            description:
+              "Codebase directory to search with fcheap connect (vecgrep)",
           },
           {
             name: "--connect",
             type: "boolean",
             default: false,
-            description: "Run fcheap connect to find code matches after stashing",
+            description:
+              "Run fcheap connect to find code matches after stashing",
           },
           {
             name: "--speed",
             type: "number",
-            description: "Video playback speed multiplier (0.25–4.0; <1 slows, >1 speeds up)",
+            description:
+              "Video playback speed multiplier (0.25–4.0; <1 slows, >1 speeds up)",
           },
           {
             name: "--slow-mo",
             type: "number",
-            description: "Delay in ms between Playwright actions during recording (0–5000)",
+            description:
+              "Delay in ms between Playwright actions during recording (0–5000)",
           },
           {
             name: "--mode",
@@ -801,8 +824,7 @@ export function buildExplain(): ExplainResult {
       },
       {
         name: "annotate",
-        summary:
-          "Pin a note and/or data to a code symbol via codemap annotate",
+        summary: "Pin a note and/or data to a code symbol via codemap annotate",
         synopsis:
           "cairn annotate <symbol> [--note <text>] [--data <json>] [--source <label>] [--from <sym>] [--to <sym>] [--format json|yaml|md]",
         flags: [
@@ -814,7 +836,8 @@ export function buildExplain(): ExplainResult {
           {
             name: "--data",
             type: "string",
-            description: "Opaque data payload (e.g. JSON from a cairntrace run)",
+            description:
+              "Opaque data payload (e.g. JSON from a cairntrace run)",
           },
           {
             name: "--source",
@@ -825,7 +848,8 @@ export function buildExplain(): ExplainResult {
           {
             name: "--from",
             type: "string",
-            description: "Annotate a call path from→to instead of a single symbol",
+            description:
+              "Annotate a call path from→to instead of a single symbol",
           },
           {
             name: "--to",
@@ -872,6 +896,32 @@ export function buildExplain(): ExplainResult {
         exitCodes: {
           "0": "success",
           "2": "tvault not installed or project not found",
+        },
+      },
+      {
+        name: "config validate",
+        summary:
+          "Validate a cairntrace.config.yml file (structure + cross-field rules)",
+        synopsis:
+          "cairn config validate [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "config is valid",
+          "4": "config is invalid (schema or cross-field violation)",
         },
       },
     ],
@@ -1286,8 +1336,10 @@ export function buildExplain(): ExplainResult {
           values: ["always", "on-failure", "never"],
           summary:
             "Watchable .webm recording (Playwright only); opt in with always or on-failure for audit-grade recordings. Feed to vidtrace for timestamped evidence extraction.",
-          slowMo: "Delay in ms between Playwright actions (0–5000) so fast clicks are visible in the recording",
-          speed: "Playback speed multiplier (0.25–4.0); values < 1 slow down via ffmpeg atempo post-processing",
+          slowMo:
+            "Delay in ms between Playwright actions (0–5000) so fast clicks are visible in the recording",
+          speed:
+            "Playback speed multiplier (0.25–4.0); values < 1 slow down via ffmpeg atempo post-processing",
         },
       },
     },

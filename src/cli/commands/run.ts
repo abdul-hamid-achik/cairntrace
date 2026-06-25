@@ -17,10 +17,11 @@ import {
   startWebServer,
   type WebServerHandle,
 } from "../../core/runner/webServer";
+import { startServices, type ServicesHandle } from "../../core/runner/services";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
-import { trackBackend, trackWebServer } from "../cleanup";
+import { trackBackend, trackServices, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { maybeAutoStash } from "./stash";
@@ -49,6 +50,8 @@ export interface RunCommandOptions {
   color?: boolean;
   /** Commander sets this to false when `--no-web-server` is passed. */
   webServer?: boolean;
+  /** Commander sets this to false when `--no-services` is passed. */
+  services?: boolean;
   /** Auto-stash failed runs to fcheap. */
   stashOnFailure?: boolean;
 }
@@ -124,6 +127,27 @@ export async function runCommand(
     process.exit(2);
   }
 
+  // Bring up the configured services environment (docker/seed/tmux), if any.
+  // Same scope as webServer — starts once before the pool, stops once after.
+  let svcHandle: ServicesHandle | undefined;
+  let untrackSvc: (() => void) | undefined;
+  try {
+    svcHandle = await maybeStartServices(
+      expandedSpecs[0]!,
+      opts,
+      (terminateSync) => {
+        untrackSvc = trackServices({ terminateSync });
+      },
+    );
+  } catch (e) {
+    untrackSvc?.();
+    // Tear down the web server too before exiting.
+    if (server) await server.stop().catch(() => undefined);
+    untrackServer?.();
+    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    process.exit(2);
+  }
+
   // Own the single process.exit so the finally can always tear the server down
   // (process.exit inside runSingle/runBatch would skip finally and orphan it).
   let exitCode: ExitCode = 2;
@@ -133,12 +157,18 @@ export async function runCommand(
         ? await runSingle(expandedSpecs[0]!, opts)
         : await runBatch(expandedSpecs, parallel, opts);
   } finally {
+    if (svcHandle) {
+      await svcHandle.stop().catch(() => undefined);
+      untrackSvc?.();
+    }
     if (server) {
       if (server.startedByUs && exitCode !== 0) {
         const logTail = server.tailLog(80).trim();
         if (logTail) {
           process.stderr.write(
-            `\ncairn run: web server log (last 80 lines${server.logPath ? `, full: ${server.logPath}` : ""}):\n${logTail}\n`,
+            `\ncairn run: web server log (last 80 lines${
+              server.logPath ? `, full: ${server.logPath}` : ""
+            }):\n${logTail}\n`,
           );
         }
       }
@@ -146,7 +176,6 @@ export async function runCommand(
       untrackServer?.();
     }
   }
-  process.exit(exitCode);
 }
 
 /**
@@ -208,6 +237,52 @@ async function maybeStartWebServer(
 
 function isTruthyEnv(value: string | undefined): boolean {
   return value !== undefined && value !== "" && value !== "0";
+}
+
+/**
+ * Resolve config for the invocation and, if it declares a `services` block,
+ * start the environment (docker/seed/tmux) once. Returns undefined when there
+ * is no config, no `services`, or `--no-services` was passed. Throws (fatal)
+ * on a boot failure.
+ */
+async function maybeStartServices(
+  firstSpec: string,
+  opts: RunCommandOptions,
+  onSpawn: (terminateSync: () => void) => void,
+): Promise<ServicesHandle | undefined> {
+  if (opts.services === false) return undefined; // --no-services
+
+  const firstSpecAbs = isAbsolutePath(firstSpec)
+    ? firstSpec
+    : resolve(process.cwd(), firstSpec);
+  if (!(await stat(firstSpecAbs).catch(() => undefined))) return undefined;
+
+  const vars = parseVarFlags(opts.var);
+  const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  });
+  const cfg = ctx.config?.services;
+  if (!cfg) return undefined;
+
+  const coldStart = opts.coldStart ?? isTruthyEnv(process.env.CI);
+  const configDir = ctx.configPath
+    ? dirname(ctx.configPath)
+    : dirname(firstSpecAbs);
+  const interactive = resolveFormat(opts, "md") === "md" && isInteractive();
+  const project = ctx.config?.project ?? "cairntrace";
+
+  return startServices(cfg, {
+    configDir,
+    coldStart,
+    project,
+    onSpawn,
+    ...(ctx.config?.secrets ? { secrets: ctx.config.secrets } : {}),
+    ...(interactive
+      ? { log: (m: string) => process.stderr.write(`${m}\n`) }
+      : {}),
+  });
 }
 
 /* ----- single-spec path (preserves v0.0 behavior) ----- */

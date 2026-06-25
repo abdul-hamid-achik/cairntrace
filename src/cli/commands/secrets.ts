@@ -31,31 +31,35 @@ export interface TvaultSecretsResult {
  * values are never returned to the caller). Used for `cairn secrets status`
  * and for pre-flight checks.
  */
-export async function getTvaultKeys(project: string): Promise<TvaultSecretsResult> {
+export async function getTvaultKeys(
+  project: string,
+): Promise<TvaultSecretsResult> {
   const ok = await isTvaultAvailable();
   if (!ok) {
     return {
       ok: false,
       keys: [],
-      error: "tvault not on $PATH. Install: brew install abdul-hamid-achik/tap/tvault",
+      error:
+        "tvault not on $PATH. Install: brew install abdul-hamid-achik/tap/tvault",
     };
   }
 
   try {
-    const r = await execa(
-      "tvault",
-      ["list", "--project", project, "--json"],
-      { reject: false, timeout: 10_000 },
-    );
+    const r = await execa("tvault", ["list", "--project", project, "--json"], {
+      reject: false,
+      timeout: 10_000,
+    });
     if (r.exitCode !== 0) {
       return { ok: false, keys: [], error: r.stderr || "tvault list failed" };
     }
     const data = JSON.parse(r.stdout);
     const keys = Array.isArray(data)
-      ? data.map((k: string | { key?: string }) =>
-          typeof k === "string" ? k : k.key ?? "",
-        ).filter(Boolean)
-      : data?.secrets?.map((s: { key: string }) => s.key) ?? [];
+      ? data
+          .map((k: string | { key?: string }) =>
+            typeof k === "string" ? k : (k.key ?? ""),
+          )
+          .filter(Boolean)
+      : (data?.secrets?.map((s: { key: string }) => s.key) ?? []);
     return { ok: true, keys };
   } catch (e) {
     return { ok: false, keys: [], error: (e as Error).message };
@@ -80,7 +84,8 @@ export async function getTvaultEnv(project: string): Promise<TvaultEnvResult> {
     return {
       ok: false,
       env: {},
-      error: "tvault not on $PATH. Install: brew install abdul-hamid-achik/tap/tvault",
+      error:
+        "tvault not on $PATH. Install: brew install abdul-hamid-achik/tap/tvault",
     };
   }
 

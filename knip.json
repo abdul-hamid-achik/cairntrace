@@ -1,0 +1,41 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/mcp/server.ts",
+    "bin/cairn"
+  ],
+  "project": ["src/**/*.ts", "bin/cairn"],
+  "ignore": [
+    "src/adapters/agent-browser/index.ts",
+    "src/core/schema/index.ts"
+  ],
+  "ignoreBinaries": [
+    "pgrep",
+    "ffmpeg",
+    "codemap",
+    "fcheap",
+    "vidtrace",
+    "tvault",
+    "tmux"
+  ],
+  "ignoreIssues": {
+    "src/core/schema/**": ["exports", "types"],
+    "src/cli/commands/secrets.ts": ["exports", "types"],
+    "src/cli/commands/stash.ts": ["exports", "types"],
+    "src/cli/commands/annotate.ts": ["exports", "types"],
+    "src/cli/commands/explain.ts": ["exports", "types"],
+    "src/cli/format.ts": ["exports"],
+    "src/core/artifacts/evidence.ts": ["exports"],
+    "src/core/artifacts/redaction.ts": ["exports"],
+    "src/core/artifacts/renderers/report.ts": ["exports", "types"],
+    "src/core/exporters/playwrightExporter.ts": ["exports"],
+    "src/core/runner/webServer.ts": ["exports"],
+    "src/core/runner/verifiers/types.ts": ["exports", "types"],
+    "src/core/parser/parseSpec.ts": ["exports", "types"],
+    "src/core/diff/runDiff.ts": ["exports", "types"],
+    "src/adapters/agent-browser/AgentBrowserAdapter.ts": ["exports"],
+    "src/adapters/agent-browser/commandBuilder.ts": ["exports"]
+  },
+  "ignoreExportsUsedInFile": true,
+  "exclude": ["unlisted"]
+}

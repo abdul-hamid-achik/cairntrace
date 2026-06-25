@@ -25,15 +25,10 @@ import {
   stashSaveCommand,
   stashSearchCommand,
 } from "./commands/stash";
-import {
-  investigateCommand,
-  auditCommand,
-} from "./commands/investigate";
+import { investigateCommand, auditCommand } from "./commands/investigate";
 import { annotateCommand } from "./commands/annotate";
-import {
-  isTvaultAvailable,
-  getTvaultKeys,
-} from "./commands/secrets";
+import { isTvaultAvailable, getTvaultKeys } from "./commands/secrets";
+import { configValidateCommand } from "./commands/config/validate";
 import { CAIRN_VERSION } from "./version";
 
 const program = new Command();
@@ -91,6 +86,10 @@ addFormatFlags(
     .option(
       "--no-web-server",
       "skip the config webServer lifecycle (manage the server yourself)",
+    )
+    .option(
+      "--no-services",
+      "skip the config services lifecycle (docker/seed/tmux)",
     )
     .option(
       "--stash-on-failure",
@@ -338,10 +337,7 @@ addFormatFlags(
   stash
     .command("restore <stash-id>")
     .description("Restore a stash to a directory")
-    .option(
-      "--to <dir>",
-      "target directory (default: a fresh temp dir)",
-    ),
+    .option("--to <dir>", "target directory (default: a fresh temp dir)"),
 ).action((stashId: string, opts) => stashRestoreCommand(stashId, opts));
 
 addFormatFlags(
@@ -402,10 +398,7 @@ addFormatFlags(
       "run fcheap connect to find code matches after stashing",
       false,
     )
-    .option(
-      "--mode <mode>",
-      "vecgrep search mode: semantic | keyword | hybrid",
-    )
+    .option("--mode <mode>", "vecgrep search mode: semantic | keyword | hybrid")
     .option("--limit <n>", "max code matches to return", "10")
     .option("--env <name>", "environment override")
     .option("--cold-start", "force fresh browser profile")
@@ -424,26 +417,17 @@ addFormatFlags(
     .description(
       "Pin a note and/or data to a code symbol via codemap (codemap annotate wrapper)",
     )
-    .option(
-      "--note <text>",
-      "free-form note text to attach to the symbol",
-    )
+    .option("--note <text>", "free-form note text to attach to the symbol")
     .option(
       "--data <json>",
       "opaque data payload (e.g. JSON from a cairntrace run)",
     )
-    .option(
-      "--source <label>",
-      "annotation source label (default: cairntrace)",
-    )
+    .option("--source <label>", "annotation source label (default: cairntrace)")
     .option(
       "--from <symbol>",
       "annotate a call path from→to instead of a single symbol",
     )
-    .option(
-      "--to <symbol>",
-      "call path end symbol (use with --from)",
-    ),
+    .option("--to <symbol>", "call path end symbol (use with --from)"),
 ).action((symbol: string, opts) => annotateCommand(symbol, opts));
 
 /* ----- secrets (TinyVault integration) ----- */
@@ -502,5 +486,23 @@ addFormatFlags(
   process.stdout.write(emit(format, result, () => md));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 });
+
+/* ----- config (validation) ----- */
+
+const configCmd = program
+  .command("config")
+  .description("Cairntrace config management");
+
+addFormatFlags(
+  configCmd
+    .command("validate")
+    .description(
+      "Validate a cairntrace.config.yml file (structure + cross-field rules)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((opts) => configValidateCommand(opts));
 
 await program.parseAsync(process.argv);

@@ -306,7 +306,21 @@ export const ScriptVerifierSchema = z
     script: z
       .object({
         runtime: z.enum(["browser", "node"]).optional(),
-        fixtures: z.record(z.string(), z.string()).optional(),
+        // 1.13.0: fixture values are handed to verifiers as strings, but spec authors routinely
+        // supply numbers/booleans — most often via ${var} interpolation (e.g. an expected row
+        // count of 0). Accept those scalars and stringify them instead of failing the whole script
+        // verifier. Because ScriptVerifierSchema is one member of the strict VerifierSchema union,
+        // a single bad fixture value used to surface as a misleading "Unrecognized key(s): 'script'"
+        // (every sibling member rejecting the unmatched `script` key), which read as "the script
+        // verifier isn't supported". Objects/arrays are still rejected as genuine errors.
+        fixtures: z
+          .record(
+            z.string(),
+            z
+              .union([z.string(), z.number(), z.boolean()])
+              .transform((v) => String(v)),
+          )
+          .optional(),
         run: z.string().min(1).optional(),
         file: z.string().min(1).optional(),
       })

@@ -134,17 +134,20 @@ export async function stashSaveCommand(
   });
 
   const runDir = await resolveRunRef(runRef, root);
-  const runId = runRef === "latest" || runRef === "previous"
-    ? runDir.split("/").pop() ?? runRef
-    : runRef;
+  const runId =
+    runRef === "latest" || runRef === "previous"
+      ? (runDir.split("/").pop() ?? runRef)
+      : runRef;
 
   // Derive spec name from run.json if available for a default tag.
   const tags = opts.tag ?? [];
   const tool = opts.tool ?? "cairntrace";
 
   const args = [
-    "save", runDir,
-    "--tool", tool,
+    "save",
+    runDir,
+    "--tool",
+    tool,
     ...tags.flatMap((t) => ["--tag", t]),
   ];
   if (opts.source) {
@@ -167,7 +170,9 @@ export async function stashSaveCommand(
     ...(opts.source ? { source: opts.source } : {}),
   };
 
-  process.stdout.write(emit(format, result, () => stashSaveMarkdown(result, runId)));
+  process.stdout.write(
+    emit(format, result, () => stashSaveMarkdown(result, runId)),
+  );
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 }
 
@@ -197,9 +202,7 @@ export interface StashListOptions {
 /**
  * `cairn stash list` — list stashes (optionally filtered by tag/tool).
  */
-export async function stashListCommand(
-  opts: StashListOptions,
-): Promise<void> {
+export async function stashListCommand(opts: StashListOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
   const args = ["list"];
   if (opts.tag) args.push("--tag", opts.tag);
@@ -227,7 +230,9 @@ function stashListMarkdown(items: StashListItem[]): string {
     ...items.map((s) => {
       const tags = s.tags?.length ? ` [${s.tags.join(", ")}]` : "";
       const tool = s.tool ? ` (${s.tool})` : "";
-      const size = s.sizeBytes ? ` — ${(s.sizeBytes / 1024).toFixed(1)} KB` : "";
+      const size = s.sizeBytes
+        ? ` — ${(s.sizeBytes / 1024).toFixed(1)} KB`
+        : "";
       return `- ${s.id}${tool}${tags}${size}`;
     }),
   ];
@@ -312,7 +317,9 @@ export async function stashRestoreCommand(
   const r = await runFcheap(args, { json: true });
 
   if (!r.ok) {
-    process.stderr.write(`cairn stash restore: ${r.stderr || "fcheap failed"}\n`);
+    process.stderr.write(
+      `cairn stash restore: ${r.stderr || "fcheap failed"}\n`,
+    );
     process.exit(2);
   }
 
@@ -322,11 +329,16 @@ export async function stashRestoreCommand(
     restoredTo: data?.path ?? opts.to ?? "(unknown)",
   };
 
-  process.stdout.write(emit(format, result, () => stashRestoreMarkdown(result)));
+  process.stdout.write(
+    emit(format, result, () => stashRestoreMarkdown(result)),
+  );
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 }
 
-function stashRestoreMarkdown(r: { stashId: string; restoredTo: string }): string {
+function stashRestoreMarkdown(r: {
+  stashId: string;
+  restoredTo: string;
+}): string {
   return [
     `# Restored stash ${r.stashId}`,
     "",
@@ -360,7 +372,9 @@ export async function stashSearchCommand(
   const r = await runFcheap(args, { json: true });
 
   if (!r.ok) {
-    process.stderr.write(`cairn stash search: ${r.stderr || "fcheap failed"}\n`);
+    process.stderr.write(
+      `cairn stash search: ${r.stderr || "fcheap failed"}\n`,
+    );
     process.exit(2);
   }
 
@@ -390,6 +404,40 @@ function stashSearchMarkdown(r: {
   return lines.join("\n");
 }
 
+/* ----- reusable stash helper (used by services lifecycle) ----- */
+
+/**
+ * Stash a directory to the fcheap vault. Best-effort: returns a result
+ * object instead of throwing. Used by the services lifecycle to persist
+ * session artifacts (tmux captures, docker logs, seed output) after a run.
+ */
+export async function stashDirectory(
+  dir: string,
+  opts: {
+    name?: string;
+    tool?: string;
+    tags?: string[];
+    source?: string;
+  } = {},
+): Promise<{ ok: boolean; stashId?: string; error?: string }> {
+  const tool = opts.tool ?? "cairntrace";
+  const args = [
+    "save",
+    dir,
+    "--tool",
+    tool,
+    ...(opts.name ? ["--name", opts.name] : []),
+    ...(opts.tags ?? []).flatMap((t) => ["--tag", t]),
+    ...(opts.source ? ["--source", opts.source] : []),
+  ];
+  const r = await runFcheap(args, { json: true });
+  if (!r.ok) {
+    return { ok: false, error: r.stderr || "fcheap failed" };
+  }
+  const data = parseJson<StashSaveResult>(r.stdout);
+  return { ok: true, stashId: data?.stashId ?? data?.path };
+}
+
 /* ----- auto-stash (called from Runner/run.ts) ----- */
 
 /**
@@ -408,20 +456,18 @@ export async function maybeAutoStash(
 ): Promise<void> {
   const shouldStash =
     opts.stashOnFailure ||
-    (opts.configStash?.enabled &&
-      opts.configStash.autoStash === "on-failure");
+    (opts.configStash?.enabled && opts.configStash.autoStash === "on-failure");
 
   if (!shouldStash) return;
 
-  const tags = [
-    specName,
-    ...(opts.configStash?.tags ?? []),
-  ];
+  const tags = [specName, ...(opts.configStash?.tags ?? [])];
 
   const r = await runFcheap(
     [
-      "save", runDir,
-      "--tool", "cairntrace",
+      "save",
+      runDir,
+      "--tool",
+      "cairntrace",
       ...tags.flatMap((t) => ["--tag", t]),
     ],
     { json: true },
@@ -433,9 +479,7 @@ export async function maybeAutoStash(
       `cairn: auto-stashed run ${runId} → ${data?.stashId ?? "(unknown)"}\n`,
     );
   } else {
-    process.stderr.write(
-      `cairn: auto-stash failed (non-fatal): ${r.stderr}\n`,
-    );
+    process.stderr.write(`cairn: auto-stash failed (non-fatal): ${r.stderr}\n`);
   }
 }
 

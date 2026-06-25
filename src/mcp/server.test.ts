@@ -241,9 +241,8 @@ steps:
   it("cairn_doctor includes fcheap in health checks", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_doctor", arguments: {} });
-    const checks = (
-      r.structuredContent as { checks: Array<{ name: string }> }
-    ).checks;
+    const checks = (r.structuredContent as { checks: Array<{ name: string }> })
+      .checks;
     const names = checks.map((ch) => ch.name);
     expect(names).toContain("fcheap");
     expect(names).toContain("vecgrep");
@@ -306,9 +305,8 @@ steps:
   it("cairn_doctor includes codemap and tvault in health checks", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_doctor", arguments: {} });
-    const checks = (
-      r.structuredContent as { checks: Array<{ name: string }> }
-    ).checks;
+    const checks = (r.structuredContent as { checks: Array<{ name: string }> })
+      .checks;
     const names = checks.map((ch) => ch.name);
     expect(names).toContain("codemap");
     expect(names).toContain("tvault");

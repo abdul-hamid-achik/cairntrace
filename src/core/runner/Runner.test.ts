@@ -1544,7 +1544,10 @@ steps:
     const backend = new VideoMockBackend();
     const result = await runSpec({ specPath, backend, artifactRoot });
     expect(result.status).toBe("passed");
-    expect(backend.lastVideoOpts).toEqual({ slowMo: undefined, speed: undefined });
+    expect(backend.lastVideoOpts).toEqual({
+      slowMo: undefined,
+      speed: undefined,
+    });
   });
 });
 
@@ -1604,14 +1607,21 @@ steps:
         runId: result.runId,
         runDir: result.runDir,
         codeMatches: [
-          { file: "src/auth/login.ts", line: 42, score: 0.89, snippet: "handleSubmit" },
+          {
+            file: "src/auth/login.ts",
+            line: 42,
+            score: 0.89,
+            snippet: "handleSubmit",
+          },
           { file: "src/router.ts", line: 15, score: 0.72 },
         ],
       }),
     );
 
     // Re-render agent_context.md by calling the function directly
-    const { renderAgentContext } = await import("../../core/artifacts/agentContext");
+    const { renderAgentContext } = await import(
+      "../../core/artifacts/agentContext"
+    );
     const { parseSpec } = await import("../../core/parser/parseSpec");
     const parsed = await parseSpec(specPath);
     const ctx = renderAgentContext(parsed.spec, result);

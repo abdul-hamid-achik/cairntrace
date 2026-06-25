@@ -3,7 +3,12 @@ import type {
   BrowserBackend,
   InvocationResult,
 } from "../adapters/browserBackend";
-import { closeTrackedBackends, trackBackend } from "./cleanup";
+import {
+  closeTrackedBackends,
+  trackBackend,
+  trackServices,
+  trackWebServer,
+} from "./cleanup";
 
 function fakeBackend(overrides: Partial<BrowserBackend> = {}): BrowserBackend {
   const ok: InvocationResult = {
@@ -92,5 +97,148 @@ describe("cleanup registry", () => {
     closeTrackedBackends();
 
     expect(calls).toEqual(["close", "thrower"]);
+  });
+});
+
+describe("cleanup registry — webServer tracking", () => {
+  it("terminates tracked webServers synchronously", () => {
+    const calls: string[] = [];
+    trackWebServer({
+      terminateSync: () => {
+        calls.push("webServer-terminateSync");
+      },
+    });
+    closeTrackedBackends();
+
+    expect(calls).toEqual(["webServer-terminateSync"]);
+  });
+
+  it("untracked webServers are not touched", () => {
+    const calls: string[] = [];
+    const untrack = trackWebServer({
+      terminateSync: () => {
+        calls.push("webServer-terminateSync");
+      },
+    });
+    untrack();
+    closeTrackedBackends();
+
+    expect(calls).toEqual([]);
+  });
+
+  it("survives a throwing webServer teardown", () => {
+    const calls: string[] = [];
+    trackWebServer({
+      terminateSync: () => {
+        calls.push("webServer-thrower");
+        throw new Error("webServer teardown blew up");
+      },
+    });
+    // Must not throw
+    closeTrackedBackends();
+
+    expect(calls).toEqual(["webServer-thrower"]);
+  });
+});
+
+describe("cleanup registry — services tracking", () => {
+  it("terminates tracked services synchronously", () => {
+    const calls: string[] = [];
+    trackServices({
+      terminateSync: () => {
+        calls.push("services-terminateSync");
+      },
+    });
+    closeTrackedBackends();
+
+    expect(calls).toEqual(["services-terminateSync"]);
+  });
+
+  it("untracked services are not touched", () => {
+    const calls: string[] = [];
+    const untrack = trackServices({
+      terminateSync: () => {
+        calls.push("services-terminateSync");
+      },
+    });
+    untrack();
+    closeTrackedBackends();
+
+    expect(calls).toEqual([]);
+  });
+
+  it("survives a throwing services teardown", () => {
+    const calls: string[] = [];
+    trackServices({
+      terminateSync: () => {
+        calls.push("services-thrower");
+        throw new Error("services teardown blew up");
+      },
+    });
+    // Must not throw
+    closeTrackedBackends();
+
+    expect(calls).toEqual(["services-thrower"]);
+  });
+});
+
+describe("cleanup registry — mixed tracking (backend + webServer + services)", () => {
+  it("tears down backends, webServers, and services in order", () => {
+    const calls: string[] = [];
+
+    trackBackend(
+      fakeBackend({
+        terminateSync: () => {
+          calls.push("backend");
+        },
+      }),
+    );
+    trackWebServer({
+      terminateSync: () => {
+        calls.push("webServer");
+      },
+    });
+    trackServices({
+      terminateSync: () => {
+        calls.push("services");
+      },
+    });
+
+    closeTrackedBackends();
+
+    // Backends are cleaned up first, then webServers, then services
+    expect(calls).toEqual(["backend", "webServer", "services"]);
+  });
+
+  it("clears all registries after closeTrackedBackends", () => {
+    let backendCalls = 0;
+    let webServerCalls = 0;
+    let servicesCalls = 0;
+
+    trackBackend(
+      fakeBackend({
+        terminateSync: () => {
+          backendCalls++;
+        },
+      }),
+    );
+    trackWebServer({
+      terminateSync: () => {
+        webServerCalls++;
+      },
+    });
+    trackServices({
+      terminateSync: () => {
+        servicesCalls++;
+      },
+    });
+
+    closeTrackedBackends();
+    // Second call should be a no-op — registries are cleared
+    closeTrackedBackends();
+
+    expect(backendCalls).toBe(1);
+    expect(webServerCalls).toBe(1);
+    expect(servicesCalls).toBe(1);
   });
 });

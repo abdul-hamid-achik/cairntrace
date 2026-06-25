@@ -456,9 +456,17 @@ export class PlaywrightAdapter implements BrowserBackend {
       // Save to a temp file first, then re-encode with ffmpeg for speed.
       const rawPath = join(this.videoTempDir ?? tmpdir(), "raw.webm");
       await video.saveAs(rawPath);
-      const reencoded = await this.reencodeVideoSpeed(rawPath, path, this.videoSpeed);
+      const reencoded = await this.reencodeVideoSpeed(
+        rawPath,
+        path,
+        this.videoSpeed,
+      );
       // Clean up the raw file.
-      try { await rm(rawPath, { force: true }); } catch { /* best-effort */ }
+      try {
+        await rm(rawPath, { force: true });
+      } catch {
+        /* best-effort */
+      }
       return { ok: reencoded, path };
     } catch {
       return { ok: false, path };
@@ -479,19 +487,27 @@ export class PlaywrightAdapter implements BrowserBackend {
     // atempo only supports 0.5–2.0 per filter; chain for extreme values.
     const videoFilter = `setpts=${(1 / speed).toFixed(4)}*PTS`;
     const audioFilters = buildAtempoChain(speed);
-    const vf = audioFilters
-      ? `${videoFilter},${audioFilters}`
-      : videoFilter;
+    const vf = audioFilters ? `${videoFilter},${audioFilters}` : videoFilter;
     return new Promise((resolve) => {
-      const proc = spawn("ffmpeg", [
-        "-y", "-i", input,
-        "-vf", vf,
-        // Preserve audio sync by dropping/duplicating as needed.
-        ...(audioFilters ? ["-af", audioFilters] : []),
-        "-c:v", "libvpx-vp9", "-b:v", "1M",
-        ...(audioFilters ? ["-c:a", "libopus"] : ["-an"] as string[]),
-        output,
-      ], { stdio: ["ignore", "ignore", "ignore"] });
+      const proc = spawn(
+        "ffmpeg",
+        [
+          "-y",
+          "-i",
+          input,
+          "-vf",
+          vf,
+          // Preserve audio sync by dropping/duplicating as needed.
+          ...(audioFilters ? ["-af", audioFilters] : []),
+          "-c:v",
+          "libvpx-vp9",
+          "-b:v",
+          "1M",
+          ...(audioFilters ? ["-c:a", "libopus"] : (["-an"] as string[])),
+          output,
+        ],
+        { stdio: ["ignore", "ignore", "ignore"] },
+      );
       proc.on("error", () => resolve(false));
       proc.on("exit", (code) => {
         resolve(existsSync(output) && code === 0);

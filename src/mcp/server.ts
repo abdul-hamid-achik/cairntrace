@@ -8,9 +8,7 @@ import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapt
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
-import {
-  isFcheapAvailable,
-} from "../cli/commands/stash";
+import { isFcheapAvailable } from "../cli/commands/stash";
 import {
   resolveArtifactRoot,
   resolveRunRef,
@@ -465,17 +463,12 @@ export function buildMcpServer(): McpServer {
         "Save a run directory to the fcheap stash vault for persistence, " +
         "sharing, and cross-run search. Requires fcheap on $PATH.",
       inputSchema: {
-        runId: z
-          .string()
-          .describe("Run id, 'latest', or 'previous'"),
+        runId: z.string().describe("Run id, 'latest', or 'previous'"),
         artifactRoot: z
           .string()
           .optional()
           .describe("Override run artifact root directory"),
-        tag: z
-          .array(z.string())
-          .optional()
-          .describe("Tags for this stash"),
+        tag: z.array(z.string()).optional().describe("Tags for this stash"),
       },
     },
     async ({ runId, artifactRoot, tag }) => {
@@ -496,12 +489,18 @@ export function buildMcpServer(): McpServer {
       );
       const runDir = await resolveRunRef(runId, root);
       // Capture stdout from the stash command by calling the function directly
-      const r = await execa("fcheap", [
-        "save", runDir,
-        "--tool", "cairntrace",
-        ...((tag ?? []).flatMap((t) => ["--tag", t])),
-        "--json",
-      ], { reject: false, timeout: 60_000 });
+      const r = await execa(
+        "fcheap",
+        [
+          "save",
+          runDir,
+          "--tool",
+          "cairntrace",
+          ...(tag ?? []).flatMap((t) => ["--tag", t]),
+          "--json",
+        ],
+        { reject: false, timeout: 60_000 },
+      );
       if (r.exitCode !== 0) {
         return {
           content: [{ type: "text", text: `fcheap save failed: ${r.stderr}` }],
@@ -573,7 +572,9 @@ export function buildMcpServer(): McpServer {
                 ? stashes
                     .map(
                       (s: { id: string; tool?: string; tags?: string[] }) =>
-                        `- ${s.id}${s.tool ? ` (${s.tool})` : ""}${s.tags?.length ? ` [${s.tags.join(", ")}]` : ""}`,
+                        `- ${s.id}${s.tool ? ` (${s.tool})` : ""}${
+                          s.tags?.length ? ` [${s.tags.join(", ")}]` : ""
+                        }`,
                     )
                     .join("\n")
                 : "(no stashes)",
@@ -596,7 +597,9 @@ export function buildMcpServer(): McpServer {
         mode: z
           .string()
           .optional()
-          .describe("Search mode: keyword | semantic | hybrid (default: hybrid)"),
+          .describe(
+            "Search mode: keyword | semantic | hybrid (default: hybrid)",
+          ),
         limit: z.number().optional().describe("Max results (default 20)"),
       },
     },
@@ -622,7 +625,9 @@ export function buildMcpServer(): McpServer {
       });
       if (r.exitCode !== 0) {
         return {
-          content: [{ type: "text", text: `fcheap search failed: ${r.stderr}` }],
+          content: [
+            { type: "text", text: `fcheap search failed: ${r.stderr}` },
+          ],
           isError: true,
         };
       }
@@ -635,8 +640,14 @@ export function buildMcpServer(): McpServer {
               Array.isArray(results) && results.length > 0
                 ? results
                     .map(
-                      (s: { stashId: string; snippet: string; score?: number }) =>
-                        `- ${s.stashId}${s.score ? ` (${s.score.toFixed(2)})` : ""}: ${s.snippet}`,
+                      (s: {
+                        stashId: string;
+                        snippet: string;
+                        score?: number;
+                      }) =>
+                        `- ${s.stashId}${
+                          s.score ? ` (${s.score.toFixed(2)})` : ""
+                        }: ${s.snippet}`,
                     )
                     .join("\n")
                 : `(no results for "${query}")`,
@@ -659,15 +670,14 @@ export function buildMcpServer(): McpServer {
         "Requires fcheap + vecgrep on $PATH.",
       inputSchema: {
         runId: z.string().describe("Run id, 'latest', or 'previous'"),
-        codebase: z.string().describe("Absolute path to the codebase to search"),
+        codebase: z
+          .string()
+          .describe("Absolute path to the codebase to search"),
         mode: z
           .string()
           .optional()
           .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
-        limit: z
-          .number()
-          .optional()
-          .describe("Max code matches (default 10)"),
+        limit: z.number().optional().describe("Max code matches (default 10)"),
       },
     },
     async (args) => {
@@ -697,7 +707,9 @@ export function buildMcpServer(): McpServer {
       );
       if (stashR.exitCode !== 0) {
         return {
-          content: [{ type: "text", text: `fcheap save failed: ${stashR.stderr}` }],
+          content: [
+            { type: "text", text: `fcheap save failed: ${stashR.stderr}` },
+          ],
           isError: true,
         };
       }
@@ -716,13 +728,17 @@ export function buildMcpServer(): McpServer {
       });
       if (connectR.exitCode !== 0) {
         return {
-          content: [{ type: "text", text: `fcheap connect failed: ${connectR.stderr}` }],
+          content: [
+            { type: "text", text: `fcheap connect failed: ${connectR.stderr}` },
+          ],
           isError: true,
         };
       }
 
       const matches = JSON.parse(connectR.stdout);
-      const codeMatches = Array.isArray(matches) ? matches : matches?.matches ?? [];
+      const codeMatches = Array.isArray(matches)
+        ? matches
+        : (matches?.matches ?? []);
 
       return {
         content: [
@@ -733,7 +749,9 @@ export function buildMcpServer(): McpServer {
                 ? codeMatches
                     .map(
                       (m: { file?: string; line?: number; score?: number }) =>
-                        `- ${m.file ?? "?"}:${m.line ?? 0}${m.score ? ` (${m.score.toFixed(2)})` : ""}`,
+                        `- ${m.file ?? "?"}:${m.line ?? 0}${
+                          m.score ? ` (${m.score.toFixed(2)})` : ""
+                        }`,
                     )
                     .join("\n")
                 : "(no code matches found)",
@@ -776,14 +794,8 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
-        limit: z
-          .number()
-          .optional()
-          .describe("Max code matches (default 10)"),
-        env: z
-          .string()
-          .optional()
-          .describe("Environment name override"),
+        limit: z.number().optional().describe("Max code matches (default 10)"),
+        env: z.string().optional().describe("Environment name override"),
         coldStart: z
           .boolean()
           .optional()
@@ -832,7 +844,9 @@ export function buildMcpServer(): McpServer {
         "to a code symbol via codemap annotate. Requires codemap on $PATH. " +
         "Persists across reindex — builds a knowledge layer over the code graph.",
       inputSchema: {
-        symbol: z.string().describe("Symbol name (FQN) or file:line to annotate"),
+        symbol: z
+          .string()
+          .describe("Symbol name (FQN) or file:line to annotate"),
         note: z.string().describe("Free-form note text"),
         source: z
           .string()
@@ -872,9 +886,12 @@ export function buildMcpServer(): McpServer {
       }
 
       const annotateArgs = [
-        "annotate", symbol,
-        "--source", source,
-        "--note", note,
+        "annotate",
+        symbol,
+        "--source",
+        source,
+        "--note",
+        note,
         ...(data ? ["--data", data] : []),
         "--json",
       ];
@@ -897,7 +914,11 @@ export function buildMcpServer(): McpServer {
           content: [
             {
               type: "text",
-              text: `Annotated ${symbol} (id: ${result.id ?? "?"})${result.matched === false ? " — symbol not indexed, saved for later" : ""}`,
+              text: `Annotated ${symbol} (id: ${result.id ?? "?"})${
+                result.matched === false
+                  ? " — symbol not indexed, saved for later"
+                  : ""
+              }`,
             },
           ],
           structuredContent: {
@@ -912,7 +933,10 @@ export function buildMcpServer(): McpServer {
       } catch (e) {
         return {
           content: [
-            { type: "text", text: `codemap annotate error: ${(e as Error).message}` },
+            {
+              type: "text",
+              text: `codemap annotate error: ${(e as Error).message}`,
+            },
           ],
           isError: true,
         };
@@ -972,10 +996,12 @@ export function buildMcpServer(): McpServer {
             const data = JSON.parse(r.stdout);
             result.project = project;
             result.keys = Array.isArray(data)
-              ? data.map((k: string | { key?: string }) =>
-                  typeof k === "string" ? k : k.key ?? "",
-                ).filter(Boolean)
-              : data?.secrets?.map((s: { key: string }) => s.key) ?? [];
+              ? data
+                  .map((k: string | { key?: string }) =>
+                    typeof k === "string" ? k : (k.key ?? ""),
+                  )
+                  .filter(Boolean)
+              : (data?.secrets?.map((s: { key: string }) => s.key) ?? []);
           } else {
             result.error = r.stderr || "tvault list failed";
           }
@@ -990,7 +1016,11 @@ export function buildMcpServer(): McpServer {
         `secrets: ${result.provider}`,
         `tvault: ${result.tvaultInstalled ? "installed" : "not on $PATH"}`,
         ...(result.project ? [`project: ${result.project}`] : []),
-        `keys: ${result.keys.length > 0 ? result.keys.join(", ") : "(none or not checked)"}`,
+        `keys: ${
+          result.keys.length > 0
+            ? result.keys.join(", ")
+            : "(none or not checked)"
+        }`,
         ...(result.error ? [`error: ${result.error}`] : []),
       ];
 

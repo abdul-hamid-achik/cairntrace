@@ -72,9 +72,15 @@ function parseCodeMatches(stdout: string): CodeMatch[] {
   try {
     const data = JSON.parse(stdout);
     // fcheap connect returns an array of matches or { matches: [...] }
-    const matches = Array.isArray(data) ? data : data?.matches ?? [];
+    const matches = Array.isArray(data) ? data : (data?.matches ?? []);
     return matches.map(
-      (m: { file?: string; path?: string; line?: number; score?: number; snippet?: string }) => ({
+      (m: {
+        file?: string;
+        path?: string;
+        line?: number;
+        score?: number;
+        snippet?: string;
+      }) => ({
         file: m.file ?? m.path ?? "(unknown)",
         line: m.line ?? 0,
         score: typeof m.score === "number" ? m.score : 0,
@@ -145,9 +151,10 @@ export async function investigateCommand(
   });
 
   const runDir = await resolveRunRef(runRef, root);
-  const runId = runRef === "latest" || runRef === "previous"
-    ? runDir.split("/").pop() ?? runRef
-    : runRef;
+  const runId =
+    runRef === "latest" || runRef === "previous"
+      ? (runDir.split("/").pop() ?? runRef)
+      : runRef;
 
   const result: InvestigateResult = {
     runId,
@@ -161,7 +168,9 @@ export async function investigateCommand(
     result.error =
       "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap";
     process.stderr.write(`cairn investigate: ${result.error}\n`);
-    process.stdout.write(emit(format, result, () => investigateMarkdown(result)));
+    process.stdout.write(
+      emit(format, result, () => investigateMarkdown(result)),
+    );
     if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     return;
   }
@@ -169,20 +178,31 @@ export async function investigateCommand(
   // Stash the run directory
   const stashR = await execa(
     "fcheap",
-    ["save", runDir, "--tool", "cairntrace", "--tag", `investigate-${runId}`, "--json"],
+    [
+      "save",
+      runDir,
+      "--tool",
+      "cairntrace",
+      "--tag",
+      `investigate-${runId}`,
+      "--json",
+    ],
     { reject: false, timeout: 60_000 },
   );
 
   if (stashR.exitCode !== 0) {
     result.error = `fcheap save failed: ${stashR.stderr}`;
     process.stderr.write(`cairn investigate: ${result.error}\n`);
-    process.stdout.write(emit(format, result, () => investigateMarkdown(result)));
+    process.stdout.write(
+      emit(format, result, () => investigateMarkdown(result)),
+    );
     if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     return;
   }
 
   const stashData = JSON.parse(stashR.stdout);
-  result.stashId = stashData.stashId ?? stashData.id ?? stashData.path ?? "(unknown)";
+  result.stashId =
+    stashData.stashId ?? stashData.id ?? stashData.path ?? "(unknown)";
 
   // Connect to codebase if requested
   if (opts.connect && opts.codebase) {
@@ -238,7 +258,10 @@ function investigateMarkdown(r: InvestigateResult): string {
   } else if (r.error) {
     lines.push("", "## Error", "", r.error);
   } else {
-    lines.push("", "No code matches. Use --connect --codebase <dir> to run fcheap connect.");
+    lines.push(
+      "",
+      "No code matches. Use --connect --codebase <dir> to run fcheap connect.",
+    );
   }
 
   return lines.join("\n");
@@ -360,17 +383,29 @@ export async function auditCommand(
       } else {
         const stashR = await execa(
           "fcheap",
-          ["save", result.runDir, "--tool", "cairntrace", "--tag", `audit-${result.runId}`, "--json"],
+          [
+            "save",
+            result.runDir,
+            "--tool",
+            "cairntrace",
+            "--tag",
+            `audit-${result.runId}`,
+            "--json",
+          ],
           { reject: false, timeout: 60_000 },
         );
         if (stashR.exitCode === 0) {
           const stashData = JSON.parse(stashR.stdout);
           result.stashId = stashData.stashId ?? stashData.id ?? stashData.path;
 
-          const connectR = await runFcheapConnect(result.stashId!, opts.codebase, {
-            mode: opts.mode,
-            limit: opts.limit,
-          });
+          const connectR = await runFcheapConnect(
+            result.stashId!,
+            opts.codebase,
+            {
+              mode: opts.mode,
+              limit: opts.limit,
+            },
+          );
           if (connectR.ok) {
             result.codeMatches = parseCodeMatches(connectR.stdout);
           }
@@ -412,7 +447,10 @@ function auditMarkdown(r: AuditResult): string {
   } else if (r.error) {
     lines.push("", "## Error", "", r.error);
   } else {
-    lines.push("", "No code matches. Use --connect --codebase <dir> to run fcheap connect.");
+    lines.push(
+      "",
+      "No code matches. Use --connect --codebase <dir> to run fcheap connect.",
+    );
   }
 
   return lines.join("\n");

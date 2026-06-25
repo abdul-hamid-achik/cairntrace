@@ -95,7 +95,9 @@ export async function startWebServer(
   // Reuse / conflict check: is something already answering the readiness URL?
   if (effectiveUrl && (await probeOnce(effectiveUrl))) {
     if (reuse) {
-      ctx.log?.(`web server: reusing the server already answering ${effectiveUrl}`);
+      ctx.log?.(
+        `web server: reusing the server already answering ${effectiveUrl}`,
+      );
       return reusedHandle();
     }
     throw new WebServerError(
@@ -182,7 +184,9 @@ export async function startWebServer(
       if (Date.now() >= deadline) {
         throw new WebServerError(
           `web server did not become ready within ${readyTimeoutMs}ms ` +
-            `(probed ${effectiveUrl ?? "—"}${cfg.waitForText ? `, waiting for "${cfg.waitForText}"` : ""})`,
+            `(probed ${effectiveUrl ?? "—"}${
+              cfg.waitForText ? `, waiting for "${cfg.waitForText}"` : ""
+            })`,
         );
       }
       await sleep(POLL_MS);
@@ -245,13 +249,46 @@ function reusedHandle(): WebServerHandle {
   };
 }
 
-/* ----- readiness probe (runtime-agnostic) ----- */
+/* ----- shared helpers (exported for services.ts) ----- */
 
-/**
- * One readiness attempt: ANY HTTP response (200/3xx/4xx/5xx) means "the socket
- * accepts and the app replies", i.e. up. Connection refused / timeout = down.
- */
-async function probeOnce(url: string): Promise<boolean> {
+export interface ShellResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface SpawnOpts {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}
+
+/** Runtime-agnostic shell command runner (Bun.$ or execa fallback). */
+export async function runShell(
+  command: string,
+  { cwd, env }: SpawnOpts,
+): Promise<ShellResult> {
+  if (hasBunRuntime()) {
+    const r = await getBun().$`/bin/sh -c ${command}`
+      .cwd(cwd)
+      .env(env as Record<string, string | undefined>)
+      .quiet()
+      .nothrow();
+    return {
+      exitCode: r.exitCode,
+      stdout: r.stdout.toString(),
+      stderr: r.stderr.toString(),
+    };
+  }
+  const r = await execa(command, { cwd, env, shell: true, reject: false });
+  return {
+    exitCode: r.exitCode ?? 0,
+    stdout: typeof r.stdout === "string" ? r.stdout : "",
+    stderr: typeof r.stderr === "string" ? r.stderr : "",
+  };
+}
+
+/** Runtime-agnostic readiness probe: ANY HTTP response = up. */
+export async function probeOnce(url: string): Promise<boolean> {
   try {
     const res = await fetch(url, {
       method: "GET",
@@ -265,6 +302,18 @@ async function probeOnce(url: string): Promise<boolean> {
   }
 }
 
+export function isTruthyEnv(value: string | undefined): boolean {
+  return value !== undefined && value !== "" && value !== "0";
+}
+
+export function hasBunRuntime(): boolean {
+  return Boolean(process.versions.bun);
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
 /* ----- spawn (Bun-native, node fallback for the test gate) ----- */
 
 interface SpawnedProc {
@@ -274,15 +323,8 @@ interface SpawnedProc {
   stderr: AsyncIterable<Uint8Array>;
 }
 
-interface SpawnOpts {
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-}
-
-function spawnProcess(command: string, opts: SpawnOpts): SpawnedProc {
-  return hasBunRuntime()
-    ? spawnBun(command, opts)
-    : spawnNode(command, opts);
+export function spawnProcess(command: string, opts: SpawnOpts): SpawnedProc {
+  return hasBunRuntime() ? spawnBun(command, opts) : spawnNode(command, opts);
 }
 
 function spawnBun(command: string, { cwd, env }: SpawnOpts): SpawnedProc {
@@ -322,35 +364,7 @@ function spawnNode(command: string, { cwd, env }: SpawnOpts): SpawnedProc {
 
 /* ----- shell commands (Bun.$, execa fallback) ----- */
 
-interface ShellResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
-
-async function runShell(
-  command: string,
-  { cwd, env }: SpawnOpts,
-): Promise<ShellResult> {
-  if (hasBunRuntime()) {
-    const r = await getBun()
-      .$`/bin/sh -c ${command}`.cwd(cwd)
-      .env(env as Record<string, string | undefined>)
-      .quiet()
-      .nothrow();
-    return {
-      exitCode: r.exitCode,
-      stdout: r.stdout.toString(),
-      stderr: r.stderr.toString(),
-    };
-  }
-  const r = await execa(command, { cwd, env, shell: true, reject: false });
-  return {
-    exitCode: r.exitCode ?? 0,
-    stdout: typeof r.stdout === "string" ? r.stdout : "",
-    stderr: typeof r.stderr === "string" ? r.stderr : "",
-  };
-}
+/* (runShell moved to the shared helpers section above) */
 
 /* ----- process-group teardown (runtime-agnostic) ----- */
 
@@ -437,14 +451,11 @@ function isAlive(pid: number): boolean {
   }
 }
 
-/* ----- small helpers ----- */
-
 /** Rolling line buffer so failure diagnostics can show the log tail. */
 class TailBuffer {
   private lines: string[] = [];
   private partial = "";
   constructor(private readonly max: number) {}
-
   push(text: string): void {
     const parts = (this.partial + text).split("\n");
     this.partial = parts.pop() ?? "";
@@ -453,23 +464,16 @@ class TailBuffer {
       this.lines.splice(0, this.lines.length - this.max);
     }
   }
-
   text(n: number): string {
     const all = this.partial ? [...this.lines, this.partial] : this.lines;
     return all.slice(-n).join("\n");
   }
 }
 
+/* ----- small helpers (not exported) ----- */
+
 function tailText(text: string, n: number): string {
   return text.split("\n").slice(-n).join("\n").trim();
-}
-
-function isTruthyEnv(value: string | undefined): boolean {
-  return value !== undefined && value !== "" && value !== "0";
-}
-
-function hasBunRuntime(): boolean {
-  return Boolean(process.versions.bun);
 }
 
 interface BunSubprocess {
@@ -509,11 +513,6 @@ function getBun(): BunGlobal {
   return bun;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((res) => setTimeout(res, ms));
-}
-
-/** Synchronous sleep — usable inside the signal handler where timers never fire. */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

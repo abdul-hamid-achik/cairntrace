@@ -103,7 +103,10 @@ report:
 
 describe("loadConfig webServer", () => {
   async function loadWebServerConfig(body: string) {
-    const projectDir = join(dir, `webserver-${Math.random().toString(36).slice(2)}`);
+    const projectDir = join(
+      dir,
+      `webserver-${Math.random().toString(36).slice(2)}`,
+    );
     await mkdir(projectDir, { recursive: true });
     const specPath = join(projectDir, "spec.yml");
     await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");

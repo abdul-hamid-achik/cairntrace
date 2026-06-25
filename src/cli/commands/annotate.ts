@@ -121,7 +121,9 @@ function annotateMarkdown(r: AnnotateResult): string {
     `- source: ${r.source}`,
     ...(r.annotationId ? [`- annotationId: ${r.annotationId}`] : []),
     ...(r.matched === false
-      ? [`- matched: false (symbol not indexed — annotation saved but won't surface until indexed)`]
+      ? [
+          `- matched: false (symbol not indexed — annotation saved but won't surface until indexed)`,
+        ]
       : []),
   ];
   if (r.note) lines.push("", "## Note", "", r.note);
@@ -174,12 +176,19 @@ export async function maybeAutoAnnotate(
   }
 
   let investigateData: {
-    codeMatches?: Array<{ file: string; line: number; score: number; snippet?: string }>;
+    codeMatches?: Array<{
+      file: string;
+      line: number;
+      score: number;
+      snippet?: string;
+    }>;
   };
   try {
     investigateData = JSON.parse(readFileSync(investigatePath, "utf8"));
   } catch (e) {
-    result.errors.push(`failed to read investigate.json: ${(e as Error).message}`);
+    result.errors.push(
+      `failed to read investigate.json: ${(e as Error).message}`,
+    );
     return result;
   }
 
@@ -200,13 +209,25 @@ export async function maybeAutoAnnotate(
     try {
       const r = await execa(
         "codemap",
-        ["annotate", symbol, "--source", source, "--note", note, "--data", data, "--json"],
+        [
+          "annotate",
+          symbol,
+          "--source",
+          source,
+          "--note",
+          note,
+          "--data",
+          data,
+          "--json",
+        ],
         { reject: false, timeout: 10_000 },
       );
       if (r.exitCode === 0) {
         result.annotated++;
       } else {
-        result.errors.push(`${symbol}: ${r.stderr || "codemap annotate failed"}`);
+        result.errors.push(
+          `${symbol}: ${r.stderr || "codemap annotate failed"}`,
+        );
       }
     } catch (e) {
       result.errors.push(`${symbol}: ${(e as Error).message}`);

@@ -1,0 +1,25 @@
+pre-commit:
+  parallel: true
+  commands:
+    typecheck:
+      tags: typecheck
+      run: bun run typecheck
+    lint:
+      tags: lint
+      run: bun run lint
+    format:
+      tags: format
+      run: bun run format:check
+    knip:
+      tags: knip
+      run: bun run knip
+    tests:
+      tags: test
+      run: bun run test
+
+pre-push:
+  parallel: true
+  commands:
+    tests:
+      tags: test
+      run: bun run test

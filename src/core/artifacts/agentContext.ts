@@ -137,8 +137,12 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
   if (existsSync(investigatePath)) {
     try {
       const inv = JSON.parse(readFileSync(investigatePath, "utf-8"));
-      const matches: Array<{ file?: string; line?: number; score?: number; snippet?: string }> =
-        inv?.codeMatches ?? [];
+      const matches: Array<{
+        file?: string;
+        line?: number;
+        score?: number;
+        snippet?: string;
+      }> = inv?.codeMatches ?? [];
       if (matches.length > 0) {
         lines.push(
           "",
@@ -148,13 +152,17 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
         );
         for (const m of matches) {
           const score =
-            typeof m.score === "number" ? ` (score: ${m.score.toFixed(2)})` : "";
+            typeof m.score === "number"
+              ? ` (score: ${m.score.toFixed(2)})`
+              : "";
           const snippet = m.snippet ? `: ${m.snippet}` : "";
-          lines.push(`- ${m.file ?? "(unknown)"}:${m.line ?? 0}${score}${snippet}`);
+          lines.push(
+            `- ${m.file ?? "(unknown)"}:${m.line ?? 0}${score}${snippet}`,
+          );
         }
         lines.push(
           "",
-          "Annotate these symbols with: `codemap annotate <symbol> --source cairntrace --note \"<run-id> failed here\"`",
+          'Annotate these symbols with: `codemap annotate <symbol> --source cairntrace --note "<run-id> failed here"`',
         );
       }
     } catch {

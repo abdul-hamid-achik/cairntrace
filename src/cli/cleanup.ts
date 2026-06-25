@@ -17,10 +17,16 @@ import type { BrowserBackend } from "../adapters/browserBackend";
 
 const active = new Set<BrowserBackend>();
 const activeServers = new Set<WebServerLike>();
+const activeServices = new Set<ServicesLike>();
 let handlersInstalled = false;
 
 /** The slice of a webServer handle the signal path needs (see webServer.ts). */
 export interface WebServerLike {
+  terminateSync(): void;
+}
+
+/** The slice of a services handle the signal path needs (see services.ts). */
+export interface ServicesLike {
   terminateSync(): void;
 }
 
@@ -52,6 +58,20 @@ export function trackWebServer(handle: WebServerLike): () => void {
 }
 
 /**
+ * Track a started services environment so Ctrl-C / SIGTERM tears the tmux
+ * session (and its services) down before exit, alongside the browser session.
+ * Returns an untrack function — call it from the `finally` that calls `handle.stop()`.
+ * Reused services register a no-op `terminateSync`.
+ */
+export function trackServices(handle: ServicesLike): () => void {
+  activeServices.add(handle);
+  installSignalHandlers();
+  return () => {
+    activeServices.delete(handle);
+  };
+}
+
+/**
  * Synchronously tear down every tracked backend. Backends without
  * `terminateSync` get a fire-and-forget `close()` — it may not finish before
  * exit, which is acceptable for backends whose browser dies with this
@@ -78,6 +98,14 @@ export function closeTrackedBackends(): void {
     }
   }
   activeServers.clear();
+  for (const svc of activeServices) {
+    try {
+      svc.terminateSync();
+    } catch {
+      // Cleanup must never block the exit path.
+    }
+  }
+  activeServices.clear();
 }
 
 function installSignalHandlers(): void {
