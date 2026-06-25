@@ -743,7 +743,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Auto-cut clips from spec points when the run failed and video is kept.
   const clips: Record<string, string> = {};
   const clipPoints = spec.artifacts?.clipPoints;
-  if (videoPath && status !== "passed" && clipPoints && clipPoints.length > 0) {
+  if (status === "failed" && videoPath && clipPoints && clipPoints.length > 0) {
     const vidtrace = await isVidtraceAvailable();
     if (vidtrace.available) {
       const labels = clipPointsToLabels(clipPoints);
@@ -778,7 +778,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  // Write outcome evidence files now that clips are available.
+  // Write outcome evidence, including clips in the source when available.
   for (const { outcome, evaluation } of evaluated) {
     const outcomeStatus: OutcomeResult["status"] = evaluation.skipped
       ? "skipped"
