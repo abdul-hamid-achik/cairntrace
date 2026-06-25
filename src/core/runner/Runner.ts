@@ -12,6 +12,12 @@ import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
 import { evaluateWhen } from "./conditions";
+import {
+  cutClipsWithVidtrace,
+  isVidtraceAvailable,
+  moveClipsIntoRunDir,
+  clipPointsToLabels,
+} from "../clip/vidtraceClip";
 import type { ExitCode } from "../schema/shared";
 import {
   openPath,
@@ -648,6 +654,46 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
   }
 
+  // Auto-cut clips from spec points when the run failed and video is kept.
+  let clips: Record<string, string> = {};
+  if (
+    videoPath &&
+    stepResults.some((s) => s.status === "failed") &&
+    spec.artifacts?.clipPoints &&
+    spec.artifacts.clipPoints.length > 0
+  ) {
+    const vidtrace = await isVidtraceAvailable();
+    if (vidtrace.available) {
+      const labels = clipPointsToLabels(spec.artifacts.clipPoints);
+      const cutResult = await cutClipsWithVidtrace(
+        writer.resolve(videoRelPath),
+        labels,
+        {
+          outputDir: writer.resolve("videos/clips"),
+          name: spec.name,
+          tags: runtime.config?.clips?.tags ?? [],
+          reencode: false,
+        },
+      );
+      if (cutResult.ok && cutResult.clips) {
+        clips = await moveClipsIntoRunDir(runDir, cutResult);
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.video",
+          action: "clip",
+          clips,
+        });
+      } else if (cutResult.error) {
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.video",
+          action: "clip",
+          error: cutResult.error,
+        });
+      }
+    }
+  }
+
   // Evaluate outcomes.
   const failedStep = stepResults.find((s) => s.status === "failed")?.id;
   const ctx: VerifierContext = {
@@ -658,6 +704,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     latestDiagnostics,
     ...(tracePath ? { trace: tracePath } : {}),
     ...(videoPath ? { video: videoPath } : {}),
+    clips,
     runDir,
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
@@ -700,6 +747,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ...(Object.keys(evals).length > 0 ? { evals } : {}),
         ...(tracePath ? { trace: tracePath } : {}),
         ...(videoPath ? { video: videoPath } : {}),
+        ...(Object.keys(clips).length > 0 ? { clips } : {}),
       },
       ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
       whyThisMatters: outcome.description,
@@ -772,6 +820,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
     ...(videoPath ? { video: videoPath } : {}),
+    ...(Object.keys(clips).length > 0 ? { clips } : {}),
   };
 
   const result: RunResult = {

@@ -6,6 +6,7 @@ import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
+import { type ClipOptions } from "../cli/commands/clip";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { validateConfigFile } from "../cli/commands/config/validate";
@@ -748,6 +749,157 @@ export function buildMcpServer(): McpServer {
           },
         ],
         structuredContent: { query, results },
+      };
+    },
+  );
+
+  /* ----- clip ----- */
+
+  server.registerTool(
+    "cairn_clip",
+    {
+      title: "Cut video clips from a run",
+      description:
+        "Resolve a run directory, find the recorded video, and use vidtrace " +
+        "to cut named clips. Clips are moved into the run directory so they " +
+        "are relative to run artifacts. Requires vidtrace on $PATH.",
+      inputSchema: {
+        runId: z.string().describe("Run id, 'latest', or 'previous'"),
+        labels: z
+          .array(z.string())
+          .describe("Clip labels as name=start-end (e.g. 'issue=0:18-3:40')"),
+        out: z.string().optional().describe("Clip output directory"),
+        name: z.string().optional().describe("Clip filename prefix"),
+        stash: z
+          .boolean()
+          .optional()
+          .describe("Stash the run directory to fcheap after cutting clips"),
+        tags: z.array(z.string()).optional().describe("Stash tags"),
+        reencode: z
+          .boolean()
+          .optional()
+          .describe("Re-encode clips instead of stream-copy"),
+      },
+    },
+    async (args) => {
+      const opts: ClipOptions = {
+        labels: args.labels as string[],
+        ...(args.out !== undefined ? { out: args.out as string } : {}),
+        ...(args.name !== undefined ? { name: args.name as string } : {}),
+        ...(args.stash !== undefined ? { stash: args.stash as boolean } : {}),
+        ...(args.tags !== undefined ? { tags: args.tags as string[] } : {}),
+        ...(args.reencode !== undefined
+          ? { reencode: args.reencode as boolean }
+          : {}),
+      };
+      // clipCommand writes to stdout; capturing process output isn't
+      // feasible here, so we re-implement the minimal clip flow using the same
+      // core helpers as the CLI command.
+      const {
+        resolveArtifactRoot: resolveArtifactRootForClip,
+        resolveRunRef: resolveRunRefForClip,
+      } = await import("../cli/runRefs");
+      const root = await resolveArtifactRootForClip();
+      const runDir = await resolveRunRefForClip(args.runId as string, root);
+      const runId =
+        args.runId === "latest" || args.runId === "previous"
+          ? (runDir.split("/").pop() ?? (args.runId as string))
+          : (args.runId as string);
+
+      const { existsSync } = await import("node:fs");
+      const { resolve } = await import("node:path");
+      const videoCandidates = [
+        resolve(runDir, "videos", "playwright-video.webm"),
+        resolve(runDir, "videos", "agent-browser-video.webm"),
+      ];
+      const sourceVideo = videoCandidates.find((p) => existsSync(p));
+      if (!sourceVideo) {
+        return {
+          content: [{ type: "text", text: "no run video found in videos/" }],
+          isError: true,
+        };
+      }
+
+      const {
+        cutClipsWithVidtrace,
+        isVidtraceAvailable,
+        moveClipsIntoRunDir,
+        parseClipLabel,
+      } = await import("../core/clip/vidtraceClip");
+      const vidtrace = await isVidtraceAvailable();
+      if (!vidtrace.available) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "vidtrace not found on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/vidtrace",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const labels = (args.labels as string[])
+        .map((l) => parseClipLabel(l))
+        .filter(Boolean) as Array<{
+        label: string;
+        start: string;
+        end: string;
+      }>;
+      if (labels.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "no valid labels provided (expected name=start-end)",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const cutResult = await cutClipsWithVidtrace(sourceVideo, labels, {
+        outputDir: opts.out ? resolve(opts.out) : undefined,
+        name: opts.name,
+        stash: opts.stash,
+        tags: opts.tags,
+        reencode: opts.reencode,
+      });
+      if (!cutResult.ok) {
+        return {
+          content: [{ type: "text", text: cutResult.error ?? "clip failed" }],
+          isError: true,
+        };
+      }
+
+      const clips = await moveClipsIntoRunDir(runDir, cutResult);
+
+      let stashId: string | undefined;
+      if (opts.stash) {
+        const { stashDirectory } = await import("../cli/commands/stash");
+        const stashResult = await stashDirectory(runDir, {
+          tags: [...(opts.tags ?? []), "vidtrace-clip", "mcp"],
+          tool: "cairntrace",
+          source: sourceVideo,
+        });
+        if (stashResult?.ok && stashResult.stashId) {
+          stashId = stashResult.stashId;
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Cut ${Object.keys(clips).length} clip(s) from ${runId}\n` +
+              Object.entries(clips)
+                .map(([label, path]) => `- ${label}: ${path}`)
+                .join("\n") +
+              (stashId ? `\nStash: ${stashId}` : ""),
+          },
+        ],
+        structuredContent: { runId, runDir, clips, stashId },
       };
     },
   );

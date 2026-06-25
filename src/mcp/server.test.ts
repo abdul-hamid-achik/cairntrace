@@ -37,6 +37,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_checkpoint_delete",
       "cairn_checkpoint_list",
       "cairn_checkpoint_show",
+      "cairn_clip",
       "cairn_config_validate",
       "cairn_context",
       "cairn_docs",

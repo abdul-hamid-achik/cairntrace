@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { cleanCommand } from "./commands/clean";
+import { clipCommand } from "./commands/clip";
 import { captureFromSessionCommand } from "./commands/checkpoint/capture";
 import { deleteCheckpointCommand } from "./commands/checkpoint/delete";
 import { listCheckpointsCommand } from "./commands/checkpoint/list";
@@ -301,6 +302,39 @@ checkpoint
   .command("delete <name>")
   .description("Remove a saved checkpoint")
   .action((name: string) => deleteCheckpointCommand(name));
+
+/* ----- clip (vidtrace video clips) ----- */
+
+addFormatFlags(
+  program
+    .command("clip <run-ref>")
+    .description("Cut named clips from a run video using vidtrace")
+    .requiredOption(
+      "--label <label=start-end>",
+      "clip label with start/end timestamps (repeatable)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option("--out <dir>", "clip output directory (default: run/videos/clips)")
+    .option("--name <prefix>", "clip filename prefix")
+    .option("--reencode", "re-encode clips instead of stream-copy", false)
+    .option(
+      "--stash",
+      "stash the run directory to fcheap after cutting clips",
+      false,
+    )
+    .option(
+      "--tag <tag>",
+      "tag for the stash; repeatable",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runRef: string, opts) => clipCommand(runRef, opts));
 
 /* ----- stash (fcheap integration) ----- */
 

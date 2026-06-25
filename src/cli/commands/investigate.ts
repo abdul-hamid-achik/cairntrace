@@ -1,9 +1,9 @@
 import { execa } from "execa";
+import { existsSync, writeFileSync } from "node:fs";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { maybeAutoStash, isFcheapAvailable } from "./stash";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /* ---------------------------------------------------------------------------
  * Types
@@ -32,6 +32,12 @@ export interface InvestigateOptions {
   limit?: number;
   query?: string;
   connect?: boolean;
+  /**
+   * If true, prefer the run's `videos/clips/` directory as the stash source
+   * instead of the whole run directory. This is useful when the run produced
+   * vidtrace clips and you want to investigate the clips alone.
+   */
+  clips?: boolean;
   artifactRoot?: string;
   config?: string;
   format?: string;
@@ -176,11 +182,15 @@ export async function investigateCommand(
   }
 
   // Stash the run directory
+  const stashPath =
+    opts.clips && existsSync(join(runDir, "videos", "clips"))
+      ? resolve(join(runDir, "videos", "clips"))
+      : runDir;
   const stashR = await execa(
     "fcheap",
     [
       "save",
-      runDir,
+      stashPath,
       "--tool",
       "cairntrace",
       "--tag",

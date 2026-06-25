@@ -18,6 +18,7 @@ export const DocsTopicSchema = z.enum([
   "backends",
   "stash",
   "investigate",
+  "clip",
   "annotate",
   "secrets",
   "services",

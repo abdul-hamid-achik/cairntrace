@@ -440,6 +440,28 @@ export const StashConfigSchema = z
   .strict();
 export type StashConfig = z.infer<typeof StashConfigSchema>;
 
+export const ClipPointSchema = z
+  .object({
+    /** Human-readable label used in the clip filename. */
+    label: z.string().min(1),
+    /** Start timestamp (SS, MM:SS, or HH:MM:SS). */
+    start: z.string().min(1),
+    /** End timestamp (SS, MM:SS, or HH:MM:SS). */
+    end: z.string().min(1),
+  })
+  .strict();
+export type ClipPoint = z.infer<typeof ClipPointSchema>;
+
+export const ClipConfigSchema = z
+  .object({
+    /** Pre-defined clip points for this spec. */
+    points: z.array(ClipPointSchema).optional(),
+    /** Default tags applied to auto-generated clips. */
+    tags: z.array(z.string()).optional(),
+  })
+  .strict();
+export type ClipConfig = z.infer<typeof ClipConfigSchema>;
+
 export const InvestigateConfigSchema = z
   .object({
     /** Default codebase directory for `cairn investigate --connect`. */
@@ -490,6 +512,8 @@ export const ConfigSchema = z
     services: ServicesConfigSchema.optional(),
     /** fcheap stash integration (save/list/search run artifacts). */
     stash: StashConfigSchema.optional(),
+    /** Video clip integration with vidtrace. */
+    clips: ClipConfigSchema.optional(),
     /** Code investigation via fcheap connect (vecgrep) + vidtrace. */
     investigate: InvestigateConfigSchema.optional(),
     /** codemap annotation integration (pin run findings to code symbols). */

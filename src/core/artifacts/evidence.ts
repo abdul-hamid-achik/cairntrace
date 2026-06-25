@@ -24,8 +24,10 @@ export interface EvidenceInput {
     transforms?: Record<string, string>;
     evals?: Record<string, string>;
     trace?: string;
+    video?: string;
+    /** Named video clips produced by vidtrace. */
+    clips?: Record<string, string>;
   };
-  /** When present, a sidecar .raw.json is written too. */
   raw?: unknown;
   /** Optional extra reason (one line). */
   whyThisMatters?: string;
@@ -67,6 +69,14 @@ export function renderEvidenceMarkdown(input: EvidenceInput): string {
   }
   if (input.source.trace) {
     sourceLines.push(`- trace: ${input.source.trace}`);
+  }
+  if (input.source.video) {
+    sourceLines.push(`- video: ${input.source.video}`);
+  }
+  if (input.source.clips) {
+    for (const [name, path] of Object.entries(input.source.clips)) {
+      sourceLines.push(`- clip ${name}: ${path}`);
+    }
   }
   if (input.raw !== undefined) {
     sourceLines.push(`- raw evidence: outcomes/${input.outcomeId}.raw.json`);

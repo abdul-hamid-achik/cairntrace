@@ -622,11 +622,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Overview",
-        body: "When a spec fails, the run artifacts (agent_context.md, events.ndjson, screenshots, video) contain rich evidence about what went wrong. `cairn investigate` stashes the run to fcheap, then runs `fcheap connect <stash-id> <codebase>` — which uses vecgrep to perform semantic code search over the codebase using the stashed run's text as the query. The result is a ranked list of file:line candidates most likely responsible for the failure.",
+        body: "When a spec fails, the run artifacts (agent_context.md, events.ndjson, screenshots, video, clips) contain rich evidence about what went wrong. `cairn investigate` stashes the run to fcheap, then runs `fcheap connect <stash-id> <codebase>` — which uses vecgrep to perform semantic code search over the codebase using the stashed run's text as the query. The result is a ranked list of file:line candidates most likely responsible for the failure.",
       },
       {
         title: "cairn investigate",
-        body: "`cairn investigate <run-id> --codebase <dir>` stashes the run, runs fcheap connect, and prints code matches. Accepts `--mode semantic|keyword|hybrid` (default: hybrid), `--limit <n>` (default: 10), `--connect` (default: true, use --no-connect to skip), and `--keep-stash` (keep the fcheap stash after investigate). All output supports `--format json|yaml|md`. Run-id accepts 'latest', 'previous', or a concrete run ID.",
+        body: "`cairn investigate <run-id> --codebase <dir>` stashes the run, runs fcheap connect, and prints code matches. Accepts `--mode semantic|keyword|hybrid` (default: hybrid), `--limit <n>` (default: 10), `--connect` (default: true, use --no-connect to skip), `--use-clips` (default: true, use --no-use-clips to skip; prefer a vidtrace clip stash if one is linked to the run), and `--keep-stash` (keep the fcheap stash after investigate). All output supports `--format json|yaml|md`. Run-id accepts 'latest', 'previous', or a concrete run ID.",
       },
       {
         title: "cairn audit",
@@ -638,15 +638,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config",
-        body: "Configure investigate defaults in cairntrace.config.yml:\n```yaml\ninvestigate:\n  codebase: ./src          # default codebase path\n  mode: hybrid             # semantic | keyword | hybrid\n  limit: 10                # max code matches\n  keepStash: false         # keep fcheap stash after investigate\n```",
+        body: "Configure investigate defaults in cairntrace.config.yml:\n```yaml\ninvestigate:\n  codebase: ./src          # default codebase path\n  mode: hybrid             # semantic | keyword | hybrid\n  limit: 10                # max code matches\n  keepStash: false         # keep fcheap stash after investigate\n  useClips: true           # prefer vidtrace clip stashes for connect\n```",
       },
       {
         title: "MCP Tools",
-        body: "`cairn_investigate` mirrors the CLI: takes runId, codebase (optional, uses config default), mode, limit, keepStash. Returns structured code matches. `cairn_audit` mirrors the audit wrapper: takes spec path, codebase, speed, slowMo, mode, limit. Both degrade gracefully when fcheap/vecgrep/vidtrace aren't installed.",
+        body: "`cairn_investigate` mirrors the CLI: takes runId, codebase (optional, uses config default), mode, limit, keepStash, useClips. Returns structured code matches. `cairn_audit` mirrors the audit wrapper: takes spec path, codebase, speed, slowMo, mode, limit. Both degrade gracefully when fcheap/vecgrep/vidtrace aren't installed.",
       },
       {
         title: "DX Workflow",
-        body: "The typical workflow: run a spec → it fails → `cairn investigate latest --codebase ~/projects/myapp` → agent_context.md now shows 'src/auth/login.ts:42 (0.89 match)' → fix the code → re-run to confirm green. For deeper analysis: `cairn audit flows/login.yml --codebase ~/projects/myapp --speed 0.5` produces a video, extracts vidtrace evidence, and connects to code — all in one command.",
+        body: "The typical workflow: run a spec → it fails → `cairn investigate latest --codebase ~/projects/myapp` → agent_context.md now shows 'src/auth/login.ts:42 (0.89 match)' → fix the code → re-run to confirm green. For deeper analysis: `cairn audit flows/login.yml --codebase ~/projects/myapp --speed 0.5` produces a video, extracts vidtrace evidence, and connects to code — all in one command. For multi-bug sessions, use `cairn clip latest --label name=start-end` to cut named clips and pass them to investigate.",
       },
     ],
     examples: [
@@ -659,6 +659,9 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "",
           "# with specific search mode and limit",
           "cairn investigate latest --codebase ~/projects/myapp --mode semantic --limit 5",
+          "",
+          "# skip using vidtrace clips (use full video stash instead)",
+          "cairn investigate latest --codebase ~/projects/myapp --no-use-clips",
         ].join("\n"),
       },
       {
@@ -673,7 +676,66 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         ].join("\n"),
       },
     ],
-    relatedTopics: ["stash", "artifacts", "overview"],
+    relatedTopics: ["clip", "stash", "artifacts", "overview"],
+  },
+  clip: {
+    title: "Clip Run Videos (vidtrace integration)",
+    summary:
+      "Cut named clips from a Cairntrace run video using vidtrace. Useful for isolating distinct bugs or interesting moments from a long session so they can be stashed, shared, or fed back into cairn investigate for targeted code search.",
+    sections: [
+      {
+        title: "Overview",
+        body: "Cairntrace records a full video of every run when `artifacts.capture.video` is `always` or `on-failure`. The `cairn clip` command calls `vidtrace clip cut` on that video, producing named `.mp4` clips from timestamp ranges. Clips are moved into `<runDir>/videos/clips/` so they stay relative to the run artifacts. When `--stash` is passed, the clips are also stashed to fcheap and the stash ID is returned.",
+      },
+      {
+        title: "cairn clip",
+        body: "`cairn clip <run-id> --label name=start-end [--label ...] [--out DIR] [--name PREFIX] [--stash] [--tag TAG] [--reencode] [--json]` resolves the run directory, finds `videos/playwright-video.webm` or `videos/agent-browser-video.webm`, and runs `vidtrace clip cut`. Timestamps follow vidtrace's `H:MM:SS` / `M:SS` / `S` format. `--stash` stashes the enriched run directory to fcheap with a `vidtrace-clip` tag. All output supports `--format json|yaml|md`.",
+      },
+      {
+        title: "Auto-clip on failure",
+        body: "Specs can declare `artifacts.clips` points so the runner automatically cuts clips after a failed run. Each clip needs a `label`, `start`, and `end`. The runner only auto-cuts when a video was captured and `vidtrace` is available. Failures are logged but do not fail the run itself.",
+      },
+      {
+        title: "Spec config",
+        body: "Declare clip points in the spec or cairntrace.config.yml:\n```yaml\nartifacts:\n  capture:\n    video: on-failure\n  clips:\n    - label: issue1-blank-row\n      start: 0:18\n      end: 3:40\n    - label: issue2-blank-cells\n      start: 3:40\n      end: 4:05\n```",
+      },
+      {
+        title: "MCP Tool",
+        body: "`cairn_clip` mirrors the CLI: takes runId, labels, out, name, stash, tags, reencode. Returns clip paths, the source video, output directory, and stashId. Degrades gracefully when vidtrace is unavailable.",
+      },
+    ],
+    examples: [
+      {
+        title: "cut clips from the latest run",
+        language: "bash",
+        code: [
+          "cairn clip latest \\",
+          "  --label issue1-blank-row=0:18-3:40 \\",
+          "  --label issue2-blank-cells=3:40-4:05 \\",
+          "  --label issue3-date-errors=6:34-11:09 \\",
+          "  --label issue4-email-rejected=14:50-16:14 \\",
+          "  --stash --tag intel --tag graphite \\",
+          "  --json",
+        ].join("\n"),
+      },
+      {
+        title: "spec-level clip config",
+        language: "yaml",
+        code: [
+          "artifacts:",
+          "  capture:",
+          "    video: on-failure",
+          "  clips:",
+          "    - label: login-spinner",
+          "      start: 0:10",
+          "      end: 0:25",
+          "    - label: error-toast",
+          "      start: 1:05",
+          "      end: 1:12",
+        ].join("\n"),
+      },
+    ],
+    relatedTopics: ["investigate", "artifacts", "stash", "overview"],
   },
   annotate: {
     title: "Annotate Code (codemap)",

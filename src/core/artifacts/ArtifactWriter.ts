@@ -99,6 +99,7 @@ export class ArtifactWriter {
     await mkdir(join(this.runDir, "screenshots"), { recursive: true });
     await mkdir(join(this.runDir, "snapshots"), { recursive: true });
     await mkdir(join(this.runDir, "videos"), { recursive: true });
+    await mkdir(join(this.runDir, "videos", "clips"), { recursive: true });
     await mkdir(join(this.runDir, "downloads"), { recursive: true });
     await mkdir(join(this.runDir, "transforms"), { recursive: true });
     await mkdir(join(this.runDir, "evals"), { recursive: true });

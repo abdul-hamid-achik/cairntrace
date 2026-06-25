@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { BackendSchema, ContractHashSchema } from "./shared";
 import { VerifierSchema } from "./verifier.v1";
+import { ClipPointSchema, type ClipPoint } from "./config.v1";
+export { ClipPointSchema };
+export type { ClipPoint };
 
 /**
  * Behavioral spec format v1 (plan §10).
@@ -553,6 +556,8 @@ export const ArtifactsConfigSchema = z
       .partial(),
     /** Video recording options. Ignored when capture.video is `never`. */
     video: VideoConfigSchema.optional(),
+    /** Pre-defined video clip points for auto-cutting on failure. */
+    clipPoints: z.array(ClipPointSchema).optional(),
   })
   .strict();
 export type ArtifactsConfig = z.infer<typeof ArtifactsConfigSchema>;
