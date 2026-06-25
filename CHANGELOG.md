@@ -3,7 +3,33 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [1.13.0]
+## [1.15.0]
+
+### Added
+- **Per-run codemap auto-annotation (pass + fail)** — `cairn run --auto-annotate on-run`
+  emits one codemap annotation per run with run context: `{ specName, contractHash,
+  runId, status, outcomes, failedVerifier }`. The `contractHash` lets codemap
+  consumers invalidate stale green badges when the spec's contract changes. This
+  generalizes the existing `on-investigate` annotate seam from failure-only to
+  bidirectional (pass + fail), closing the loop with future impact-driven spec
+  selection. (CODEMAP-INTEGRATION.md item B.)
+- **`annotate.autoAnnotate: on-run`** config mode — the enum now accepts
+  `on-run | on-investigate | never` (previously `on-investigate | never`).
+- **`--auto-annotate <mode>`** CLI flag on `cairn run` — overrides config
+  `annotate.autoAnnotate`; accepts `on-run` or `never`.
+- **`maybeAutoAnnotateRun`** exported from `annotate.ts` — wired into both
+  `runSingle` and `runBatch` paths, best-effort (silently skipped if codemap
+  isn't installed).
+
+## [1.14.1]
+
+### Fixed
+- **tvault availability checks** in `doctor`, `secrets`, and the MCP server used
+  `tvault version` (a non-existent subcommand). tvault expects `tvault --version`.
+  The old call always failed, so tvault was misreported as unavailable even when
+  installed.
+
+## [1.14.0]
 
 ### Added
 - **Services lifecycle block** — `cairn run` can now own the full multi-service

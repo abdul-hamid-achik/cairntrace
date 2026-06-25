@@ -126,6 +126,13 @@ export function buildExplain(): ExplainResult {
               "Preview the services lifecycle (docker/seed/tmux) without executing any commands. Prints the plan and returns a no-op handle.",
           },
           {
+            name: "--auto-annotate",
+            type: "enum",
+            values: ["on-run", "never"],
+            description:
+              "Auto-annotate each run (pass+fail) into codemap with run context (specName, contractHash, runId, status, outcomes, failedVerifier). Best-effort: skipped if codemap isn't installed. Overrides config annotate.autoAnnotate.",
+          },
+          {
             name: "--format",
             type: "enum",
             values: ["json", "yaml", "md"],

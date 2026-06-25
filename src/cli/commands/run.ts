@@ -25,6 +25,7 @@ import { trackBackend, trackServices, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { maybeAutoStash } from "./stash";
+import { maybeAutoAnnotateRun } from "./annotate";
 import { stampSpecContractHash } from "./spec/verify";
 
 export interface RunCommandOptions {
@@ -56,6 +57,8 @@ export interface RunCommandOptions {
   servicesDryRun?: boolean;
   /** Auto-stash failed runs to fcheap. */
   stashOnFailure?: boolean;
+  /** Auto-annotate runs into codemap (on-run | never). */
+  autoAnnotate?: string;
 }
 
 /**
@@ -366,6 +369,13 @@ async function runSingle(
       });
     }
 
+    // Auto-annotate runs into codemap (best-effort, never fatal).
+    // Pass + fail: emits one annotation per run with run context.
+    await maybeAutoAnnotateRun(
+      result,
+      await resolveAnnotateOpts(specPath, opts),
+    );
+
     if (!interactive) {
       process.stdout.write(emit(format, result, renderRunMarkdown));
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
@@ -461,6 +471,12 @@ async function runBatch(
             stashOnFailure: opts.stashOnFailure ?? false,
           });
         }
+        // Auto-annotate runs into codemap (best-effort, never fatal).
+        // Pass + fail: emits one annotation per run with run context.
+        await maybeAutoAnnotateRun(
+          r,
+          await resolveAnnotateOpts(specPath, opts),
+        );
         return r;
       } catch (e) {
         // Synthesize an errored RunResult so the batch survives.
@@ -531,6 +547,42 @@ function colorEnabled(opts: RunCommandOptions): boolean {
   return (
     opts.color !== false && !process.env.NO_COLOR && process.env.TERM !== "dumb"
   );
+}
+
+/**
+ * Resolve the effective auto-annotate options for the run path.
+ * The `--auto-annotate` CLI flag wins over the config `annotate.autoAnnotate`
+ * value. The `annotate.source` config value provides the default source label.
+ * Returns `{ autoAnnotate: "never" }` when neither is set, so
+ * `maybeAutoAnnotateRun` is a no-op.
+ */
+async function resolveAnnotateOpts(
+  specPath: string,
+  opts: RunCommandOptions,
+): Promise<{ autoAnnotate?: string; source?: string }> {
+  // CLI flag wins.
+  if (opts.autoAnnotate) {
+    return { autoAnnotate: opts.autoAnnotate };
+  }
+  // Fall back to config annotate block.
+  try {
+    const firstSpecAbs = isAbsolutePath(specPath)
+      ? specPath
+      : resolve(process.cwd(), specPath);
+    const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+      configPath: opts.config,
+    });
+    const annotate = ctx.config?.annotate;
+    if (annotate?.autoAnnotate && annotate.autoAnnotate !== "never") {
+      return {
+        autoAnnotate: annotate.autoAnnotate,
+        ...(annotate.source ? { source: annotate.source } : {}),
+      };
+    }
+  } catch {
+    // config resolution failure — silently skip; the run itself will report
+  }
+  return { autoAnnotate: "never" };
 }
 
 function emitErroredResult(result: RunResult, format: string): void {

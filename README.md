@@ -561,6 +561,9 @@ knowledge layer of failure points that persists across reindexes. Requires
 
 # Annotate without a run reference
 ./bin/cairn annotate handleSubmit --note "flaky on cold start"
+
+# Auto-annotate every run (pass + fail) into codemap with run context
+./bin/cairn run flows/login.yml --auto-annotate on-run
 ```
 
 `cairn secrets` manages [TinyVault](https://github.com/abdul-hamid-achik/tinyvault)

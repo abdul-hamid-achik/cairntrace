@@ -102,6 +102,10 @@ addFormatFlags(
       "auto-stash failed run directories to fcheap (non-fatal if fcheap is missing)",
       false,
     )
+    .option(
+      "--auto-annotate <mode>",
+      "auto-annotate runs into codemap: on-run (pass+fail) | never (default: config annotate.autoAnnotate or never)",
+    )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
 

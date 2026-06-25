@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { emit, resolveFormat } from "../format";
 import type { OutputFormat } from "../format";
+import type { RunResult } from "../../core/schema/run.v1";
 
 /* ---------------------------------------------------------------------------
  * codemap annotate wrapper
@@ -241,6 +242,94 @@ export async function maybeAutoAnnotate(
   }
 
   return result;
+}
+
+/* ---------------------------------------------------------------------------
+ * Per-run auto-annotate (pass + fail)
+ *
+ * Called from the run path (`cairn run`). Emits a single annotation per run,
+ * pinning the spec name as a codemap symbol with run context:
+ * { specName, contractHash, runId, status, outcomes, failedVerifier }.
+ * The contractHash lets codemap consumers invalidate stale green badges when
+ * the spec's contract changes. Best-effort: codemap not installed → silently
+ * skipped. (CODEMAP-INTEGRATION.md item B.)
+ * ------------------------------------------------------------------------- */
+
+export interface AutoAnnotateRunResult {
+  runId: string;
+  annotated: number;
+  skipped: number;
+  errors: string[];
+}
+
+export async function maybeAutoAnnotateRun(
+  result: RunResult,
+  opts: {
+    autoAnnotate?: string;
+    source?: string;
+  },
+): Promise<AutoAnnotateRunResult> {
+  const out: AutoAnnotateRunResult = {
+    runId: result.runId,
+    annotated: 0,
+    skipped: 0,
+    errors: [],
+  };
+
+  if (opts.autoAnnotate !== "on-run") return out;
+
+  const codemapOk = await isCodemapAvailable();
+  if (!codemapOk) {
+    out.errors.push("codemap not on $PATH");
+    out.skipped = 1;
+    return out;
+  }
+
+  const source = opts.source ?? "cairntrace";
+  const symbol = result.spec.name;
+
+  // Find the first failed outcome's id (if any) for the failedVerifier field.
+  const failedOutcome = result.outcomes.find((o) => o.status === "failed");
+  const data = JSON.stringify({
+    specName: result.spec.name,
+    contractHash: result.spec.contractHash,
+    runId: result.runId,
+    status: result.status,
+    outcomes: result.outcomes.map((o) => ({ id: o.id, status: o.status })),
+    failedVerifier: failedOutcome?.id,
+  });
+
+  const note = `cairntrace run ${result.runId}: ${result.status} (${result.outcomes.filter((o) => o.status === "passed").length}/${result.outcomes.length} outcomes passed)`;
+
+  try {
+    const r = await execa(
+      "codemap",
+      [
+        "annotate",
+        symbol,
+        "--source",
+        source,
+        "--note",
+        note,
+        "--data",
+        data,
+        "--json",
+      ],
+      { reject: false, timeout: 10_000 },
+    );
+    if (r.exitCode === 0) {
+      out.annotated = 1;
+      process.stderr.write(
+        `cairn: auto-annotated run ${result.runId} (${result.status}) into codemap\n`,
+      );
+    } else {
+      out.errors.push(`${symbol}: ${r.stderr || "codemap annotate failed"}`);
+    }
+  } catch (e) {
+    out.errors.push(`${symbol}: ${(e as Error).message}`);
+  }
+
+  return out;
 }
 
 export type { OutputFormat };

@@ -458,8 +458,12 @@ export const AnnotateConfigSchema = z
   .object({
     /** Enable codemap annotate integration (default: false). */
     enabled: z.boolean().default(false),
-    /** Auto-annotate code matches from investigate results into codemap. */
-    autoAnnotate: z.enum(["on-investigate", "never"]).default("never"),
+    /** Auto-annotate mode: on-run annotates every run (pass+fail) with run
+     * context; on-investigate annotates code matches from investigate results;
+     * never disables auto-annotation. */
+    autoAnnotate: z
+      .enum(["on-run", "on-investigate", "never"])
+      .default("never"),
     /** Default source label for annotations (default: cairntrace). */
     source: z.string().optional(),
   })

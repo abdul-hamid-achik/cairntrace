@@ -686,11 +686,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Auto-Annotate",
-        body: "When `annotate.autoAnnotate: on-investigate` is set in config, `cairn investigate` automatically annotates each code match into codemap after the investigate run. This is best-effort: if codemap isn't installed, the annotation step is silently skipped. The annotation note includes the run ID and match score; the data field contains the full match JSON.",
+        body: "There are two auto-annotate modes. `on-investigate` (set via `annotate.autoAnnotate` in config) annotates each code match from `cairn investigate` results into codemap. `on-run` annotates every run — pass or fail — with run context: `{ specName, contractHash, runId, status, outcomes, failedVerifier }`. The `contractHash` lets codemap consumers invalidate stale green badges when the spec's contract changes. Enable on-run via `cairn run --auto-annotate on-run` or `annotate.autoAnnotate: on-run` in config. Both are best-effort: if codemap isn't installed, the annotation step is silently skipped.",
       },
       {
         title: "Config",
-        body: "Configure annotate integration in cairntrace.config.yml:\n```yaml\nannotate:\n  enabled: true\n  autoAnnotate: on-investigate   # auto-annotate after investigate\n  source: cairntrace             # default source label\n```",
+        body: "Configure annotate integration in cairntrace.config.yml:\n```yaml\nannotate:\n  enabled: true\n  autoAnnotate: on-run   # on-run (pass+fail) | on-investigate | never\n  source: cairntrace      # default source label\n```",
       },
       {
         title: "MCP Tool",
@@ -698,7 +698,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "DX Workflow",
-        body: 'The full workflow: `cairn run flows/login.yml` → fails → `cairn investigate latest --codebase ~/projects/myapp` → code matches in agent_context.md → `cairn annotate src/auth/login.ts:42 --note "login_flow fails: redirects to /error"` → `codemap impact handleSubmit` now shows the annotation. Or with auto-annotate: just run investigate and it\'s automatic.',
+        body: 'The full workflow: `cairn run flows/login.yml --auto-annotate on-run` → run completes (pass or fail) → codemap symbol `login_flow` now carries an annotation with run status and contractHash → `codemap annotations login_flow` shows the latest cairntrace verdict. For failure investigation: `cairn run flows/login.yml` → fails → `cairn investigate latest --codebase ~/projects/myapp` → code matches → `cairn annotate src/auth/login.ts:42 --note "login_flow fails: redirects to /error"` → `codemap impact handleSubmit` now shows the annotation.',
       },
     ],
     examples: [
