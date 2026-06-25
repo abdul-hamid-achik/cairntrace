@@ -154,6 +154,40 @@ describe("exportPlaywright", () => {
     expect(src).toContain(`expect(result.ok).toBe(true);`);
   });
 
+  it("translates selector wait steps", () => {
+    const src = exportPlaywright(
+      baseSpec({
+        steps: [
+          {
+            id: "wait_visible",
+            wait: {
+              selector: "#element_69d53d5dabbab17b1fede24f",
+              timeoutMs: 30000,
+            },
+          },
+          {
+            id: "wait_hidden",
+            wait: {
+              selector: ".loading-overlay",
+              state: "hidden",
+              timeoutMs: 15000,
+            },
+          },
+          { id: "wait_load", wait: { load: "networkidle" } },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `await page.waitForSelector("#element_69d53d5dabbab17b1fede24f", { timeout: 30000, state: "visible" });`,
+    );
+    expect(src).toContain(
+      `await page.waitForSelector(".loading-overlay", { timeout: 15000, state: "hidden" });`,
+    );
+    expect(src).toContain(
+      `await page.waitForLoadState("networkidle", { timeout: 30000 });`,
+    );
+  });
+
   it("includes the spec intent + source as a header comment", () => {
     const src = exportPlaywright(baseSpec({ intent: "do the thing" }), {
       sourcePath: "/path/to/spec.yml",

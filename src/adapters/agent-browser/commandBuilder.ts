@@ -124,6 +124,9 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
     // The function returns truthy when the text is absent from <body>.
     const escaped = JSON.stringify(w.notText);
     argv.push("--fn", `() => !document.body.innerText.includes(${escaped})`);
+  } else if ("selector" in w) {
+    argv.push(w.selector);
+    if (w.state !== undefined) argv.push("--state", w.state);
   } else {
     argv.push("--load", w.load);
   }

@@ -909,6 +909,11 @@ export class PlaywrightAdapter implements BrowserBackend {
         undefined,
         { timeout },
       );
+    } else if ("selector" in cond) {
+      await page.waitForSelector(cond.selector, {
+        state: cond.state ?? "visible",
+        timeout,
+      });
     } else {
       await page.waitForLoadState(cond.load, { timeout });
     }

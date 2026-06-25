@@ -1474,6 +1474,7 @@ function diagnosticNeedles(step: Step): string[] {
   if ("wait" in step) {
     if ("text" in step.wait) add(step.wait.text);
     if ("notText" in step.wait) add(step.wait.notText);
+    if ("selector" in step.wait) add(step.wait.selector);
   }
   if ("scroll" in step && "to" in step.scroll)
     add(locatorNeedle(step.scroll.to));
@@ -1488,6 +1489,7 @@ function diagnosticNeedles(step: Step): string[] {
       else if ("wait" in sub) {
         if ("text" in sub.wait) add(sub.wait.text);
         if ("notText" in sub.wait) add(sub.wait.notText);
+        if ("selector" in sub.wait) add(sub.wait.selector);
       }
     }
   }

@@ -71,6 +71,36 @@ steps:
     expect("batch" in step && step.batch).toHaveLength(2);
   });
 
+  it("accepts a selector wait step", async () => {
+    const path = join(dir, "wait_selector.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: wait_selector
+intent: wait for selector
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - wait: { selector: "#element_69d53d5dabbab17b1fede24f", state: visible, timeoutMs: 30000 }
+  - wait: { selector: ".loading-overlay", state: hidden }
+`,
+    );
+    const r = await parseSpec(path);
+    const steps = r.spec.steps!;
+    expect(steps[0]).toMatchObject({
+      wait: {
+        selector: "#element_69d53d5dabbab17b1fede24f",
+        state: "visible",
+        timeoutMs: 30000,
+      },
+    });
+    expect(steps[1]).toMatchObject({
+      wait: { selector: ".loading-overlay", state: "hidden" },
+    });
+  });
+
   it("rejects semantic locators inside a batch step", async () => {
     const path = join(dir, "batch_semantic.yml");
     await writeFile(

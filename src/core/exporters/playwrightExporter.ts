@@ -199,6 +199,14 @@ function renderStepBody(step: Step): string[] {
         `);`,
       ];
     }
+    if ("selector" in w) {
+      const opts = [`timeout: ${timeout}`];
+      const state = w.state ?? "visible";
+      opts.push(`state: ${JSON.stringify(state)}`);
+      return [
+        `await page.waitForSelector(${JSON.stringify(w.selector)}, { ${opts.join(", ")} });`,
+      ];
+    }
     return [
       `await page.waitForLoadState(${JSON.stringify(w.load)}, { timeout: ${timeout} });`,
     ];

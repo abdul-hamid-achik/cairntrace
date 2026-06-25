@@ -197,6 +197,13 @@ export const WaitConditionSchema = z.union([
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
+  z
+    .object({
+      selector: z.string().min(1),
+      state: z.enum(["attached", "visible", "hidden", "detached"]).optional(),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
 

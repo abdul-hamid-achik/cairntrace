@@ -114,6 +114,29 @@ describe("waitConditionToArgv", () => {
     ]);
   });
 
+  it("selector wait", () => {
+    expect(
+      waitConditionToArgv({ selector: "#element_69d53d5dabbab17b1fede24f" }),
+    ).toEqual(["wait", "#element_69d53d5dabbab17b1fede24f"]);
+  });
+
+  it("selector wait with state and timeout", () => {
+    expect(
+      waitConditionToArgv({
+        selector: ".loading-overlay",
+        state: "hidden",
+        timeoutMs: 15000,
+      }),
+    ).toEqual([
+      "wait",
+      ".loading-overlay",
+      "--state",
+      "hidden",
+      "--timeout",
+      "15000",
+    ]);
+  });
+
   it("notText synthesized as --fn predicate (agent-browser has no native --notText)", () => {
     const argv = waitConditionToArgv({ notText: "Loading..." });
     expect(argv[0]).toBe("wait");

@@ -440,6 +440,52 @@ describe("PlaywrightAdapter wait", () => {
     });
   });
 
+  it("waits for a selector to become visible by default", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    const waitForSelector = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { waitForSelector });
+
+    const pending = adapter.runStep({
+      wait: { selector: "#element_69d53d5dabbab17b1fede24f", timeoutMs: 25 },
+    });
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await pending;
+
+    expect(waitForSelector).toHaveBeenCalledWith(
+      "#element_69d53d5dabbab17b1fede24f",
+      { state: "visible", timeout: 25 },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      stderr: "wait timed out after 25ms",
+      exitCode: 1,
+    });
+  });
+
+  it("waits for a selector to become hidden when state is hidden", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    const waitForSelector = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { waitForSelector });
+
+    const pending = adapter.runStep({
+      wait: { selector: ".loading-overlay", state: "hidden", timeoutMs: 25 },
+    });
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await pending;
+
+    expect(waitForSelector).toHaveBeenCalledWith(".loading-overlay", {
+      state: "hidden",
+      timeout: 25,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      stderr: "wait timed out after 25ms",
+      exitCode: 1,
+    });
+  });
+
   it("uses an external watchdog to abort wait when a browser process is present", async () => {
     const adapter = new PlaywrightAdapter();
     const browserProcess = startHungProcess();
