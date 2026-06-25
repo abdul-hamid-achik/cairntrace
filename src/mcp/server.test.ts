@@ -37,6 +37,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_checkpoint_delete",
       "cairn_checkpoint_list",
       "cairn_checkpoint_show",
+      "cairn_config_validate",
       "cairn_context",
       "cairn_docs",
       "cairn_doctor",
@@ -310,6 +311,41 @@ steps:
     const names = checks.map((ch) => ch.name);
     expect(names).toContain("codemap");
     expect(names).toContain("tvault");
+    await c.close();
+  });
+
+  it("cairn_config_validate validates a config file", async () => {
+    const c = await connectInMemory();
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nproject: test\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: test\n    windows:\n      - name: web\n        command: yarn start\n",
+    );
+    const r = await c.callTool({
+      name: "cairn_config_validate",
+      arguments: { config: configPath },
+    });
+    const sc = r.structuredContent as { ok: boolean; errors: string[] };
+    expect(sc.ok).toBe(true);
+    expect(sc.errors).toEqual([]);
+    await c.close();
+  });
+
+  it("cairn_config_validate reports errors for invalid config", async () => {
+    const c = await connectInMemory();
+    const configPath = join(dir, "bad.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: test\n    windows:\n      - name: web\n        command: yarn start\n      - name: web\n        command: yarn start2\n",
+    );
+    const r = await c.callTool({
+      name: "cairn_config_validate",
+      arguments: { config: configPath },
+    });
+    const sc = r.structuredContent as { ok: boolean; errors: string[] };
+    expect(sc.ok).toBe(false);
+    expect(sc.errors.length).toBeGreaterThan(0);
+    expect(r.isError).toBe(true);
     await c.close();
   });
 });

@@ -307,7 +307,76 @@ Ctrl-C / SIGTERM during a run tears down the run's own agent-browser session
 **Config**
 
 `cairntrace.config.yml` can provide `baseUrl`, environment vars, artifact root,
-and project settings. Placeholders such as `${vars.connectionPath}` resolve
+project settings, and the `services` lifecycle block. Validate it before use:
+
+```bash
+./bin/cairn config validate --config cairntrace.config.yml --json
+```
+
+The `services` block lets `cairn run` own the full multi-service environment
+lifecycle — docker, conditional data seeding, tmux session management, and
+teardown — all config-driven, started once before the spec pool and stopped
+after the last spec. Skip it with `--no-services`.
+
+```yaml
+# cairntrace.config.yml
+version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+secrets:
+  provider: tvault
+  required: [MONGO_PASSWORD, ES_PASSWORD]
+  tvault: { project: myapp }
+services:
+  docker:
+    command: "docker compose up -d"
+    reuseExisting: true
+    readinessCheck: "curl -sf http://localhost:27017"
+    healthcheck:
+      command: "curl -sf http://localhost:9200/_cluster/health | grep -q green"
+      intervalSeconds: 15
+      retries: 5
+  seed:
+    command: "yarn demo-import --mongoSourceUri mongodb://admin:${MONGO_PASSWORD}@host/db"
+    ttlSeconds: 21600
+    freshnessCheck: "mongosh --quiet --eval 'db.count()' mongodb://localhost:27017/db"
+  tmux:
+    session: myapp
+    reuseExisting: true
+    options:
+      - { key: mouse, value: "on" }
+    env:
+      NODE_ENV: development
+    windows:
+      - name: web
+        cwd: web-app
+        command: "yarn serve"
+        readyOn: { url: http://localhost:8080 }
+        healthcheck:
+          command: "curl -sf http://localhost:8080/healthz"
+          intervalSeconds: 20
+          retries: 3
+      - name: api
+        cwd: web-api
+        command: "yarn dev-watch"
+        env: { PORT: "3001" }
+        readyOn: { text: "listening on" }
+  stash:
+    enabled: true
+    autoStash: always
+    capture: [tmux, docker, seed]
+    tags: [services, myapp]
+teardown:
+  - "tmux kill-session -t myapp"
+  - "docker compose down"
+```
+
+Seed freshness is tracked at `~/.cairntrace/services/<project>.seed.json`
+with a three-layer check (fingerprint + TTL + optional data-level command).
+The seed only re-runs when the command changed, the TTL expired, or the
+freshness check failed. Placeholders such as `${vars.connectionPath}` resolve
 before spec validation, so they can appear in required fields. Vars merge as
 config environment vars < top-level spec `vars:` < repeatable CLI
 `--var key=value`. Built-ins `${worker.index}` and `${run.token}` can derive
@@ -539,7 +608,7 @@ Common commands:
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
 | `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
 | `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path`, `--config`, or `--artifact-root`. |
-| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `stash`, `investigate`, `annotate`, `mcp`, or `backends`. |
+| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `services`, `stash`, `investigate`, `annotate`, `mcp`, or `backends`. |
 | `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
 | `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
 | `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
@@ -558,6 +627,7 @@ Common commands:
 | `cairn secrets list-projects` | List TinyVault projects. |
 | `cairn secrets list-keys` | List secret keys in a TinyVault project (`--project`). |
 | `cairn secrets export-env` | Export TinyVault secrets to a `.env` file without exposing values (`--project`, `--output`). |
+| `cairn config validate` | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid. |
 | `cairn mcp` | Start the MCP server on stdio. |
 
 Structured output is available on commands wired with format flags:
@@ -608,11 +678,13 @@ Example MCP client config:
 }
 ```
 
-The MCP server exposes 11 tools:
+The MCP server exposes these tools:
 
 `cairn_explain`, `cairn_docs`, `cairn_doctor`, `cairn_run`, `cairn_context`,
 `cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
-`cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`.
+`cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
+`cairn_config_validate`, `cairn_stash_save`, `cairn_stash_list`, `cairn_stash_search`,
+`cairn_investigate`, `cairn_audit`, `cairn_annotate`, `cairn_secrets_status`.
 
 Agents should call `cairn_explain` once at session start, then `cairn_docs`
 for the focused topic they need.

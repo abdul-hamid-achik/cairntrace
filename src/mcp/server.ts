@@ -8,6 +8,7 @@ import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapt
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
+import { validateConfigFile } from "../cli/commands/config/validate";
 import { isFcheapAvailable } from "../cli/commands/stash";
 import {
   resolveArtifactRoot,
@@ -452,6 +453,50 @@ export function buildMcpServer(): McpServer {
         structuredContent: { name, deleted: ok },
         isError: !ok,
       };
+    },
+  );
+
+  server.registerTool(
+    "cairn_config_validate",
+    {
+      title: "Validate a cairntrace config file",
+      description:
+        "Validate the cairntrace.config.yml structure (zod schema) and cross-field rules. " +
+        "Returns ok, errors, keys, and a services summary. Exit code 0 = valid, 4 = invalid.",
+      inputSchema: {
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+      },
+    },
+    async ({ config }) => {
+      try {
+        const { result } = await validateConfigFile(config);
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `valid: ${result.path}\n` +
+                  (result.services
+                    ? `services: docker=${result.services.docker} seed=${result.services.seed} tmux=${result.services.tmux} windows=${result.services.tmuxWindows} teardown=${result.services.teardown}`
+                    : "")
+                : `invalid: ${result.path}\n` +
+                  result.errors.map((e) => `  - ${e}`).join("\n"),
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
     },
   );
 

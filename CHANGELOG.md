@@ -5,6 +5,41 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [1.13.0]
 
+### Added
+- **Services lifecycle block** — `cairn run` can now own the full multi-service
+  environment lifecycle via the `services:` config block:
+  - **Docker**: `docker compose up -d` with `reuseExisting` detection,
+    `readinessCheck` command, and `healthcheck` (command + startPeriod + interval
+    + timeout + retries).
+  - **Conditional seed**: runs once, then skips if fresh (three-layer check:
+    fingerprint + TTL + optional `freshnessCheck`). State tracked at
+    `~/.cairntrace/services/<project>.seed.json`.
+  - **tmux session management**: creates sessions from scratch with session-level
+    `options`, `env` (via `tmux set-environment`), `defaultShell`, per-window `env`,
+    `preCommands`, `readyOn` (URL or text), and per-window `healthcheck`.
+  - **Teardown**: reverse order (tmux kill → docker down).
+  - **fcheap session stash**: optionally stash session artifacts (tmux panes, docker
+    logs, seed output) to fcheap via `services.stash`.
+  - **tvault integration**: `secrets.provider: tvault` injects vault secrets into
+    the seed command's env (first time `getTvaultEnv()` is called from the run path).
+  - **`--no-services`** CLI flag to skip the entire lifecycle.
+- **`cairn config validate`** command — validates `cairntrace.config.yml` structure
+  (zod schema) and cross-field rules (unique window names, readyOn constraints, tvault
+  provider requires tvault block). Supports `--config`, `--format json|yaml|md`.
+- **`cairn_config_validate` MCP tool** — mirrors the CLI command.
+- **`services` doc topic** — `cairn docs services` returns full documentation for the
+  services lifecycle, healthchecks, and fcheap session stash.
+- **HealthcheckSchema** — Docker-style healthcheck semantics for docker and tmux
+  windows (command, startPeriod, interval, timeout, retries).
+- **`docker.readinessCheck`** — shell command run after `docker compose up` completes.
+- **SeedStateStore** — seed freshness tracking at
+  `~/.cairntrace/services/<project>.seed.json`.
+- **lefthook** pre-commit hooks (typecheck, lint, format:check, knip, tests).
+- **knip** configuration for unused exports/deps detection.
+- **Coverage enforcement** — 80% minimum threshold in vitest config.
+- **Shared helpers exported from `webServer.ts`** — `runShell`, `probeOnce`, `sleep`,
+  `spawnProcess` for reuse by `services.ts`.
+
 ### Fixed
 - **`script` verifier no longer rejects numeric/boolean `fixtures` values with a misleading error.**
   `verify.script.fixtures` previously required string values (`z.record(string, string)`). Spec

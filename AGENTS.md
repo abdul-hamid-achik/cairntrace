@@ -127,6 +127,64 @@ per-agent code paths.
   `artifacts`, `mcp`, `backends`) — don't rely on training-data knowledge of
   the CLI.
 
+## Services Lifecycle
+
+The `services:` block in `cairntrace.config.yml` lets `cairn run` own the
+full multi-service environment lifecycle: docker, conditional data seeding,
+tmux session management, and teardown — all config-driven, started once
+before the spec pool and stopped after the last spec.
+
+```yaml
+services:
+  docker:
+    command: "docker compose up -d"
+    reuseExisting: true
+    readinessCheck: "curl -sf http://localhost:27017"
+    healthcheck:
+      command: "curl -sf http://localhost:9200/_cluster/health | grep -q green"
+      intervalSeconds: 15
+      retries: 5
+  seed:
+    command: "yarn demo-import"
+    ttlSeconds: 21600
+    freshnessCheck: "mongosh --quiet --eval 'db.count()' mongodb://localhost:27017/db"
+  tmux:
+    session: myapp
+    reuseExisting: true
+    options:
+      - { key: mouse, value: "on" }
+    env:
+      NODE_ENV: development
+    windows:
+      - name: web
+        cwd: web-app
+        command: "yarn serve"
+        readyOn: { url: http://localhost:8080 }
+        healthcheck:
+          command: "curl -sf http://localhost:8080/healthz"
+          intervalSeconds: 20
+          retries: 3
+  stash:
+    enabled: true
+    autoStash: always
+    capture: [tmux, docker, seed]
+    tags: [services, myapp]
+teardown:
+  - "tmux kill-session -t myapp"
+  - "docker compose down"
+```
+
+Key rules:
+- Seed freshness is tracked at `~/.cairntrace/services/<project>.seed.json`
+  with a three-layer check (fingerprint + TTL + optional data-level command).
+- `--no-services` skips the entire lifecycle.
+- `secrets.provider: tvault` injects vault secrets into the seed command's env.
+- `cairn config validate --json` validates the config file (zod schema +
+  cross-field `.refine()` rules: unique window names, readyOn constraints,
+  tvault provider requires tvault block).
+- Session artifacts (tmux panes, docker logs, seed output) can be stashed to
+  fcheap via `services.stash`.
+
 ## Browser automation
 
 Cairntrace has two backends; the spec doesn't have to know which one runs.
@@ -185,10 +243,11 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
 ```bash
 bun install            # install deps
 bun run typecheck      # tsc --noEmit
-bun run test           # vitest run
+bun run test           # vitest run (coverage threshold: 80%)
 bun run lint           # oxlint
 bun run format         # oxfmt src bin
-bun run verify         # typecheck + lint + tests (the gate)
+bun run knip           # detect unused exports/deps
+bun run verify         # typecheck + lint + format:check + knip + tests (the gate)
 ./bin/cairn doctor     # sanity check (node/bun/agent-browser/artifact root)
 ```
 
@@ -200,8 +259,12 @@ src/
   core/
     parser/        parseSpec (YAML + zod + ${X} substitution + imports + baseUrl)
     runner/        Runner, OutcomeEvaluator, verifiers/, conditions (when:)
+                   webServer.ts (single-server lifecycle)
+                   services.ts (multi-service lifecycle: docker/seed/tmux)
+                   seedState.ts (seed freshness tracking)
     artifacts/     ArtifactWriter, renderers/, evidence, agentContext
-    schema/        zod-first schemas (spec.v1, verifier.v1, run.v1, heal.v1, explain.v1, ...)
+    schema/        zod-first schemas (spec.v1, verifier.v1, run.v1, heal.v1, explain.v1,
+                   config.v1 (services, healthcheck, stash), docs.v1, ...)
     checkpoint/    CheckpointStore (~/.cairntrace/checkpoints/<name>.json)
     config/        loader for cairntrace.config.yml
     contractHash   sha256 over intent + outcomes
