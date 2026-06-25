@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectUnresolvedRuntimeRefs,
   deepMapStrings,
+  resolveEvalPlaceholders,
   resolveResponsePlaceholders,
 } from "./runtimePlaceholders";
 
@@ -55,6 +56,40 @@ describe("resolveResponsePlaceholders", () => {
   });
 });
 
+describe("resolveEvalPlaceholders", () => {
+  const evals = {
+    state: { value: { count: 5, items: [{ id: "a" }], nested: { x: 1 } } },
+  };
+
+  it("resolves dotted paths into the eval value envelope", () => {
+    expect(resolveEvalPlaceholders("${evals.state.value.count}", evals)).toBe(
+      "5",
+    );
+    expect(
+      resolveEvalPlaceholders("${evals.state.value.items.0.id}", evals),
+    ).toBe("a");
+  });
+
+  it("renders objects as JSON", () => {
+    expect(resolveEvalPlaceholders("${evals.state.value.nested}", evals)).toBe(
+      '{"x":1}',
+    );
+  });
+
+  it("renders unknown names and missing paths as empty string", () => {
+    expect(resolveEvalPlaceholders("${evals.nope.value}", evals)).toBe("");
+    expect(resolveEvalPlaceholders("${evals.state.value.missing}", evals)).toBe(
+      "",
+    );
+  });
+
+  it("substitutes inside larger strings", () => {
+    expect(
+      resolveEvalPlaceholders("Count: ${evals.state.value.count}", evals),
+    ).toBe("Count: 5");
+  });
+});
+
 describe("collectUnresolvedRuntimeRefs", () => {
   const artifacts = {
     template: {
@@ -89,6 +124,25 @@ describe("collectUnresolvedRuntimeRefs", () => {
     ]);
     expect(
       collectUnresolvedRuntimeRefs(verifier, artifacts, { auth: { body: {} } }),
+    ).toEqual([]);
+  });
+
+  it("reports eval refs missing from captured eval values", () => {
+    const verifier = {
+      script: { fixtures: { count: "${evals.state.value.count}" } },
+    };
+    expect(collectUnresolvedRuntimeRefs(verifier, artifacts, {}, {})).toEqual([
+      "evals.state",
+    ]);
+    expect(
+      collectUnresolvedRuntimeRefs(
+        verifier,
+        artifacts,
+        {},
+        {
+          state: { value: { count: 5 } },
+        },
+      ),
     ).toEqual([]);
   });
 

@@ -209,7 +209,7 @@ Run `cairn run <spec> --cold-start --json` before declaring a spec done.
 Current step keys:
 
 `open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`,
-`request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`.
+`request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`, `eval`.
 
 Interactive steps use locators with `by: role`, `by: label`, `by: text`, or
 `by: selector`. Prefer role and label locators when possible; they are clearer
@@ -438,6 +438,7 @@ network/
 downloads/
 transforms/
 requests/
+evals/
 diagnostics/
 traces/
 videos/

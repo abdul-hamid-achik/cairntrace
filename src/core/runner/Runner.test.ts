@@ -1653,3 +1653,234 @@ steps:
     expect(ctx).not.toContain("## Code Matches");
   });
 });
+
+describe("eval steps", () => {
+  it("captures the return value as evals/<assign>.json and populates artifacts", async () => {
+    const specPath = await writeSpec(
+      "eval_basic",
+      `version: 1
+name: eval_basic
+intent: eval step captures return value
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: get_state
+    eval:
+      js: "return { count: 42, label: 'test' }"
+      assign: state
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ count: 42, label: "test" });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.evals).toEqual({ state: "evals/state.json" });
+    expect(result.steps[0]!.artifacts).toContain("evals/state.json");
+    const captured = JSON.parse(
+      await readFile(join(result.runDir, "evals/state.json"), "utf8"),
+    );
+    expect(captured).toEqual({ value: { count: 42, label: "test" } });
+  });
+
+  it("splices ${evals.<name>.value.X} into later steps", async () => {
+    const specPath = await writeSpec(
+      "eval_interpolate",
+      `version: 1
+name: eval_interpolate
+intent: eval value drives a later fill
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: get_token
+    eval:
+      js: "return { token: 'eval-tok-999' }"
+      assign: auth
+  - id: fill_token
+    fill:
+      by: label
+      name: Token
+      value: "\${evals.auth.value.token}"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ token: "eval-tok-999" });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toMatchObject({
+      fill: { by: "label", name: "Token", value: "eval-tok-999" },
+    });
+  });
+
+  it("reads JS from a file when file: is given instead of js:", async () => {
+    await writeFile(
+      join(workDir, "eval-source.js"),
+      `return { items: [1, 2, 3], total: 6 }`,
+    );
+    const specPath = await writeSpec(
+      "eval_file",
+      `version: 1
+name: eval_file
+intent: eval step reads from file
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: compute
+    eval:
+      file: ./eval-source.js
+      assign: result
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ items: [1, 2, 3], total: 6 });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    const captured = JSON.parse(
+      await readFile(join(result.runDir, "evals/result.json"), "utf8"),
+    );
+    expect(captured.value).toEqual({ items: [1, 2, 3], total: 6 });
+  });
+
+  it("fails the step when backend.evaluate returns an error", async () => {
+    const specPath = await writeSpec(
+      "eval_fail",
+      `version: 1
+name: eval_fail
+intent: eval failure surfaces as a step failure
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: bad_eval
+    eval:
+      js: "throw new Error('boom')"
+      assign: broken
+  - id: never_runs
+    open: /unreachable
+`,
+    );
+
+    // Override evaluate() to return a failure so the eval step fails.
+    const backend = new MockBrowserBackend();
+    (backend as unknown as { evaluate: () => Promise<unknown> }).evaluate =
+      async () => ({
+        ok: false,
+        stdout: "",
+        stderr: "eval boom",
+        exitCode: 1,
+        durationMs: 0,
+        argv: ["eval"],
+      });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]!.status).toBe("failed");
+    expect(result.steps[0]!.error).toContain("eval");
+  });
+
+  it("passes args to the eval function", async () => {
+    const specPath = await writeSpec(
+      "eval_args",
+      `version: 1
+name: eval_args
+intent: eval step receives args object
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: with_args
+    eval:
+      js: "return { doubled: args.n * 2 }"
+      args: { n: 21 }
+      assign: computed
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ doubled: 42 });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    // The wrapped script should contain the args JSON
+    expect(backend.lastEvaluatedScript).toContain('"n":21');
+  });
+
+  it("works without assign (fire-and-forget eval)", async () => {
+    const specPath = await writeSpec(
+      "eval_no_assign",
+      `version: 1
+name: eval_no_assign
+intent: eval without assign runs without capturing
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: seed_state
+    eval:
+      js: "window.__seeded = true; return { ok: true }"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ ok: true });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.evals).toBeUndefined();
+  });
+
+  it("redacts secrets from eval artifact output", async () => {
+    const specPath = await writeSpec(
+      "eval_redaction",
+      `version: 1
+name: eval_redaction
+intent: eval values are redacted before writing
+redaction:
+  values: ["supersecret-eval-token"]
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: leak
+    eval:
+      js: "return { token: 'supersecret-eval-token' }"
+      assign: leaked
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ token: "supersecret-eval-token" });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    const captured = await readFile(
+      join(result.runDir, "evals/leaked.json"),
+      "utf8",
+    );
+    expect(captured).not.toContain("supersecret-eval-token");
+    expect(captured).toContain("[redacted]");
+  });
+});

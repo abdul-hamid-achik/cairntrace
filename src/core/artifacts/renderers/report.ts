@@ -651,6 +651,9 @@ function buildArtifactLinks(result: RunResult): ReportArtifactLink[] {
   for (const [name, path] of Object.entries(artifacts.requests ?? {})) {
     links.push({ label: name, path, kind: "request" });
   }
+  for (const [name, path] of Object.entries(artifacts.evals ?? {})) {
+    links.push({ label: name, path, kind: "eval" });
+  }
   return links;
 }
 

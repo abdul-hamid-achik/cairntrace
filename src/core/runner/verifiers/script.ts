@@ -180,6 +180,7 @@ function resolveRuntimeFixtures(
     verifier.script.fixtures,
     ctx.artifacts,
     ctx.responses,
+    ctx.evals,
   );
 }
 

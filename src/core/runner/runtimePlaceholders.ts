@@ -46,6 +46,35 @@ export function resolveResponsePlaceholders(
   );
 }
 
+/**
+ * Splice captured `eval` step return values into a string:
+ *   ${evals.state.value.profile}       → the profile object (as JSON)
+ *   ${evals.state.value.items.0.id}    → first item's id
+ * Objects/arrays render as JSON; unknown names/paths render as "".
+ */
+export function resolveEvalPlaceholders(
+  input: string,
+  evals: Record<string, unknown> = {},
+): string {
+  return input.replace(
+    /\$\{evals\.([a-z][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}/g,
+    (_match, name: string, pathStr: string) => {
+      let value: unknown = evals[name];
+      if (value === undefined) return "";
+      const path = pathStr ? pathStr.slice(1).split(".") : [];
+      for (const key of path) {
+        if (value !== null && typeof value === "object" && key in value) {
+          value = (value as Record<string, unknown>)[key];
+        } else {
+          return "";
+        }
+      }
+      if (value === undefined || value === null) return "";
+      return typeof value === "object" ? JSON.stringify(value) : String(value);
+    },
+  );
+}
+
 /** Apply `fn` to every string anywhere inside a JSON-ish value. */
 export function deepMapStrings<T>(value: T, fn: (s: string) => string): T {
   if (typeof value === "string") return fn(value) as unknown as T;
@@ -63,7 +92,7 @@ export function deepMapStrings<T>(value: T, fn: (s: string) => string): T {
 }
 
 /**
- * Collect `${artifacts.X.…}` / `${requests.X.…}` references anywhere inside
+ * Collect `${artifacts.X.…}` / `${requests.X.…}` / `${evals.X.…}` references anywhere inside
  * `value` whose names were never produced. Used to mark artifact-dependent
  * outcomes as blocked when an earlier step failure stopped the run before the
  * producing step.
@@ -72,6 +101,7 @@ export function collectUnresolvedRuntimeRefs(
   value: unknown,
   artifacts: Record<string, ArtifactRef> = {},
   responses: Record<string, unknown> = {},
+  evals: Record<string, unknown> = {},
 ): string[] {
   const missing = new Set<string>();
   deepMapStrings(value, (s) => {
@@ -85,6 +115,11 @@ export function collectUnresolvedRuntimeRefs(
     )) {
       if (!(m[1]! in responses)) missing.add(`requests.${m[1]}`);
     }
+    for (const m of s.matchAll(
+      /\$\{evals\.([a-z][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_]+)*\}/g,
+    )) {
+      if (!(m[1]! in evals)) missing.add(`evals.${m[1]}`);
+    }
     return s;
   });
   return [...missing];
@@ -94,12 +129,16 @@ export function resolveFixtureMap(
   input: Record<string, string> | undefined,
   artifacts: Record<string, ArtifactRef> = {},
   responses: Record<string, unknown> = {},
+  evals: Record<string, unknown> = {},
 ): Record<string, string> {
   const output: Record<string, string> = {};
   for (const [key, value] of Object.entries(input ?? {})) {
-    output[key] = resolveResponsePlaceholders(
-      resolveArtifactPlaceholders(value, artifacts),
-      responses,
+    output[key] = resolveEvalPlaceholders(
+      resolveResponsePlaceholders(
+        resolveArtifactPlaceholders(value, artifacts),
+        responses,
+      ),
+      evals,
     );
   }
   return output;

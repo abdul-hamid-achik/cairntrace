@@ -22,6 +22,7 @@ export interface EvidenceInput {
     diagnostics?: string;
     downloads?: Record<string, string>;
     transforms?: Record<string, string>;
+    evals?: Record<string, string>;
     trace?: string;
   };
   /** When present, a sidecar .raw.json is written too. */
@@ -57,6 +58,11 @@ export function renderEvidenceMarkdown(input: EvidenceInput): string {
   if (input.source.transforms) {
     for (const [name, path] of Object.entries(input.source.transforms)) {
       sourceLines.push(`- transform ${name}: ${path}`);
+    }
+  }
+  if (input.source.evals) {
+    for (const [name, path] of Object.entries(input.source.evals)) {
+      sourceLines.push(`- eval ${name}: ${path}`);
     }
   }
   if (input.source.trace) {

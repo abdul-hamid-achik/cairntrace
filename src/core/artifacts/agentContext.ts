@@ -47,6 +47,10 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     for (const [name, path] of Object.entries(result.artifacts.transforms))
       evidenceRefs.push(`- ${name}: ${path}`);
   }
+  if (result.artifacts.evals) {
+    for (const [name, path] of Object.entries(result.artifacts.evals))
+      evidenceRefs.push(`- ${name}: ${path}`);
+  }
   if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
   if (result.artifacts.video) evidenceRefs.push(`- ${result.artifacts.video}`);
 

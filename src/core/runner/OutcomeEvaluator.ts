@@ -66,6 +66,7 @@ async function dispatch(
       v,
       ctx.artifacts,
       ctx.responses,
+      ctx.evals,
     );
     if (missing.length > 0) {
       return {

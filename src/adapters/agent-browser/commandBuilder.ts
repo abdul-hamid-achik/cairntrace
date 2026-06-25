@@ -215,6 +215,11 @@ export function stepToArgv(step: Step): string[] {
       `'use: ${step.use}' must be expanded to inline steps by the runner before adapter dispatch`,
     );
   }
+  if ("eval" in step) {
+    throw new Error(
+      "eval steps are handled by the runner via backend.evaluate before adapter dispatch",
+    );
+  }
   const exhaustive: never = step;
   throw new Error(
     `unhandled step shape: ${JSON.stringify(exhaustive satisfies never)}`,

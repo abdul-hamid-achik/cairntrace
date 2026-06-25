@@ -36,6 +36,7 @@ export interface RunEvent {
     | "artifact.transform"
     | "artifact.diagnostics"
     | "artifact.request"
+    | "artifact.eval"
     | "artifact.video"
     | "viewport.set"
     | "services.docker.start"
@@ -100,6 +101,7 @@ export class ArtifactWriter {
     await mkdir(join(this.runDir, "videos"), { recursive: true });
     await mkdir(join(this.runDir, "downloads"), { recursive: true });
     await mkdir(join(this.runDir, "transforms"), { recursive: true });
+    await mkdir(join(this.runDir, "evals"), { recursive: true });
     await mkdir(join(this.runDir, "diagnostics"), { recursive: true });
     await mkdir(join(this.runDir, "outcomes"), { recursive: true });
   }

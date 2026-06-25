@@ -109,6 +109,21 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     };
   }
 
+  // eval steps are an escape hatch — they run arbitrary page-context JS and
+  // have no locator to repair. Skip healing with a clear message.
+  if ("eval" in origin.step) {
+    return {
+      specPath: specPathAbs,
+      basedOnRunId: result.runId,
+      status: "no-heal-possible",
+      outcomesStillReachable: false,
+      ops: [],
+      summary:
+        "eval steps are not healable — they are an escape hatch running arbitrary page-context JS with no locator to repair. Fix the eval source or the page under test.",
+      exitCode: 5,
+    };
+  }
+
   // Read the snapshot the backend took at the failing step (post-attempt page).
   const failedStepResult = result.steps[failedStepIdx]!;
   const stepIdForFile = failedStepResult.id;

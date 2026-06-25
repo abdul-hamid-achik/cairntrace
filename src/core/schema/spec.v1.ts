@@ -279,6 +279,39 @@ export const TransformStepSchema = z
   .strict();
 export type TransformStep = z.infer<typeof TransformStepSchema>;
 
+/**
+ * `eval` — page-context JavaScript escape hatch.
+ *
+ * Runs arbitrary JS in the browser via `backend.evaluate()` and optionally
+ * captures the JSON-serializable return value as `evals/<assign>.json`.
+ * The captured value is spliced into later steps via `${evals.<name>.value.<field>}`.
+ *
+ * This is deliberately the last-resort locator-free step: opaque to `heal`,
+ * bypassing the semantic-locator contract. Use it for state setup and
+ * internal-state assertions that no UI affordance can reach.
+ */
+export const EvalStepSchema = z
+  .object({
+    ...stepCommon,
+    eval: z
+      .object({
+        /** Inline JS source. Exactly one of `js` | `file` is required. */
+        js: z.string().min(1).optional(),
+        /** Path to a .js file (resolved against specDir at run time). */
+        file: z.string().min(1).optional(),
+        /** Capture return value → `evals/<assign>.json` + `${evals.<assign>.…}`. */
+        assign: z.string().optional(),
+        /** Passed as the single argument to the wrapped function. */
+        args: z.record(z.unknown()).optional(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .refine((v) => Boolean(v.js) !== Boolean(v.file), {
+        message: "eval needs exactly one of js | file",
+      }),
+  })
+  .strict();
+export type EvalStep = z.infer<typeof EvalStepSchema>;
+
 export const WaitStepSchema = z
   .object({ ...stepCommon, wait: WaitConditionSchema })
   .strict();
@@ -424,6 +457,7 @@ export const StepSchema = z.union([
   SnapshotStepSchema,
   UseStepSchema,
   BatchStepSchema,
+  EvalStepSchema,
 ]);
 export type Step = z.infer<typeof StepSchema>;
 

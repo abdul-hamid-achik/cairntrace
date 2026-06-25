@@ -1,6 +1,10 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Step } from "../schema/spec.v1";
-import { proposeOps } from "./Healer";
+import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
+import { healSpec, proposeOps } from "./Healer";
 import { parseSnapshot } from "./snapshotParser";
 
 const SNAPSHOT_WITH_RENAMED_LINK = `
@@ -176,5 +180,54 @@ describe("proposeOps", () => {
       allSteps: [{ wait: { text: "Anything" } }, step],
     });
     expect(ops).toHaveLength(0);
+  });
+});
+
+describe("healSpec — eval steps", () => {
+  let workDir: string;
+
+  it("returns no-heal-possible when the failed step is an eval step", async () => {
+    workDir = await mkdtemp(join(tmpdir(), "cairntrace-heal-eval-"));
+    const specPath = join(workDir, "eval_fail.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: eval_heal_skip
+intent: eval steps should not be healed
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: bad_eval
+    eval:
+      js: "throw new Error('eval boom')"
+      assign: broken
+`,
+    );
+
+    // Override evaluate() to return a failure so the eval step fails.
+    const failingBackend = new MockBrowserBackend();
+    (
+      failingBackend as unknown as { evaluate: () => Promise<unknown> }
+    ).evaluate = async () => ({
+      ok: false,
+      stdout: "",
+      stderr: "eval boom",
+      exitCode: 1,
+      durationMs: 0,
+      argv: ["eval"],
+    });
+
+    const result = await healSpec({
+      specPath,
+      backend: failingBackend as MockBrowserBackend,
+    });
+
+    expect(result.status).toBe("no-heal-possible");
+    expect(result.exitCode).toBe(5);
+    expect(result.summary).toContain("eval steps are not healable");
+    expect(result.ops).toEqual([]);
   });
 });

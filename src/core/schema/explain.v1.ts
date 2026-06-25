@@ -89,6 +89,7 @@ export const StepDocSchema = z
       "snapshot",
       "use",
       "batch",
+      "eval",
     ]),
     kind: z.enum([
       "navigation",
@@ -97,6 +98,7 @@ export const StepDocSchema = z
       "network",
       "wait",
       "artifact",
+      "escape-hatch",
     ]),
     summary: z.string().min(1),
     yamlExample: z.string().min(1),

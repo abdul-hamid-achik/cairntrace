@@ -15,6 +15,7 @@ import { evaluateWhen } from "./conditions";
 import type { ExitCode } from "../schema/shared";
 import {
   openPath,
+  type EvalStep,
   type RequestStep,
   type Spec,
   type Step,
@@ -32,6 +33,7 @@ import { runNodeScript } from "./nodeScripts";
 import {
   deepMapStrings,
   resolveArtifactPlaceholders,
+  resolveEvalPlaceholders,
   resolveFixtureMap,
   resolveResponsePlaceholders,
   resolveRuntimeFilePath,
@@ -252,6 +254,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const requests: Record<string, string> = {};
   /** Captured request-step responses for ${requests.<name>.…} substitution. */
   const responses: Record<string, unknown> = {};
+  /** eval-step artifact paths by assign name (run-relative). */
+  const evals: Record<string, string> = {};
+  /** Captured eval-step return values for ${evals.<name>.…} substitution. */
+  const evalValues: Record<string, unknown> = {};
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
 
@@ -312,12 +318,18 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
 
     const stepArtifacts: string[] = [];
-    // Splice captured request-response fields (${requests.<name>.…}) into any
-    // string field of the step before it runs — the hybrid-flow hook ("fetch
-    // token via API, fill it into the UI").
+    // Splice captured request-response fields (${requests.<name>.…}) and
+    // eval return values (${evals.<name>.…}) into any string field of the
+    // step before it runs — the hybrid-flow hook ("fetch token via API, fill
+    // it into the UI" / "read store value, fill it into the form").
     const substituted =
-      Object.keys(responses).length > 0
-        ? deepMapStrings(step, (s) => resolveResponsePlaceholders(s, responses))
+      Object.keys(responses).length > 0 || Object.keys(evalValues).length > 0
+        ? deepMapStrings(step, (s) =>
+            resolveEvalPlaceholders(
+              resolveResponsePlaceholders(s, responses),
+              evalValues,
+            ),
+          )
         : step;
     let stepToRun = resolveOpenStep(substituted, {
       baseUrl: runtime.baseUrl,
@@ -421,6 +433,35 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
             stepId,
             path: transformed.relativePath,
             assign: transformed.assign,
+          });
+        }
+      } else if ("eval" in stepToRun) {
+        const ev = await runEvalStep({
+          step: stepToRun as EvalStep,
+          backend: opts.backend,
+          specDir: dirname(specPath),
+          writer,
+          redactor,
+        });
+        if (!ev.ok) {
+          stepStatus = "failed";
+          stepError = ev.error;
+        } else if (ev.assign) {
+          const relativePath = `evals/${ev.assign}.json`;
+          evals[ev.assign] = relativePath;
+          evalValues[ev.assign] = { value: ev.value };
+          namedArtifacts[ev.assign] = {
+            kind: "eval",
+            path: writer.resolve(relativePath),
+            relativePath,
+          };
+          stepArtifacts.push(relativePath);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.eval",
+            stepId,
+            path: relativePath,
+            assign: ev.assign,
           });
         }
       } else {
@@ -621,6 +662,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
     responses,
+    evals: evalValues,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     vars: resolvedVars,
   };
@@ -655,6 +697,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ...(latestDiagnostics ? { diagnostics: latestDiagnostics } : {}),
         ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
         ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
+        ...(Object.keys(evals).length > 0 ? { evals } : {}),
         ...(tracePath ? { trace: tracePath } : {}),
         ...(videoPath ? { video: videoPath } : {}),
       },
@@ -725,6 +768,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
     ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
+    ...(Object.keys(evals).length > 0 ? { evals } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
     ...(videoPath ? { video: videoPath } : {}),
@@ -1166,6 +1210,95 @@ async function runTransformStep(opts: {
   };
 }
 
+/**
+ * Execute an `eval` step — run arbitrary JS in the page context via
+ * `backend.evaluate()` and optionally capture the return value.
+ *
+ * The source is either inline (`js`) or read from a file (`file`, resolved
+ * against specDir). The source is wrapped so `args` is passed as the single
+ * argument. The return value is JSON-parsed from the backend's stdout
+ * (agent-browser auto-stringifies eval results).
+ *
+ * If `assign` is set, the captured value is written to `evals/<assign>.json`
+ * (after redaction) and made available for `${evals.<name>.…}` interpolation.
+ */
+async function runEvalStep(opts: {
+  step: EvalStep;
+  backend: BrowserBackend;
+  specDir: string;
+  writer: ArtifactWriter;
+  redactor: ReturnType<typeof createArtifactRedactor>;
+}): Promise<
+  { ok: true; assign?: string; value: unknown } | { ok: false; error: string }
+> {
+  const target = opts.step.eval;
+
+  let source: string;
+  try {
+    if (target.js) {
+      source = target.js;
+    } else {
+      const file = isAbsolute(target.file!)
+        ? target.file!
+        : resolve(opts.specDir, target.file!);
+      const { readFile } = await import("node:fs/promises");
+      source = await readFile(file, "utf8");
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      error: `eval: failed to load source: ${(e as Error).message}`,
+    };
+  }
+
+  // Wrap so `args` is the single argument and the value is returned.
+  const argsJson = JSON.stringify(target.args ?? {});
+  const wrapped = `(async (args) => { ${source} })(${argsJson})`;
+
+  let result;
+  try {
+    result = await opts.backend.evaluate(
+      wrapped,
+      target.timeoutMs ? { timeoutMs: target.timeoutMs } : {},
+    );
+  } catch (e) {
+    return {
+      ok: false,
+      error: `eval: backend.evaluate threw: ${(e as Error).message}`,
+    };
+  }
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: `eval failed: exitCode=${result.exitCode}, stderr=${result.stderr.trim() || "(empty)"}`,
+    };
+  }
+
+  // Parse the return value from stdout (agent-browser auto-stringifies).
+  let value: unknown;
+  try {
+    value = JSON.parse(result.stdout);
+  } catch {
+    // If the result isn't JSON, use the raw stdout as a string value.
+    value = result.stdout;
+  }
+
+  // Write the captured value to evals/<assign>.json (after redaction).
+  if (target.assign) {
+    const relativePath = `evals/${target.assign}.json`;
+    const absolutePath = opts.writer.resolve(relativePath);
+    await Bun_writeFile(
+      absolutePath,
+      opts.redactor.text(JSON.stringify({ value }, null, 2) + "\n"),
+      true,
+    );
+    return { ok: true, assign: target.assign, value };
+  }
+
+  return { ok: true, value };
+}
+
 async function ensureParentDir(absPath: string): Promise<void> {
   const { mkdir } = await import("node:fs/promises");
   await mkdir(dirname(absPath), { recursive: true });
@@ -1304,6 +1437,14 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
       url: step.request.url,
     };
   }
+  if ("eval" in step) {
+    return {
+      kind: "eval",
+      js: step.eval.js ? "(inline)" : undefined,
+      file: step.eval.file,
+      assign: step.eval.assign,
+    };
+  }
   if ("wait" in step) return { kind: "wait", condition: step.wait };
   if ("press" in step) return { kind: "press", key: step.press };
   if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };
@@ -1325,6 +1466,10 @@ function diagnosticNeedles(step: Step): string[] {
     add(step.transform.file);
     add(step.transform.input);
     add(step.transform.saveAs);
+  }
+  if ("eval" in step) {
+    add(step.eval.file);
+    add(step.eval.assign);
   }
   if ("wait" in step) {
     if ("text" in step.wait) add(step.wait.text);

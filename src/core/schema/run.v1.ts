@@ -63,6 +63,8 @@ export const RunArtifactsSchema = z
     transforms: z.record(z.string(), RelativePathSchema).optional(),
     /** request-step response envelopes (requests/<assign>.json), by assign name. */
     requests: z.record(z.string(), RelativePathSchema).optional(),
+    /** eval-step captured values (evals/<assign>.json), by assign name. */
+    evals: z.record(z.string(), RelativePathSchema).optional(),
     diagnostics: z.array(RelativePathSchema).optional(),
     console: RelativePathSchema.optional(),
     network: RelativePathSchema.optional(),

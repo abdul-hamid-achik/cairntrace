@@ -3,6 +3,43 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.16.0]
+
+### Added
+- **`eval` step type** — a page-context JavaScript escape hatch that runs
+  arbitrary JS in the browser via `backend.evaluate()` and optionally captures
+  the JSON-serializable return value as `evals/<assign>.json`. Captured values
+  are spliced into later steps via `${evals.<name>.value.<field>}`. Use it for
+  state setup and internal-state assertions that no UI affordance can reach
+  (seed a Vuex/Redux/Pinia store, read `localStorage`, assert on a computed
+  property). Exactly one of `js` (inline) or `file` (path to a .js file) is
+  required; optional `args` is passed as the single argument to the wrapped
+  function; `assign: name` writes `{ value: <return> }` to `evals/<name>.json`
+  (after redaction). Opaque to `heal` — there is no locator to repair. The
+  backend primitive (`BrowserBackend.evaluate()`) already existed across all
+  three adapters; this is a schema + runner + docs + tests effort.
+- **`evals/` artifact directory** — eval step return values are written as
+  `evals/<assign>.json` alongside `downloads/`, `transforms/`, `requests/`.
+- **`${evals.<name>.value.<field>}` runtime placeholder** — mirrors
+  `${requests.<name>.body.<field>}`; resolves into any string field of later
+  steps. Unknown names/paths render as empty string.
+- **`artifact.eval` event type** — emitted in `events.ndjson` when an eval
+  step captures a value.
+- **`ArtifactRef.kind: "eval"`** — eval artifacts appear in `RunArtifacts.evals`,
+  evidence files, `agent_context.md`, and `report.html` artifact links.
+- **`evals` in `VerifierContext`** — script verifiers can access captured eval
+  values via `ctx.evals` / `${evals.*}` fixture interpolation.
+
+### Changed
+- **`healSpec` skips eval steps** — returns `no-heal-possible` with a clear
+  "eval steps are not healable — escape hatch" message instead of attempting
+  locator-based repair.
+- **`collectUnresolvedRuntimeRefs`** now scans for `${evals.<name>...}` refs
+  in addition to `${artifacts.*}` and `${requests.*}` — outcomes depending on
+  a never-produced eval value are reported as blocked, not failed.
+- **`resolveFixtureMap`** resolves `${evals.*}` placeholders in script verifier
+  fixtures.
+
 ## [1.15.0]
 
 ### Added

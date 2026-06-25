@@ -1062,6 +1062,14 @@ export function buildExplain(): ExplainResult {
         yamlExample:
           'steps:\n  - batch:\n      - hover: { by: selector, selector: "#row-actions" }\n      - click: { by: selector, selector: \'button[aria-label="Upload data"]\' }',
       },
+      {
+        id: "eval",
+        kind: "escape-hatch",
+        summary:
+          "Run arbitrary JavaScript in the page context via backend.evaluate() and optionally capture the JSON-serializable return value as evals/<assign>.json; splice captured values into later steps via ${evals.<name>.value.<field>}. Opaque to heal, bypasses the semantic-locator contract — use for state setup and internal-state assertions that no UI affordance can reach",
+        yamlExample:
+          'steps:\n  - eval:\n      js: "window.__APP__.$store.state.profile.answers"\n      assign: answersBefore\n  - eval:\n      file: ./scripts/seed-state.js\n      assign: seeded\n      args: { flag: "stripped" }\n  - fill: { by: label, name: Token, value: "${evals.answersBefore.value.token}" }',
+      },
     ],
     verifiers: [
       {

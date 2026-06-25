@@ -34,6 +34,8 @@ export interface VerifierContext {
   artifacts?: Record<string, ArtifactRef>;
   /** Captured request-step responses, for ${requests.<name>.…} in fixtures. */
   responses?: Record<string, unknown>;
+  /** Captured eval-step return values, for ${evals.<name>.…} in fixtures. */
+  evals?: Record<string, unknown>;
   /** Config-resolved baseUrl for relative browser-side HTTP checks. */
   baseUrl?: string;
   /**
