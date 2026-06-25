@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
@@ -11,10 +12,6 @@ import {
   type ClipLabel,
 } from "../../core/clip/vidtraceClip";
 import { stashDirectory } from "./stash";
-
-/* ---------------------------------------------------------------------------
- * Types
- * ------------------------------------------------------------------------- */
 
 export interface ClipResult {
   runId: string;
@@ -133,6 +130,9 @@ export async function clipCommand(
   // Move clips into the run dir so they're relative to run artifacts
   result.clips = await moveClipsIntoRunDir(runDir, cutResult);
 
+  // Persist clips manifest for later tooling.
+  await writeClipsManifest(runDir, result.clips);
+
   // Optionally stash the run dir (now enriched with clips)
   if (opts.stash) {
     const stashResult = await stashDirectory(runDir, {
@@ -146,6 +146,19 @@ export async function clipCommand(
   }
 
   writeResult(format, result);
+}
+
+async function writeClipsManifest(
+  runDir: string,
+  clips: Record<string, string>,
+): Promise<void> {
+  const dir = resolve(runDir, "videos", "clips");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    resolve(dir, "clips.json"),
+    JSON.stringify({ clips, generatedAt: new Date().toISOString() }, null, 2) +
+      "\n",
+  );
 }
 
 function writeResult(format: OutputFormat, result: ClipResult): void {

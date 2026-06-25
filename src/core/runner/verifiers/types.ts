@@ -24,8 +24,6 @@ export interface VerifierContext {
   trace?: string;
   /** Relative path to a video artifact, if one was captured. */
   video?: string;
-  /** Named video clips produced by vidtrace from the run video. */
-  clips?: Record<string, string>;
   /** Relative path to diagnostics captured after the latest failed step/outcome. */
   latestDiagnostics?: string;
   /** Absolute run directory for resolving relative artifact paths. */

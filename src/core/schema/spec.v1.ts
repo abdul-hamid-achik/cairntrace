@@ -1,7 +1,7 @@
 import { z } from "zod";
+import { ClipPointSchema, type ClipPoint } from "./config.v1";
 import { BackendSchema, ContractHashSchema } from "./shared";
 import { VerifierSchema } from "./verifier.v1";
-import { ClipPointSchema, type ClipPoint } from "./config.v1";
 export { ClipPointSchema };
 export type { ClipPoint };
 
@@ -558,6 +558,8 @@ export const ArtifactsConfigSchema = z
     video: VideoConfigSchema.optional(),
     /** Pre-defined video clip points for auto-cutting on failure. */
     clipPoints: z.array(ClipPointSchema).optional(),
+    /** Default tags applied to auto-generated clips. */
+    clipTags: z.array(z.string()).optional(),
   })
   .strict();
 export type ArtifactsConfig = z.infer<typeof ArtifactsConfigSchema>;

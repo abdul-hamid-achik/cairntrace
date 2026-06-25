@@ -53,6 +53,10 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
   }
   if (result.artifacts.trace) evidenceRefs.push(`- ${result.artifacts.trace}`);
   if (result.artifacts.video) evidenceRefs.push(`- ${result.artifacts.video}`);
+  if (result.artifacts.clips) {
+    for (const [name, path] of Object.entries(result.artifacts.clips))
+      evidenceRefs.push(`- clip "${name}": ${path}`);
+  }
 
   const lines: string[] = [
     "# Cairntrace Run Context",

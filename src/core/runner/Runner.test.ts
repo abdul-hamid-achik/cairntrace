@@ -1,11 +1,33 @@
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import type { RunResult } from "../schema/run.v1";
 import { DEFAULT_REQUEST_TIMEOUT_MS, runSpec } from "./Runner";
+import {
+  cutClipsWithVidtrace,
+  isVidtraceAvailable,
+  moveClipsIntoRunDir,
+} from "../clip/vidtraceClip";
+
+vi.mock("../clip/vidtraceClip", () => ({
+  isVidtraceAvailable: vi
+    .fn()
+    .mockResolvedValue({ available: false, version: "" }),
+  cutClipsWithVidtrace: vi
+    .fn()
+    .mockResolvedValue({ ok: false, outputDir: "", clips: [] }),
+  moveClipsIntoRunDir: vi.fn().mockResolvedValue({}),
+  clipPointsToLabels: vi.fn().mockImplementation((points) =>
+    points.map((p: { label: string; start: string; end: string }) => ({
+      label: p.label,
+      start: p.start,
+      end: p.end,
+    })),
+  ),
+}));
 
 let workDir: string;
 let artifactRoot: string;
@@ -1419,6 +1441,253 @@ steps:
     expect(ctx).toContain("videos/mock-video.webm");
   });
 
+  it("includes clips in agent_context.md when auto-cut on failure", async () => {
+    mockVidtraceClip();
+
+    const specPath = await writeSpec(
+      "video-clip-context",
+      `version: 1
+name: video_clip_context
+intent: clips should appear in agent context on failure
+artifacts:
+  capture:
+    video: on-failure
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.clips).toEqual({
+      issue1: "videos/clips/issue1.mp4",
+    });
+    const ctx = await readFile(join(result.runDir, "agent_context.md"), "utf8");
+    expect(ctx).toContain('clip "issue1"');
+    expect(ctx).toContain("videos/clips/issue1.mp4");
+  });
+
+  it("auto-cuts clips on failing run when clipPoints are declared", async () => {
+    mockVidtraceClip();
+
+    const specPath = await writeSpec(
+      "video-clip-points",
+      `version: 1
+name: video_clip_points
+intent: auto-cut clips from spec-defined points on failure
+artifacts:
+  capture:
+    video: on-failure
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(result.artifacts.clips).toEqual({
+      issue1: "videos/clips/issue1.mp4",
+    });
+    expect(cutClipsWithVidtrace).toHaveBeenCalledWith(
+      expect.stringContaining("videos/mock-video.webm"),
+      [{ label: "issue1", start: "0:10", end: "0:20" }],
+      expect.objectContaining({
+        outputDir: expect.stringContaining("videos/clips"),
+        name: "video_clip_points",
+        tags: [],
+        reencode: false,
+      }),
+    );
+  });
+
+  it("does not auto-cut clips when the run passes", async () => {
+    mockVidtraceClip();
+
+    const specPath = await writeSpec(
+      "video-clip-points-pass",
+      `version: 1
+name: video_clip_points_pass
+intent: no clips when passing
+artifacts:
+  capture:
+    video: always
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.clips).toBeUndefined();
+    expect(cutClipsWithVidtrace).not.toHaveBeenCalled();
+  });
+
+  it("does not auto-cut clips when vidtrace is unavailable", async () => {
+    mockVidtraceClipUnavailable();
+
+    const specPath = await writeSpec(
+      "video-clip-points-no-vidtrace",
+      `version: 1
+name: video_clip_points_no_vidtrace
+intent: clips are skipped when vidtrace is unavailable
+artifacts:
+  capture:
+    video: on-failure
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(result.artifacts.clips).toBeUndefined();
+    expect(cutClipsWithVidtrace).not.toHaveBeenCalled();
+  });
+
+  it("does not set clips when vidtrace cut fails", async () => {
+    mockVidtraceClipCutFailure();
+
+    const specPath = await writeSpec(
+      "video-clip-points-cut-fail",
+      `version: 1
+name: video_clip_points_cut_fail
+intent: clips ignored when vidtrace cut fails
+artifacts:
+  capture:
+    video: on-failure
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(result.artifacts.clips).toBeUndefined();
+    expect(cutClipsWithVidtrace).toHaveBeenCalled();
+  });
+
+  it("does not set clips when moving clips into run dir fails", async () => {
+    mockVidtraceClipMoveFailure();
+
+    const specPath = await writeSpec(
+      "video-clip-points-move-fail",
+      `version: 1
+name: video_clip_points_move_fail
+intent: clips ignored when move fails
+artifacts:
+  capture:
+    video: on-failure
+  clipPoints:
+    - label: issue1
+      start: 0:10
+      end: 0:20
+outcomes:
+  - id: should_fail
+    description: should fail
+    verify:
+      url: { endsWith: "/nonexistent" }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
+    expect(result.artifacts.clips).toBeUndefined();
+    expect(moveClipsIntoRunDir).toHaveBeenCalled();
+  });
+
   it("includes video link in report.html when recorded", async () => {
     const specPath = await writeSpec(
       "video-report",
@@ -1577,6 +1846,89 @@ class VideoMockBackend extends MockBrowserBackend {
       return { ok: false, path };
     }
   }
+}
+
+function resetClipMocks() {
+  vi.mocked(isVidtraceAvailable).mockClear();
+  vi.mocked(isVidtraceAvailable).mockResolvedValue({
+    available: false,
+    version: "",
+  });
+  vi.mocked(cutClipsWithVidtrace).mockClear();
+  vi.mocked(cutClipsWithVidtrace).mockResolvedValue({
+    ok: false,
+    outputDir: "",
+    clips: [],
+  });
+  vi.mocked(moveClipsIntoRunDir).mockClear();
+  vi.mocked(moveClipsIntoRunDir).mockResolvedValue({});
+}
+
+function mockVidtraceClip() {
+  resetClipMocks();
+  vi.mocked(isVidtraceAvailable).mockResolvedValue({
+    available: true,
+    version: "0.0.0",
+  });
+  vi.mocked(cutClipsWithVidtrace).mockResolvedValue({
+    ok: true,
+    outputDir: "/tmp/clips",
+    clips: [
+      {
+        label: "issue1",
+        start_seconds: 10,
+        end_seconds: 20,
+        duration_seconds: 10,
+        path: "/tmp/clips/issue1.mp4",
+      },
+    ],
+  });
+  vi.mocked(moveClipsIntoRunDir).mockResolvedValue({
+    issue1: "videos/clips/issue1.mp4",
+  });
+}
+
+function mockVidtraceClipUnavailable() {
+  resetClipMocks();
+  vi.mocked(isVidtraceAvailable).mockResolvedValue({
+    available: false,
+    version: "",
+  });
+}
+
+function mockVidtraceClipCutFailure() {
+  resetClipMocks();
+  vi.mocked(isVidtraceAvailable).mockResolvedValue({
+    available: true,
+    version: "0.0.0",
+  });
+  vi.mocked(cutClipsWithVidtrace).mockResolvedValue({
+    ok: false,
+    clips: [],
+    outputDir: "",
+  });
+}
+
+function mockVidtraceClipMoveFailure() {
+  resetClipMocks();
+  vi.mocked(isVidtraceAvailable).mockResolvedValue({
+    available: true,
+    version: "0.0.0",
+  });
+  vi.mocked(cutClipsWithVidtrace).mockResolvedValue({
+    ok: true,
+    outputDir: "/tmp/clips",
+    clips: [
+      {
+        label: "issue1",
+        start_seconds: 10,
+        end_seconds: 20,
+        duration_seconds: 10,
+        path: "/tmp/clips/issue1.mp4",
+      },
+    ],
+  });
+  vi.mocked(moveClipsIntoRunDir).mockResolvedValue({});
 }
 
 describe("agent_context.md Code Matches", () => {

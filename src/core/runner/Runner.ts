@@ -654,47 +654,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
   }
 
-  // Auto-cut clips from spec points when the run failed and video is kept.
-  let clips: Record<string, string> = {};
-  if (
-    videoPath &&
-    stepResults.some((s) => s.status === "failed") &&
-    spec.artifacts?.clipPoints &&
-    spec.artifacts.clipPoints.length > 0
-  ) {
-    const vidtrace = await isVidtraceAvailable();
-    if (vidtrace.available) {
-      const labels = clipPointsToLabels(spec.artifacts.clipPoints);
-      const cutResult = await cutClipsWithVidtrace(
-        writer.resolve(videoRelPath),
-        labels,
-        {
-          outputDir: writer.resolve("videos/clips"),
-          name: spec.name,
-          tags: runtime.config?.clips?.tags ?? [],
-          reencode: false,
-        },
-      );
-      if (cutResult.ok && cutResult.clips) {
-        clips = await moveClipsIntoRunDir(runDir, cutResult);
-        await writer.appendEvent({
-          ts: new Date().toISOString(),
-          type: "artifact.video",
-          action: "clip",
-          clips,
-        });
-      } else if (cutResult.error) {
-        await writer.appendEvent({
-          ts: new Date().toISOString(),
-          type: "artifact.video",
-          action: "clip",
-          error: cutResult.error,
-        });
-      }
-    }
-  }
-
-  // Evaluate outcomes.
+  // Evaluate outcomes first so we know whether the run failed before
+  // deciding whether to auto-cut video clips.
   const failedStep = stepResults.find((s) => s.status === "failed")?.id;
   const ctx: VerifierContext = {
     lastSuccessfulStep: lastSuccessfulStep?.id,
@@ -704,7 +665,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     latestDiagnostics,
     ...(tracePath ? { trace: tracePath } : {}),
     ...(videoPath ? { video: videoPath } : {}),
-    clips,
     runDir,
     specDir: dirname(specPath),
     artifacts: namedArtifacts,
@@ -728,34 +688,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       : evaluation.passed
         ? "passed"
         : "failed";
-    const evidenceRel = `outcomes/${outcome.id}.md`;
-    await writer.writeOutcomeEvidence({
-      outcomeId: outcome.id,
-      status: outcomeStatus,
-      description: outcome.description,
-      expected: evaluation.expected,
-      actual: evaluation.actual,
-      source: {
-        ...(ctx.lastSuccessfulStep
-          ? { lastSuccessfulStep: ctx.lastSuccessfulStep }
-          : {}),
-        ...(latestScreenshot ? { screenshot: latestScreenshot } : {}),
-        ...(latestSnapshot ? { snapshot: latestSnapshot } : {}),
-        ...(latestDiagnostics ? { diagnostics: latestDiagnostics } : {}),
-        ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
-        ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
-        ...(Object.keys(evals).length > 0 ? { evals } : {}),
-        ...(tracePath ? { trace: tracePath } : {}),
-        ...(videoPath ? { video: videoPath } : {}),
-        ...(Object.keys(clips).length > 0 ? { clips } : {}),
-      },
-      ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
-      whyThisMatters: outcome.description,
-    });
     outcomeResults.push({
       id: outcome.id,
       status: outcomeStatus,
-      evidence: evidenceRel,
+      evidence: `outcomes/${outcome.id}.md`,
       ...(evaluation.raw !== undefined
         ? { evidenceRaw: `outcomes/${outcome.id}.raw.json` }
         : {}),
@@ -802,6 +738,76 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       await rm(writer.resolve(videoRelPath), { force: true });
     });
     videoPath = undefined;
+  }
+
+  // Auto-cut clips from spec points when the run failed and video is kept.
+  const clips: Record<string, string> = {};
+  const clipPoints = spec.artifacts?.clipPoints;
+  if (videoPath && status !== "passed" && clipPoints && clipPoints.length > 0) {
+    const vidtrace = await isVidtraceAvailable();
+    if (vidtrace.available) {
+      const labels = clipPointsToLabels(clipPoints);
+      const cutResult = await cutClipsWithVidtrace(
+        writer.resolve(videoRelPath),
+        labels,
+        {
+          outputDir: writer.resolve("videos/clips"),
+          name: spec.name,
+          tags: runtime.config?.clips?.tags ?? spec.artifacts?.clipTags ?? [],
+          reencode: false,
+        },
+      );
+      if (cutResult.ok && cutResult.clips && cutResult.clips.length > 0) {
+        Object.assign(clips, await moveClipsIntoRunDir(runDir, cutResult));
+        if (Object.keys(clips).length > 0) {
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.video",
+            action: "clip",
+            clips,
+          });
+        }
+      } else if (cutResult.error) {
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.video",
+          action: "clip",
+          error: cutResult.error,
+        });
+      }
+    }
+  }
+
+  // Write outcome evidence files now that clips are available.
+  for (const { outcome, evaluation } of evaluated) {
+    const outcomeStatus: OutcomeResult["status"] = evaluation.skipped
+      ? "skipped"
+      : evaluation.passed
+        ? "passed"
+        : "failed";
+    await writer.writeOutcomeEvidence({
+      outcomeId: outcome.id,
+      status: outcomeStatus,
+      description: outcome.description,
+      expected: evaluation.expected,
+      actual: evaluation.actual,
+      source: {
+        ...(ctx.lastSuccessfulStep
+          ? { lastSuccessfulStep: ctx.lastSuccessfulStep }
+          : {}),
+        ...(latestScreenshot ? { screenshot: latestScreenshot } : {}),
+        ...(latestSnapshot ? { snapshot: latestSnapshot } : {}),
+        ...(latestDiagnostics ? { diagnostics: latestDiagnostics } : {}),
+        ...(Object.keys(downloads).length > 0 ? { downloads } : {}),
+        ...(Object.keys(transforms).length > 0 ? { transforms } : {}),
+        ...(Object.keys(evals).length > 0 ? { evals } : {}),
+        ...(tracePath ? { trace: tracePath } : {}),
+        ...(videoPath ? { video: videoPath } : {}),
+        ...(Object.keys(clips).length > 0 ? { clips } : {}),
+      },
+      ...(evaluation.raw !== undefined ? { raw: evaluation.raw } : {}),
+      whyThisMatters: outcome.description,
+    });
   }
 
   const artifacts: RunArtifacts = {
