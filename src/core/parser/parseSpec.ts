@@ -281,7 +281,36 @@ function substitute(
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
 ): string {
-  return text.replace(/\$\{([\w.]+)\}/g, (match, key: string) => {
+  // Resolve placeholders from the inside out so nested defaults can reference
+  // runtime placeholders like ${env.X:-prefix-${run.token}}. Re-run while
+  // the text keeps changing to a max depth that comfortably exceeds real specs.
+  let previous = "";
+  let current = text;
+  for (let depth = 0; depth < 10 && current !== previous; depth++) {
+    previous = current;
+    current = substitutePass(
+      current,
+      env,
+      vars,
+      projectRoot,
+      baseUrl,
+      filePath,
+      runtime,
+    );
+  }
+  return current;
+}
+
+function substitutePass(
+  text: string,
+  env: Record<string, string | undefined>,
+  vars: Record<string, string | number | boolean>,
+  projectRoot: string,
+  baseUrl: string | undefined,
+  filePath: string,
+  runtime: RuntimeTemplateContext | undefined,
+): string {
+  return text.replace(/\$\{([\w.:-]+)\}/g, (match, key: string) => {
     if (key === "project.root") return projectRoot;
     if (key === "baseUrl") return baseUrl ?? "";
     if (key === "worker.index") return String(runtime?.workerIndex ?? 0);
@@ -289,18 +318,38 @@ function substitute(
     const dotIdx = key.indexOf(".");
     if (dotIdx < 0) return match;
     const ns = key.slice(0, dotIdx);
-    const name = key.slice(dotIdx + 1);
+    const rest = key.slice(dotIdx + 1);
     if (ns === "env" || ns === "secrets") {
-      return env[name] ?? "";
+      const defaultIdx = rest.indexOf(":-");
+      const name = defaultIdx >= 0 ? rest.slice(0, defaultIdx) : rest;
+      const defaultValue =
+        defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
+      const val = env[name];
+      if (val === undefined || val === "") {
+        if (defaultValue === undefined) return '""';
+        return quoteEnvValue(renderRuntimePlaceholders(defaultValue, runtime));
+      }
+      return quoteEnvValue(val);
     }
     if (ns === "vars") {
-      const v = vars[name];
+      const v = vars[rest];
       if (v === undefined)
-        throw new MissingTemplateVariableError(name, filePath);
-      return renderRuntimePlaceholders(String(v), runtime);
+        throw new MissingTemplateVariableError(rest, filePath);
+      const rendered = renderRuntimePlaceholders(String(v), runtime);
+      // Empty string vars (usually from missing env-driven config vars) must
+      // stay as a YAML string scalar, not YAML null.
+      if (rendered === "") return '""';
+      return rendered;
     }
     return match;
   });
+}
+
+/** Quote a substituted env value so it always remains a YAML string. */
+function quoteEnvValue(value: string): string {
+  if (value === "") return '""';
+  if (/^[\w./:=@~-]+$/.test(value)) return value;
+  return JSON.stringify(value);
 }
 
 function renderRuntimePlaceholders(

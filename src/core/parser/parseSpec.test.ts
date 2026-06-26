@@ -43,6 +43,58 @@ outcomes:
     expect(v.text.contains).toBe("abdul@example.com");
   });
 
+  it("supports ${env.X:-default} fallback when env var is missing or empty", async () => {
+    const path = join(dir, "env_default.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: env_default
+intent: env default fallback
+outcomes:
+  - id: missing_uses_default
+    description: missing env uses default
+    verify:
+      text: { contains: "\${env.MISSING_VAR:-fallback-value}" }
+  - id: empty_uses_default
+    description: empty env uses default
+    verify:
+      text: { contains: "\${env.EMPTY_VAR:-also-fallback}" }
+  - id: present_overrides_default
+    description: present env overrides default
+    verify:
+      text: { contains: "\${env.PRESENT_VAR:-should-not-appear}" }
+`,
+    );
+    const r = await parseSpec(path, {
+      env: { EMPTY_VAR: "", PRESENT_VAR: "real-value" },
+    });
+    const outcomes = r.spec.outcomes.map(
+      (o) => (o.verify as { text: { contains: string } }).text.contains,
+    );
+    expect(outcomes).toEqual(["fallback-value", "also-fallback", "real-value"]);
+  });
+
+  it("renders runtime placeholders inside ${env.X:-default} defaults", async () => {
+    const path = join(dir, "env_default_runtime.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: env_default_runtime
+intent: env default with runtime placeholder
+outcomes:
+  - id: token_in_default
+    description: default contains run token
+    verify:
+      text: { contains: "\${env.MISSING_TOKEN:-prefix-\${run.token}}" }
+`,
+    );
+    const r = await parseSpec(path, {
+      runtime: { runToken: "abc123" },
+    });
+    const v = r.spec.outcomes[0]!.verify as { text: { contains: string } };
+    expect(v.text.contains).toBe("prefix-abc123");
+  });
+
   it("rejects specs missing required fields", async () => {
     const path = join(dir, "missing.yml");
     await writeFile(path, `version: 1\nname: only_name\n`);
