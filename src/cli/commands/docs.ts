@@ -475,6 +475,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         body: "`cairn_run`, `cairn_spec_verify`, `cairn_spec_heal`, `cairn_context`, and checkpoint tools mirror their CLI counterparts. `cairn_run` supports `artifactRoot` for sandboxes and tests.",
       },
       {
+        title: "Discovery Tools",
+        body: "Nine `cairn_discover_*` tools provide interactive page exploration: open a session, snapshot, interact (click/fill/hover/scroll/press), navigate, collect inventory, suggest recorded steps, export as spec YAML, and close. Sessions are stateful and auto-expire after 5 min. See `cairn docs discovery` for the full workflow.",
+      },
+      {
         title: "No Per-Agent Paths",
         body: "The MCP tools are an adapter over the same runner, schemas, and artifact format as the CLI. Agent-specific behavior belongs in the client, not Cairntrace core.",
       },
@@ -495,7 +499,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         ].join("\n"),
       },
     ],
-    relatedTopics: ["overview", "artifacts", "backends"],
+    relatedTopics: ["overview", "artifacts", "backends", "discovery"],
   },
   backends: {
     title: "Browser Backends",
@@ -1043,5 +1047,86 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
     ],
     relatedTopics: ["backends", "secrets", "overview"],
+  },
+  discovery: {
+    title: "Discovery Sessions",
+    summary:
+      "Interactive page exploration through the harness. An agent opens a session, navigates, interacts, and snapshots — all through MCP tools — then exports recorded steps as a spec YAML. No direct Playwright or agent-browser usage required.",
+    sections: [
+      {
+        title: "Overview",
+        body: [
+          "Discovery sessions let an agent explore a live page through cairntrace's own browser backend, recording each interaction as a spec-compatible step. The agent can then export the full recorded session as a valid spec YAML. This replaces the blind authoring workflow (write → run → fail → heal) with an explore → record → export workflow.",
+          "",
+          "The MCP tools are the primary interface (9 tools: cairn_discover_open, _snapshot, _interact, _navigate, _inventory, _suggest, _export, _close, _list). The CLI `cairn discover <url>` is a one-shot enhanced snapshot for quick inspection.",
+        ].join("\n"),
+      },
+      {
+        title: "Workflow",
+        body: [
+          "1. cairn_discover_open(url, mock?) — creates a session, navigates, returns initial snapshot + inventory",
+          "2. cairn_discover_snapshot(sessionId) — captures the current accessibility tree",
+          "3. cairn_discover_inventory(sessionId) — collects role + testid locators from the current page",
+          "4. cairn_discover_interact(sessionId, action, target, value?) — clicks/fills/hovers/types/scrolls/presses; records the step; returns post-interaction snapshot",
+          "5. cairn_discover_navigate(sessionId, url) — navigates to a new URL; records an open step",
+          "6. cairn_discover_suggest(sessionId) — shows all recorded steps as YAML for review",
+          "7. cairn_discover_export(sessionId, path, intent, outcomes) — writes a spec YAML with cold-start contract comments; verifies it",
+          "8. cairn_discover_close(sessionId) — closes the session and frees the backend",
+          "",
+          "Use cairn_discover_list to check for active sessions (debugging). Sessions auto-expire after 5 minutes of inactivity.",
+        ].join("\n"),
+      },
+      {
+        title: "Step Recording",
+        body: [
+          "Each interaction is recorded as a spec-compatible step object using the same schema as real spec steps:",
+          "- click/fill/hover/type → { click/fill/hover/type: { by: role|label|text|selector, ... } }",
+          "- scroll → { scroll: { down: 500 } } or { scroll: { to: locator } }",
+          "- press → { press: 'Enter' }",
+          "- navigate → { open: '/url' } or { open: { path: '/url', waitUntil: 'networkidle' } }",
+          "",
+          "The exported spec YAML includes a cold-start contract comment header, same as `cairn spec scaffold`. The agent must satisfy the cold-start contract separately (imports, checkpoint, or preconditions).",
+        ].join("\n"),
+      },
+      {
+        title: "CLI: cairn discover",
+        body: [
+          "The CLI one-shot command is the quick inspection path:",
+          "  cairn discover /login --env local --format json",
+          "",
+          "Returns the full accessibility tree (structured SnapshotElement[]) plus role and testid locator inventory. Supports --roles, --testids, --env, --backend, --mock, --config, --format. Use this when you need a single-page inventory without interactive exploration.",
+        ].join("\n"),
+      },
+    ],
+    examples: [
+      {
+        title: "MCP discovery workflow (login flow)",
+        language: "yaml",
+        code: [
+          "# 1. Open a session",
+          'cairn_discover_open(url="/login", mock=true)',
+          '# → { sessionId: "abc-123", snapshot: [...], inventory: { roles: [...] } }',
+          "",
+          "# 2. Fill the email field",
+          'cairn_discover_interact(sessionId="abc-123", action="fill",',
+          '  target={ by: "role", role: "textbox", name: "Email" }, value="admin@test.com")',
+          "",
+          "# 3. Click Sign In",
+          'cairn_discover_interact(sessionId="abc-123", action="click",',
+          '  target={ by: "role", role: "button", name: "Sign In" })',
+          "# → URL changed to /dashboard, snapshot shows dashboard elements",
+          "",
+          "# 4. Export as spec",
+          'cairn_discover_export(sessionId="abc-123", path="flows/login.yml",',
+          '  intent="User can log in and reach the dashboard",',
+          '  outcomes=[{ id: "dashboard_visible", description: "Dashboard heading is shown",',
+          '    verify: { text: { contains: "Dashboard" } } }])',
+          "",
+          "# 5. Close the session",
+          'cairn_discover_close(sessionId="abc-123")',
+        ].join("\n"),
+      },
+    ],
+    relatedTopics: ["mcp", "authoring", "steps", "overview"],
   },
 };

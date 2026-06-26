@@ -198,6 +198,57 @@ export function buildExplain(): ExplainResult {
         exitCodes: { "0": "success", "2": "navigation or backend error" },
       },
       {
+        name: "discover",
+        summary:
+          "Inspect a page and return full accessibility tree + locator inventory",
+        synopsis:
+          "cairn discover <url> [--roles] [--testids] [--env <name>] [--backend agent-browser|playwright|mock] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--roles",
+            type: "boolean",
+            default: false,
+            description:
+              "Include accessibility role locators. If neither --roles nor --testids is set, both are included.",
+          },
+          {
+            name: "--testids",
+            type: "boolean",
+            default: false,
+            description:
+              "Include data-testid locators. If neither --roles nor --testids is set, both are included.",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Environment override for config baseUrl",
+          },
+          {
+            name: "--backend",
+            type: "enum",
+            values: ["agent-browser", "playwright", "mock"],
+            default: "agent-browser",
+            description: "Browser backend",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml for resolving relative URLs",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: { "0": "success", "2": "navigation or backend error" },
+        notes:
+          "MCP tools cairn_discover_open/_snapshot/_interact/_navigate/_inventory/_suggest/_export/_close/_list provide interactive session-based discovery — see `cairn docs discovery`.",
+      },
+      {
         name: "clean",
         summary: "Prune old run directories from the artifact root",
         synopsis:

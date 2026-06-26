@@ -194,6 +194,29 @@ Key rules:
   block replaces the top-level one entirely. This replaces the need for
   `--no-services` or `--services-dry-run` when running against remote envs.
 
+## Discovery sessions
+
+Discovery is the interactive authoring path — an agent explores a live page
+through the harness and records each interaction as a spec step, then exports
+the session as a spec YAML. This replaces blind authoring (write → run →
+fail → heal) with explore → record → export.
+
+**MCP tools** (primary interface, 9 tools):
+`cairn_discover_open` → `cairn_discover_snapshot` / `cairn_discover_inventory` →
+`cairn_discover_interact` / `cairn_discover_navigate` →
+`cairn_discover_suggest` → `cairn_discover_export` → `cairn_discover_close`.
+Use `cairn_discover_list` to check for active sessions.
+
+**CLI** (one-shot): `cairn discover <url> [--roles] [--testids] [--env <name>]`
+returns the full accessibility tree + locator inventory in one call.
+
+Sessions are stateful — the browser stays alive across MCP tool calls.
+Auto-expire after 5 min of inactivity. Use `mock: true` for fast offline
+exploration. Exported specs include cold-start contract comments but the
+agent must satisfy the cold-start contract separately (imports, checkpoint,
+or preconditions). Run `cairn docs discovery --json` or MCP `cairn_docs` with
+topic `discovery` for the full workflow guide.
+
 ## Browser automation
 
 Cairntrace has two backends; the spec doesn't have to know which one runs.

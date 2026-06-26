@@ -7,6 +7,7 @@ import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { type ClipOptions } from "../cli/commands/clip";
+import { resolveDiscoverUrl } from "../cli/commands/discover";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { validateConfigFile } from "../cli/commands/config/validate";
@@ -19,12 +20,26 @@ import {
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
 import { computeContractHash } from "../core/contractHash";
+import {
+  closeAllSessions,
+  closeSession,
+  captureSnapshot,
+  getInventory,
+  getSteps,
+  interact,
+  navigate,
+  openSession,
+  sweepSessions,
+  type SessionRegistry,
+} from "../core/discovery/DiscoverySession";
+import { buildSpecYaml, deriveSpecName } from "../core/discovery/specExporter";
 import { healSpec } from "../core/healer/Healer";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
 import { DocsTopicSchema } from "../core/schema/docs.v1";
+import { LocatorSchema, SpecSchema } from "../core/schema/spec.v1";
+import { VerifierSchema } from "../core/schema/verifier.v1";
 import type { RunResult } from "../core/schema/run.v1";
-import { SpecSchema } from "../core/schema/spec.v1";
 import { CAIRN_VERSION as VERSION } from "../cli/version";
 
 /**
@@ -1315,6 +1330,575 @@ export function buildMcpServer(): McpServer {
           },
         ],
         structuredContent: result,
+      };
+    },
+  );
+
+  /* ----- discovery sessions ----- */
+
+  const sessions: SessionRegistry = new Map();
+
+  // Auto-sweep expired sessions every 60s
+  const sweepTimer = setInterval(() => {
+    void sweepSessions(sessions);
+  }, 60_000);
+  sweepTimer.unref?.();
+
+  // Close all discovery sessions on server shutdown.
+  // Use process.on (not once) + process.exit to ensure cleanup runs
+  // before the CLI's cleanup.ts handler exits the process.
+  let shuttingDown = false;
+  function shutdownDiscovery(_signal: NodeJS.Signals): void {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(sweepTimer);
+    // Close sessions synchronously as best-effort (close() is async but
+    // backends with terminateSync will be cleaned by cleanup.ts; the
+    // closeAllSessions call handles the rest in-process).
+    void closeAllSessions(sessions);
+  }
+  process.on("SIGINT", () => shutdownDiscovery("SIGINT"));
+  process.on("SIGTERM", () => shutdownDiscovery("SIGTERM"));
+
+  server.registerTool(
+    "cairn_discover_open",
+    {
+      title: "Open a discovery session",
+      description:
+        "Create a stateful browser session, navigate to a URL, and return " +
+        "the initial accessibility snapshot + locator inventory. The agent " +
+        "can then interact, navigate, and snapshot within this session before " +
+        "exporting recorded steps as a spec YAML. Use mock=true for fast " +
+        "offline exploration. Close with cairn_discover_close when done.",
+      inputSchema: {
+        url: z.string().min(1).describe("URL or path to navigate to"),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment name for config baseUrl"),
+        mock: z
+          .boolean()
+          .optional()
+          .describe("Use mock backend (no real browser)"),
+        headed: z
+          .boolean()
+          .optional()
+          .describe("Show the browser window (real backends only)"),
+        waitUntil: z
+          .enum(["networkidle", "load", "domcontentloaded"])
+          .optional()
+          .describe("Wait condition after navigation"),
+        sessionName: z
+          .string()
+          .optional()
+          .describe("Custom agent-browser session name"),
+      },
+    },
+    async ({ url, env, mock, headed, waitUntil, sessionName }) => {
+      // Resolve relative URLs against config baseUrl when env is provided
+      const resolvedUrl = env
+        ? await resolveDiscoverUrl(url, { env }).catch(() => url)
+        : url;
+      const backend = mock
+        ? new MockBrowserBackend()
+        : new AgentBrowserAdapter({
+            session: sessionName ?? `cairntrace-disc-${process.pid}`,
+            ...(headed !== undefined ? { headed } : {}),
+          });
+      try {
+        const handle = await openSession(
+          backend,
+          resolvedUrl,
+          waitUntil !== undefined ? { waitUntil } : undefined,
+        );
+        sessions.set(handle.session.id, handle);
+
+        // Collect initial inventory
+        let inventory;
+        try {
+          inventory = await getInventory(handle);
+        } catch {
+          // inventory is best-effort
+        }
+
+        const result = {
+          sessionId: handle.session.id,
+          url: handle.session.currentUrl,
+          snapshot: handle.session.lastSnapshot,
+          ...(inventory ? { inventory } : {}),
+        };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                `Session ${handle.session.id} opened at ${handle.session.currentUrl}`,
+                `${handle.session.lastSnapshot.length} snapshot elements`,
+                ...(inventory?.roles
+                  ? [`${inventory.roles.length} role locators`]
+                  : []),
+                ...(inventory?.testids
+                  ? [`${inventory.testids.length} testid locators`]
+                  : []),
+                `Use cairn_discover_interact / cairn_discover_snapshot to explore.`,
+              ].join("\n"),
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        await backend.close().catch(() => undefined);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `discovery open failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_snapshot",
+    {
+      title: "Capture current page snapshot",
+      description:
+        "Capture the accessibility tree of the current page in a discovery " +
+        "session. Returns structured SnapshotElement[] with role, name, " +
+        "level, and ref for each element.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+      },
+    },
+    async ({ sessionId }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const { snapshot, url } = await captureSnapshot(handle);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Snapshot at ${url}: ${snapshot.length} elements`,
+            },
+          ],
+          structuredContent: { snapshot, url } as unknown as Record<
+            string,
+            unknown
+          >,
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `snapshot failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_interact",
+    {
+      title: "Interact with the page in a discovery session",
+      description:
+        "Perform an action (click, fill, hover, type, scroll, press) on the " +
+        "current page. The interaction is recorded as a spec-compatible step. " +
+        "Returns the post-interaction snapshot and resolved element. Use " +
+        "cairn_discover_export to write all recorded steps as a spec YAML.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+        action: z
+          .enum(["click", "fill", "hover", "type", "scroll", "press"])
+          .describe("Action to perform"),
+        target: z
+          .union([LocatorSchema, z.string().min(1)])
+          .optional()
+          .describe(
+            "Element locator (role/label/text/selector) or CSS selector string. Required for click/fill/hover/type. Optional for scroll.",
+          ),
+        value: z
+          .string()
+          .optional()
+          .describe(
+            "Value for fill/type (text input) or press (key name). For scroll, use scrollDirection + scrollPixels instead.",
+          ),
+        scrollDirection: z
+          .enum(["up", "down", "left", "right"])
+          .optional()
+          .describe("Scroll direction (scroll action only)"),
+        scrollPixels: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Pixels to scroll (scroll action only, default 500)"),
+      },
+    },
+    async ({
+      sessionId,
+      action,
+      target,
+      value,
+      scrollDirection,
+      scrollPixels,
+    }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await interact(handle, {
+          action,
+          ...(target !== undefined ? { target: target as never } : {}),
+          ...(value !== undefined ? { value } : {}),
+          ...(scrollDirection !== undefined ? { scrollDirection } : {}),
+          ...(scrollPixels !== undefined ? { scrollPixels } : {}),
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `${action} ok at ${result.url} (${result.snapshot.length} elements)`
+                : `${action} failed: ${result.error ?? "unknown"}`,
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `interact failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_navigate",
+    {
+      title: "Navigate to a new URL in a discovery session",
+      description:
+        "Navigate the session's browser to a new URL. The navigation is " +
+        "recorded as an open step. Returns the new page snapshot.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+        url: z.string().min(1).describe("URL or path to navigate to"),
+        waitUntil: z
+          .enum(["networkidle", "load", "domcontentloaded"])
+          .optional()
+          .describe("Wait condition after navigation"),
+      },
+    },
+    async ({ sessionId, url, waitUntil }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await navigate(
+          handle,
+          url,
+          waitUntil !== undefined ? { waitUntil } : undefined,
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `Navigated to ${result.url} (${result.snapshot.length} elements)`
+                : `Navigation failed: ${result.url}`,
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `navigate failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_inventory",
+    {
+      title: "Get locator inventory from current page",
+      description:
+        "Collect role-based and data-testid locator inventory from the " +
+        "current page in the session. Returns structured locator entries " +
+        "with refs, counts, and ready-to-use spec locator objects.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+        roles: z
+          .boolean()
+          .optional()
+          .describe("Include role locators (default: true if neither set)"),
+        testids: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include data-testid locators (default: true if neither set)",
+          ),
+      },
+    },
+    async ({ sessionId, roles, testids }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const inventory = await getInventory(handle, {
+          ...(roles !== undefined ? { roles } : {}),
+          ...(testids !== undefined ? { testids } : {}),
+        });
+        const result = {
+          ...(inventory.roles ? { roles: inventory.roles } : {}),
+          ...(inventory.testids ? { testids: inventory.testids } : {}),
+        };
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                `Inventory at ${handle.session.currentUrl}:`,
+                ...(inventory.roles
+                  ? [`  ${inventory.roles.length} role locators`]
+                  : []),
+                ...(inventory.testids
+                  ? [`  ${inventory.testids.length} testid locators`]
+                  : []),
+              ].join("\n"),
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `inventory failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_suggest",
+    {
+      title: "Show recorded steps as spec YAML",
+      description:
+        "Return all recorded steps from the session as spec-compatible YAML " +
+        "text. The agent can review this before exporting to a file, or copy " +
+        "steps into an existing spec manually.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+      },
+    },
+    async ({ sessionId }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      const steps = getSteps(handle);
+      const yaml = yamlStringify(steps);
+      return {
+        content: [{ type: "text", text: yaml }],
+        structuredContent: {
+          steps,
+          stepCount: steps.length,
+        } as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_export",
+    {
+      title: "Export recorded steps as a spec YAML",
+      description:
+        "Write the recorded discovery steps + provided intent + outcomes as " +
+        "a valid spec YAML file. The spec is immediately verified with " +
+        "cairn spec verify. Use this when the agent has explored the flow and " +
+        "is ready to write the test.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+        path: z.string().min(1).describe("Output path for the spec YAML file"),
+        intent: z
+          .string()
+          .min(1)
+          .describe("One-line intent statement for the spec"),
+        outcomes: z
+          .array(
+            z.object({
+              id: z.string().min(1).describe("Snake_case outcome ID"),
+              description: z
+                .string()
+                .min(1)
+                .describe("Human-readable outcome description"),
+              verify: VerifierSchema.describe(
+                "Verifier object (e.g. { text: { contains: 'Dashboard' } })",
+              ),
+            }),
+          )
+          .min(1)
+          .describe("Outcome definitions (the spec contract)"),
+      },
+    },
+    async ({ sessionId, path, intent, outcomes }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      try {
+        const steps = getSteps(handle);
+        const name = deriveSpecName(path);
+        const { yaml, stepCount } = buildSpecYaml({
+          name,
+          intent,
+          outcomes,
+          steps,
+        });
+        await writeFile(resolvePath(path), yaml, "utf8");
+
+        // Verify the spec — parseSpec validates via SpecSchema internally
+        let verifyOk = true;
+        let verifyErrors: string[] | undefined;
+        try {
+          await parseSpec(path);
+        } catch (e) {
+          verifyOk = false;
+          verifyErrors = [(e as Error).message];
+        }
+
+        const result = {
+          path,
+          verifyOk,
+          ...(verifyErrors ? { verifyErrors } : {}),
+          stepCount,
+        };
+        return {
+          content: [
+            {
+              type: "text",
+              text: verifyOk
+                ? `Exported ${stepCount} steps to ${path} (verified OK)`
+                : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})`,
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+          isError: !verifyOk,
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `export failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_close",
+    {
+      title: "Close a discovery session",
+      description:
+        "Close the browser session and free the backend. Call this when " +
+        "exploration is complete and the spec has been exported.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+      },
+    },
+    async ({ sessionId }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      await closeSession(handle);
+      sessions.delete(sessionId);
+      return {
+        content: [{ type: "text", text: `Session ${sessionId} closed` }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_discover_list",
+    {
+      title: "List active discovery sessions",
+      description:
+        "List all active discovery sessions with their IDs, URLs, and " +
+        "recorded step counts. Useful for debugging stale sessions.",
+      inputSchema: {},
+    },
+    async () => {
+      const list = [...sessions.values()].map((h) => ({
+        sessionId: h.session.id,
+        url: h.session.currentUrl,
+        stepCount: h.session.steps.length,
+        lastActivity: new Date(h.session.lastActivity).toISOString(),
+      }));
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              list.length === 0
+                ? "No active discovery sessions"
+                : list
+                    .map(
+                      (s) =>
+                        `  ${s.sessionId} → ${s.url} (${s.stepCount} steps, last: ${s.lastActivity})`,
+                    )
+                    .join("\n"),
+          },
+        ],
+        structuredContent: { sessions: list } as unknown as Record<
+          string,
+          unknown
+        >,
       };
     },
   );

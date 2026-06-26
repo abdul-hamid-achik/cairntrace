@@ -34,6 +34,14 @@ all coding agents. Read that file first — everything below assumes you have.
 - Playwright `wait` and browser `evaluate` paths are hard-bounded. Real
   Chromium runs use an external watchdog process that kills the browser at the
   deadline, defaulting to 30000ms unless a specific timeout is supplied.
+- Discovery sessions (9 MCP tools: `cairn_discover_open` → `_snapshot` →
+  `_interact` → `_navigate` → `_inventory` → `_suggest` → `_export` →
+  `_close`, plus `_list`) let an agent explore a live page and record steps
+  as a spec. The CLI one-shot is `cairn discover <url>`. Sessions are
+  stateful, auto-expire after 5 min, and use the same `BrowserBackend` as
+  the runner. Exported specs include cold-start contract comments but the
+  agent must satisfy the cold-start contract separately. See
+  `cairn docs discovery` or the "Discovery sessions" section in AGENTS.md.
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:
@@ -57,4 +65,10 @@ CAIRN_FORCE_TTY=1 ./bin/cairn run examples/flows/<spec>.yml --no-color
 
 # heal a drifted spec end-to-end
 ./bin/cairn spec heal examples/flows/06-drifted-link.yml --apply
+
+# one-shot page discovery (full a11y tree + locator inventory)
+./bin/cairn discover /login --env local --format json
+
+# discovery docs (MCP workflow, step recording, export)
+./bin/cairn docs discovery
 ```

@@ -29,6 +29,8 @@ export const CommandDocSchema = z
     exitCodes: z.record(z.string().regex(/^\d+$/), z.string()),
     /** URN or URL identifying the command's structured output schema, if any. */
     outputSchema: z.string().min(1).optional(),
+    /** Additional notes for agent-facing docs (e.g. MCP tool references). */
+    notes: z.string().optional(),
   })
   .strict();
 export type CommandDoc = z.infer<typeof CommandDocSchema>;

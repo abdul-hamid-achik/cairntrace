@@ -40,6 +40,15 @@ describe("Cairntrace MCP server", () => {
       "cairn_clip",
       "cairn_config_validate",
       "cairn_context",
+      "cairn_discover_close",
+      "cairn_discover_export",
+      "cairn_discover_interact",
+      "cairn_discover_inventory",
+      "cairn_discover_list",
+      "cairn_discover_navigate",
+      "cairn_discover_open",
+      "cairn_discover_snapshot",
+      "cairn_discover_suggest",
       "cairn_docs",
       "cairn_doctor",
       "cairn_explain",
@@ -370,6 +379,337 @@ steps:
     expect(sc).toHaveProperty("seed");
     expect(sc).toHaveProperty("tmux");
     expect(Array.isArray(sc.errors)).toBe(true);
+    await c.close();
+  });
+});
+
+describe("Cairntrace MCP discovery tools", () => {
+  it("cairn_discover_open with mock=true creates a session and returns snapshot", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    expect(r.isError).toBeFalsy();
+    const sc = r.structuredContent as Record<string, unknown>;
+    expect(sc.sessionId).toBeTruthy();
+    expect(sc.url).toBe("/login");
+    expect(Array.isArray(sc.snapshot)).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_discover_open → interact → snapshot → close lifecycle", async () => {
+    const c = await connectInMemory();
+
+    // 1. Open
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    expect(openResult.isError).toBeFalsy();
+    const openSc = openResult.structuredContent as Record<string, unknown>;
+    const sessionId = openSc.sessionId as string;
+
+    // 2. Interact — fill a textbox
+    const fillResult = await c.callTool({
+      name: "cairn_discover_interact",
+      arguments: {
+        sessionId,
+        action: "fill",
+        target: { by: "selector", selector: "#email" },
+        value: "test@test.com",
+      },
+    });
+    expect(fillResult.isError).toBeFalsy();
+    const fillSc = fillResult.structuredContent as Record<string, unknown>;
+    expect(fillSc.ok).toBe(true);
+    expect(fillSc.recordedStep).toEqual({
+      fill: { by: "selector", selector: "#email", value: "test@test.com" },
+    });
+
+    // 3. Snapshot
+    const snapResult = await c.callTool({
+      name: "cairn_discover_snapshot",
+      arguments: { sessionId },
+    });
+    expect(snapResult.isError).toBeFalsy();
+    const snapSc = snapResult.structuredContent as Record<string, unknown>;
+    expect(Array.isArray(snapSc.snapshot)).toBe(true);
+    expect(typeof snapSc.url).toBe("string");
+
+    // 4. List sessions
+    const listResult = await c.callTool({
+      name: "cairn_discover_list",
+      arguments: {},
+    });
+    expect(listResult.isError).toBeFalsy();
+    const listSc = listResult.structuredContent as Record<string, unknown>;
+    const sessions = listSc.sessions as Array<Record<string, unknown>>;
+    expect(sessions.length).toBe(1);
+    expect(sessions[0]!.sessionId).toBe(sessionId);
+    expect(sessions[0]!.stepCount).toBe(2); // open + fill
+
+    // 5. Close
+    const closeResult = await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    expect(closeResult.isError).toBeFalsy();
+
+    // 6. Verify session is gone
+    const listAfter = await c.callTool({
+      name: "cairn_discover_list",
+      arguments: {},
+    });
+    const listAfterSc = listAfter.structuredContent as Record<string, unknown>;
+    expect((listAfterSc.sessions as Array<unknown>).length).toBe(0);
+
+    await c.close();
+  });
+
+  it("cairn_discover_interact returns error for non-existent session", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_discover_interact",
+      arguments: {
+        sessionId: "nonexistent",
+        action: "click",
+        target: { by: "selector", selector: "#btn" },
+      },
+    });
+    expect(r.isError).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_discover_suggest returns recorded steps as YAML", async () => {
+    const c = await connectInMemory();
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/page", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    await c.callTool({
+      name: "cairn_discover_interact",
+      arguments: {
+        sessionId,
+        action: "click",
+        target: { by: "selector", selector: "#button" },
+      },
+    });
+
+    const suggestResult = await c.callTool({
+      name: "cairn_discover_suggest",
+      arguments: { sessionId },
+    });
+    expect(suggestResult.isError).toBeFalsy();
+    const sc = suggestResult.structuredContent as Record<string, unknown>;
+    expect(sc.stepCount).toBe(2); // open + click
+    const steps = sc.steps as Array<Record<string, unknown>>;
+    expect(steps[0]).toEqual({ open: "/page" });
+    expect(steps[1]).toEqual({
+      click: { by: "selector", selector: "#button" },
+    });
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_export writes a spec YAML and verifies it", async () => {
+    const c = await connectInMemory();
+    const specPath = join(dir, "discovered-spec.yml");
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    await c.callTool({
+      name: "cairn_discover_interact",
+      arguments: {
+        sessionId,
+        action: "click",
+        target: { by: "selector", selector: "#submit" },
+      },
+    });
+
+    const exportResult = await c.callTool({
+      name: "cairn_discover_export",
+      arguments: {
+        sessionId,
+        path: specPath,
+        intent: "User can submit the login form",
+        outcomes: [
+          {
+            id: "page_loads",
+            description: "Page loads",
+            verify: { text: { contains: "Welcome" } },
+          },
+        ],
+      },
+    });
+    expect(exportResult.isError).toBeFalsy();
+    const sc = exportResult.structuredContent as Record<string, unknown>;
+    expect(sc.path).toBe(specPath);
+    expect(sc.verifyOk).toBe(true);
+    expect(sc.stepCount).toBe(2); // open + click
+
+    // Verify the file was written
+    const { readFile } = await import("node:fs/promises");
+    const content = await readFile(specPath, "utf8");
+    expect(content).toContain("version: 1");
+    expect(content).toContain("name: discovered_spec");
+    expect(content).toContain("open: /login");
+    expect(content).toContain("click");
+    expect(content).toContain("page_loads");
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_navigate records a new open step", async () => {
+    const c = await connectInMemory();
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const navResult = await c.callTool({
+      name: "cairn_discover_navigate",
+      arguments: { sessionId, url: "/dashboard" },
+    });
+    expect(navResult.isError).toBeFalsy();
+    const navSc = navResult.structuredContent as Record<string, unknown>;
+    expect(navSc.ok).toBe(true);
+    expect(navSc.url).toBe("/dashboard");
+
+    // Verify two steps recorded
+    const suggestResult = await c.callTool({
+      name: "cairn_discover_suggest",
+      arguments: { sessionId },
+    });
+    const sc = suggestResult.structuredContent as Record<string, unknown>;
+    expect(sc.stepCount).toBe(2); // open /login + open /dashboard
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_close on non-existent session returns error", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId: "nonexistent" },
+    });
+    expect(r.isError).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_discover_inventory returns role locators from the page", async () => {
+    const c = await connectInMemory();
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const invResult = await c.callTool({
+      name: "cairn_discover_inventory",
+      arguments: { sessionId, roles: true, testids: false },
+    });
+    expect(invResult.isError).toBeFalsy();
+    const invSc = invResult.structuredContent as Record<string, unknown>;
+    expect(Array.isArray(invSc.roles)).toBe(true);
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_interact with scroll action", async () => {
+    const c = await connectInMemory();
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/long-page", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const scrollResult = await c.callTool({
+      name: "cairn_discover_interact",
+      arguments: {
+        sessionId,
+        action: "scroll",
+        scrollDirection: "down",
+        scrollPixels: 300,
+      },
+    });
+    expect(scrollResult.isError).toBeFalsy();
+    const scrollSc = scrollResult.structuredContent as Record<string, unknown>;
+    expect(scrollSc.ok).toBe(true);
+    expect(scrollSc.recordedStep).toEqual({ scroll: { down: 300 } });
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_export with invalid verifier fails validation", async () => {
+    const c = await connectInMemory();
+    const specPath = join(dir, "bad-discovered-spec.yml");
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const exportResult = await c.callTool({
+      name: "cairn_discover_export",
+      arguments: {
+        sessionId,
+        path: specPath,
+        intent: "Bad spec",
+        outcomes: [
+          {
+            id: "bad_outcome",
+            description: "Invalid verifier",
+            verify: { bogus: { foo: 1 } },
+          },
+        ],
+      },
+    });
+    // The VerifierSchema should reject { bogus: { foo: 1 } }
+    expect(exportResult.isError).toBe(true);
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
     await c.close();
   });
 });

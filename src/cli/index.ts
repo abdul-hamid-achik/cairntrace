@@ -16,6 +16,7 @@ import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
 import { runCommand } from "./commands/run";
 import { snapshotCommand } from "./commands/snapshot";
+import { discoverCommand } from "./commands/discover";
 import { healCommand } from "./commands/spec/heal";
 import { scaffoldCommand } from "./commands/spec/scaffold";
 import { verifyCommand } from "./commands/spec/verify";
@@ -141,7 +142,7 @@ addFormatFlags(
   program
     .command("docs [topic]")
     .description(
-      "Return focused agent docs; topics: overview, authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends",
+      "Return focused agent docs; topics: overview, authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends, discovery",
     ),
 ).action((topic: string | undefined, opts) => docsCommand(topic, opts));
 
@@ -160,6 +161,24 @@ addFormatFlags(
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
 ).action((url: string, opts) => snapshotCommand(url, opts));
+
+addFormatFlags(
+  program
+    .command("discover <url>")
+    .description(
+      "Inspect a page and return full accessibility tree + locator inventory",
+    )
+    .option("--roles", "include accessibility role locators", false)
+    .option("--testids", "include data-testid locators", false)
+    .option("--env <name>", "environment override for config baseUrl")
+    .option("--headed", "show the browser window", false)
+    .option("--mock", "use the in-memory mock backend", false)
+    .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((url: string, opts) => discoverCommand(url, opts));
 
 program
   .command("context <run>")
