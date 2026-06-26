@@ -609,6 +609,68 @@ describe("ConfigSchema with services", () => {
   });
 });
 
+describe("EnvironmentConfigSchema with per-env services/secrets", () => {
+  it("accepts environment with services: false", () => {
+    const result = ConfigSchema.safeParse({
+      version: 1,
+      environments: {
+        local: { baseUrl: "http://localhost:8080" },
+        dev: {
+          baseUrl: "https://dev.example.com",
+          services: false,
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts environment with partial services override", () => {
+    const result = ConfigSchema.safeParse({
+      version: 1,
+      environments: {
+        local: { baseUrl: "http://localhost:8080" },
+        dev: {
+          baseUrl: "https://dev.example.com",
+          services: {
+            seed: { command: "yarn seed", ttlSeconds: 3600 },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts environment with secrets override", () => {
+    const result = ConfigSchema.safeParse({
+      version: 1,
+      environments: {
+        local: { baseUrl: "http://localhost:8080" },
+        dev: {
+          baseUrl: "https://dev.example.com",
+          secrets: {
+            provider: "tvault",
+            tvault: { project: "dev-project" },
+          },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects environment with invalid services override", () => {
+    const result = ConfigSchema.safeParse({
+      version: 1,
+      environments: {
+        dev: {
+          baseUrl: "https://dev.example.com",
+          services: { docker: { command: 123 } },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("validateConfigFile — auto-discovery", () => {
   let tmpDir: string;
   beforeEach(() => {

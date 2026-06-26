@@ -169,4 +169,213 @@ steps: []
       specOnly: "yes",
     });
   });
+
+  it("disables services when env says services: false", async () => {
+    const projectRoot = join(dir, "no-services");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+services:
+  docker:
+    command: docker compose up -d
+  seed:
+    command: yarn seed
+    ttlSeconds: 3600
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+    services: false
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: no_services
+intent: dev env disables services
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "dev",
+    });
+    expect(ctx.services).toBeUndefined();
+  });
+
+  it("keeps top-level services when env has no services key", async () => {
+    const projectRoot = join(dir, "keep-services");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+services:
+  docker:
+    command: docker compose up -d
+  seed:
+    command: yarn seed
+    ttlSeconds: 3600
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: keep_services
+intent: dev env inherits top-level services
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "dev",
+    });
+    expect(ctx.services).toBeDefined();
+    expect(ctx.services?.docker?.command).toBe("docker compose up -d");
+  });
+
+  it("merges env services override over top-level", async () => {
+    const projectRoot = join(dir, "merge-services");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+services:
+  docker:
+    command: docker compose up -d
+  seed:
+    command: yarn seed
+    ttlSeconds: 3600
+  tmux:
+    session: graphite
+    windows:
+      - name: web
+        cwd: web-app
+        command: yarn serve
+        readyOn: { url: http://localhost:8080 }
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+    services:
+      seed:
+        command: echo skip-seed
+        ttlSeconds: 0
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: merge_services
+intent: dev env overrides seed only
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "dev",
+    });
+    expect(ctx.services).toBeDefined();
+    expect(ctx.services?.docker?.command).toBe("docker compose up -d");
+    expect(ctx.services?.seed?.command).toBe("echo skip-seed");
+    expect(ctx.services?.seed?.ttlSeconds).toBe(0);
+    expect(ctx.services?.tmux?.session).toBe("graphite");
+  });
+
+  it("applies env secrets override over top-level", async () => {
+    const projectRoot = join(dir, "env-secrets");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+secrets:
+  provider: tvault
+  tvault:
+    project: local-project
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+    secrets:
+      provider: tvault
+      tvault:
+        project: dev-project
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: env_secrets
+intent: dev env overrides secrets
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "dev",
+    });
+    expect(ctx.secrets?.tvault?.project).toBe("dev-project");
+  });
+
+  it("inherits top-level secrets when env has no secrets key", async () => {
+    const projectRoot = join(dir, "inherit-secrets");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+secrets:
+  provider: tvault
+  tvault:
+    group: myapp
+    env: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: inherit_secrets
+intent: dev inherits top-level secrets
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "dev",
+    });
+    expect(ctx.secrets?.tvault?.group).toBe("myapp");
+    expect(ctx.secrets?.tvault?.env).toBe("local");
+  });
 });

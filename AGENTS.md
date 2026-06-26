@@ -187,6 +187,12 @@ Key rules:
   tvault provider requires tvault block with either `project` or `group`+`env`).
 - Session artifacts (tmux panes, docker logs, seed output) can be stashed to
   fcheap via `services.stash`.
+- **Per-environment overrides:** `environments.<name>` can carry `services:`
+  and `secrets:` blocks. `services: false` disables all services for that env
+  (e.g. `dev`/`test` where the app is already deployed remotely). A partial
+  `services:` block deep-merges over the top-level one. An env-level `secrets:`
+  block replaces the top-level one entirely. This replaces the need for
+  `--no-services` or `--services-dry-run` when running against remote envs.
 
 ## Browser automation
 

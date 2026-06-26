@@ -1282,7 +1282,7 @@ export function buildMcpServer(): McpServer {
           if (r.exitCode === 0) {
             const data = JSON.parse(r.stdout);
             result.target = `${group}/${env}`;
-            result.keys = Object.keys(data).sort();
+            result.keys = Object.keys(data).toSorted();
           } else {
             result.error = r.stderr || "tvault env failed";
           }

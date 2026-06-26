@@ -404,6 +404,31 @@ environments:
 Specs can also set a top-level `viewport: { width, height }`, which wins over
 the environment's.
 
+**Per-environment services & secrets.** The `services` and `secrets` blocks
+can be overridden per-environment inside `environments.<name>`. This lets you
+run the full local stack (docker + seed + tmux) for `local`, but skip all
+services for `dev` or `test` where the app is already deployed remotely:
+
+```yaml
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: https://dev.example.com
+    services: false   # no docker/seed/tmux — app is remote
+  test:
+    baseUrl: https://test.example.com
+    services: false
+    secrets:           # different tvault project for test env
+      provider: tvault
+      tvault: { project: test-project }
+```
+
+When `services: false`, `cairn run --env dev` skips the entire lifecycle — no
+need for `--no-services`. A partial `services:` block deep-merges over the
+top-level one (e.g. override just the seed command, keep docker and tmux). An
+env-level `secrets:` block replaces the top-level one entirely.
+
 Use the same config for validation and runs:
 
 ```bash

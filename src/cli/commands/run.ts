@@ -281,7 +281,7 @@ async function maybeStartServices(
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),
     ...(Object.keys(vars).length > 0 ? { vars } : {}),
   });
-  const cfg = ctx.config?.services;
+  const cfg = ctx.services;
   if (!cfg) return undefined;
 
   const coldStart = opts.coldStart ?? isTruthyEnv(process.env.CI);
@@ -326,7 +326,7 @@ async function maybeStartServices(
     coldStart,
     project,
     onSpawn,
-    ...(ctx.config?.secrets ? { secrets: ctx.config.secrets } : {}),
+    ...(ctx.secrets ? { secrets: ctx.secrets } : {}),
     ...(interactive
       ? { log: (m: string) => process.stderr.write(`${m}\n`) }
       : {}),
@@ -568,7 +568,7 @@ export async function maybeInjectTvaultSecrets(
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),
     ...(Object.keys(vars).length > 0 ? { vars } : {}),
   });
-  const secrets = ctx.config?.secrets;
+  const secrets = ctx.secrets;
   if (!secrets || secrets.provider !== "tvault" || !secrets.tvault) return;
 
   const tvaultCfg = secrets.tvault;

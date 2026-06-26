@@ -97,7 +97,7 @@ export async function getTvaultKeys(
     if (!envResult.ok) {
       return { ok: false, keys: [], error: envResult.error };
     }
-    return { ok: true, keys: Object.keys(envResult.env).sort() };
+    return { ok: true, keys: Object.keys(envResult.env).toSorted() };
   } catch (e) {
     return { ok: false, keys: [], error: (e as Error).message };
   }

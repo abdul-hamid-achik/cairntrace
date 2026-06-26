@@ -23,17 +23,19 @@ export const ViewportConfigSchema = z
   .strict();
 export type ViewportConfig = z.infer<typeof ViewportConfigSchema>;
 
-export const EnvironmentConfigSchema = z
-  .object({
-    /** Base URL prepended to `open:` steps that begin with `/`. */
-    baseUrl: z.string().optional(),
-    /** Variables substituted as `${vars.X}` inside specs. */
-    vars: z.record(ConfigVarValueSchema).optional(),
-    /** Browser viewport applied at run start. Spec-level `viewport:` wins. */
-    viewport: ViewportConfigSchema.optional(),
-  })
-  .strict();
-export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
+// Forward-declared as an interface so ConfigSchema (below) and runtimeContext
+// can reference EnvironmentConfig before EnvironmentConfigSchema is assigned
+// (it depends on ServicesConfigSchema + SecretsConfigSchema, defined later).
+export interface EnvironmentConfig {
+  baseUrl?: string;
+  vars?: Record<string, ConfigVarValue>;
+  viewport?: ViewportConfig;
+  /** Per-env services override: false disables all; partial ServicesConfig
+   * is deep-merged over the top-level services block. */
+  services?: false | ServicesConfig;
+  /** Per-env secrets override (replaces the top-level secrets block). */
+  secrets?: SecretsConfig;
+}
 
 export const SecretsProviderSchema = z.enum(["env", "tvault"]);
 export type SecretsProvider = z.infer<typeof SecretsProviderSchema>;
@@ -439,6 +441,22 @@ export const ServicesConfigSchema = z
     },
   );
 export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
+
+export const EnvironmentConfigSchema = z
+  .object({
+    /** Base URL prepended to `open:` steps that begin with `/`. */
+    baseUrl: z.string().optional(),
+    /** Variables substituted as `${vars.X}` inside specs. */
+    vars: z.record(ConfigVarValueSchema).optional(),
+    /** Browser viewport applied at run start. Spec-level `viewport:` wins. */
+    viewport: ViewportConfigSchema.optional(),
+    /** Per-env services override: false disables all; partial ServicesConfig
+     * is deep-merged over the top-level services block. */
+    services: z.union([z.literal(false), ServicesConfigSchema]).optional(),
+    /** Per-env secrets override (replaces the top-level secrets block). */
+    secrets: SecretsConfigSchema.optional(),
+  })
+  .strict();
 
 export const StashConfigSchema = z
   .object({
