@@ -196,6 +196,50 @@ webServer:
 });
 
 describe("loadConfig env substitution", () => {
+  it("substitutes ${env.X:-fallback} when the env var is missing", async () => {
+    const projectDir = join(dir, "env-fallback-subst");
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:\${env.CAIRN_MISSING_PORT:-8080}
+`,
+    );
+    delete process.env["CAIRN_MISSING_PORT"];
+    const loaded = await loadConfig(specPath);
+    expect(loaded?.config.environments["local"]?.baseUrl).toBe(
+      "http://localhost:8080",
+    );
+  });
+
+  it("prefers env var over ${env.X:-fallback} default", async () => {
+    const projectDir = join(dir, "env-fallback-preferred");
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:\${env.CAIRN_PREFERRED_PORT:-8080}
+`,
+    );
+    process.env["CAIRN_PREFERRED_PORT"] = "3123";
+    try {
+      const loaded = await loadConfig(specPath);
+      expect(loaded?.config.environments["local"]?.baseUrl).toBe(
+        "http://localhost:3123",
+      );
+    } finally {
+      delete process.env["CAIRN_PREFERRED_PORT"];
+    }
+  });
+
   it("substitutes ${env.X} in config text before parsing", async () => {
     const projectDir = join(dir, "env-subst");
     await mkdir(projectDir, { recursive: true });

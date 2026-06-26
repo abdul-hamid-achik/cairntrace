@@ -69,8 +69,9 @@ export async function loadConfig(
 
 function substituteEnv(text: string): string {
   return text.replace(
-    /\$\{env\.(\w+)\}/g,
-    (_match, name: string) => process.env[name] ?? "",
+    /\$\{env\.(\w+)(?::-([^}]+))?\}/g,
+    (_match, name: string, fallback?: string) =>
+      process.env[name] ?? fallback ?? "",
   );
 }
 

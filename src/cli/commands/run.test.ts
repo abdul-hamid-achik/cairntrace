@@ -2,9 +2,24 @@ import { execa } from "execa";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunResultSchema } from "../../core/schema/run.v1";
-import { expandSpecArgs, synthesizeErroredResult } from "./run";
+import {
+  expandSpecArgs,
+  maybeInjectTvaultSecrets,
+  synthesizeErroredResult,
+  type RunCommandOptions,
+} from "./run";
+
+// Mock the tvault helper so CLI tests don't require a real TinyVault project.
+vi.mock("./secrets", async () => {
+  const actual = await vi.importActual<typeof import("./secrets")>("./secrets");
+  return {
+    ...actual,
+    getTvaultEnv: vi.fn(),
+  };
+});
+const { getTvaultEnv } = await import("./secrets");
 
 describe("synthesizeErroredResult", () => {
   it("produces a RunResult that parses against the v1 wire schema", () => {
@@ -235,5 +250,133 @@ steps:
     expect(stderr).toContain("seed: ");
     // The truncation should add "..." for commands over 80 chars
     expect(stderr).toContain("...");
+  });
+});
+
+describe("tvault secrets injection", () => {
+  const dirPromise = mkdtemp(join(tmpdir(), "cairntrace-tvault-run-"));
+
+  beforeEach(() => {
+    vi.mocked(getTvaultEnv).mockReset();
+    delete process.env["TVAULT_SECRET_A"];
+    delete process.env["TVAULT_SECRET_B"];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("injects tvault secrets into process.env for spec placeholders", async () => {
+    vi.mocked(getTvaultEnv).mockResolvedValue({
+      ok: true,
+      env: {
+        TVAULT_SECRET_A: "value-a",
+        TVAULT_SECRET_B: "value-b",
+      },
+    });
+
+    const dir = await dirPromise;
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+secrets:
+  provider: tvault
+  tvault:
+    project: test-project
+`,
+    );
+    await writeFile(
+      join(dir, "spec.yml"),
+      `version: 1
+name: tvault_spec
+intent: Use tvault secrets in spec placeholders.
+outcomes:
+  - id: secret_a_visible
+    description: secret A is visible in page
+    verify: { text: "value-a" }
+steps:
+  - open: { path: "data:text/html,<h1>value-a</h1>", waitUntil: load }
+`,
+    );
+
+    await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+      services: false,
+    } as RunCommandOptions);
+
+    expect(process.env["TVAULT_SECRET_A"]).toBe("value-a");
+    expect(process.env["TVAULT_SECRET_B"]).toBe("value-b");
+    expect(getTvaultEnv).toHaveBeenCalledWith("test-project");
+  });
+
+  it("throws when tvault project is missing required secrets", async () => {
+    vi.mocked(getTvaultEnv).mockResolvedValue({
+      ok: true,
+      env: { TVAULT_SECRET_A: "value-a" },
+    });
+
+    const dir = await dirPromise;
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+secrets:
+  provider: tvault
+  tvault:
+    project: test-project
+  required: [TVAULT_SECRET_A, TVAULT_SECRET_B]
+`,
+    );
+    await writeFile(
+      join(dir, "spec.yml"),
+      `version: 1
+name: tvault_missing_spec
+intent: Missing required secret should fail fast.
+outcomes: []
+steps: []
+`,
+    );
+
+    await expect(
+      maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+        services: false,
+      } as RunCommandOptions),
+    ).rejects.toThrow(
+      'tvault project "test-project" is missing required secrets: TVAULT_SECRET_B',
+    );
+  });
+
+  it("does nothing when no tvault secrets are configured", async () => {
+    const dir = await dirPromise;
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+`,
+    );
+    await writeFile(
+      join(dir, "spec.yml"),
+      `version: 1
+name: no_secrets
+intent: No secrets configured.
+outcomes: []
+steps: []
+`,
+    );
+
+    await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+      services: false,
+    } as RunCommandOptions);
+
+    expect(getTvaultEnv).not.toHaveBeenCalled();
   });
 });

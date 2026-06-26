@@ -24,6 +24,7 @@ import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
+import { getTvaultEnv } from "./secrets";
 import { maybeAutoStash } from "./stash";
 import { maybeAutoAnnotateRun } from "./annotate";
 import { stampSpecContractHash } from "./spec/verify";
@@ -149,6 +150,18 @@ export async function runCommand(
     // Tear down the web server too before exiting.
     if (server) await server.stop().catch(() => undefined);
     untrackServer?.();
+    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    process.exit(2);
+  }
+
+  // Inject tvault secrets into process.env so that `${env.SECRET_KEY}`
+  // placeholders in specs resolve to the actual secret values.
+  // This runs once for the whole invocation, before any spec executes.
+  // Errors are fatal because a missing required secret would just fail later
+  // in a more confusing way.
+  try {
+    await maybeInjectTvaultSecrets(expandedSpecs[0]!, opts);
+  } catch (e) {
     process.stderr.write(`cairn run: ${(e as Error).message}\n`);
     process.exit(2);
   }
@@ -532,6 +545,70 @@ async function runBatch(
 }
 
 /* ----- helpers ----- */
+
+/**
+ * When `secrets.provider: tvault` is configured, resolve the tvault project
+ * name (substituting `${env.X:-default}` from process.env) and inject all
+ * secrets from that project into process.env. This makes them available to
+ * `${env.SECRET_KEY}` placeholders in specs via parseSpec's substitute().
+ *
+ * Without this, tvault secrets were only injected into the seed command's env
+ * (resolveSeedEnv in services.ts), not into the spec execution path.
+ */
+export async function maybeInjectTvaultSecrets(
+  firstSpec: string,
+  opts: RunCommandOptions,
+): Promise<void> {
+  const firstSpecAbs = isAbsolutePath(firstSpec)
+    ? firstSpec
+    : resolve(process.cwd(), firstSpec);
+  const vars = parseVarFlags(opts.var);
+  const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  });
+  const secrets = ctx.config?.secrets;
+  if (!secrets || secrets.provider !== "tvault" || !secrets.tvault) return;
+
+  const project = secrets.tvault.project;
+  const result = await getTvaultEnv(project);
+  if (!result.ok) {
+    throw new Error(
+      `tvault secrets injection failed: ${result.error ?? "unknown error"}`,
+    );
+  }
+
+  // Inject all tvault secrets into process.env. Existing env vars are NOT
+  // overwritten — the caller's shell env takes precedence (e.g. when running
+  // inside `tvault run -- cairn run ...`, the secrets are already in env).
+  let injected = 0;
+  for (const [key, value] of Object.entries(result.env)) {
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+      injected++;
+    }
+  }
+
+  // Also inject into the required list — fail fast if any required key is
+  // still missing (not in tvault and not in the shell env).
+  if (secrets.required) {
+    const missing = secrets.required.filter(
+      (k) => process.env[k] === undefined || process.env[k] === "",
+    );
+    if (missing.length > 0) {
+      throw new Error(
+        `tvault project "${project}" is missing required secrets: ${missing.join(", ")}`,
+      );
+    }
+  }
+
+  if (injected > 0) {
+    process.stderr.write(
+      `cairn run: injected ${injected} secrets from tvault project "${project}"\n`,
+    );
+  }
+}
 
 function backendOpts(
   opts: RunCommandOptions,
