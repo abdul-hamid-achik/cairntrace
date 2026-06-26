@@ -480,9 +480,14 @@ addFormatFlags(
   program
     .command("secrets")
     .description("Check TinyVault secrets provider status and available keys")
+    .option("--project <name>", "TinyVault project name (direct mode)")
     .option(
-      "--project <name>",
-      "TinyVault project name (required when provider is tvault)",
+      "--group <name>",
+      "TinyVault environment group (inheritance mode; requires --env)",
+    )
+    .option(
+      "--env <name>",
+      "Environment name within the group (requires --group)",
     )
     .option(
       "--config <path>",
@@ -496,7 +501,7 @@ addFormatFlags(
   const result: {
     provider: string;
     tvaultInstalled: boolean;
-    project?: string;
+    target?: string;
     keys: string[];
     error?: string;
   } = {
@@ -505,14 +510,26 @@ addFormatFlags(
     keys: [],
   };
 
-  const projectName = opts.project;
-  if (tvaultOk && projectName) {
-    const keys = await getTvaultKeys(projectName);
-    result.project = projectName;
+  const hasProject = !!opts.project;
+  const hasGroup = !!opts.group;
+  const hasEnv = !!opts.env;
+
+  if (tvaultOk && hasProject && !hasGroup && !hasEnv) {
+    const keys = await getTvaultKeys({ project: opts.project });
+    result.target = opts.project;
     result.keys = keys.keys;
     if (keys.error) result.error = keys.error;
-  } else if (tvaultOk && !projectName) {
-    result.error = "pass --project <name> to list keys";
+  } else if (tvaultOk && hasGroup && hasEnv && !hasProject) {
+    const keys = await getTvaultKeys({ group: opts.group, env: opts.env });
+    result.target = `${opts.group}/${opts.env}`;
+    result.keys = keys.keys;
+    if (keys.error) result.error = keys.error;
+  } else if (tvaultOk && (hasProject || hasGroup || hasEnv)) {
+    result.error =
+      "specify either --project <name> or both --group <name> --env <name>";
+  } else if (tvaultOk) {
+    result.error =
+      "pass --project <name> or --group <name> --env <name> to list keys";
   }
 
   const md = [
@@ -520,7 +537,7 @@ addFormatFlags(
     "",
     `- provider: ${result.provider}`,
     `- tvault: ${result.tvaultInstalled ? "installed" : "not on $PATH"}`,
-    ...(result.project ? [`- project: ${result.project}`] : []),
+    ...(result.target ? [`- target: ${result.target}`] : []),
     ...(result.keys.length > 0
       ? [`- keys: ${result.keys.join(", ")}`]
       : ["- keys: (none or not checked)"]),

@@ -521,6 +521,54 @@ describe("SecretsConfigSchema validations", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts tvault with group + env (inheritance mode)", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { group: "myapp", env: "preview" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts tvault with group + env + identity", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { group: "myapp", env: "preview", identity: "ci" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects tvault with group but no env", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { group: "myapp" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects tvault with env but no group", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { env: "preview" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects tvault with both project and group+env", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { project: "myapp-test", group: "myapp", env: "preview" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects tvault with no project, group, or env", () => {
+    const result = SecretsConfigSchema.safeParse({
+      provider: "tvault",
+      tvault: { identity: "ci" },
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("ConfigSchema with services", () => {

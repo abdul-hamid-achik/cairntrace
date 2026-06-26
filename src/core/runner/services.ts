@@ -12,7 +12,7 @@ import type {
   TmuxSessionOption,
   TmuxWindow,
 } from "../schema/config.v1";
-import type { SecretsConfig } from "../schema/config.v1";
+import type { SecretsConfig, TvaultConfig } from "../schema/config.v1";
 import {
   isTruthyEnv,
   probeOnce,
@@ -443,13 +443,17 @@ async function resolveSeedEnv(
   let env: NodeJS.ProcessEnv = { ...process.env, ...cfg.env };
 
   if (ctx.secrets?.provider === "tvault" && ctx.secrets.tvault) {
-    const tvaultResult = await getTvaultEnvSafe(ctx.secrets.tvault.project);
+    const tvaultCfg = ctx.secrets.tvault;
+    // Lazy import to avoid circular dependency (secrets.ts imports execa, not runner code).
+    const { tvaultArgs } = await import("../../cli/commands/secrets");
+    const { target } = tvaultArgs(tvaultCfg);
+    const tvaultResult = await getTvaultEnvSafe(tvaultCfg);
     if (!tvaultResult.ok) {
       throw new ServicesError(`tvault secrets for seed: ${tvaultResult.error}`);
     }
     env = { ...env, ...tvaultResult.env };
     ctx.log?.(
-      `services: seed — injected ${Object.keys(tvaultResult.env).length} secrets from tvault project "${ctx.secrets.tvault.project}"`,
+      `services: seed — injected ${Object.keys(tvaultResult.env).length} secrets from tvault "${target}"`,
     );
   }
 
@@ -462,12 +466,12 @@ async function resolveSeedEnv(
  * circular dependency (secrets.ts imports execa, not runner code).
  */
 async function getTvaultEnvSafe(
-  project: string,
+  cfg: TvaultConfig,
 ): Promise<{ ok: boolean; env: Record<string, string>; error?: string }> {
   try {
     // Dynamic import to avoid circular dependency.
     const { getTvaultEnv } = await import("../../cli/commands/secrets");
-    return await getTvaultEnv(project);
+    return await getTvaultEnv(cfg);
   } catch (e) {
     return { ok: false, env: {}, error: (e as Error).message };
   }

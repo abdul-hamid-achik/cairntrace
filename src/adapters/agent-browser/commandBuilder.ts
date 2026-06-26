@@ -11,6 +11,7 @@ import {
   type ScrollStep,
   type SnapshotStep,
   type Step,
+  type TypeStep,
   type UploadStep,
   type WaitCondition,
   type WaitStep,
@@ -93,6 +94,21 @@ export function fillStepToArgv(step: FillStep): string[] {
   return locatorToArgv(locator as Locator, "fill", value);
 }
 
+/**
+ * `type` — character-by-character keyboard input via CDP.
+ * Maps to agent-browser's `type <sel> <text>` command.
+ * Real keyboard events trigger SPA framework reactivity (Vue/React) that a
+ * bulk `fill` may miss, leaving submit buttons disabled.
+ *
+ * NOTE: agent-browser's `type` does not support `--delay`; the schema's
+ * `delayMs` is reserved for future backends (e.g. Playwright) and is
+ * stripped by the adapter before dispatch.
+ */
+export function typeStepToArgv(step: TypeStep): string[] {
+  const { value, delayMs: _delayMs, ...locator } = step.type;
+  return locatorToArgv(locator as Locator, "type", value);
+}
+
 export function uploadStepToArgv(step: UploadStep): string[] {
   const { path, ...locator } = step.upload;
   return locatorToArgv(locator as Locator, "upload", path);
@@ -169,6 +185,7 @@ export function scrollStepToArgv(step: ScrollStep): string[] {
 export function batchSubStepToArgv(sub: BatchSubStep): string[] {
   if ("click" in sub) return ["click", sub.click.selector];
   if ("hover" in sub) return ["hover", sub.hover.selector];
+  if ("type" in sub) return ["type", sub.type.selector, sub.type.value];
   if ("fill" in sub) return ["fill", sub.fill.selector, sub.fill.value];
   if ("upload" in sub) return ["upload", sub.upload.selector, sub.upload.path];
   if ("press" in sub) return ["press", sub.press];
@@ -192,6 +209,7 @@ export function stepToArgv(step: Step): string[] {
   if ("click" in step) return clickStepToArgv(step);
   if ("hover" in step) return hoverStepToArgv(step);
   if ("fill" in step) return fillStepToArgv(step);
+  if ("type" in step) return typeStepToArgv(step);
   if ("upload" in step) return uploadStepToArgv(step);
   if ("download" in step) return downloadStepToArgv(step);
   if ("wait" in step) return waitStepToArgv(step);

@@ -1198,18 +1198,30 @@ export function buildMcpServer(): McpServer {
       title: "Check TinyVault secrets provider status",
       description:
         "Check if tvault is installed and list available secret keys from " +
-        "a TinyVault project. Returns metadata only — secret values are " +
-        "never returned to the AI context. Use vault_run_with_secrets for " +
-        "actual secret injection.",
+        "a TinyVault project or environment group. Returns metadata only — " +
+        "secret values are never returned to the AI context. Use " +
+        "vault_run_with_secrets for actual secret injection.",
       inputSchema: {
         project: z
           .string()
           .optional()
-          .describe("TinyVault project name to check keys for"),
+          .describe("TinyVault project name (direct mode)"),
+        group: z
+          .string()
+          .optional()
+          .describe(
+            "TinyVault environment group name (inheritance mode; requires env)",
+          ),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment name within the group (requires group)"),
       },
     },
     async (args) => {
       const project = args.project as string | undefined;
+      const group = args.group as string | undefined;
+      const env = args.env as string | undefined;
 
       let tvaultOk = false;
       try {
@@ -1222,7 +1234,7 @@ export function buildMcpServer(): McpServer {
       const result: {
         provider: string;
         tvaultInstalled: boolean;
-        project?: string;
+        target?: string;
         keys: string[];
         error?: string;
       } = {
@@ -1231,7 +1243,11 @@ export function buildMcpServer(): McpServer {
         keys: [],
       };
 
-      if (tvaultOk && project) {
+      const hasProject = !!project;
+      const hasGroup = !!group;
+      const hasEnv = !!env;
+
+      if (tvaultOk && hasProject && !hasGroup && !hasEnv) {
         try {
           const r = await execa(
             "tvault",
@@ -1240,7 +1256,7 @@ export function buildMcpServer(): McpServer {
           );
           if (r.exitCode === 0) {
             const data = JSON.parse(r.stdout);
-            result.project = project;
+            result.target = project;
             result.keys = Array.isArray(data)
               ? data
                   .map((k: string | { key?: string }) =>
@@ -1254,14 +1270,35 @@ export function buildMcpServer(): McpServer {
         } catch (e) {
           result.error = (e as Error).message;
         }
-      } else if (tvaultOk && !project) {
-        result.error = "pass project to list keys";
+      } else if (tvaultOk && hasGroup && hasEnv && !hasProject) {
+        // Group mode: tvault list doesn't support --group/--env.
+        // Use tvault env to get resolved keys (values discarded).
+        try {
+          const r = await execa(
+            "tvault",
+            ["env", "--group", group, "--env", env, "--format", "json"],
+            { reject: false, timeout: 10_000 },
+          );
+          if (r.exitCode === 0) {
+            const data = JSON.parse(r.stdout);
+            result.target = `${group}/${env}`;
+            result.keys = Object.keys(data).sort();
+          } else {
+            result.error = r.stderr || "tvault env failed";
+          }
+        } catch (e) {
+          result.error = (e as Error).message;
+        }
+      } else if (tvaultOk && (hasProject || hasGroup || hasEnv)) {
+        result.error = "specify either project or both group+env — not both";
+      } else if (tvaultOk) {
+        result.error = "pass project or group+env to list keys";
       }
 
       const textLines = [
         `secrets: ${result.provider}`,
         `tvault: ${result.tvaultInstalled ? "installed" : "not on $PATH"}`,
-        ...(result.project ? [`project: ${result.project}`] : []),
+        ...(result.target ? [`target: ${result.target}`] : []),
         `keys: ${
           result.keys.length > 0
             ? result.keys.join(", ")

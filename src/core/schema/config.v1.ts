@@ -40,12 +40,24 @@ export type SecretsProvider = z.infer<typeof SecretsProviderSchema>;
 
 export const TvaultConfigSchema = z
   .object({
-    /** TinyVault project name to pull secrets from. */
-    project: z.string().min(1),
+    /** TinyVault project name (direct mode). Mutually exclusive with group+env. */
+    project: z.string().min(1).optional(),
+    /** TinyVault environment group name (inheritance mode). Requires `env`. */
+    group: z.string().min(1).optional(),
+    /** Environment name within the group (requires `group`). */
+    env: z.string().min(1).optional(),
     /** TinyVault identity name for sealed secrets (optional). */
     identity: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .refine((cfg) => {
+    const hasProject = !!cfg.project;
+    const hasGroup = !!cfg.group;
+    const hasEnv = !!cfg.env;
+    if (hasProject) return !hasGroup && !hasEnv;
+    if (hasGroup) return hasEnv;
+    return false;
+  }, "tvault: specify either `project` (direct) or both `group` + `env` (inheritance) — not both");
 export type TvaultConfig = z.infer<typeof TvaultConfigSchema>;
 
 export const SecretsConfigSchema = z
@@ -58,7 +70,7 @@ export const SecretsConfigSchema = z
   .strict()
   .refine((cfg) => cfg.provider !== "tvault" || cfg.tvault !== undefined, {
     message:
-      "secrets.provider: tvault requires a `tvault:` block with at least a `project` name",
+      "secrets.provider: tvault requires a `tvault:` block with either `project` or `group`+`env`",
   });
 export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
 

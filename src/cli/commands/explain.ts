@@ -887,12 +887,23 @@ export function buildExplain(): ExplainResult {
         name: "secrets",
         summary: "Check TinyVault secrets provider status and available keys",
         synopsis:
-          "cairn secrets [--project <name>] [--config <path>] [--format json|yaml|md]",
+          "cairn secrets [--project <name> | --group <name> --env <name>] [--config <path>] [--format json|yaml|md]",
         flags: [
           {
             name: "--project",
             type: "string",
-            description: "TinyVault project name to list keys for",
+            description: "TinyVault project name (direct mode)",
+          },
+          {
+            name: "--group",
+            type: "string",
+            description:
+              "TinyVault environment group (inheritance mode; requires --env)",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Environment name within the group (requires --group)",
           },
           {
             name: "--config",
@@ -909,7 +920,7 @@ export function buildExplain(): ExplainResult {
         ],
         exitCodes: {
           "0": "success",
-          "2": "tvault not installed or project not found",
+          "2": "tvault not installed or project/group not found",
         },
       },
       {

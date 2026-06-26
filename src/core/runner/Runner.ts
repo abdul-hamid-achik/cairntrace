@@ -1504,6 +1504,7 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   if ("press" in step) return { kind: "press", key: step.press };
   if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };
   if ("snapshot" in step) return { kind: "snapshot" };
+  if ("type" in step) return { kind: "type" };
   return { kind: "use", action: step.use };
 }
 
@@ -1515,6 +1516,7 @@ function diagnosticNeedles(step: Step): string[] {
   if ("click" in step) add(locatorNeedle(step.click));
   if ("hover" in step) add(locatorNeedle(step.hover));
   if ("fill" in step) add(locatorNeedle(step.fill));
+  if ("type" in step) add(locatorNeedle(step.type));
   if ("upload" in step) add(locatorNeedle(step.upload));
   if ("download" in step) add(locatorNeedle(step.download));
   if ("transform" in step) {
@@ -1538,6 +1540,7 @@ function diagnosticNeedles(step: Step): string[] {
       if ("click" in sub) add(sub.click.selector);
       else if ("hover" in sub) add(sub.hover.selector);
       else if ("fill" in sub) add(sub.fill.selector);
+      else if ("type" in sub) add(sub.type.selector);
       else if ("upload" in sub) add(sub.upload.selector);
       else if ("scroll" in sub && "to" in sub.scroll)
         add(sub.scroll.to.selector);

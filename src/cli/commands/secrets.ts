@@ -1,9 +1,12 @@
 import { execa } from "execa";
+import type { TvaultConfig } from "../../core/schema/config.v1";
 
 /* ---------------------------------------------------------------------------
  * TinyVault secrets provider
  *
  * `tvault env --project <name> --format json` returns { KEY: "value", ... }.
+ * `tvault env --group <g> --env <e> --format json` returns the same, resolved
+ *   through the group's inheritance chain.
  * `tvault run --project <name> -- <command>` injects secrets into a subprocess.
  *
  * Cairntrace uses tvault in two ways:
@@ -20,6 +23,23 @@ export async function isTvaultAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * Build the `--project` or `--group`/`--env` CLI args for tvault commands.
+ * Returns the "target" string for logging/error messages.
+ */
+export function tvaultArgs(cfg: TvaultConfig): {
+  args: string[];
+  target: string;
+} {
+  if (cfg.project) {
+    return { args: ["--project", cfg.project], target: cfg.project };
+  }
+  return {
+    args: ["--group", cfg.group!, "--env", cfg.env!],
+    target: `${cfg.group}/${cfg.env}`,
+  };
+}
+
 export interface TvaultSecretsResult {
   ok: boolean;
   keys: string[];
@@ -30,9 +50,12 @@ export interface TvaultSecretsResult {
  * Get the list of secret keys from a TinyVault project (metadata only —
  * values are never returned to the caller). Used for `cairn secrets status`
  * and for pre-flight checks.
+ *
+ * In group mode, `tvault list` doesn't support --group/--env, so we fall
+ * back to `tvault env --format json` and take Object.keys().
  */
 export async function getTvaultKeys(
-  project: string,
+  cfg: TvaultConfig,
 ): Promise<TvaultSecretsResult> {
   const ok = await isTvaultAvailable();
   if (!ok) {
@@ -45,22 +68,36 @@ export async function getTvaultKeys(
   }
 
   try {
-    const r = await execa("tvault", ["list", "--project", project, "--json"], {
-      reject: false,
-      timeout: 10_000,
-    });
-    if (r.exitCode !== 0) {
-      return { ok: false, keys: [], error: r.stderr || "tvault list failed" };
+    if (cfg.project) {
+      const r = await execa(
+        "tvault",
+        ["list", ...tvaultArgs(cfg).args, "--json"],
+        {
+          reject: false,
+          timeout: 10_000,
+        },
+      );
+      if (r.exitCode !== 0) {
+        return { ok: false, keys: [], error: r.stderr || "tvault list failed" };
+      }
+      const data = JSON.parse(r.stdout);
+      const keys = Array.isArray(data)
+        ? data
+            .map((k: string | { key?: string }) =>
+              typeof k === "string" ? k : (k.key ?? ""),
+            )
+            .filter(Boolean)
+        : (data?.secrets?.map((s: { key: string }) => s.key) ?? []);
+      return { ok: true, keys };
     }
-    const data = JSON.parse(r.stdout);
-    const keys = Array.isArray(data)
-      ? data
-          .map((k: string | { key?: string }) =>
-            typeof k === "string" ? k : (k.key ?? ""),
-          )
-          .filter(Boolean)
-      : (data?.secrets?.map((s: { key: string }) => s.key) ?? []);
-    return { ok: true, keys };
+
+    // Group mode: tvault list doesn't support --group/--env. Use tvault env
+    // to get the resolved key set (values are discarded here).
+    const envResult = await getTvaultEnv(cfg);
+    if (!envResult.ok) {
+      return { ok: false, keys: [], error: envResult.error };
+    }
+    return { ok: true, keys: Object.keys(envResult.env).sort() };
   } catch (e) {
     return { ok: false, keys: [], error: (e as Error).message };
   }
@@ -74,11 +111,15 @@ export interface TvaultEnvResult {
 
 /**
  * Get secret values as environment variables from TinyVault.
- * Uses `tvault env --project <name> --format json` to get { KEY: "value", ... }.
+ * Uses `tvault env --format json` to get { KEY: "value", ... }.
  * The values are returned for environment injection only — they're never
  * written to artifacts or shown in agent_context.md.
+ *
+ * Supports both direct project mode and group/env inheritance mode.
  */
-export async function getTvaultEnv(project: string): Promise<TvaultEnvResult> {
+export async function getTvaultEnv(
+  cfg: TvaultConfig,
+): Promise<TvaultEnvResult> {
   const ok = await isTvaultAvailable();
   if (!ok) {
     return {
@@ -90,13 +131,17 @@ export async function getTvaultEnv(project: string): Promise<TvaultEnvResult> {
   }
 
   try {
-    const r = await execa(
-      "tvault",
-      ["env", "--project", project, "--format", "json"],
-      { reject: false, timeout: 10_000 },
-    );
+    const { args, target } = tvaultArgs(cfg);
+    const r = await execa("tvault", ["env", ...args, "--format", "json"], {
+      reject: false,
+      timeout: 10_000,
+    });
     if (r.exitCode !== 0) {
-      return { ok: false, env: {}, error: r.stderr || "tvault env failed" };
+      return {
+        ok: false,
+        env: {},
+        error: r.stderr || `tvault env failed for ${target}`,
+      };
     }
     const env = JSON.parse(r.stdout);
     return { ok: true, env };
@@ -111,13 +156,14 @@ export async function getTvaultEnv(project: string): Promise<TvaultEnvResult> {
  * Returns the child process so the caller can control lifecycle.
  */
 export async function runWithTvault(
-  project: string,
+  cfg: TvaultConfig,
   command: string[],
   opts: { cwd?: string; timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; exitCode: number; stdout: string; stderr: string }> {
-  const args = ["run", "--project", project, "--", ...command];
+  const { args } = tvaultArgs(cfg);
+  const fullArgs = ["run", ...args, "--", ...command];
   try {
-    const r = await execa("tvault", args, {
+    const r = await execa("tvault", fullArgs, {
       reject: false,
       timeout: opts.timeoutMs ?? 60_000,
       ...(opts.cwd ? { cwd: opts.cwd } : {}),

@@ -179,9 +179,12 @@ Key rules:
   with a three-layer check (fingerprint + TTL + optional data-level command).
 - `--no-services` skips the entire lifecycle.
 - `secrets.provider: tvault` injects vault secrets into the seed command's env.
+  The `tvault:` block supports two modes: `project` (direct) or `group` + `env`
+  (inheritance — resolves missing keys from the base environment via tvault's
+  env-group feature).
 - `cairn config validate --json` validates the config file (zod schema +
   cross-field `.refine()` rules: unique window names, readyOn constraints,
-  tvault provider requires tvault block).
+  tvault provider requires tvault block with either `project` or `group`+`env`).
 - Session artifacts (tmux panes, docker logs, seed output) can be stashed to
   fcheap via `services.stash`.
 

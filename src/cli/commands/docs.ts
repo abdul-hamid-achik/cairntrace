@@ -793,27 +793,31 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
   secrets: {
     title: "Secrets (TinyVault)",
     summary:
-      "Use TinyVault as a secrets provider for authenticated specs. Secret values never enter the AI context — tvault injects them into the subprocess environment at run time.",
+      "Use TinyVault as a secrets provider for authenticated specs. Secret values never enter the AI context — tvault injects them into the subprocess environment at run time. Supports direct project mode and environment-group inheritance mode.",
     sections: [
       {
         title: "Overview",
         body: "Authenticated specs need credentials (API keys, database URLs, session tokens). TinyVault stores them encrypted locally and injects them into subprocess environments via `tvault run`. Cairntrace integrates with tvault as a config-level secrets provider, so spec authors never hardcode secrets and agent_context.md never exposes them.",
       },
       {
+        title: "Two modes: project vs group/env",
+        body: "TinyVault supports two ways to resolve secrets:\n\n**Direct mode** — point at a specific tvault project:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    project: myapp-test\n```\n\n**Inheritance mode** — point at a group + environment, and missing keys fall back to the base environment at read time:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    group: myapp\n    env: preview\n```\nThis is useful when preview/staging inherit most keys from production but override a few. The group must be created in tvault first (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`). Inheritance is resolve-time — no values are duplicated across projects.",
+      },
+      {
         title: "cairn secrets",
-        body: "`cairn secrets [--project <name>]` checks the tvault status and lists available secret keys (metadata only — values are never shown). This is a pre-flight check: verify that the required keys exist before running a spec that depends on them.",
+        body: "`cairn secrets` checks the tvault status and lists available secret keys (metadata only — values are never shown). Supports both modes:\n```bash\ncairn secrets --project myapp-test          # direct mode\ncairn secrets --group myapp --env preview    # inheritance mode\n```\nThis is a pre-flight check: verify that the required keys exist before running a spec that depends on them.",
       },
       {
         title: "Config",
-        body: "Enable tvault as the secrets provider in cairntrace.config.yml:\n```yaml\nsecrets:\n  provider: tvault\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    identity: ci\n```\nWhen provider is tvault, `cairn run` wraps the backend launch in `tvault run --project myapp-test -- <command>`, injecting all project secrets as environment variables. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
+        body: "Enable tvault as the secrets provider in cairntrace.config.yml. Use either `project` (direct) or `group` + `env` (inheritance) — not both:\n```yaml\nsecrets:\n  provider: tvault\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    # OR:\n    # group: myapp\n    # env: preview\n```\nWhen provider is tvault, `cairn run` injects all project/group secrets as environment variables before the spec executes. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
       },
       {
         title: "MCP Tool",
-        body: "`cairn_secrets_status` mirrors the CLI: takes an optional project name, returns tvault installation status and the list of secret keys. Values are never returned — only key names. For actual secret injection in commands, use TinyVault's own MCP tools (`vault_run_with_secrets`).",
+        body: "`cairn_secrets_status` mirrors the CLI: takes an optional `project` or `group`+`env`, returns tvault installation status and the list of secret keys. Values are never returned — only key names. For actual secret injection in commands, use TinyVault's own MCP tools (`vault_run_with_secrets`).",
       },
       {
         title: "DX Workflow",
-        body: "The typical workflow: store secrets in tvault (`tvault set API_KEY ...`) → configure `secrets.provider: tvault` in cairntrace.config.yml → `cairn secrets --project myapp-test` verifies keys exist → `cairn run flows/auth.yml --cold-start` runs the spec with secrets injected. The spec YAML uses `${vars.API_KEY}` or environment variables — never hardcoded values.",
+        body: "The typical workflow:\n1. Store secrets in tvault (`tvault set API_KEY ...`)\n2. Optionally create an environment group (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`)\n3. Configure `secrets.provider: tvault` in cairntrace.config.yml with either `project` or `group`+`env`\n4. `cairn secrets --project myapp-test` (or `--group myapp --env preview`) verifies keys exist\n5. `cairn run flows/auth.yml --cold-start` runs the spec with secrets injected\n\nThe spec YAML uses `${env.SECRET_KEY}` placeholders — never hardcoded values.",
       },
       {
         title: "Security",
@@ -825,15 +829,25 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "check tvault status",
         language: "bash",
         code: [
-          "# check if tvault is installed and list keys",
+          "# direct mode — list keys for a project",
           "cairn secrets --project myapp-test",
           "",
-          "# configure in cairntrace.config.yml",
+          "# inheritance mode — list resolved keys through group/env",
+          "cairn secrets --group myapp --env preview",
+          "",
+          "# configure in cairntrace.config.yml (direct)",
           "# secrets:",
           "#   provider: tvault",
           "#   required: [API_KEY, DATABASE_URL]",
           "#   tvault:",
           "#     project: myapp-test",
+          "",
+          "# configure in cairntrace.config.yml (inheritance)",
+          "# secrets:",
+          "#   provider: tvault",
+          "#   tvault:",
+          "#     group: myapp",
+          "#     env: preview",
         ].join("\n"),
       },
     ],

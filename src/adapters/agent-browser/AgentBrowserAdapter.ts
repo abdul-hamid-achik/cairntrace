@@ -73,6 +73,10 @@ export class AgentBrowserAdapter implements BrowserBackend {
       const { value, ...locator } = step.fill;
       return this.runInteractiveStep(locator as Locator, "fill", value);
     }
+    if ("type" in step) {
+      const { value, delayMs: _delayMs, ...locator } = step.type;
+      return this.runInteractiveStep(locator as Locator, "type", value);
+    }
     if ("upload" in step) {
       const { path, ...locator } = step.upload;
       return this.runInteractiveStep(locator as Locator, "upload", path);
@@ -499,7 +503,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private async runInteractiveStep(
     locator: Locator,
-    action: "click" | "hover" | "fill" | "upload",
+    action: "click" | "hover" | "fill" | "type" | "upload",
     value?: string,
   ): Promise<InvocationResult> {
     if (locator.by === "selector") {

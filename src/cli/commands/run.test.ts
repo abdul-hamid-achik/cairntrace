@@ -17,6 +17,7 @@ vi.mock("./secrets", async () => {
   return {
     ...actual,
     getTvaultEnv: vi.fn(),
+    tvaultArgs: actual.tvaultArgs,
   };
 });
 const { getTvaultEnv } = await import("./secrets");
@@ -309,7 +310,7 @@ steps:
 
     expect(process.env["TVAULT_SECRET_A"]).toBe("value-a");
     expect(process.env["TVAULT_SECRET_B"]).toBe("value-b");
-    expect(getTvaultEnv).toHaveBeenCalledWith("test-project");
+    expect(getTvaultEnv).toHaveBeenCalledWith({ project: "test-project" });
   });
 
   it("throws when tvault project is missing required secrets", async () => {
@@ -348,7 +349,7 @@ steps: []
         services: false,
       } as RunCommandOptions),
     ).rejects.toThrow(
-      'tvault project "test-project" is missing required secrets: TVAULT_SECRET_B',
+      'tvault "test-project" is missing required secrets: TVAULT_SECRET_B',
     );
   });
 
@@ -378,5 +379,49 @@ steps: []
     } as RunCommandOptions);
 
     expect(getTvaultEnv).not.toHaveBeenCalled();
+  });
+
+  it("injects tvault secrets from group/env inheritance mode", async () => {
+    vi.mocked(getTvaultEnv).mockResolvedValue({
+      ok: true,
+      env: {
+        TVAULT_SECRET_A: "value-a",
+      },
+    });
+
+    const dir = await dirPromise;
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+secrets:
+  provider: tvault
+  tvault:
+    group: myapp
+    env: preview
+`,
+    );
+    await writeFile(
+      join(dir, "spec.yml"),
+      `version: 1
+name: tvault_group_spec
+intent: Use tvault group/env secrets.
+outcomes: []
+steps: []
+`,
+    );
+
+    await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+      services: false,
+    } as RunCommandOptions);
+
+    expect(process.env["TVAULT_SECRET_A"]).toBe("value-a");
+    expect(getTvaultEnv).toHaveBeenCalledWith({
+      group: "myapp",
+      env: "preview",
+    });
   });
 });

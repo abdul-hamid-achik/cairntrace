@@ -24,7 +24,7 @@ import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
-import { getTvaultEnv } from "./secrets";
+import { getTvaultEnv, tvaultArgs } from "./secrets";
 import { maybeAutoStash } from "./stash";
 import { maybeAutoAnnotateRun } from "./annotate";
 import { stampSpecContractHash } from "./spec/verify";
@@ -571,8 +571,9 @@ export async function maybeInjectTvaultSecrets(
   const secrets = ctx.config?.secrets;
   if (!secrets || secrets.provider !== "tvault" || !secrets.tvault) return;
 
-  const project = secrets.tvault.project;
-  const result = await getTvaultEnv(project);
+  const tvaultCfg = secrets.tvault;
+  const { target } = tvaultArgs(tvaultCfg);
+  const result = await getTvaultEnv(tvaultCfg);
   if (!result.ok) {
     throw new Error(
       `tvault secrets injection failed: ${result.error ?? "unknown error"}`,
@@ -598,14 +599,14 @@ export async function maybeInjectTvaultSecrets(
     );
     if (missing.length > 0) {
       throw new Error(
-        `tvault project "${project}" is missing required secrets: ${missing.join(", ")}`,
+        `tvault "${target}" is missing required secrets: ${missing.join(", ")}`,
       );
     }
   }
 
   if (injected > 0) {
     process.stderr.write(
-      `cairn run: injected ${injected} secrets from tvault project "${project}"\n`,
+      `cairn run: injected ${injected} secrets from tvault "${target}"\n`,
     );
   }
 }

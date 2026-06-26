@@ -77,16 +77,30 @@ vi.mock("./webServer", () => ({
 
 // Configurable tvault mock implementation (reset per-test).
 let tvaultImpl:
-  | ((
-      project: string,
-    ) => Promise<{ ok: boolean; env: Record<string, string>; error?: string }>)
+  | ((cfg: {
+      project?: string;
+      group?: string;
+      env?: string;
+    }) => Promise<{ ok: boolean; env: Record<string, string>; error?: string }>)
   | undefined;
 
 vi.mock("../../cli/commands/secrets", () => ({
-  getTvaultEnv: vi.fn(async (project: string) => {
-    if (tvaultImpl) return tvaultImpl(project);
-    return { ok: true, env: {} };
-  }),
+  getTvaultEnv: vi.fn(
+    async (cfg: { project?: string; group?: string; env?: string }) => {
+      if (tvaultImpl) return tvaultImpl(cfg);
+      return { ok: true, env: {} };
+    },
+  ),
+  tvaultArgs: vi.fn(
+    (cfg: { project?: string; group?: string; env?: string }) => {
+      if (cfg.project)
+        return { args: ["--project", cfg.project], target: cfg.project };
+      return {
+        args: ["--group", cfg.group!, "--env", cfg.env!],
+        target: `${cfg.group}/${cfg.env}`,
+      };
+    },
+  ),
 }));
 
 vi.mock("./seedState", () => ({

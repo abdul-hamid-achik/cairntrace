@@ -265,6 +265,46 @@ export const FillStepSchema = z
   .strict();
 export type FillStep = z.infer<typeof FillStepSchema>;
 
+/**
+ * `type` — type text character-by-character into a field.
+ *
+ * Unlike `fill` (which does a bulk value-set), `type` sends each character as
+ * a real keyboard event via CDP. This is critical for SPA frameworks (Vue,
+ * React, etc.) whose form validation listens for `keydown`/`keyup`/`input`
+ * events that a bulk `fill` may not trigger — the classic symptom is a submit
+ * button staying `[disabled]` after `fill` because the framework's reactivity
+ * never fired.
+ *
+ * `delayMs` adds a per-keystroke delay (useful for slow debounced validators).
+ * Defaults to 0 (as fast as Playwright can send keys).
+ */
+const typeTargetSchema = z.union([
+  RoleLocatorSchema.extend({
+    value: z.string(),
+    delayMs: z.number().int().min(0).optional(),
+  }).strict(),
+  LabelLocatorSchema.extend({
+    value: z.string(),
+    delayMs: z.number().int().min(0).optional(),
+  }).strict(),
+  TextLocatorSchema.extend({
+    value: z.string(),
+    delayMs: z.number().int().min(0).optional(),
+  }).strict(),
+  SelectorLocatorSchema.extend({
+    value: z.string(),
+    delayMs: z.number().int().min(0).optional(),
+  }).strict(),
+]);
+
+export const TypeStepSchema = z
+  .object({
+    ...stepCommon,
+    type: typeTargetSchema,
+  })
+  .strict();
+export type TypeStep = z.infer<typeof TypeStepSchema>;
+
 export const UploadStepSchema = z
   .object({
     ...stepCommon,
@@ -424,10 +464,17 @@ const batchScrollSchema = z
   .strict();
 const batchWaitSchema = z.object({ wait: WaitConditionSchema }).strict();
 
+const batchTypeSchema = z
+  .object({
+    type: SelectorLocatorSchema.extend({ value: z.string() }).strict(),
+  })
+  .strict();
+
 export const BatchSubStepSchema = z.union([
   batchClickSchema,
   batchHoverSchema,
   batchFillSchema,
+  batchTypeSchema,
   batchUploadSchema,
   batchPressSchema,
   batchScrollSchema,
@@ -457,6 +504,7 @@ export const StepSchema = z.union([
   ClickStepSchema,
   HoverStepSchema,
   FillStepSchema,
+  TypeStepSchema,
   UploadStepSchema,
   DownloadStepSchema,
   TransformStepSchema,
