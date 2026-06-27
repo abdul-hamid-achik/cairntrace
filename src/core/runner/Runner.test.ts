@@ -1298,9 +1298,19 @@ steps:
 `,
     );
     const backend = new MockBrowserBackend();
-    const result = await runSpec({ specPath, backend, artifactRoot });
-    expect(result.coldStart).toBe(false);
-    expect(backend.clearBrowserStateCalls).toBe(0);
+    // Cold-start defaults to `process.env.CI === "true"`, so control CI
+    // explicitly here — otherwise this passes locally but fails under CI
+    // (where the runner is also exercised), which is exactly the env this
+    // assertion is about.
+    const prevCi = process.env["CI"];
+    delete process.env["CI"];
+    try {
+      const result = await runSpec({ specPath, backend, artifactRoot });
+      expect(result.coldStart).toBe(false);
+      expect(backend.clearBrowserStateCalls).toBe(0);
+    } finally {
+      if (prevCi !== undefined) process.env["CI"] = prevCi;
+    }
   });
 
   // ---- Video recording tests ----
