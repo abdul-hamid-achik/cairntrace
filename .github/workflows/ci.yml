@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        # Needed by the real-browser adapter tests and the smoke below.
+        # GitHub's ubuntu runner sets CI=true, so Cairntrace applies
+        # --no-sandbox / --disable-dev-shm-usage automatically.
+        run: bunx playwright install --with-deps chromium
+
+      - name: Verify (typecheck + lint + format + knip + test)
+        run: bun run verify
+
+      - name: Smoke — run a spec end-to-end against real Chromium
+        run: |
+          set -euo pipefail
+          bun examples/demo-app/server.ts &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          # Wait for the demo app to accept connections (max 30s).
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8787/ >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:8787/ >/dev/null || { echo "demo app did not start"; exit 1; }
+          ./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright

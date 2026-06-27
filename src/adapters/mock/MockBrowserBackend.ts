@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { openPath, type Step } from "../../core/schema/spec.v1";
+import { openPath, type Step, StepSchema } from "../../core/schema/spec.v1";
 import type {
   BackendRequest,
   BackendResponse,
@@ -41,6 +41,7 @@ export class MockBrowserBackend implements BrowserBackend {
   private scriptQueue: unknown[] = [];
   private stepShouldFail = false;
   private stepFailureMessage = "mock step failure";
+  private strictStepValidation = false;
   /** Recorded steps for assertions in tests. */
   public readonly stepLog: Step[] = [];
   public readonly requestLog: BackendRequest[] = [];
@@ -90,11 +91,31 @@ export class MockBrowserBackend implements BrowserBackend {
     this.stepShouldFail = true;
     this.stepFailureMessage = message;
   }
+  /**
+   * When enabled, runStep validates each step against StepSchema and fails on
+   * a shape the schema rejects. Off by default (so existing tests are
+   * unaffected); turn it on to catch step-shape bugs — e.g. a recorder or
+   * exporter emitting a step the real backends would reject — that the
+   * permissive default would otherwise pass green.
+   */
+  setStrictStepValidation(on = true): void {
+    this.strictStepValidation = on;
+  }
 
   /* ----- BrowserBackend impl ----- */
 
   async runStep(step: Step): Promise<InvocationResult> {
     this.stepLog.push(step);
+    if (this.strictStepValidation) {
+      const parsed = StepSchema.safeParse(step);
+      if (!parsed.success) {
+        return failure(
+          `mock: step rejected by StepSchema: ${parsed.error.issues
+            .map((i) => `${i.path.join(".")} ${i.message}`)
+            .join("; ")}`,
+        );
+      }
+    }
     if ("open" in step) this.url = openPath(step);
     if ("download" in step) {
       await mkdir(dirname(step.download.saveAs), { recursive: true });

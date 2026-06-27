@@ -30,6 +30,9 @@ function createMockBackend(
 ): MockBrowserBackend {
   const backend = new MockBrowserBackend();
   backend.setSnapshot(snapshotText);
+  // Validate recorded step shapes against the real schema so a recorder bug
+  // (e.g. an invalid scroll shape) surfaces here instead of shipping green.
+  backend.setStrictStepValidation();
   return backend;
 }
 

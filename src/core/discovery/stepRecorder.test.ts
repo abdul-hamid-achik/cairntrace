@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { StepSchema } from "../schema/spec.v1";
 import {
   recordInteraction,
   recordOpen,
@@ -151,5 +152,76 @@ describe("stepRecorder", () => {
     it("returns undefined when press has no value", () => {
       expect(recordInteraction({ action: "press" })).toBeUndefined();
     });
+  });
+
+  // Contract: everything the recorder emits must be a step the real backends
+  // accept — i.e. it must satisfy StepSchema. This is the guard that the
+  // invalid `{ scroll: { down: N } }` shape lacked.
+  describe("recorded steps satisfy StepSchema", () => {
+    const cases: { name: string; step: Record<string, unknown> | undefined }[] =
+      [
+        { name: "open", step: recordOpen("/login") },
+        {
+          name: "open+wait",
+          step: recordOpenWithWait("/login", "networkidle"),
+        },
+        {
+          name: "click",
+          step: recordInteraction({ action: "click", target: "#go" }),
+        },
+        {
+          name: "hover",
+          step: recordInteraction({ action: "hover", target: "#menu" }),
+        },
+        {
+          name: "fill",
+          step: recordInteraction({
+            action: "fill",
+            target: "#email",
+            value: "a@b.com",
+          }),
+        },
+        {
+          name: "type",
+          step: recordInteraction({
+            action: "type",
+            target: "#search",
+            value: "hi",
+          }),
+        },
+        {
+          name: "scroll-direction",
+          step: recordInteraction({
+            action: "scroll",
+            scrollDirection: "down",
+            scrollPixels: 300,
+          }),
+        },
+        {
+          name: "scroll-default",
+          step: recordInteraction({ action: "scroll" }),
+        },
+        {
+          name: "scroll-to",
+          step: recordInteraction({
+            action: "scroll",
+            target: { by: "role", role: "button", name: "Submit" },
+          }),
+        },
+        {
+          name: "press",
+          step: recordInteraction({ action: "press", value: "Enter" }),
+        },
+      ];
+
+    for (const { name, step } of cases) {
+      it(`${name} parses as a valid spec step`, () => {
+        const result = StepSchema.safeParse(step);
+        expect(
+          result.success,
+          result.success ? "" : JSON.stringify(result.error.issues),
+        ).toBe(true);
+      });
+    }
   });
 });

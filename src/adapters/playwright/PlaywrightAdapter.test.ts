@@ -540,6 +540,68 @@ describe("PlaywrightAdapter type", () => {
       "unhandled step type",
     );
   });
+
+  // Coverage: every interactive step type must be wired in runStep. If a future
+  // step type is added to StepSchema without an adapter branch, the
+  // exhaustiveness guard turns it into an "unhandled step type" failure — this
+  // test would catch that for the common interactions.
+  it("wires every interactive step type (no silent no-op)", async () => {
+    const calls: string[] = [];
+    const track =
+      (label: string) =>
+      (..._args: unknown[]): Promise<void> => {
+        calls.push(label);
+        return Promise.resolve();
+      };
+    const loc = {
+      click: track("click"),
+      hover: track("hover"),
+      fill: track("fill"),
+      setInputFiles: track("setInputFiles"),
+      pressSequentially: track("pressSequentially"),
+      scrollIntoViewIfNeeded: track("scrollIntoViewIfNeeded"),
+    };
+    const page = {
+      goto: track("goto"),
+      keyboard: { press: track("keyboard.press") },
+      mouse: { wheel: track("mouse.wheel") },
+      locator: () => loc,
+    };
+
+    const steps = [
+      { open: "http://localhost/" },
+      { click: { by: "selector", selector: "#a" } },
+      { hover: { by: "selector", selector: "#a" } },
+      { fill: { by: "selector", selector: "#a", value: "x" } },
+      { type: { by: "selector", selector: "#a", value: "x" } },
+      { upload: { by: "selector", selector: "#a", path: "/tmp/x" } },
+      { scroll: { direction: "down", px: 100 } },
+      { scroll: { to: { by: "selector", selector: "#a" } } },
+      { press: "Enter" },
+    ] as const;
+
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 100 });
+    installPage(adapter, page);
+    for (const step of steps) {
+      const result = await adapter.runStep(step as never);
+      expect(
+        result.ok,
+        result.ok ? "" : (result as { stderr: string }).stderr,
+      ).toBe(true);
+    }
+    // Each interaction reached a real Playwright call.
+    expect(calls).toEqual([
+      "goto",
+      "click",
+      "hover",
+      "fill",
+      "pressSequentially",
+      "setInputFiles",
+      "mouse.wheel",
+      "scrollIntoViewIfNeeded",
+      "keyboard.press",
+    ]);
+  });
 });
 
 describe("PlaywrightAdapter launch", () => {
