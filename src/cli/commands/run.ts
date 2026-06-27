@@ -563,6 +563,15 @@ export async function maybeInjectTvaultSecrets(
     ? firstSpec
     : resolve(process.cwd(), firstSpec);
   const vars = parseVarFlags(opts.var);
+
+  // When --env <name> is passed, propagate it to CAIRN_TVAULT_ENV so that
+  // config-level `${env.CAIRN_TVAULT_ENV:-local}` resolves to the cairn env
+  // name automatically — unless the caller explicitly set CAIRN_TVAULT_ENV
+  // to decouple the two.
+  if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
+    process.env.CAIRN_TVAULT_ENV = opts.env;
+  }
+
   const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
     ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),

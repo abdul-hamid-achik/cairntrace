@@ -3,6 +3,18 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.1]
+
+### Fixed
+- **`--env` flag now propagates to `CAIRN_TVAULT_ENV`** — when `cairn run --env dev`
+  is used with `secrets.provider: tvault` in group/env mode, the tvault env
+  was resolved from `${env.CAIRN_TVAULT_ENV:-local}` in the config. Since
+  `--env` only set the cairn env name (for baseUrl/vars), but not
+  `CAIRN_TVAULT_ENV`, tvault always resolved to `local` regardless of the
+  `--env` flag. This meant dev-pinned secrets (e.g. `MONGO_URI`) were never
+  injected. Now `--env <name>` sets `CAIRN_TVAULT_ENV=<name>` automatically,
+  unless the caller explicitly set `CAIRN_TVAULT_ENV` to decouple the two.
+
 ## [1.23.0]
 
 ### Added
