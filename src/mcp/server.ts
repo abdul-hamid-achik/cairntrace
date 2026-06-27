@@ -24,6 +24,7 @@ import {
   closeAllSessions,
   closeSession,
   captureSnapshot,
+  getExportableSteps,
   getInventory,
   getSteps,
   interact,
@@ -1337,6 +1338,9 @@ export function buildMcpServer(): McpServer {
   /* ----- discovery sessions ----- */
 
   const sessions: SessionRegistry = new Map();
+  // Cap concurrent live browser sessions so a runaway loop can't exhaust
+  // processes / file descriptors by opening sessions without closing them.
+  const MAX_DISCOVERY_SESSIONS = 8;
 
   // Auto-sweep expired sessions every 60s
   const sweepTimer = setInterval(() => {
@@ -1352,9 +1356,18 @@ export function buildMcpServer(): McpServer {
     if (shuttingDown) return;
     shuttingDown = true;
     clearInterval(sweepTimer);
-    // Close sessions synchronously as best-effort (close() is async but
-    // backends with terminateSync will be cleaned by cleanup.ts; the
-    // closeAllSessions call handles the rest in-process).
+    // These backends are created inline (not via trackBackend), so cleanup.ts
+    // does NOT see them. close() is async and won't finish before the process
+    // exits on a signal, so synchronously kill each backend's daemon/browser
+    // first — otherwise every open discovery session orphans an agent-browser
+    // daemon + Chrome on Ctrl-C. Then best-effort async close for the rest.
+    for (const handle of sessions.values()) {
+      try {
+        handle.backend.terminateSync?.();
+      } catch {
+        // best-effort — keep terminating the remaining sessions
+      }
+    }
     void closeAllSessions(sessions);
   }
   process.on("SIGINT", () => shutdownDiscovery("SIGINT"));
@@ -1395,6 +1408,19 @@ export function buildMcpServer(): McpServer {
       },
     },
     async ({ url, env, mock, headed, waitUntil, sessionName }) => {
+      // Sweep expired sessions first so the cap reflects live sessions only.
+      await sweepSessions(sessions);
+      if (sessions.size >= MAX_DISCOVERY_SESSIONS) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `too many open discovery sessions (${sessions.size}/${MAX_DISCOVERY_SESSIONS}); close some with cairn_discover_close before opening more`,
+            },
+          ],
+          isError: true,
+        };
+      }
       // Resolve relative URLs against config baseUrl when env is provided
       const resolvedUrl = env
         ? await resolveDiscoverUrl(url, { env }).catch(() => url)
@@ -1788,7 +1814,7 @@ export function buildMcpServer(): McpServer {
         };
       }
       try {
-        const steps = getSteps(handle);
+        const { steps, skippedFailed } = getExportableSteps(handle);
         const name = deriveSpecName(path);
         const { yaml, stepCount } = buildSpecYaml({
           name,
@@ -1808,19 +1834,26 @@ export function buildMcpServer(): McpServer {
           verifyErrors = [(e as Error).message];
         }
 
+        const skipNote =
+          skippedFailed > 0
+            ? ` (excluded ${skippedFailed} failed step${
+                skippedFailed === 1 ? "" : "s"
+              } that did not replay)`
+            : "";
         const result = {
           path,
           verifyOk,
           ...(verifyErrors ? { verifyErrors } : {}),
           stepCount,
+          skippedFailed,
         };
         return {
           content: [
             {
               type: "text",
               text: verifyOk
-                ? `Exported ${stepCount} steps to ${path} (verified OK)`
-                : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})`,
+                ? `Exported ${stepCount} steps to ${path} (verified OK)${skipNote}`
+                : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})${skipNote}`,
             },
           ],
           structuredContent: result as unknown as Record<string, unknown>,

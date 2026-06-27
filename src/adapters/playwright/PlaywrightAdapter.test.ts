@@ -512,6 +512,36 @@ describe("PlaywrightAdapter wait", () => {
   });
 });
 
+describe("PlaywrightAdapter type", () => {
+  it("types into a locator via pressSequentially (not a silent no-op)", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
+    const pressSequentially = vi.fn(() => Promise.resolve());
+    const locator = vi.fn(() => ({ pressSequentially }));
+    installPage(adapter, { locator });
+
+    const result = await adapter.runStep({
+      type: { by: "selector", selector: "#search", value: "hello", delayMs: 5 },
+    });
+
+    expect(locator).toHaveBeenCalledWith("#search");
+    expect(pressSequentially).toHaveBeenCalledWith("hello", {
+      timeout: 1000,
+      delay: 5,
+    });
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("fails loudly on an unhandled step type instead of reporting a pass", async () => {
+    const adapter = new PlaywrightAdapter();
+    installPage(adapter, {});
+    const result = await adapter.runStep({ bogus: true } as never);
+    expect(result.ok).toBe(false);
+    expect((result as { stderr: string }).stderr).toContain(
+      "unhandled step type",
+    );
+  });
+});
+
 describe("PlaywrightAdapter launch", () => {
   const originalCi = process.env.CI;
   const originalLaunchArgs = process.env.CAIRN_PLAYWRIGHT_LAUNCH_ARGS;

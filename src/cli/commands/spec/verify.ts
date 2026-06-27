@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { parse as parseYaml, stringify as yamlStringify } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { computeContractHash } from "../../../core/contractHash";
 import { resolveSpecRuntimeContext } from "../../../core/config/runtimeContext";
 import {
@@ -87,22 +87,18 @@ export async function verifyCommand(
 }
 
 export async function stampSpecContractHash(specPath: string): Promise<string> {
-  // Stamp mode: re-parse the YAML as raw object, write a fresh contractHash, save.
+  // Stamp mode: compute the contractHash from the validated spec, then update
+  // ONLY the contractHash node via the YAML Document API. A full re-serialize
+  // would re-emit every scalar in PLAIN style and strip hand-authored quoting
+  // (e.g. "${vars.X}" / "${secrets.X}"); the Document API preserves the rest of
+  // the file — quoting, comments, key order — untouched.
   const text = await readFile(specPath, "utf8");
   const raw = parseYaml(text);
   const spec = SpecSchema.parse(raw);
   const hash = computeContractHash(spec);
-  const updated = { ...spec, contractHash: hash };
-  const header = extractHeader(text);
-  const out =
-    header +
-    yamlStringify(updated, {
-      indent: 2,
-      lineWidth: 100,
-      defaultStringType: "PLAIN",
-      defaultKeyType: "PLAIN",
-    });
-  await writeFile(specPath, out);
+  const doc = parseDocument(text);
+  doc.set("contractHash", hash);
+  await writeFile(specPath, doc.toString());
   return hash;
 }
 
@@ -116,20 +112,6 @@ function coldStartLint(
     return "cold-start: no imports, no session.resume, and no preconditions.commands. Specs without setup likely cannot replay from a fresh browser.";
   }
   return undefined;
-}
-
-function extractHeader(text: string): string {
-  // Preserve leading `#` comment lines from a scaffolded file when re-writing.
-  const lines = text.split("\n");
-  const headerLines: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith("#") || line.trim() === "") {
-      headerLines.push(line);
-    } else {
-      break;
-    }
-  }
-  return headerLines.length > 0 ? headerLines.join("\n") + "\n" : "";
 }
 
 function toMarkdown(r: VerifyResult): string {

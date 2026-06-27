@@ -775,6 +775,16 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           error: cutResult.error,
         });
       }
+    } else {
+      // Clips were requested but vidtrace isn't installed — surface it
+      // instead of silently dropping the evidence the user asked for.
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.video",
+        action: "clip",
+        error:
+          "vidtrace not found on PATH — clipPoints were requested but no clips were cut. Install vidtrace to enable failure clip extraction.",
+      });
     }
   }
 

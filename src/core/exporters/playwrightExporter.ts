@@ -146,6 +146,13 @@ function renderStepBody(step: Step): string[] {
     const { value, ...loc } = step.fill;
     return [`await ${locator(loc as Locator)}.fill(${JSON.stringify(value)});`];
   }
+  if ("type" in step) {
+    const { value, delayMs, ...loc } = step.type;
+    const opts = delayMs !== undefined ? `, { delay: ${delayMs} }` : "";
+    return [
+      `await ${locator(loc as Locator)}.pressSequentially(${JSON.stringify(value)}${opts});`,
+    ];
+  }
   if ("upload" in step) {
     const { path, ...loc } = step.upload;
     return [

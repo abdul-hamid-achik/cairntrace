@@ -56,9 +56,32 @@ export type SessionRegistry = Map<string, DiscoverySessionHandle>;
 export interface DiscoverySessionHandle {
   session: DiscoverySession;
   backend: BrowserBackend;
+  /**
+   * Serializes backend operations so two concurrent calls against the same
+   * session can't interleave on the single shared browser (which would corrupt
+   * the recorded-step order and the last-snapshot/url state).
+   */
+  lock: Promise<unknown>;
 }
 
 const SESSION_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Run `fn` exclusively against a session's backend: concurrent calls queue
+ * behind one another instead of racing on the same browser. The stored lock
+ * never carries a rejection, so one failed op can't poison the queue.
+ */
+function withLock<T>(
+  handle: DiscoverySessionHandle,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const run = handle.lock.then(fn, fn);
+  handle.lock = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 /**
  * Create a new discovery session: instantiate a backend, open the URL,
@@ -100,7 +123,7 @@ export async function openSession(
     lastSnapshot: snapshotElements,
   };
 
-  return { session, backend };
+  return { session, backend, lock: Promise.resolve() };
 }
 
 /**
@@ -110,14 +133,16 @@ export async function captureSnapshot(
   handle: DiscoverySessionHandle,
 ): Promise<{ snapshot: SnapshotElement[]; url: string }> {
   handle.session.lastActivity = Date.now();
-  const snap = await handle.backend.snapshot({ interactive: true });
-  const elements = snap.ok ? parseSnapshot(snap.text) : [];
-  handle.session.lastSnapshot = elements;
-  const url = await handle.backend
-    .getUrl()
-    .catch(() => handle.session.currentUrl);
-  handle.session.currentUrl = url;
-  return { snapshot: elements, url };
+  return withLock(handle, async () => {
+    const snap = await handle.backend.snapshot({ interactive: true });
+    const elements = snap.ok ? parseSnapshot(snap.text) : [];
+    handle.session.lastSnapshot = elements;
+    const url = await handle.backend
+      .getUrl()
+      .catch(() => handle.session.currentUrl);
+    handle.session.currentUrl = url;
+    return { snapshot: elements, url };
+  });
 }
 
 /**
@@ -155,42 +180,44 @@ export async function interact(
     };
   }
 
-  // Execute the step on the backend
-  const result: InvocationResult = await handle.backend.runStep(
-    recordedStep as never,
-  );
+  return withLock(handle, async () => {
+    // Execute the step on the backend
+    const result: InvocationResult = await handle.backend.runStep(
+      recordedStep as never,
+    );
 
-  // Capture post-interaction snapshot
-  const snap = await handle.backend.snapshot({ interactive: true });
-  const elements = snap.ok ? parseSnapshot(snap.text) : [];
-  handle.session.lastSnapshot = elements;
-  const url = await handle.backend
-    .getUrl()
-    .catch(() => handle.session.currentUrl);
-  handle.session.currentUrl = url;
+    // Capture post-interaction snapshot
+    const snap = await handle.backend.snapshot({ interactive: true });
+    const elements = snap.ok ? parseSnapshot(snap.text) : [];
+    handle.session.lastSnapshot = elements;
+    const url = await handle.backend
+      .getUrl()
+      .catch(() => handle.session.currentUrl);
+    handle.session.currentUrl = url;
 
-  // Record the step
-  handle.session.steps.push({
-    step: recordedStep,
-    timestamp: new Date().toISOString(),
-    ok: result.ok,
-    ...(result.resolvedElement
-      ? { resolvedElement: result.resolvedElement }
-      : {}),
+    // Record the step
+    handle.session.steps.push({
+      step: recordedStep,
+      timestamp: new Date().toISOString(),
+      ok: result.ok,
+      ...(result.resolvedElement
+        ? { resolvedElement: result.resolvedElement }
+        : {}),
+    });
+
+    return {
+      ok: result.ok,
+      ...(result.resolvedElement
+        ? { resolvedElement: result.resolvedElement }
+        : {}),
+      url,
+      snapshot: elements,
+      ...(result.ok
+        ? {}
+        : { error: result.stderr || result.stdout || "step failed" }),
+      recordedStep,
+    };
   });
-
-  return {
-    ok: result.ok,
-    ...(result.resolvedElement
-      ? { resolvedElement: result.resolvedElement }
-      : {}),
-    url,
-    snapshot: elements,
-    ...(result.ok
-      ? {}
-      : { error: result.stderr || result.stdout || "step failed" }),
-    recordedStep,
-  };
 }
 
 /**
@@ -207,21 +234,23 @@ export async function navigate(
       ? recordOpenWithWait(url, opts.waitUntil)
       : recordOpen(url);
 
-  const result = await handle.backend.runStep(openStep as never);
+  return withLock(handle, async () => {
+    const result = await handle.backend.runStep(openStep as never);
 
-  const snap = await handle.backend.snapshot({ interactive: true });
-  const elements = snap.ok ? parseSnapshot(snap.text) : [];
-  handle.session.lastSnapshot = elements;
-  const currentUrl = await handle.backend.getUrl().catch(() => url);
-  handle.session.currentUrl = currentUrl;
+    const snap = await handle.backend.snapshot({ interactive: true });
+    const elements = snap.ok ? parseSnapshot(snap.text) : [];
+    handle.session.lastSnapshot = elements;
+    const currentUrl = await handle.backend.getUrl().catch(() => url);
+    handle.session.currentUrl = currentUrl;
 
-  handle.session.steps.push({
-    step: openStep,
-    timestamp: new Date().toISOString(),
-    ok: result.ok,
+    handle.session.steps.push({
+      step: openStep,
+      timestamp: new Date().toISOString(),
+      ok: result.ok,
+    });
+
+    return { ok: result.ok, url: currentUrl, snapshot: elements };
   });
-
-  return { ok: result.ok, url: currentUrl, snapshot: elements };
 }
 
 /**
@@ -234,19 +263,43 @@ export async function getInventory(
   handle.session.lastActivity = Date.now();
   const includeRoles = opts?.roles || (!opts?.roles && !opts?.testids);
   const includeTestIds = opts?.testids || (!opts?.roles && !opts?.testids);
-  return collectLocatorInventory(handle.backend, {
-    roles: includeRoles,
-    testids: includeTestIds,
-  });
+  return withLock(handle, () =>
+    collectLocatorInventory(handle.backend, {
+      roles: includeRoles,
+      testids: includeTestIds,
+    }),
+  );
 }
 
 /**
- * Get all recorded steps (for export/suggest).
+ * Get all recorded steps (for suggest/review). Refreshes the session's
+ * activity timestamp so reviewing a session keeps it alive — otherwise a long
+ * review pause could let the idle sweep reap the session mid-export.
  */
 export function getSteps(
   handle: DiscoverySessionHandle,
 ): Record<string, unknown>[] {
+  handle.session.lastActivity = Date.now();
   return handle.session.steps.map((s) => s.step);
+}
+
+/**
+ * Get the steps that are safe to export as a spec: only those that executed
+ * successfully. A failed interaction (a click that didn't resolve, a 404
+ * navigate) never achieved its effect, so exporting it would produce a spec
+ * that can't replay. Returns the count of excluded failed steps so callers can
+ * warn the agent.
+ */
+export function getExportableSteps(handle: DiscoverySessionHandle): {
+  steps: Record<string, unknown>[];
+  skippedFailed: number;
+} {
+  handle.session.lastActivity = Date.now();
+  const ok = handle.session.steps.filter((s) => s.ok);
+  return {
+    steps: ok.map((s) => s.step),
+    skippedFailed: handle.session.steps.length - ok.length,
+  };
 }
 
 /**

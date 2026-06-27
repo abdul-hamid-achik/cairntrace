@@ -62,12 +62,12 @@ export function recordInteraction(
       if (target) {
         return { scroll: { to: normalizeTarget(target) } };
       }
-      const dir = scrollDirection ?? "down";
-      const px = scrollPixels;
-      if (px !== undefined) {
-        return { scroll: { [dir]: px } };
-      }
-      return { scroll: { [dir]: 500 } };
+      // Must match ScrollStepSchema: { direction, px } — a directional
+      // `{ [dir]: px }` shape is rejected by the strict schema and throws on
+      // the agent-browser backend.
+      const direction = scrollDirection ?? "down";
+      const px = scrollPixels ?? 500;
+      return { scroll: { direction, px } };
     }
 
     case "press":

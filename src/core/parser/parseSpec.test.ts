@@ -95,6 +95,52 @@ outcomes:
     expect(v.text.contains).toBe("prefix-abc123");
   });
 
+  it("substitutes a default value that contains slashes (URLs/paths)", async () => {
+    // Regression: the old placeholder regex excluded `/`, so a URL/path
+    // default was left as a literal `${...}` and never substituted.
+    const path = join(dir, "env_default_url.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: env_default_url
+intent: url default
+outcomes:
+  - id: url_default
+    description: missing env falls back to a URL
+    verify:
+      text: { contains: "\${env.MISSING_URL:-http://localhost:3000/login}" }
+`,
+    );
+    const r = await parseSpec(path, { env: {} });
+    const v = r.spec.outcomes[0]!.verify as { text: { contains: string } };
+    expect(v.text.contains).toBe("http://localhost:3000/login");
+  });
+
+  it("does not re-expand placeholders that appear inside a resolved value", async () => {
+    // Regression: multi-pass substitution re-interpreted a value that itself
+    // contained `${...}`, splicing other secrets or crashing on `${vars.X}`.
+    const path = join(dir, "no_reexpand.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: no_reexpand
+intent: \${env.TEMPLATEY}
+outcomes:
+  - id: inert
+    description: a value containing a template token stays literal
+    verify:
+      text: { contains: ok }
+`,
+    );
+    const r = await parseSpec(path, {
+      env: { TEMPLATEY: "pre-${env.SECRET}", SECRET: "topsecret" },
+    });
+    // The TEMPLATEY value is emitted verbatim — its embedded ${env.SECRET} is
+    // NOT resolved, so "topsecret" never leaks in.
+    expect(r.spec.intent).toBe("pre-${env.SECRET}");
+    expect(r.spec.intent).not.toContain("topsecret");
+  });
+
   it("rejects specs missing required fields", async () => {
     const path = join(dir, "missing.yml");
     await writeFile(path, `version: 1\nname: only_name\n`);

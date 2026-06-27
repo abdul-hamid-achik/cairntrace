@@ -143,22 +143,32 @@ export async function startServices(
   // that reads `phases.tmuxSession`, so it stays current as phases progress.
   // No-op until the tmux phase sets the session name.
   ctx.onSpawn?.(() => {
-    terminateTmuxSync(phases.tmuxSession);
+    terminateServicesSync(phases, ctx.configDir);
   });
 
-  // Phase 1: Docker
-  if (cfg.docker) {
-    await startDocker(cfg.docker, ctx, coldStart, phases, emit);
-  }
+  try {
+    // Phase 1: Docker
+    if (cfg.docker) {
+      await startDocker(cfg.docker, ctx, coldStart, phases, emit);
+    }
 
-  // Phase 2: Conditional seed
-  if (cfg.seed) {
-    await startSeed(cfg.seed, ctx, emit);
-  }
+    // Phase 2: Conditional seed
+    if (cfg.seed) {
+      await startSeed(cfg.seed, ctx, emit);
+    }
 
-  // Phase 3: tmux
-  if (cfg.tmux) {
-    await startTmux(cfg.tmux, ctx, coldStart, phases, emit);
+    // Phase 3: tmux
+    if (cfg.tmux) {
+      await startTmux(cfg.tmux, ctx, coldStart, phases, emit);
+    }
+  } catch (e) {
+    // A later phase failed after an earlier one already started. Tear down
+    // what we started so we don't orphan tmux dev-servers or docker
+    // containers, then propagate. The caller untracks the signal-time hook on
+    // throw, so cleanup MUST happen here — the returned handle never exists.
+    emit("teardown", "failure-cleanup", (e as Error).message);
+    await teardownStartedPhases(cfg, phases, ctx).catch(() => undefined);
+    throw e;
   }
 
   const startedByUs = phases.dockerStarted || phases.tmuxSession !== undefined;
@@ -211,9 +221,41 @@ export async function startServices(
       }
     },
     terminateSync: () => {
-      terminateTmuxSync(phases.tmuxSession);
+      terminateServicesSync(phases, ctx.configDir);
     },
   };
+}
+
+/**
+ * Best-effort teardown of whatever startServices already brought up, used when
+ * a later phase fails mid-startup. Runs config teardown commands (e.g. docker
+ * compose down), kills the tmux session, and removes the temp artifacts dir —
+ * so a tmux/seed failure can't orphan running containers or dev-servers.
+ */
+async function teardownStartedPhases(
+  cfg: ServicesConfig,
+  phases: PhaseState,
+  ctx: StartServicesContext,
+): Promise<void> {
+  for (const cmd of phases.teardownCommands) {
+    try {
+      ctx.log?.(`services: teardown (${cmd})`);
+      await runShell(cmd, { cwd: ctx.configDir, env: process.env });
+    } catch {
+      // teardown is best-effort, never fatal
+    }
+  }
+  if (phases.tmuxSession) {
+    await execa("tmux", ["kill-session", "-t", phases.tmuxSession], {
+      reject: false,
+      timeout: 5_000,
+    }).catch(() => undefined);
+  }
+  if (phases.artifactsDir) {
+    await rm(phases.artifactsDir, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
 }
 
 /* ----- phase state ----- */
@@ -276,7 +318,11 @@ async function startDocker(
   if (cfg.readinessCheck) {
     ctx.log?.(`services: docker — readiness check (${cfg.readinessCheck})`);
     emit("docker", "readiness-check", cfg.readinessCheck);
-    const rc = await runShell(cfg.readinessCheck, { cwd, env });
+    const rc = await runShellWithTimeout(
+      cfg.readinessCheck,
+      { cwd, env },
+      timeout,
+    );
     if (rc.exitCode !== 0) {
       emit("docker", "fail", `readiness check exit ${rc.exitCode}`, {
         exitCode: rc.exitCode,
@@ -388,7 +434,11 @@ async function startSeed(
     const env = await resolveSeedEnv(cfg, ctx);
     ctx.log?.(`services: seed — freshness check (${cfg.freshnessCheck})`);
     emit("seed", "freshness-check", cfg.freshnessCheck);
-    const fr = await runShell(cfg.freshnessCheck, { cwd, env });
+    const fr = await runShellWithTimeout(
+      cfg.freshnessCheck,
+      { cwd, env },
+      cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS,
+    );
     if (fr.exitCode === 0) {
       ctx.log?.("services: seed — freshness check passed, skipping");
       emit("seed", "skip", "freshness check passed");
@@ -737,6 +787,31 @@ export async function captureTmuxPane(
     return typeof r.stdout === "string" ? r.stdout : "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Synchronous, signal-safe teardown for SIGINT/SIGTERM, where the async stop()
+ * never runs. Kills the tmux session AND runs any user-declared teardown
+ * commands (e.g. `docker compose down`) so they aren't silently skipped on
+ * Ctrl-C. Each command is time-bounded so a hang can't block process exit.
+ */
+function terminateServicesSync(phases: PhaseState, configDir: string): void {
+  terminateTmuxSync(phases.tmuxSession);
+  if (phases.teardownCommands.length === 0) return;
+  try {
+    const { spawnSync } =
+      require("node:child_process") as typeof import("node:child_process");
+    for (const cmd of phases.teardownCommands) {
+      spawnSync(cmd, {
+        cwd: configDir,
+        shell: true,
+        timeout: 10_000,
+        stdio: "ignore",
+      });
+    }
+  } catch {
+    // best-effort, never fatal in the signal path
   }
 }
 

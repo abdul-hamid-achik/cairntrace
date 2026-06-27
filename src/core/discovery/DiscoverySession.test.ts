@@ -33,6 +33,29 @@ function createMockBackend(
   return backend;
 }
 
+/**
+ * A mock backend that records the peak number of in-flight runStep calls, used
+ * to prove the per-session lock actually serializes backend operations.
+ */
+class ConcurrencyTrackingBackend extends MockBrowserBackend {
+  active = 0;
+  maxConcurrent = 0;
+  override async runStep(
+    step: Parameters<MockBrowserBackend["runStep"]>[0],
+  ): Promise<Awaited<ReturnType<MockBrowserBackend["runStep"]>>> {
+    this.active++;
+    this.maxConcurrent = Math.max(this.maxConcurrent, this.active);
+    // Yield a few microtasks so an unserialized second call could overlap.
+    await Promise.resolve();
+    await Promise.resolve();
+    try {
+      return await super.runStep(step);
+    } finally {
+      this.active--;
+    }
+  }
+}
+
 describe("DiscoverySession", () => {
   describe("openSession", () => {
     it("opens a URL, captures snapshot, and creates a session", async () => {
@@ -169,7 +192,9 @@ describe("DiscoverySession", () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(result.recordedStep).toEqual({ scroll: { down: 300 } });
+      expect(result.recordedStep).toEqual({
+        scroll: { direction: "down", px: 300 },
+      });
     });
 
     it("records a scroll to a locator", async () => {
@@ -202,6 +227,29 @@ describe("DiscoverySession", () => {
       // Step still recorded (with ok=false)
       expect(handle.session.steps).toHaveLength(2);
       expect(handle.session.steps[1]!.ok).toBe(false);
+    });
+
+    it("serializes concurrent interactions on the shared backend", async () => {
+      const backend = new ConcurrencyTrackingBackend();
+      backend.setSnapshot(SNAPSHOT_WITH_ELEMENTS);
+      const handle = await openSession(backend, "/page");
+
+      // Fire three interactions without awaiting between them.
+      await Promise.all([
+        interact(handle, { action: "click", target: "#a" }),
+        interact(handle, { action: "click", target: "#b" }),
+        interact(handle, { action: "click", target: "#c" }),
+      ]);
+
+      // The lock must keep backend.runStep strictly one-at-a-time.
+      expect(backend.maxConcurrent).toBe(1);
+      // All three recorded in call order (plus the initial open).
+      expect(handle.session.steps).toHaveLength(4);
+      expect(handle.session.steps.slice(1).map((s) => s.step)).toEqual([
+        { click: { by: "selector", selector: "#a" } },
+        { click: { by: "selector", selector: "#b" } },
+        { click: { by: "selector", selector: "#c" } },
+      ]);
     });
   });
 

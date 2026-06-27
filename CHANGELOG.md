@@ -3,6 +3,68 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.2]
+
+A review-and-fix pass over the v1.12–v1.23 DX/UX work. All fixes; no CLI/schema
+surface changes.
+
+### Fixed
+- **Tvault secret values could leak unredacted into artifacts.** The artifact
+  redactor only scrubbed env values whose *key* matched a sensitive-name
+  heuristic (`token`, `secret`, `password`, …). Vault secrets with ordinary
+  key names — `MONGO_URI`, `DATABASE_URL`, `STRIPE_*`, `SMTP_URL` — were
+  injected into the environment but never registered for redaction, so their
+  plaintext could appear in `spec.resolved.yml`, `run.json`, `report.html`,
+  `agent_context.md`, and `events.ndjson`. Every value pulled from the vault is
+  now registered with the redactor regardless of key name.
+- **`type` step was a silent no-op under the Playwright backend.** The
+  `PlaywrightAdapter` had no `type` branch in `runStep` or the batch path, so a
+  `type` step reported a green pass while typing nothing (and the Playwright
+  exporter dropped it). It now uses `locator.pressSequentially(...)`, and an
+  exhaustiveness guard makes any future unhandled step fail loudly instead of
+  passing.
+- **`--env` did not reach the seed/services phase as `CAIRN_TVAULT_ENV`.**
+  Services (docker/seed/tmux) start before secret injection, so under
+  `cairn run --env dev` they resolved `${env.CAIRN_TVAULT_ENV:-local}` to
+  `local` and could seed/migrate against the wrong environment's database.
+  `CAIRN_TVAULT_ENV` is now set from `--env` at the very top of `cairn run`.
+- **`${env.X:-default}` defaults containing `/` (URLs/paths) were not
+  substituted in specs**, and substituted values that themselves contained
+  `${...}` were re-expanded (cross-secret splicing, or a crash on a
+  value-borne `${vars.X}`). Both are fixed by a single balanced-brace scanner
+  that resolves each placeholder once and never re-scans a resolved value.
+- **Discovery recorded schema-invalid `scroll` steps.** The step recorder
+  emitted `{ scroll: { down: N } }`, which the strict schema rejects — it threw
+  on the agent-browser backend and produced unparseable exported specs. Now
+  emits `{ scroll: { direction, px } }`.
+- **Services orphaned docker/tmux/seed on a partial-startup failure.** A
+  later-phase failure (e.g. a tmux window that never becomes ready) left earlier
+  phases running with no teardown. `startServices` now tears down what it
+  started before propagating. Readiness and seed-freshness checks are also
+  time-bounded now (they previously ran with no timeout and could hang a run
+  forever).
+- **Discovery browsers were orphaned on SIGINT/SIGTERM.** Session backends were
+  created inline and not tracked by the signal-teardown machinery; the shutdown
+  hook only fired an un-awaited async close. It now calls `terminateSync()` on
+  each session backend so the agent-browser daemon + Chrome are killed on
+  Ctrl-C.
+- **Reviewing a discovery session could reap it mid-export.** Read-only ops
+  (`_suggest`, `_export`) didn't refresh the session TTL, so a long review pause
+  let the idle sweep close the session and lose all recorded steps. These ops
+  now refresh activity.
+- **Failed discovery steps were exported as if they had succeeded.** Export now
+  excludes steps that did not execute successfully and reports how many were
+  dropped.
+- **`cairn spec verify --stamp` stripped hand-authored quoting.** Stamping
+  re-serialized the whole spec in PLAIN style, mangling `"${vars.X}"` /
+  `"${secrets.X}"` quotes and comments. It now updates only the `contractHash`
+  node via the YAML Document API, preserving the rest of the file.
+- **Discovery hardening:** concurrent operations on one session are now
+  serialized (no interleaving on the shared browser), open sessions are capped
+  to bound process/FD usage, user-declared services `teardown` commands run on
+  the signal path, and a requested clip that can't be cut because vidtrace is
+  missing now records a diagnostic instead of being silently dropped.
+
 ## [1.23.1]
 
 ### Fixed

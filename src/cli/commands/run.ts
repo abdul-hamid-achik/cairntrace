@@ -7,6 +7,7 @@ import {
   join,
   resolve,
 } from "node:path";
+import { registerSecretValues } from "../../core/artifacts/redaction";
 import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
@@ -111,6 +112,16 @@ export async function runCommand(
   } catch (e) {
     process.stderr.write(`cairn run: ${(e as Error).message}\n`);
     process.exit(2);
+  }
+
+  // Propagate --env to CAIRN_TVAULT_ENV as early as possible — before the
+  // webServer, services, and secret-injection phases — so config-level
+  // `${env.CAIRN_TVAULT_ENV:-local}` placeholders resolve to the same tvault
+  // env everywhere (the seed/docker/tmux phases run before secret injection).
+  // The caller can still decouple them by exporting CAIRN_TVAULT_ENV in the
+  // shell.
+  if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
+    process.env.CAIRN_TVAULT_ENV = opts.env;
   }
 
   // Bring up the configured webServer (if any) once for the whole invocation,
@@ -588,6 +599,11 @@ export async function maybeInjectTvaultSecrets(
       `tvault secrets injection failed: ${result.error ?? "unknown error"}`,
     );
   }
+
+  // Every value pulled from the vault is sensitive regardless of its key name
+  // (e.g. MONGO_URI, DATABASE_URL). Register them so the artifact redactor
+  // scrubs their plaintext from resolved specs, run.json, report.html, etc.
+  registerSecretValues(Object.values(result.env));
 
   // Inject all tvault secrets into process.env. Existing env vars are NOT
   // overwritten — the caller's shell env takes precedence (e.g. when running

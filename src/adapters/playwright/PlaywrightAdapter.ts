@@ -139,6 +139,12 @@ export class PlaywrightAdapter implements BrowserBackend {
         await this.resolveLocator(loc as Locator).fill(value, {
           timeout: this.opts.defaultTimeoutMs,
         });
+      } else if ("type" in step) {
+        const { value, delayMs, ...loc } = step.type;
+        await this.resolveLocator(loc as Locator).pressSequentially(value, {
+          timeout: this.opts.defaultTimeoutMs,
+          ...(delayMs !== undefined ? { delay: delayMs } : {}),
+        });
       } else if ("upload" in step) {
         const { path, ...loc } = step.upload;
         await this.resolveLocator(loc as Locator).setInputFiles(path, {
@@ -192,6 +198,12 @@ export class PlaywrightAdapter implements BrowserBackend {
       } else if ("use" in step) {
         throw new Error(
           `'use: ${step.use}' must be expanded by the runner before adapter dispatch`,
+        );
+      } else {
+        // Fail loudly on an unhandled step type rather than reporting a
+        // green pass for a step that did nothing.
+        throw new Error(
+          `unhandled step type: ${JSON.stringify(Object.keys(step as object))}`,
         );
       }
       return success(Date.now() - start);
@@ -803,6 +815,11 @@ export class PlaywrightAdapter implements BrowserBackend {
     } else if ("fill" in sub) {
       const { value, ...loc } = sub.fill;
       await this.resolveLocator(loc as Locator).fill(value, { timeout });
+    } else if ("type" in sub) {
+      const { value, ...loc } = sub.type;
+      await this.resolveLocator(loc as Locator).pressSequentially(value, {
+        timeout,
+      });
     } else if ("upload" in sub) {
       const { path, ...loc } = sub.upload;
       await this.resolveLocator(loc as Locator).setInputFiles(path, {
@@ -824,6 +841,10 @@ export class PlaywrightAdapter implements BrowserBackend {
       }
     } else if ("wait" in sub) {
       await this.applyWait(page, sub.wait);
+    } else {
+      throw new Error(
+        `unhandled batch sub-step type: ${JSON.stringify(Object.keys(sub as object))}`,
+      );
     }
   }
 

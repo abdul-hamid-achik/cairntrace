@@ -668,7 +668,9 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(scrollResult.isError).toBeFalsy();
     const scrollSc = scrollResult.structuredContent as Record<string, unknown>;
     expect(scrollSc.ok).toBe(true);
-    expect(scrollSc.recordedStep).toEqual({ scroll: { down: 300 } });
+    expect(scrollSc.recordedStep).toEqual({
+      scroll: { direction: "down", px: 300 },
+    });
 
     await c.callTool({
       name: "cairn_discover_close",

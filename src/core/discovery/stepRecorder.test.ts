@@ -115,7 +115,7 @@ describe("stepRecorder", () => {
         scrollDirection: "down",
         scrollPixels: 500,
       });
-      expect(step).toEqual({ scroll: { down: 500 } });
+      expect(step).toEqual({ scroll: { direction: "down", px: 500 } });
     });
 
     it("defaults to 500px when no pixels given", () => {
@@ -123,12 +123,12 @@ describe("stepRecorder", () => {
         action: "scroll",
         scrollDirection: "up",
       });
-      expect(step).toEqual({ scroll: { up: 500 } });
+      expect(step).toEqual({ scroll: { direction: "up", px: 500 } });
     });
 
     it("defaults to down 500 when no direction given", () => {
       const step = recordInteraction({ action: "scroll" });
-      expect(step).toEqual({ scroll: { down: 500 } });
+      expect(step).toEqual({ scroll: { direction: "down", px: 500 } });
     });
 
     it("records a scroll to a locator", () => {

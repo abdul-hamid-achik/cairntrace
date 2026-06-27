@@ -281,15 +281,31 @@ function substitute(
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
 ): string {
-  // Resolve placeholders from the inside out so nested defaults can reference
-  // runtime placeholders like ${env.X:-prefix-${run.token}}. Re-run while
-  // the text keeps changing to a max depth that comfortably exceeds real specs.
-  let previous = "";
-  let current = text;
-  for (let depth = 0; depth < 10 && current !== previous; depth++) {
-    previous = current;
-    current = substitutePass(
-      current,
+  // Single left-to-right scan with balanced-brace matching. Each `${...}` is
+  // resolved exactly once and its resolved value is emitted verbatim — never
+  // re-scanned — so an env/secret/var value that itself contains `${...}` stays
+  // inert (no cross-secret injection, no crash from a value-borne `${vars.X}`).
+  // Default expressions ARE resolved recursively, so nested placeholders like
+  // `${env.X:-prefix-${run.token}}` and defaults containing `/` (URLs, paths)
+  // both work — the brace scanner does not exclude any default character.
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    const start = text.indexOf("${", i);
+    if (start < 0) {
+      result += text.slice(i);
+      break;
+    }
+    result += text.slice(i, start);
+    const end = findPlaceholderEnd(text, start + 2);
+    if (end < 0) {
+      // Unterminated `${` — emit the remainder literally.
+      result += text.slice(start);
+      break;
+    }
+    const body = text.slice(start + 2, end);
+    result += resolvePlaceholder(
+      body,
       env,
       vars,
       projectRoot,
@@ -297,12 +313,33 @@ function substitute(
       filePath,
       runtime,
     );
+    i = end + 1;
   }
-  return current;
+  return result;
 }
 
-function substitutePass(
-  text: string,
+/**
+ * Find the index of the `}` that closes a `${` (whose `{` sits just before
+ * `from`), accounting for nested `${...}` in default expressions. Returns -1
+ * when no matching brace exists.
+ */
+function findPlaceholderEnd(text: string, from: number): number {
+  let depth = 1;
+  for (let j = from; j < text.length; j++) {
+    if (text[j] === "$" && text[j + 1] === "{") {
+      depth++;
+      j++;
+    } else if (text[j] === "}") {
+      depth--;
+      if (depth === 0) return j;
+    }
+  }
+  return -1;
+}
+
+/** Resolve a single placeholder body (the text between `${` and its `}`). */
+function resolvePlaceholder(
+  body: string,
   env: Record<string, string | undefined>,
   vars: Record<string, string | number | boolean>,
   projectRoot: string,
@@ -310,39 +347,51 @@ function substitutePass(
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
 ): string {
-  return text.replace(/\$\{([\w.:-]+)\}/g, (match, key: string) => {
-    if (key === "project.root") return projectRoot;
-    if (key === "baseUrl") return baseUrl ?? "";
-    if (key === "worker.index") return String(runtime?.workerIndex ?? 0);
-    if (key === "run.token") return runtime?.runToken ?? "verify";
-    const dotIdx = key.indexOf(".");
-    if (dotIdx < 0) return match;
-    const ns = key.slice(0, dotIdx);
-    const rest = key.slice(dotIdx + 1);
-    if (ns === "env" || ns === "secrets") {
-      const defaultIdx = rest.indexOf(":-");
-      const name = defaultIdx >= 0 ? rest.slice(0, defaultIdx) : rest;
-      const defaultValue =
-        defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
-      const val = env[name];
-      if (val === undefined || val === "") {
-        if (defaultValue === undefined) return '""';
-        return quoteEnvValue(renderRuntimePlaceholders(defaultValue, runtime));
-      }
-      return quoteEnvValue(val);
+  if (body === "project.root") return projectRoot;
+  if (body === "baseUrl") return baseUrl ?? "";
+  if (body === "worker.index") return String(runtime?.workerIndex ?? 0);
+  if (body === "run.token") return runtime?.runToken ?? "verify";
+
+  const dotIdx = body.indexOf(".");
+  if (dotIdx < 0) return `\${${body}}`;
+  const ns = body.slice(0, dotIdx);
+  const rest = body.slice(dotIdx + 1);
+
+  if (ns === "env" || ns === "secrets") {
+    const defaultIdx = rest.indexOf(":-");
+    const name = defaultIdx >= 0 ? rest.slice(0, defaultIdx) : rest;
+    const defaultExpr =
+      defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
+    const val = env[name];
+    if (val === undefined || val === "") {
+      if (defaultExpr === undefined) return '""';
+      // Resolve placeholders WITHIN the default expression only — a present
+      // env value is returned without recursion (see substitute()).
+      const resolvedDefault = substitute(
+        defaultExpr,
+        env,
+        vars,
+        projectRoot,
+        baseUrl,
+        filePath,
+        runtime,
+      );
+      return quoteEnvValue(resolvedDefault);
     }
-    if (ns === "vars") {
-      const v = vars[rest];
-      if (v === undefined)
-        throw new MissingTemplateVariableError(rest, filePath);
-      const rendered = renderRuntimePlaceholders(String(v), runtime);
-      // Empty string vars (usually from missing env-driven config vars) must
-      // stay as a YAML string scalar, not YAML null.
-      if (rendered === "") return '""';
-      return rendered;
-    }
-    return match;
-  });
+    return quoteEnvValue(val);
+  }
+
+  if (ns === "vars") {
+    const v = vars[rest];
+    if (v === undefined) throw new MissingTemplateVariableError(rest, filePath);
+    const rendered = renderRuntimePlaceholders(String(v), runtime);
+    // Empty string vars (usually from missing env-driven config vars) must
+    // stay as a YAML string scalar, not YAML null.
+    if (rendered === "") return '""';
+    return rendered;
+  }
+
+  return `\${${body}}`;
 }
 
 /** Quote a substituted env value so it always remains a YAML string. */
