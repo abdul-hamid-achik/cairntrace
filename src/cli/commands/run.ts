@@ -584,11 +584,20 @@ export async function maybeInjectTvaultSecrets(
   // overwritten — the caller's shell env takes precedence (e.g. when running
   // inside `tvault run -- cairn run ...`, the secrets are already in env).
   let injected = 0;
+  const shadowed: string[] = [];
   for (const [key, value] of Object.entries(result.env)) {
     if (process.env[key] === undefined) {
       process.env[key] = value;
       injected++;
+    } else if (process.env[key] !== value) {
+      shadowed.push(key);
     }
+  }
+
+  if (shadowed.length > 0) {
+    process.stderr.write(
+      `cairn run: WARNING - tvault "${target}" secrets shadowed by existing env vars (bun .env auto-load or shell): ${shadowed.join(", ")}. Remove these from .env or unset them to use tvault values.\n`,
+    );
   }
 
   // Also inject into the required list — fail fast if any required key is

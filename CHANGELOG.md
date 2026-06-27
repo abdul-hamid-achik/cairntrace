@@ -3,6 +3,35 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.0]
+
+### Added
+- **Tvault secret shadowing warning** — when `secrets.provider: tvault` is
+  configured, `cairn run` now warns if any tvault secret key is already set
+  in the process environment with a *different* value (e.g. from bun's
+  automatic `.env` loading). Previously, stale `.env` credentials silently
+  shadowed tvault values with no diagnostic, causing authentication failures
+  that were hard to trace. The warning names the affected keys and suggests
+  removing them from `.env` or unsetting them.
+
+## [1.22.0]
+
+### Added
+- **`${env.X:-default}` fallback syntax** — spec placeholders now support
+  shell-style default values when an env var is missing or empty:
+  `${env.MISSING:-fallback}`. Defaults can themselves contain runtime
+  placeholders like `${run.token}`. Empty-string env vars trigger the
+  fallback, not just undefined ones.
+
+## [1.21.0]
+
+### Added
+- **Discovery sessions** — interactive page exploration and spec authoring
+  via `cairn discover open/navigate/interact/snapshot/export`. Create a
+  stateful browser session, navigate, take accessibility snapshots, perform
+  actions (click, fill, hover, type, scroll, press), and export recorded
+  steps as a spec YAML file.
+
 ## [1.16.0]
 
 ### Added
