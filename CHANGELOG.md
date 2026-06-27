@@ -3,6 +3,18 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.3]
+
+### Fixed
+- **MCP server now disposes its signal handlers on close.** `buildMcpServer`
+  registered process-level `SIGINT`/`SIGTERM` handlers but never removed them,
+  so building many servers in one process (e.g. across a test run) accumulated
+  listeners past Node's `MaxListeners` default and emitted a warning.
+  Production was unaffected (one server per `cairn mcp` process), but the noise
+  masked any real listener leak. Handlers are now named and removed when the
+  server closes, via the SDK's `Protocol.onclose` hook (chained so the SDK's
+  own teardown is preserved).
+
 ## [1.23.2]
 
 A review-and-fix pass over the v1.12–v1.23 DX/UX work. All fixes; no CLI/schema
