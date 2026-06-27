@@ -1348,14 +1348,22 @@ export function buildMcpServer(): McpServer {
   }, 60_000);
   sweepTimer.unref?.();
 
-  // Close all discovery sessions on server shutdown.
-  // Use process.on (not once) + process.exit to ensure cleanup runs
-  // before the CLI's cleanup.ts handler exits the process.
+  // Close all discovery sessions on server shutdown. Signal handlers are named
+  // (not inline arrows) and removed on dispose, so building many servers in one
+  // process — e.g. across a test suite — doesn't leak SIGINT/SIGTERM listeners.
+  let disposed = false;
+  function disposeSignalState(): void {
+    if (disposed) return;
+    disposed = true;
+    clearInterval(sweepTimer);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  }
   let shuttingDown = false;
-  function shutdownDiscovery(_signal: NodeJS.Signals): void {
+  function shutdownDiscovery(): void {
     if (shuttingDown) return;
     shuttingDown = true;
-    clearInterval(sweepTimer);
+    disposeSignalState();
     // These backends are created inline (not via trackBackend), so cleanup.ts
     // does NOT see them. close() is async and won't finish before the process
     // exits on a signal, so synchronously kill each backend's daemon/browser
@@ -1370,8 +1378,25 @@ export function buildMcpServer(): McpServer {
     }
     void closeAllSessions(sessions);
   }
-  process.on("SIGINT", () => shutdownDiscovery("SIGINT"));
-  process.on("SIGTERM", () => shutdownDiscovery("SIGTERM"));
+  function onSigint(): void {
+    shutdownDiscovery();
+  }
+  function onSigterm(): void {
+    shutdownDiscovery();
+  }
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  // When the server closes (InMemory transport teardown in tests, or the
+  // `cairn mcp` stdio transport ending), dispose the process-global signal
+  // listeners + sweep timer and close any open sessions. Chain any onclose the
+  // SDK already set so we don't clobber its own teardown.
+  const prevOnClose = server.server.onclose?.bind(server.server);
+  server.server.onclose = () => {
+    disposeSignalState();
+    void closeAllSessions(sessions);
+    prevOnClose?.();
+  };
 
   server.registerTool(
     "cairn_discover_open",

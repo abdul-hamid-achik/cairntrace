@@ -27,6 +27,24 @@ async function connectInMemory(): Promise<Client> {
 }
 
 describe("Cairntrace MCP server", () => {
+  it("removes its signal listeners when the server closes (no listener leak)", async () => {
+    const beforeInt = process.listenerCount("SIGINT");
+    const beforeTerm = process.listenerCount("SIGTERM");
+    const server = buildMcpServer();
+    const [client, serverSide] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "test", version: "0" }, { capabilities: {} });
+    await Promise.all([server.connect(serverSide), c.connect(client)]);
+    // While live, the server has registered exactly one handler per signal.
+    expect(process.listenerCount("SIGINT")).toBe(beforeInt + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm + 1);
+    await c.close();
+    await new Promise((r) => setTimeout(r, 0));
+    // Closing disposes them — listeners return to baseline (so building many
+    // servers in one process can't exceed Node's MaxListeners limit).
+    expect(process.listenerCount("SIGINT")).toBe(beforeInt);
+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm);
+  });
+
   it("lists the expected tool surface", async () => {
     const c = await connectInMemory();
     const list = await c.listTools();
