@@ -1,6 +1,6 @@
 {
   "name": "cairntrace",
-  "version": "1.23.4",
+  "version": "1.23.5",
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
   "license": "MIT",

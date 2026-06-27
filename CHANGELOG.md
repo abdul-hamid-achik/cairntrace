@@ -3,6 +3,20 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.5]
+
+### Fixed
+- **Placeholder substitution no longer breaks when a resolved value contains
+  YAML metacharacters.** Substitution previously rewrote the raw YAML *text*
+  and re-parsed it, so a secret/env/var value containing `:`, `"`, `{`, `#`, or
+  newlines could corrupt the document (e.g. a quoted `"${env.X}"` resolving to
+  `a: b "c"` produced invalid YAML). Substitution now resolves into the parsed
+  YAML **AST** — the YAML library owns serialization, so any resolved value is
+  safe. Types are preserved via scalar style: an unquoted `${env.PORT}`
+  re-infers its YAML type (number/bool/null) exactly as before, while a quoted
+  `"${env.PORT}"` stays a string. Structural values (`a: b`, `[1,2]`) can no
+  longer silently restructure a spec. Behavior is unchanged for existing specs.
+
 ## [1.23.4]
 
 ### Added

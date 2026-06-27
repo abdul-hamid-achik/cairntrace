@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument, Scalar, visit } from "yaml";
 import { computeContractHash } from "../contractHash";
 import {
   openPath,
@@ -76,8 +76,9 @@ export interface RuntimeTemplateContext {
 /**
  * Load and validate a behavioral spec from disk.
  * Performs:
- *   1. textual ${env.X} / ${vars.X} / ${secrets.X} / ${project.root} substitution
- *   2. YAML parse
+ *   1. YAML parse to an AST
+ *   2. ${env.X} / ${vars.X} / ${secrets.X} / ${project.root} substitution into
+ *      scalar nodes (so resolved values can never break the YAML)
  *   3. zod validation against SpecSchema
  *   4. recursive import resolution (only top-level imports for v0)
  *   5. inline `use:` steps from imported actions
@@ -244,16 +245,43 @@ function loadAndParseSource(
   baseUrl: string | undefined,
   runtime: RuntimeTemplateContext | undefined,
 ): unknown {
-  const substituted = substitute(
-    text,
-    env,
-    vars,
-    dirname(absPath),
-    baseUrl,
-    absPath,
-    runtime,
-  );
-  return parseYaml(substituted);
+  // Parse to an AST first, then substitute into scalar *nodes*. Because the
+  // YAML library owns serialization, a resolved value containing YAML
+  // metacharacters (`:`, `"`, `{`, newlines) can never break the parse — the
+  // old text-substitution caveat is gone. Scalar style preserves types: an
+  // unquoted (PLAIN) whole-placeholder re-infers its YAML scalar type, while a
+  // quoted or embedded placeholder stays a string.
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0) throw doc.errors[0];
+  const projectRoot = dirname(absPath);
+  visit(doc, {
+    Scalar(key, node) {
+      if (typeof node.value !== "string" || !node.value.includes("${")) return;
+      const original = node.value;
+      const resolved = substituteString(
+        original,
+        env,
+        vars,
+        projectRoot,
+        baseUrl,
+        absPath,
+        runtime,
+      );
+      // Only an unquoted whole-placeholder in a *value* position re-infers its
+      // YAML type (so `port: ${env.PORT}` → number); map keys and quoted or
+      // embedded scalars stay strings (so `port: "${env.PORT}"` → string).
+      if (
+        key !== "key" &&
+        node.type === Scalar.PLAIN &&
+        isWholePlaceholder(original)
+      ) {
+        node.value = coerceScalarValue(resolved);
+      } else {
+        node.value = resolved;
+      }
+    },
+  });
+  return doc.toJS();
 }
 
 function resolveImportPath(p: string, baseDir: string): string {
@@ -263,16 +291,16 @@ function resolveImportPath(p: string, baseDir: string): string {
 }
 
 /**
- * Textual substitution applied to the raw YAML source *before* parsing.
- * Supports `${env.X}`, `${secrets.X}` (alias of env), `${vars.X}`, `${project.root}`.
- * Unknown patterns are left intact. Done at text-time so substitution works inside
- * any string field without walking the parsed object.
- *
- * Caveat: substituted values that contain YAML metacharacters (`:`, `"`, newlines)
- * may break parsing. Treat `${...}` like a templating concern; sanitize secrets at
- * source if needed.
+ * Resolve every `${...}` placeholder inside a single scalar string and return
+ * the RAW resolved string — no YAML quoting, because the AST owns
+ * serialization (see loadAndParseSource). Each placeholder is resolved exactly
+ * once and emitted verbatim — never re-scanned — so an env/secret/var value
+ * that itself contains `${...}` stays inert (no cross-secret injection, no
+ * crash from a value-borne `${vars.X}`). `${env.X:-default}` default
+ * expressions ARE resolved recursively, so nested placeholders like
+ * `${env.X:-prefix-${run.token}}` and defaults containing any character work.
  */
-function substitute(
+function substituteString(
   text: string,
   env: Record<string, string | undefined>,
   vars: Record<string, string | number | boolean>,
@@ -281,13 +309,6 @@ function substitute(
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
 ): string {
-  // Single left-to-right scan with balanced-brace matching. Each `${...}` is
-  // resolved exactly once and its resolved value is emitted verbatim — never
-  // re-scanned — so an env/secret/var value that itself contains `${...}` stays
-  // inert (no cross-secret injection, no crash from a value-borne `${vars.X}`).
-  // Default expressions ARE resolved recursively, so nested placeholders like
-  // `${env.X:-prefix-${run.token}}` and defaults containing `/` (URLs, paths)
-  // both work — the brace scanner does not exclude any default character.
   let result = "";
   let i = 0;
   while (i < text.length) {
@@ -318,6 +339,12 @@ function substitute(
   return result;
 }
 
+/** True when `text` is exactly one `${...}` placeholder and nothing else. */
+function isWholePlaceholder(text: string): boolean {
+  if (!text.startsWith("${")) return false;
+  return findPlaceholderEnd(text, 2) === text.length - 1;
+}
+
 /**
  * Find the index of the `}` that closes a `${` (whose `{` sits just before
  * `from`), accounting for nested `${...}` in default expressions. Returns -1
@@ -337,7 +364,10 @@ function findPlaceholderEnd(text: string, from: number): number {
   return -1;
 }
 
-/** Resolve a single placeholder body (the text between `${` and its `}`). */
+/**
+ * Resolve a single placeholder body (the text between `${` and its `}`) to its
+ * raw string value. Unknown namespaces are returned unchanged.
+ */
 function resolvePlaceholder(
   body: string,
   env: Record<string, string | undefined>,
@@ -364,10 +394,10 @@ function resolvePlaceholder(
       defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
     const val = env[name];
     if (val === undefined || val === "") {
-      if (defaultExpr === undefined) return '""';
+      if (defaultExpr === undefined) return "";
       // Resolve placeholders WITHIN the default expression only — a present
-      // env value is returned without recursion (see substitute()).
-      const resolvedDefault = substitute(
+      // env value is returned without recursion.
+      return substituteString(
         defaultExpr,
         env,
         vars,
@@ -376,29 +406,37 @@ function resolvePlaceholder(
         filePath,
         runtime,
       );
-      return quoteEnvValue(resolvedDefault);
     }
-    return quoteEnvValue(val);
+    return val;
   }
 
   if (ns === "vars") {
     const v = vars[rest];
     if (v === undefined) throw new MissingTemplateVariableError(rest, filePath);
-    const rendered = renderRuntimePlaceholders(String(v), runtime);
-    // Empty string vars (usually from missing env-driven config vars) must
-    // stay as a YAML string scalar, not YAML null.
-    if (rendered === "") return '""';
-    return rendered;
+    return renderRuntimePlaceholders(String(v), runtime);
   }
 
   return `\${${body}}`;
 }
 
-/** Quote a substituted env value so it always remains a YAML string. */
-function quoteEnvValue(value: string): string {
-  if (value === "") return '""';
-  if (/^[\w./:=@~-]+$/.test(value)) return value;
-  return JSON.stringify(value);
+/**
+ * Coerce a resolved PLAIN whole-placeholder value to the YAML scalar type it
+ * would have had if written literally (`8080` → number, `true` → boolean,
+ * `null` → null), so an unquoted placeholder behaves like its value was
+ * inlined. Structural results (arrays/maps) are NEVER adopted — they stay
+ * strings — so a value like `a: b` or `[1,2]` can't silently restructure the
+ * spec. An empty value stays an empty string rather than becoming null.
+ */
+function coerceScalarValue(value: string): unknown {
+  if (value === "") return "";
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(value);
+  } catch {
+    return value;
+  }
+  if (typeof parsed === "object" && parsed !== null) return value;
+  return parsed;
 }
 
 function renderRuntimePlaceholders(

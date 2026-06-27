@@ -141,6 +141,50 @@ outcomes:
     expect(r.spec.intent).not.toContain("topsecret");
   });
 
+  it("substitutes a value with YAML metacharacters without breaking the parse", async () => {
+    // Regression: text substitution re-parsed the substituted source, so a
+    // value with `:`, quotes, or braces could corrupt the YAML. The AST-based
+    // substitution sets scalar node values directly, so any value is safe.
+    const path = join(dir, "metachar.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: metachar
+intent: x
+outcomes:
+  - id: weird
+    description: value has colon-space, quotes, and braces
+    verify:
+      text: { contains: "\${env.WEIRD}" }
+`,
+    );
+    const r = await parseSpec(path, { env: { WEIRD: 'a: b "c" {d} #e' } });
+    const v = r.spec.outcomes[0]!.verify as { text: { contains: string } };
+    expect(v.text.contains).toBe('a: b "c" {d} #e');
+  });
+
+  it("keeps a quoted placeholder a string even when it resolves to digits", async () => {
+    // A quoted placeholder stays a string — only an unquoted PLAIN
+    // whole-placeholder re-infers its YAML type. With X="12345", `intent:
+    // "${env.X}"` is the string "12345", not the number 12345.
+    const path = join(dir, "quoted-digits.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: quoted_digits
+intent: "\${env.VALUE}"
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: ok }
+`,
+    );
+    const r = await parseSpec(path, { env: { VALUE: "12345" } });
+    expect(r.spec.intent).toBe("12345");
+    expect(typeof r.spec.intent).toBe("string");
+  });
+
   it("rejects specs missing required fields", async () => {
     const path = join(dir, "missing.yml");
     await writeFile(path, `version: 1\nname: only_name\n`);
