@@ -216,6 +216,31 @@ environments:
     );
   });
 
+  it("falls back to the default when the env var is set but empty (`:-` semantics)", async () => {
+    const projectDir = join(dir, "env-fallback-empty");
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:\${env.CAIRN_EMPTY_PORT:-8080}
+`,
+    );
+    process.env["CAIRN_EMPTY_PORT"] = "";
+    try {
+      const loaded = await loadConfig(specPath);
+      // Empty (not just unset) triggers the default — same as the spec parser.
+      expect(loaded?.config.environments["local"]?.baseUrl).toBe(
+        "http://localhost:8080",
+      );
+    } finally {
+      delete process.env["CAIRN_EMPTY_PORT"];
+    }
+  });
+
   it("prefers env var over ${env.X:-fallback} default", async () => {
     const projectDir = join(dir, "env-fallback-preferred");
     await mkdir(projectDir, { recursive: true });

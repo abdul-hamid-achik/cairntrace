@@ -70,8 +70,14 @@ export async function loadConfig(
 function substituteEnv(text: string): string {
   return text.replace(
     /\$\{env\.(\w+)(?::-([^}]+))?\}/g,
-    (_match, name: string, fallback?: string) =>
-      process.env[name] ?? fallback ?? "",
+    (_match, name: string, fallback?: string) => {
+      const value = process.env[name];
+      // `:-` shell semantics: an empty OR unset env var falls back to the
+      // default. Matches the spec-parser placeholder behavior so config and
+      // specs resolve `${env.X:-default}` identically.
+      if (value === undefined || value === "") return fallback ?? "";
+      return value;
+    },
   );
 }
 

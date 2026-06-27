@@ -193,6 +193,30 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     await safe(async () => opts.backend.startTrace?.());
   }
 
+  // Surface clip/video misconfigurations that would otherwise silently produce
+  // nothing — the marquee "run → video → vidtrace clip" loop only works on the
+  // playwright backend with video enabled.
+  const clipPointsRequested = (spec.artifacts?.clipPoints?.length ?? 0) > 0;
+  if (clipPointsRequested && policy.video === "never") {
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.video",
+      action: "warning",
+      warning:
+        "clipPoints are configured but artifacts.capture.video is 'never' — no video is recorded, so no clips can be cut. Set video: on-failure (or always) to enable clips.",
+    });
+  }
+  if (policy.video !== "never" && !opts.backend.startVideo) {
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.video",
+      action: "warning",
+      warning: `video capture is requested but the '${opts.backend.name}' backend does not record video — only the playwright backend does. Run with --backend playwright to produce video${
+        clipPointsRequested ? " and clips" : ""
+      }.`,
+    });
+  }
+
   // Start video recording. Same best-effort pattern as trace: backends
   // without video support no-op. The default policy is `never` so videos are
   // only recorded when the spec explicitly opts in.

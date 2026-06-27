@@ -1359,6 +1359,82 @@ steps:
     expect(videoStat.isFile()).toBe(true);
   });
 
+  it("warns when video is requested but the backend cannot record it", async () => {
+    const specPath = await writeSpec(
+      "video-unsupported",
+      `version: 1
+name: video_unsupported
+intent: warn when the backend has no video support
+artifacts:
+  capture:
+    video: always
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    // Plain mock backend has no startVideo — exactly the agent-browser case.
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    const events = (
+      await readFile(join(result.runDir, "events.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map(
+        (l) =>
+          JSON.parse(l) as { type: string; action?: string; warning?: string },
+      );
+    const warn = events.find(
+      (e) => e.type === "artifact.video" && e.action === "warning",
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.warning).toContain("does not record video");
+  });
+
+  it("warns when clipPoints are configured but video is never", async () => {
+    const specPath = await writeSpec(
+      "clip-no-video",
+      `version: 1
+name: clip_no_video
+intent: warn when clipPoints are set without video capture
+artifacts:
+  capture: {}
+  clipPoints:
+    - { label: bug, start: "0", end: "2" }
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    const events = (
+      await readFile(join(result.runDir, "events.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map(
+        (l) =>
+          JSON.parse(l) as { type: string; action?: string; warning?: string },
+      );
+    const warn = events.find(
+      (e) => e.type === "artifact.video" && e.action === "warning",
+    );
+    expect(warn).toBeDefined();
+    expect(warn?.warning).toContain("no clips can be cut");
+  });
+
   it("deletes video on passing run when policy is on-failure", async () => {
     const specPath = await writeSpec(
       "video-on-failure-pass",

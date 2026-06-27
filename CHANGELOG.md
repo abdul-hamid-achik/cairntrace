@@ -3,6 +3,29 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.4]
+
+### Added
+- **Warnings for clip/video misconfigurations that would silently produce
+  nothing.** A run now emits an `artifact.video` warning event when
+  `clipPoints` are configured but `artifacts.capture.video` is `never` (so no
+  video is recorded and no clips can be cut), or when video is requested on a
+  backend that can't record it (only the playwright backend does). The marquee
+  "run → video → vidtrace clip" loop no longer fails silently.
+
+### Changed
+- **Config `${env.X:-default}` now falls back on an *empty* env var, not just
+  an unset one** — matching shell `:-` semantics and the spec parser, so
+  `cairntrace.config.yml` and specs resolve the same placeholder identically.
+
+### Internal
+- Added GitHub Actions CI (`bun run verify` on push/PR + a real-Chromium
+  end-to-end smoke); previously verification ran only via local git hooks.
+- Added backend step-shape guards (opt-in strict `MockBrowserBackend`
+  validation, a recorder→`StepSchema` contract test, and per-step
+  `PlaywrightAdapter` coverage) so step-shape and adapter-no-op bugs can't ship
+  green.
+
 ## [1.23.3]
 
 ### Fixed
