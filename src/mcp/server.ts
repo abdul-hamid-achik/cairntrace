@@ -1392,6 +1392,9 @@ export function buildMcpServer(): McpServer {
   // listeners + sweep timer and close any open sessions. Chain any onclose the
   // SDK already set so we don't clobber its own teardown.
   const prevOnClose = server.server.onclose?.bind(server.server);
+  // `onclose` is the SDK Protocol's callback property, not a DOM EventTarget —
+  // assignment is the only way to set it; addEventListener does not apply.
+  // oxlint-disable-next-line unicorn/prefer-add-event-listener
   server.server.onclose = () => {
     disposeSignalState();
     void closeAllSessions(sessions);
