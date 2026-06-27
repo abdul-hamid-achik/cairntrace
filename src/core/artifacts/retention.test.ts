@@ -45,7 +45,7 @@ describe("pruneRuns", () => {
     expect(result.kept).toBe(2);
     expect(result.freedBytes).toBeGreaterThan(0);
 
-    const remaining = (await readdir(root)).sort();
+    const remaining = (await readdir(root)).toSorted();
     expect(remaining).toEqual([
       "2026-06-02T11-00-00-000Z_spec_b_eeeeee",
       "2026-06-03T10-00-00-000Z_spec_a_cccccc",

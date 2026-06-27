@@ -35,7 +35,7 @@ export async function evaluateFile(
   let lastMatches: string[] = [];
   while (true) {
     const entries = await readdir(dir).catch(() => [] as string[]);
-    lastMatches = entries.filter((f) => namePattern.test(f)).sort();
+    lastMatches = entries.filter((f) => namePattern.test(f)).toSorted();
     for (const name of lastMatches) {
       const path = resolve(dir, name);
       if (contains === undefined) {

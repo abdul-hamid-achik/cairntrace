@@ -3,6 +3,40 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.6]
+
+A correctness pass over the healer and verifiers. Some fixes tighten checks, so
+a spec that was passing on a *wrong* result may now correctly fail — see notes.
+
+### Fixed
+- **`cairn spec heal --apply` could corrupt the spec file.** When the healer
+  inserted a wait step, it used `addIn(["steps", N], …)`, which merged the new
+  step *into* `steps[N]` as a complex mapping key instead of splicing a sibling
+  — producing an unparseable file. It now splices a proper sibling seq item.
+- **`noFailedRequests` missed transport-level failures.** It only flagged
+  requests with a 4xx/5xx status, so an aborted / blocked / DNS-failed /
+  connection-refused request (which never gets a status) passed silently, and
+  the evidence falsely read "returned <400". Failed requests are now marked by
+  the Playwright adapter and counted; genuinely-pending/streaming requests are
+  not flagged. *A spec that was silently ignoring a failed request may now
+  fail.*
+- **`count: { text }` is rejected at parse time.** It was accepted but silently
+  matched zero elements (an `atMost`/`equals: 0` always passed, an `atLeast`
+  always failed). Counting by text needs the a11y tree; use the `text` verifier
+  for presence or `script` for a real count. The Playwright importer now maps
+  text-visibility assertions to a `text` verifier instead.
+- **`httpJson` `equals`/`contains` are order-insensitive** for object keys (was
+  a `JSON.stringify` compare that failed when the server emitted keys in a
+  different order), and **`atLeast`/`atMost` reject non-numbers** instead of
+  coercing them (`Number([])` was `0`, making a bound vacuously pass).
+- **`script` verifier requires a boolean `ok`** on the browser path too (the
+  node path already did) — a truthy non-boolean like the string `"false"` no
+  longer counts as a pass.
+- Playwright exporter flattens newlines in `step.id` / `when` / `use` comments
+  so a crafted multi-line value can't inject lines into the generated test.
+- Cleared the remaining `oxlint` warnings (`Array#sort` → `toSorted`, function
+  scoping).
+
 ## [1.23.5]
 
 ### Fixed

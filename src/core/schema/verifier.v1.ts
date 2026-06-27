@@ -159,7 +159,6 @@ export const CountVerifierSchema = z
       .object({
         role: z.string().optional(),
         selector: z.string().optional(),
-        text: z.string().optional(),
         in_region: z.string().optional(),
         equals: z.number().int().min(0).optional(),
         atLeast: z.number().int().min(0).optional(),
@@ -170,10 +169,14 @@ export const CountVerifierSchema = z
       })
       .strict()
       .refine(
-        (c) =>
-          [c.role, c.selector, c.text].filter((x) => x !== undefined).length >=
-          1,
-        { message: "must specify one of: role, selector, text" },
+        (c) => [c.role, c.selector].filter((x) => x !== undefined).length >= 1,
+        {
+          // `text` is intentionally NOT a count target: counting elements by
+          // visible text needs the a11y/innerText tree, which the count
+          // verifier doesn't have. Use the `text` verifier for presence, or the
+          // `script` escape hatch for a real text-based count.
+          message: "must specify one of: role, selector",
+        },
       )
       .refine(
         (c) =>

@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Step } from "../schema/spec.v1";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
-import { healSpec, proposeOps } from "./Healer";
+import { parse as parseYaml } from "yaml";
+import { applyPatchOps, healSpec, proposeOps } from "./Healer";
 import { parseSnapshot } from "./snapshotParser";
 
 const SNAPSHOT_WITH_RENAMED_LINK = `
@@ -180,6 +181,67 @@ describe("proposeOps", () => {
       allSteps: [{ wait: { text: "Anything" } }, step],
     });
     expect(ops).toHaveLength(0);
+  });
+});
+
+describe("applyPatchOps", () => {
+  const source = `steps:
+  - id: open_home
+    open: /
+  - id: click_apply
+    click: { by: role, role: button, name: Apply }
+  - id: done
+    click: { by: role, role: button, name: Done }
+`;
+
+  it("splices an inserted wait as a NEW sibling step (does not corrupt steps[N])", () => {
+    // Regression: addIn(["steps", 1], …) merged the wait INTO steps[1] as a
+    // complex mapping key, producing an unparseable file. Use the real op
+    // proposeOps emits.
+    const step: Step = {
+      click: { by: "role", role: "button", name: "Apply" },
+    };
+    const ops = proposeOps(
+      step,
+      1,
+      parseSnapshot(`- main\n  - heading "Loading…"`),
+      {
+        allSteps: [{ open: "/" }, step],
+      },
+    );
+    expect(ops[0]).toMatchObject({ op: "insert", path: "/steps/1" });
+
+    const out = applyPatchOps(source, ops);
+    const reparsed = parseYaml(out) as { steps: { id: string }[] };
+    expect(reparsed.steps.map((s) => s.id)).toEqual([
+      "open_home",
+      "wait_for_apply",
+      "click_apply",
+      "done",
+    ]);
+    // The shifted step is intact, not merged into.
+    expect(reparsed.steps[2]).toMatchObject({ id: "click_apply" });
+  });
+
+  it("replace preserves surrounding formatting and other steps", () => {
+    const out = applyPatchOps(source, [
+      {
+        op: "replace",
+        path: "/steps/1/click/name",
+        from: "Apply",
+        to: "Apply coupon",
+        reason: "test",
+      },
+    ]);
+    const reparsed = parseYaml(out) as {
+      steps: { click?: { name: string } }[];
+    };
+    expect(reparsed.steps[1]!.click!.name).toBe("Apply coupon");
+    expect(reparsed.steps.map((s) => (s as { id: string }).id)).toEqual([
+      "open_home",
+      "click_apply",
+      "done",
+    ]);
   });
 });
 

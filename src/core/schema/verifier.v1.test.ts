@@ -48,3 +48,24 @@ describe("ScriptVerifierSchema fixtures (1.13.0)", () => {
     ).toBe(false);
   });
 });
+
+describe("count verifier targets", () => {
+  it("accepts role and selector", () => {
+    expect(
+      VerifierSchema.safeParse({ count: { role: "row", equals: 3 } }).success,
+    ).toBe(true);
+    expect(
+      VerifierSchema.safeParse({ count: { selector: "#x", atLeast: 1 } })
+        .success,
+    ).toBe(true);
+  });
+
+  it("rejects a text target (count can't query by text — use text/script)", () => {
+    // Previously accepted but silently matched 0 elements (always-pass/
+    // always-fail). It must now fail loudly at parse time.
+    const r = VerifierSchema.safeParse({
+      count: { text: "Error", atLeast: 1 },
+    });
+    expect(r.success).toBe(false);
+  });
+});

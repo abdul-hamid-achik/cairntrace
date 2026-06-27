@@ -232,8 +232,9 @@ function mapOutcome(line: string, idx: number): Outcome | undefined {
       });
     }
     if (loc?.by === "text") {
+      // Count can't query by text; assert presence with the text verifier.
       return outcome(idx, "text_visible", "expected text is visible", {
-        count: { text: loc.text, atLeast: 1 },
+        text: { contains: loc.text },
       });
     }
   }

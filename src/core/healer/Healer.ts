@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import { parseDocument } from "yaml";
+import { isSeq, parseDocument } from "yaml";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { parseSpec } from "../parser/parseSpec";
 import { runSpec } from "../runner/Runner";
@@ -170,21 +170,10 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   }
 
   if (opts.apply) {
-    // parseDocument preserves comments + formatting on the OWNING file
+    // applyPatchOps preserves comments + formatting on the OWNING file
     // (which may be an imported action, not the main spec).
     const ownerText = await readFile(origin.filePath, "utf8");
-    const doc = parseDocument(ownerText);
-    for (const op of ops) {
-      const path = jsonPointerToPath(op.path);
-      if (op.op === "replace") {
-        doc.setIn(path, (op as { to: unknown }).to);
-      } else if (op.op === "remove") {
-        doc.deleteIn(path);
-      } else if (op.op === "insert") {
-        doc.addIn(path, (op as { value: unknown }).value);
-      }
-    }
-    await writeFile(origin.filePath, String(doc));
+    await writeFile(origin.filePath, applyPatchOps(ownerText, ops));
     return {
       specPath: specPathAbs,
       basedOnRunId: result.runId,
@@ -403,6 +392,36 @@ function slugify(s: string): string {
 /* ----- helpers ----- */
 
 /** Convert a JSON Pointer (`/steps/1/click/name`) to the path form yaml's Document expects. */
+/**
+ * Apply heal patch ops to a YAML source string via the Document API, preserving
+ * comments / quoting / key order on untouched nodes. Returns the new source.
+ * Exported for testing the apply path directly.
+ */
+export function applyPatchOps(ownerText: string, ops: PatchOp[]): string {
+  const doc = parseDocument(ownerText);
+  for (const op of ops) {
+    const path = jsonPointerToPath(op.path);
+    if (op.op === "replace") {
+      doc.setIn(path, (op as { to: unknown }).to);
+    } else if (op.op === "remove") {
+      doc.deleteIn(path);
+    } else if (op.op === "insert") {
+      // Splice a NEW sibling seq item at the index. addIn(["steps", N], …)
+      // would instead resolve steps[N] and merge the value INTO it as a complex
+      // mapping key — corrupting that step and making the file unparseable.
+      const idx = path[path.length - 1];
+      const seq = doc.getIn(path.slice(0, -1));
+      const value = (op as { value: unknown }).value;
+      if (isSeq(seq) && typeof idx === "number") {
+        seq.items.splice(idx, 0, doc.createNode(value));
+      } else {
+        doc.addIn(path, value);
+      }
+    }
+  }
+  return String(doc);
+}
+
 function jsonPointerToPath(p: string): (string | number)[] {
   return (
     p

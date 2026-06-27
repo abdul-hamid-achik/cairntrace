@@ -608,28 +608,28 @@ describe("batch step", () => {
   });
 });
 
+async function pidFixture(session: string): Promise<{
+  stateDir: string;
+  exitSignal: Promise<NodeJS.Signals | null>;
+}> {
+  const { mkdtemp, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { spawn } = await import("node:child_process");
+  const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-state-"));
+  const child = spawn("sleep", ["30"]);
+  // Attach before the kill so the assertion can't miss the event.
+  const exitSignal = new Promise<NodeJS.Signals | null>((r) =>
+    child.once("exit", (_code, sig) => r(sig)),
+  );
+  await writeFile(join(stateDir, `${session}.pid`), `${child.pid}\n`);
+  return { stateDir, exitSignal };
+}
+
 describe("daemon teardown", () => {
   beforeEach(() => {
     execaMock.mockReset();
   });
-
-  async function pidFixture(session: string): Promise<{
-    stateDir: string;
-    exitSignal: Promise<NodeJS.Signals | null>;
-  }> {
-    const { mkdtemp, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const { spawn } = await import("node:child_process");
-    const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-state-"));
-    const child = spawn("sleep", ["30"]);
-    // Attach before the kill so the assertion can't miss the event.
-    const exitSignal = new Promise<NodeJS.Signals | null>((r) =>
-      child.once("exit", (_code, sig) => r(sig)),
-    );
-    await writeFile(join(stateDir, `${session}.pid`), `${child.pid}\n`);
-    return { stateDir, exitSignal };
-  }
 
   it("close() escalates to a daemon kill after a child timeout", async () => {
     const { stateDir, exitSignal } = await pidFixture("wedged-close");

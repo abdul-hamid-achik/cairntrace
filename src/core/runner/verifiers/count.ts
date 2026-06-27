@@ -3,12 +3,14 @@ import type { CountVerifier } from "../../schema/verifier.v1";
 import type { VerifierEvaluation } from "./types";
 
 /**
- * Counts elements matching role/selector/text in an optional in_region.
+ * Counts elements matching role/selector in an optional in_region.
  *
- * v0 simplification: `role` is translated to a CSS attribute selector
- * (`[role=row]`), and `in_region` is prepended as an ancestor selector.
- * `text` is not supported in v0 — agents needing text-based count should use
- * the `script` escape hatch until a real implementation lands.
+ * Simplification: `role` is translated to a CSS attribute selector
+ * (`[role=row]`), so it only matches elements with an explicit `role`
+ * attribute — implicit ARIA roles on native elements (`<tr>`, `<button>`) are
+ * not counted. `in_region` is prepended as an ancestor selector. Text-based
+ * counting is intentionally unsupported (rejected by the schema) — use the
+ * `text` verifier for presence or the `script` escape hatch.
  */
 export async function evaluateCount(
   verifier: CountVerifier,
@@ -53,10 +55,6 @@ function buildSelector(c: CountVerifier["count"]): string {
     parts.push(c.selector);
   } else if (c.role) {
     parts.push(`[role=${cssEscape(c.role)}]`);
-  } else if (c.text) {
-    // v0: text-based count isn't a real CSS query. Use a sentinel the backend
-    // can opt to interpret; otherwise treat as "match nothing" and let evidence say so.
-    parts.push(`*:not(*)`);
   }
   return parts.length > 0 ? parts.join(" ") : "*:not(*)";
 }

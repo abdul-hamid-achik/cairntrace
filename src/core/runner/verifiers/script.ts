@@ -36,7 +36,7 @@ export async function evaluateScript(
     };
   }
 
-  let parsed: { ok: boolean; evidence: unknown };
+  let parsed: { ok: unknown; evidence: unknown };
   try {
     parsed = JSON.parse(result.stdout);
   } catch (e) {
@@ -47,8 +47,19 @@ export async function evaluateScript(
     };
   }
 
+  // Require a real boolean `ok` — matching the node path. A truthy non-boolean
+  // (e.g. the string "false", or any object) must NOT count as a pass.
+  if (typeof parsed.ok !== "boolean") {
+    return {
+      passed: false,
+      expected: "script ok === true (boolean)",
+      actual: `script returned a non-boolean ok: ${JSON.stringify(parsed.ok)}`,
+      raw: parsed.evidence,
+    };
+  }
+
   return {
-    passed: Boolean(parsed.ok),
+    passed: parsed.ok,
     expected: "script ok === true",
     actual: parsed.ok ? "script returned ok=true" : "script returned ok=false",
     raw: parsed.evidence,

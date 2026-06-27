@@ -867,7 +867,12 @@ export class PlaywrightAdapter implements BrowserBackend {
           if (res) entry.status = res.status();
         })
         .catch(() => {
-          // Request was aborted / failed before a response — leave status undefined.
+          // The promise rejects only when the request FAILED (aborted, blocked,
+          // DNS, refused) — a still-pending request leaves it unresolved. Mark
+          // the failure explicitly so `noFailedRequests` can flag it without
+          // false-failing genuinely-pending/streaming requests (which keep an
+          // undefined status and no error).
+          entry.error = req.failure()?.errorText ?? "request failed";
         });
     });
     page.on("console", (msg: ConsoleMessage) => {

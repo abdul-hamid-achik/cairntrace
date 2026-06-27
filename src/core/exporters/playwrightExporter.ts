@@ -107,7 +107,10 @@ export function exportPlaywright(
 /* ----- step rendering ----- */
 
 function renderStep(step: Step): string[] {
-  const idComment = step.id ? `// step: ${step.id}` : "";
+  // `id`/`when` are unconstrained strings, so flatten newlines via oneLine —
+  // otherwise a multi-line value would break out of the `//` comment and
+  // inject arbitrary lines into the generated test.
+  const idComment = step.id ? `// step: ${oneLine(step.id)}` : "";
   const whenWrap = "when" in step && step.when ? step.when : undefined;
   const body = renderStepBody(step);
   const withComment = idComment ? [idComment, ...body] : body;
@@ -115,8 +118,8 @@ function renderStep(step: Step): string[] {
   // Wrap in an if-block for the when predicate. We comment the predicate since
   // a perfect translation would require duplicating the conditions DSL here.
   return [
-    `// when: ${whenWrap} — Cairntrace evaluates this before the step; for parity`,
-    `//   you'd need: ${renderWhenComment(whenWrap)}`,
+    `// when: ${oneLine(whenWrap)} — Cairntrace evaluates this before the step; for parity`,
+    `//   you'd need: ${oneLine(renderWhenComment(whenWrap))}`,
     ...withComment,
   ];
 }
@@ -238,7 +241,7 @@ function renderStepBody(step: Step): string[] {
   }
   if ("use" in step) {
     return [
-      `// use: ${step.use} — expand imports via \`parseSpec\` before exporting`,
+      `// use: ${oneLine(step.use)} — expand imports via \`parseSpec\` before exporting`,
     ];
   }
   return [`// unhandled step: ${JSON.stringify(step)}`];
@@ -368,10 +371,8 @@ function renderCountOutcome(v: CountVerifier): string[] {
     target = `${base}.locator(${JSON.stringify(c.selector)})`;
   } else if (c.role) {
     target = `${base}.getByRole(${JSON.stringify(c.role)})`;
-  } else if (c.text) {
-    target = `${base}.getByText(${JSON.stringify(c.text)})`;
   } else {
-    return [`// count verifier requires role/selector/text`];
+    return [`// count verifier requires role/selector`];
   }
   if (c.equals !== undefined) {
     return [`await expect(${target}).toHaveCount(${c.equals});`];

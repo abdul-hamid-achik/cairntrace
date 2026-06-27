@@ -213,21 +213,63 @@ function matchValue(
     };
   }
   if (matcher.atLeast !== undefined) {
-    const n = typeof actual === "number" ? actual : Number(actual);
+    const n = asNumber(actual);
     return {
-      passed: Number.isFinite(n) && n >= matcher.atLeast,
+      passed: n !== undefined && n >= matcher.atLeast,
       expected: `${matcher.jsonPath} at least ${matcher.atLeast}`,
-      actual: actualText,
+      actual: n === undefined ? `${actualText} (not a number)` : actualText,
     };
   }
-  const n = typeof actual === "number" ? actual : Number(actual);
+  const n = asNumber(actual);
   return {
-    passed: Number.isFinite(n) && n <= matcher.atMost!,
+    passed: n !== undefined && n <= matcher.atMost!,
     expected: `${matcher.jsonPath} at most ${matcher.atMost}`,
-    actual: actualText,
+    actual: n === undefined ? `${actualText} (not a number)` : actualText,
   };
 }
 
+/**
+ * Numeric view of a JSON value for atLeast/atMost. Only a real number or a
+ * numeric string qualifies — booleans, null, arrays, and objects are NOT
+ * coerced (JS `Number([])`=0, `Number([42])`=42, `Number(null)`=0 would make a
+ * bound vacuously pass). Returns undefined for anything non-numeric.
+ */
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === "number")
+    return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Structural deep equality — order-insensitive for object keys (so
+ * `{a:1,b:2}` equals `{b:2,a:1}`), order-sensitive for arrays. Replaces a
+ * `JSON.stringify` compare that failed on differing key order.
+ */
 function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+      return false;
+    }
+    return a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (typeof a === "object" && typeof b === "object") {
+    const ka = Object.keys(a as object);
+    const kb = Object.keys(b as object);
+    if (ka.length !== kb.length) return false;
+    return ka.every(
+      (k) =>
+        Object.prototype.hasOwnProperty.call(b, k) &&
+        deepEqual(
+          (a as Record<string, unknown>)[k],
+          (b as Record<string, unknown>)[k],
+        ),
+    );
+  }
+  return false;
 }

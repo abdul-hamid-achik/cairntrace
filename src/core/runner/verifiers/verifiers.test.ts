@@ -153,6 +153,33 @@ describe("noFailedRequests", () => {
     expect(r.passed).toBe(false);
     expect(r.actual).toContain("/api/y");
   });
+
+  it("fails on a transport failure (error set, no >=400 status)", async () => {
+    // Aborted/blocked/DNS-failed requests never get a 4xx/5xx status — they
+    // carry an error marker instead. A status-only check would miss them.
+    const b = new MockBrowserBackend();
+    b.pushNetworkEntry({
+      url: "/api/checkout",
+      method: "POST",
+      error: "net::ERR_CONNECTION_REFUSED",
+    });
+    const r = await evaluateNoFailedRequests(
+      { noFailedRequests: { urlContains: "/api/" } },
+      b,
+    );
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("/api/checkout");
+  });
+
+  it("does not fail a merely-pending request (no status, no error)", async () => {
+    const b = new MockBrowserBackend();
+    b.pushNetworkEntry({ url: "/api/stream", method: "GET" }); // SSE-like
+    const r = await evaluateNoFailedRequests(
+      { noFailedRequests: { urlContains: "/api/" } },
+      b,
+    );
+    expect(r.passed).toBe(true);
+  });
 });
 
 describe("console", () => {
@@ -296,6 +323,41 @@ describe("httpJson", () => {
     expect(r.actual).toContain("needs a baseUrl");
     expect(b.lastEvaluatedScript).toBe("");
   });
+
+  it("equals matches objects regardless of key order", async () => {
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult({
+      status: 200,
+      ok: true,
+      body: { prefs: { lang: "en", theme: "dark" } }, // server order
+    });
+    const r = await evaluateHttpJson(
+      {
+        httpJson: {
+          url: "https://host/state",
+          jsonPath: "$.prefs",
+          equals: { theme: "dark", lang: "en" }, // spec order differs
+        },
+      },
+      b,
+    );
+    expect(r.passed).toBe(true);
+  });
+
+  it("atMost fails on a non-number value instead of coercing it", async () => {
+    // Number([]) === 0, so the old coercion made `atMost` vacuously pass on an
+    // array. A non-number actual must fail, not silently satisfy the bound.
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult({ status: 200, ok: true, body: { items: [] } });
+    const r = await evaluateHttpJson(
+      {
+        httpJson: { url: "https://host/state", jsonPath: "$.items", atMost: 5 },
+      },
+      b,
+    );
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("not a number");
+  });
 });
 
 describe("count", () => {
@@ -358,6 +420,20 @@ describe("script", () => {
     );
     expect(r.passed).toBe(false);
     expect(r.raw).toMatchObject({ mismatches: [{ row: 3 }] });
+  });
+
+  it("fails on a non-boolean ok instead of coercing it truthy", async () => {
+    // `ok: "false"` is a truthy string; Boolean("false") === true would have
+    // passed. A non-boolean ok must fail, matching the node path.
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult({ ok: "false", evidence: { note: "stringly typed" } });
+    const r = await evaluateScript(
+      { script: { run: "return { ok: 'false', evidence: {} };" } },
+      b,
+    );
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("non-boolean ok");
+    expect(r.raw).toMatchObject({ note: "stringly typed" });
   });
 
   it("runs runtime: node scripts outside the browser with filesystem access", async () => {

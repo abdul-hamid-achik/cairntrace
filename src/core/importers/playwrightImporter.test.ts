@@ -49,7 +49,7 @@ describe("importPlaywright", () => {
       {
         id: "text_visible_2",
         description: "expected text is visible",
-        verify: { count: { text: "Saved", atLeast: 1 } },
+        verify: { text: { contains: "Saved" } },
       },
     ]);
 
@@ -119,7 +119,7 @@ describe("importPlaywright", () => {
       {
         id: "text_visible_3",
         description: "expected text is visible",
-        verify: { count: { text: "Roshan", atLeast: 1 } },
+        verify: { text: { contains: "Roshan" } },
       },
       {
         id: "text_contains_4",
