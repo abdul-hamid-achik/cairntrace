@@ -70,11 +70,24 @@ describe("notText", () => {
   it("uses nested region for absence checks", async () => {
     const b = new MockBrowserBackend();
     b.setRegionText("#toast", "All good");
+    b.setCount("#toast", 1); // region exists
     const r = await evaluateNotText(
       { notText: { contains: "Something went wrong", region: "#toast" } },
       b,
     );
     expect(r.passed).toBe(true);
+  });
+
+  it("fails (does not pass vacuously) when the region is missing", async () => {
+    const b = new MockBrowserBackend();
+    // #typo resolves to no elements (count 0) — an absence assertion over a
+    // region that isn't there must fail, not pass.
+    const r = await evaluateNotText(
+      { notText: { contains: "anything", region: "#typo" } },
+      b,
+    );
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("matched no elements");
   });
 });
 
@@ -361,18 +374,29 @@ describe("httpJson", () => {
 });
 
 describe("count", () => {
-  it("passes when equals matches", async () => {
+  it("passes when equals matches (role expands to native elements)", async () => {
     const b = new MockBrowserBackend();
-    b.setCount("[role=row]", 42);
+    // role: row → "[role=row], tr" so native <tr> rows are counted too.
+    b.setCount("[role=row], tr", 42);
     const r = await evaluateCount({ count: { role: "row", equals: 42 } }, b);
     expect(r.passed).toBe(true);
   });
 
   it("fails when count is off", async () => {
     const b = new MockBrowserBackend();
-    b.setCount("[role=row]", 41);
+    b.setCount("[role=row], tr", 41);
     const r = await evaluateCount({ count: { role: "row", equals: 42 } }, b);
     expect(r.passed).toBe(false);
+  });
+
+  it("scopes a role count to in_region across all native alternatives", async () => {
+    const b = new MockBrowserBackend();
+    b.setCount("table.invoices [role=row], table.invoices tr", 3);
+    const r = await evaluateCount(
+      { count: { role: "row", in_region: "table.invoices", equals: 3 } },
+      b,
+    );
+    expect(r.passed).toBe(true);
   });
 
   it("supports atLeast / atMost / between", async () => {

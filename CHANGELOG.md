@@ -3,6 +3,31 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.23.7]
+
+The three follow-ups deferred from the v1.23.6 review.
+
+### Fixed
+- **`notText` no longer passes vacuously over a missing region.** When a
+  specific region was targeted (`notText: { contains, region: "#typo" }`) but
+  the region didn't exist, `getText` returned `""` and the absence check passed
+  silently, masking a broken assertion. It now confirms the region resolves to
+  an element first and fails clearly if it doesn't. *A spec asserting absence
+  over a missing region will now correctly fail.*
+- **`count: { role }` counts native semantic elements, not just explicit
+  `[role]` attributes.** `role: row` now matches `<tr>` (and `button` → native
+  `<button>`, `link` → `<a href>`, `heading` → `<h1>`–`<h6>`, etc.), so a count
+  over a normal `<table>` works. This is a heuristic CSS expansion — for exact
+  ARIA semantics use a `selector`. *Role counts that were silently returning 0
+  on native markup will now return the real count.*
+
+### Added
+- **Playwright importer round-trip coverage** for the steps the exporter
+  already emits: `type` (`pressSequentially`, with `delay`), selector waits
+  (`waitForSelector` → `wait: { selector, state, timeoutMs }`), and `.nth(N)` on
+  role/label/text locators (previously silently dropped, which targeted the
+  wrong element).
+
 ## [1.23.6]
 
 A correctness pass over the healer and verifiers. Some fixes tighten checks, so

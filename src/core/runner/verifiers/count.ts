@@ -5,12 +5,14 @@ import type { VerifierEvaluation } from "./types";
 /**
  * Counts elements matching role/selector in an optional in_region.
  *
- * Simplification: `role` is translated to a CSS attribute selector
- * (`[role=row]`), so it only matches elements with an explicit `role`
- * attribute — implicit ARIA roles on native elements (`<tr>`, `<button>`) are
- * not counted. `in_region` is prepended as an ancestor selector. Text-based
- * counting is intentionally unsupported (rejected by the schema) — use the
- * `text` verifier for presence or the `script` escape hatch.
+ * `role` is translated to a CSS selector list covering both the explicit
+ * `[role=X]` attribute AND the native elements that carry that role implicitly
+ * (`role: row` → `[role=row], tr`), so a normal `<table>` is counted. This is a
+ * heuristic: it doesn't account for `role` overrides on native elements (an
+ * `<a role="button">` is matched by both the link and button mappings). For
+ * exact ARIA semantics use a `selector`. `in_region` is prepended as an
+ * ancestor. Text-based counting is rejected by the schema — use the `text`
+ * verifier for presence or the `script` escape hatch.
  */
 export async function evaluateCount(
   verifier: CountVerifier,
@@ -49,14 +51,57 @@ export async function evaluateCount(
 }
 
 function buildSelector(c: CountVerifier["count"]): string {
-  const parts: string[] = [];
-  if (c.in_region) parts.push(c.in_region);
   if (c.selector) {
-    parts.push(c.selector);
-  } else if (c.role) {
-    parts.push(`[role=${cssEscape(c.role)}]`);
+    return c.in_region ? `${c.in_region} ${c.selector}` : c.selector;
   }
-  return parts.length > 0 ? parts.join(" ") : "*:not(*)";
+  if (c.role) {
+    const alts = roleSelectors(c.role);
+    const scoped = c.in_region ? alts.map((a) => `${c.in_region} ${a}`) : alts;
+    return scoped.join(", ");
+  }
+  // Schema guarantees role or selector is present; this is an unreachable guard.
+  return c.in_region ?? "*:not(*)";
+}
+
+/**
+ * Native HTML elements that carry an ARIA role implicitly, so `count: { role }`
+ * matches semantic markup, not just elements with an explicit `role` attribute.
+ */
+const IMPLICIT_ROLE_NATIVES: Record<string, string[]> = {
+  row: ["tr"],
+  cell: ["td"],
+  gridcell: ["td"],
+  columnheader: ["th"],
+  rowheader: ["th"],
+  table: ["table"],
+  button: [
+    "button",
+    "input[type=button]",
+    "input[type=submit]",
+    "input[type=reset]",
+  ],
+  link: ["a[href]"],
+  list: ["ul", "ol"],
+  listitem: ["li"],
+  heading: ["h1", "h2", "h3", "h4", "h5", "h6"],
+  textbox: ["input:not([type])", "input[type=text]", "textarea"],
+  checkbox: ["input[type=checkbox]"],
+  radio: ["input[type=radio]"],
+  img: ["img"],
+  navigation: ["nav"],
+  banner: ["header"],
+  contentinfo: ["footer"],
+  main: ["main"],
+  article: ["article"],
+  complementary: ["aside"],
+  combobox: ["select"],
+  option: ["option"],
+  region: ["section"],
+};
+
+function roleSelectors(role: string): string[] {
+  const natives = IMPLICIT_ROLE_NATIVES[role.toLowerCase()] ?? [];
+  return [`[role=${cssEscape(role)}]`, ...natives];
 }
 
 function cssEscape(s: string): string {

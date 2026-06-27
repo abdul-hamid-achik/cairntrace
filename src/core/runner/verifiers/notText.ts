@@ -11,6 +11,23 @@ export async function evaluateNotText(
   backend: BrowserBackend,
 ): Promise<VerifierEvaluation> {
   const region = notTextVerifierRegion(verifier);
+
+  // Absence-over-a-missing-region is a trap: a typo'd/absent region makes
+  // getText return "" and the "text is absent" check passes vacuously, masking
+  // a broken assertion. When a specific region is targeted (not the whole-page
+  // sentinel), confirm it resolves to an element first. ("page" maps to the
+  // body and is not a real selector, so it's always present — skip the check.)
+  if (region !== "page") {
+    const regionCount = await backend.getCount(region);
+    if (regionCount === 0) {
+      return {
+        passed: false,
+        expected: `region ${JSON.stringify(region)} to exist before asserting absence`,
+        actual: `region ${JSON.stringify(region)} matched no elements — cannot assert text is absent from a region that isn't there`,
+      };
+    }
+  }
+
   const haystack = await backend.getText(region);
   const { passed: matchFound, expected } = matchText(
     haystack,

@@ -60,6 +60,30 @@ describe("importPlaywright", () => {
     expect(parsed.spec.name).toBe("admin_saves_settings");
   });
 
+  it("imports type (pressSequentially), selector waits, and .nth", () => {
+    const imported = importPlaywright(
+      [
+        "test('Search flow', async ({ page }) => {",
+        "  await page.goto('/search');",
+        "  await page.getByLabel('Query').pressSequentially('hello', { delay: 20 });",
+        "  await page.waitForSelector('#results', { timeout: 5000, state: 'visible' });",
+        "  await page.getByRole('button', { name: 'Result' }).nth(2).click();",
+        "});",
+      ].join("\n"),
+      { sourcePath: "search.spec.ts" },
+    );
+    expect(imported.spec.steps).toEqual([
+      { open: "/search" },
+      { type: { by: "label", name: "Query", value: "hello", delayMs: 20 } },
+      { wait: { selector: "#results", state: "visible", timeoutMs: 5000 } },
+      {
+        click: { by: "role", role: "button", name: "Result", nth: 2 },
+      },
+    ]);
+    // Every step line mapped — no step was dropped to a TODO comment.
+    expect(imported.todos.some((t) => t.includes("page."))).toBe(false);
+  });
+
   it("leaves TODO comments for unmapped lines and inserts a placeholder outcome", () => {
     const imported = importPlaywright(
       [

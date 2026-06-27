@@ -184,9 +184,26 @@ function mapStep(line: string): Step | undefined {
     }
   }
 
+  const waitSelector = /^await\s+page\.waitForSelector\((.+?)\);?$/.exec(line);
+  if (waitSelector) {
+    const args = splitTopLevelArgs(waitSelector[1]!);
+    const selector = literal(args[0] ?? "");
+    if (selector !== undefined) {
+      const state = objectStringProperty(args[1], "state");
+      const timeoutMs = objectNumberProperty(args[1], "timeout");
+      return {
+        wait: {
+          selector,
+          ...(isWaitState(state) ? { state } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        },
+      };
+    }
+  }
+
   const action =
     /^await\s+(page\..+?)\.(click|hover)\(\s*\);?$/.exec(line) ??
-    /^await\s+(page\..+?)\.(fill)\((.+?)\);?$/.exec(line);
+    /^await\s+(page\..+?)\.(fill|pressSequentially)\((.+?)\);?$/.exec(line);
   if (!action) return undefined;
 
   const loc = locator(action[1]!);
@@ -194,9 +211,23 @@ function mapStep(line: string): Step | undefined {
   const op = action[2]!;
   if (op === "click") return { click: loc };
   if (op === "hover") return { hover: loc };
-  const value = literal(action[3] ?? "");
+  // fill / pressSequentially carry a value (and pressSequentially → `type`).
+  const args = splitTopLevelArgs(action[3] ?? "");
+  const value = literal(args[0] ?? "");
   if (value === undefined) return undefined;
-  return { fill: { ...loc, value } };
+  if (op === "fill") return { fill: { ...loc, value } };
+  const delayMs = objectNumberProperty(args[1], "delay");
+  return {
+    type: { ...loc, value, ...(delayMs !== undefined ? { delayMs } : {}) },
+  };
+}
+
+function isWaitState(
+  s: string | undefined,
+): s is "attached" | "visible" | "hidden" | "detached" {
+  return (
+    s === "attached" || s === "visible" || s === "hidden" || s === "detached"
+  );
 }
 
 function mapOutcome(line: string, idx: number): Outcome | undefined {
@@ -269,6 +300,22 @@ function outcome(
 }
 
 function locator(input: string): Locator | undefined {
+  // A trailing `.nth(N)` selects the Nth match — strip it, parse the base
+  // locator, then re-attach. Without this it was silently dropped, targeting a
+  // different element than the source.
+  const nthMatch = /^(.+)\.nth\((\d+)\)$/.exec(input.trim());
+  const base = nthMatch ? nthMatch[1]! : input;
+  const parsed = parseBaseLocator(base);
+  if (!parsed) return undefined;
+  // nth is a disambiguator on the semantic (role/label/text) locators; the
+  // selector locator can't carry it (encode position in the CSS instead).
+  if (nthMatch && parsed.by !== "selector") {
+    return { ...parsed, nth: Number(nthMatch[2]) };
+  }
+  return parsed;
+}
+
+function parseBaseLocator(input: string): Locator | undefined {
   const receiver = "(?:[A-Za-z_$][\\w$]*\\.)?";
   const testId = new RegExp(`^${receiver}getByTestId\\((.+?)\\)$`).exec(input);
   if (testId) {
@@ -378,6 +425,15 @@ function objectStringProperty(
   if (!input) return undefined;
   const re = new RegExp(`${prop}\\s*:\\s*(['"\`])([\\s\\S]*?)\\1`);
   return re.exec(input)?.[2];
+}
+
+function objectNumberProperty(
+  input: string | undefined,
+  prop: string,
+): number | undefined {
+  if (!input) return undefined;
+  const m = new RegExp(`${prop}\\s*:\\s*(\\d+)`).exec(input);
+  return m ? Number(m[1]) : undefined;
 }
 
 function parseDataObject(input: string | undefined): unknown {
