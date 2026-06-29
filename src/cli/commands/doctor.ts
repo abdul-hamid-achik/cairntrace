@@ -3,6 +3,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { emit, resolveFormat } from "../format";
+import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
+import { codemapProjects } from "./codemap.js";
+
+/** Injectable codemap seam for `cairn doctor` (FEATURES item 7). */
+export interface DoctorDeps {
+  codemap: CodemapDeps;
+}
 
 export interface DoctorReport {
   ok: boolean;
@@ -16,7 +23,10 @@ export interface DoctorOptions {
   md?: boolean;
 }
 
-export async function doctorCommand(opts: DoctorOptions): Promise<void> {
+export async function doctorCommand(
+  opts: DoctorOptions,
+  deps: DoctorDeps = { codemap: defaultCodemapDeps },
+): Promise<void> {
   const format = resolveFormat(opts, "md");
   const checks: DoctorReport["checks"] = [];
 
@@ -78,6 +88,14 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
       : "codemap not on $PATH (cairn annotate will be unavailable)",
   });
 
+  // Resolve the target codebase from the `codemap projects` registry and
+  // report whether it is indexed (symbol count) — no hardcoded codemap.path.
+  // (FEATURES item 7) NOTE: `codemap status` (per-project freshness) is not
+  // yet shipped, so we report "indexed: yes (N symbols)" without a freshness
+  // verdict. TODO: add freshness once codemap_status lands.
+  const indexCheck = await resolveCodemapIndexCheck(deps.codemap, codemap.ok);
+  if (indexCheck) checks.push(indexCheck);
+
   const tvault = await tryExec("tvault", ["--version"]);
   checks.push({
     name: "tvault",
@@ -116,6 +134,44 @@ export async function doctorCommand(opts: DoctorOptions): Promise<void> {
   process.stdout.write(emit(format, report, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
   process.exit(ok ? 0 : 2);
+}
+
+/**
+ * Resolve the target codebase from the `codemap projects` registry and build
+ * the doctor "codebase indexed" check. Picks the registry project whose path
+ * contains the current working directory (falling back to the first project).
+ * Returns undefined when codemap is absent (the `codemap` availability check
+ * already flags that). No `codemap status` freshness — best-effort + TODO.
+ * (FEATURES item 7)
+ */
+export async function resolveCodemapIndexCheck(
+  deps: CodemapDeps,
+  codemapOnPath: boolean,
+): Promise<{ name: string; ok: boolean; detail: string } | undefined> {
+  if (!codemapOnPath) return undefined;
+  const projects = await codemapProjects(deps);
+  if (projects.length === 0) {
+    return {
+      name: "codemap-index",
+      ok: false,
+      detail:
+        "codemap on $PATH but no projects in registry — run `codemap index`",
+    };
+  }
+  const cwd = process.cwd();
+  const proj =
+    projects.find(
+      (p) => p.path && (cwd === p.path || cwd.startsWith(`${p.path}/`)),
+    ) ?? projects[0]!;
+  const where = proj.path ? ` at ${proj.path}` : "";
+  return {
+    name: "codemap-index",
+    ok: true,
+    detail:
+      proj.symbols !== undefined
+        ? `codebase indexed: yes (${proj.symbols} symbols${where})`
+        : `codebase indexed: yes${where}`,
+  };
 }
 
 async function tryExec(

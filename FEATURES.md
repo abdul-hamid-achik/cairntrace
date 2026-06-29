@@ -60,7 +60,7 @@ critical path."
 - **cairntrace:** enrich the investigate pipeline in `src/cli/commands/investigate.ts`.
 - **Accept:** investigate output is sorted by `codemapScore`; the top hit is on the failing call path.
 
-### [ ] 4 — call-path annotations for entry→failure traces · S · medium
+### [x] 4 — call-path annotations for entry→failure traces · S · medium
 A failing trace (`handleSubmit → validateEmail → api.post`) becomes a first-class annotated **call path**:
 `codemap annotate <fromSymbol> <toSymbol> --source cairntrace`. codemap already supports path annotations
 and nothing currently feeds them — cairntrace is the natural producer.
@@ -68,7 +68,7 @@ and nothing currently feeds them — cairntrace is the natural producer.
 - **cairntrace:** when investigate reconstructs a failure trace, emit one path annotation per edge.
 - **Accept:** `codemap annotations --from handleSubmit --to api.post` returns the cairntrace note.
 
-### [ ] 5 — fcheap as the run-artifact substrate · S · medium
+### [x] 5 — fcheap as the run-artifact substrate · S · medium
 Annotation `data` carries a `stashId` pointer instead of inline evidence; a codemap consumer hydrates the
 full bundle via `fcheap restore`. Reverse direction: `cairn stash search` seeded from codemap symbol names.
 Keeps the code graph light while evidence stays addressable.
@@ -76,7 +76,7 @@ Keeps the code graph light while evidence stays addressable.
 - **cairntrace:** store `stashId` in annotation `data`; add `cairn stash search <symbol>`.
 - **Accept:** a 2 KB annotation resolves to a full evidence bundle via one `fcheap restore`.
 
-### [ ] 6 — semantic spec scaffolding from untested entrypoints · M · medium
+### [x] 6 — semantic spec scaffolding from untested entrypoints · M · medium
 `cairn spec scaffold` consults `codemap_semantic` + `codemap_orphans` for untested entrypoints and pre-fills
 the `coversSymbol:` binding from the symbol's signature/docstring — so agents discover *what to test next*
 from the code graph, not from guessing.
@@ -84,12 +84,22 @@ from the code graph, not from guessing.
 - **cairntrace:** seed scaffold templates from codemap symbol metadata.
 - **Accept:** scaffolding an uncovered handler produces a spec stub already bound to `coversSymbol`.
 
-### [ ] 7 — resolve the target codebase from codemap's registry · S · low
+> **Implemented (2026-06-29) from `codemap semantic` + `codemap orphans` only.** `codemap read-order`
+> (entrypoint ranking) is NOT used here yet — noted as a future enhancement (feature 9 builds on it).
+> The scaffolded `coversSymbol` field also needs a matching `coversSymbol` entry on `SpecSchema`
+> (`src/core/schema/spec.v1.ts`, currently `.strict()`) for `cairn spec verify`/`run` to accept it; the
+> scaffolded stub is a TODO template (placeholder outcome, no contractHash) consistent with that gap.
+
+### [x] 7 — resolve the target codebase from codemap's registry · S · low
 `cairn doctor` + config resolve the codebase from `codemap_projects` (the XDG registry) instead of a
 hardcoded `codemap.path`; `doctor` reports `codemap_status` ("codebase indexed: yes/no, N symbols, stale?").
 - **codemap:** `codemap_projects`, `codemap_status`.
 - **cairntrace:** read the registry in `cairn doctor` / config resolution.
 - **Accept:** `cairn doctor` prints "codebase indexed: yes (4 522 symbols, fresh)" with no manual path.
+
+> **Implemented (2026-06-29) from `codemap projects` only.** `codemap status` (per-project freshness) is
+> NOT shipped in codemap yet, so `cairn doctor` reports "codebase indexed: yes (N symbols)" without a
+> freshness verdict — a TODO in `src/cli/commands/doctor.ts` adds freshness once `codemap_status` lands.
 
 ### [ ] 8 — risk-ranked investigate (uses the new `codemap risk`) · S · **high**
 `cairn investigate` already surfaces N code candidates for a failing run; now rank them by **change-risk**,

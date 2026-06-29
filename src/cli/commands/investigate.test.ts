@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type CodeMatch,
+  annotateCallPath,
   gatherFailureContext,
   rankCodeMatches,
+  reconstructFailureTrace,
 } from "./investigate";
 import type { CodemapDeps } from "./annotate.js";
 
@@ -253,5 +255,168 @@ describe("rankCodeMatches", () => {
       fakeCodemap(),
     );
     expect(ranked).toEqual([]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * reconstructFailureTrace + annotateCallPath — call-path annotations
+ * (FEATURES item 4)
+ *
+ * A failing run yields a 3-symbol trace (handleSubmit → validateEmail →
+ * api.post). `reconstructFailureTrace` derives the chain from `codemap callers`
+ * edges among the ranked matches; `annotateCallPath` emits one codemap path
+ * annotation per edge via the CodemapDeps seam. Best-effort: codemap absent →
+ * graceful skip, no crash.
+ * ------------------------------------------------------------------------- */
+
+/** Fake codemap whose `callers` returns the inbound caller symbol names. */
+function fakeCodemapWithTrace(): CodemapDeps {
+  // Call graph: handleSubmit → validateEmail → apiPost.
+  const callersOf: Record<string, string[]> = {
+    handleSubmit: [],
+    validateEmail: ["handleSubmit"],
+    apiPost: ["validateEmail"],
+  };
+  const dispatch: Record<string, (args: string[]) => unknown> = {
+    callers: (args) =>
+      (callersOf[args[1] ?? ""] ?? []).map((c) => ({ symbol: c })),
+  };
+  return {
+    isAvailable: async () => true,
+    async exec(args) {
+      const cmd = args[0]!;
+      const handler = dispatch[cmd];
+      if (!handler)
+        return { exitCode: 1, stdout: "", stderr: `unknown cmd ${cmd}` };
+      return { exitCode: 0, stdout: JSON.stringify(handler(args)), stderr: "" };
+    },
+  };
+}
+
+const traceMatches: CodeMatch[] = [
+  {
+    file: "src/forms/handler.ts",
+    line: 22,
+    score: 0.7,
+    symbol: "handleSubmit",
+  },
+  {
+    file: "src/forms/validate.ts",
+    line: 8,
+    score: 0.6,
+    symbol: "validateEmail",
+  },
+  { file: "src/api/client.ts", line: 40, score: 0.5, symbol: "apiPost" },
+];
+
+describe("reconstructFailureTrace", () => {
+  it("builds the entry→failure chain from codemap callers edges", async () => {
+    const trace = await reconstructFailureTrace(
+      traceMatches,
+      fakeCodemapWithTrace(),
+    );
+    // 3 symbols → a 3-node chain.
+    expect(trace).toEqual(["handleSubmit", "validateEmail", "apiPost"]);
+  });
+
+  it("returns [] when fewer than two matches have resolved symbols", async () => {
+    const trace = await reconstructFailureTrace(
+      [{ file: "a.ts", line: 1, score: 1, symbol: "onlyOne" }],
+      fakeCodemapWithTrace(),
+    );
+    expect(trace).toEqual([]);
+  });
+
+  it("returns [] when codemap is absent (graceful, no crash)", async () => {
+    const missing: CodemapDeps = {
+      isAvailable: async () => false,
+      exec: async () => ({ exitCode: 127, stdout: "", stderr: "not found" }),
+    };
+    const trace = await reconstructFailureTrace(traceMatches, missing);
+    expect(trace).toEqual([]);
+  });
+
+  it("returns [] when no edges connect the candidates", async () => {
+    // callers never reference another candidate → no chain.
+    const noEdges: CodemapDeps = {
+      isAvailable: async () => true,
+      async exec(args) {
+        if (args[0] === "callers")
+          return { exitCode: 0, stdout: "[]", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "" };
+      },
+    };
+    const trace = await reconstructFailureTrace(traceMatches, noEdges);
+    expect(trace).toEqual([]);
+  });
+});
+
+describe("annotateCallPath", () => {
+  it("emits one path annotation per edge with stashId in the data payload", async () => {
+    const calls: string[][] = [];
+    const fake: CodemapDeps = {
+      isAvailable: async () => true,
+      async exec(args) {
+        calls.push(args);
+        return { exitCode: 0, stdout: JSON.stringify({ id: 1 }), stderr: "" };
+      },
+    };
+    const trace = ["handleSubmit", "validateEmail", "apiPost"];
+    const out = await annotateCallPath(
+      trace,
+      "run-abc",
+      { stashId: "stash-123" },
+      fake,
+    );
+
+    // 3 symbols → 2 edges → 2 path annotations.
+    expect(out.annotated).toBe(2);
+    expect(out.skipped).toBe(0);
+    expect(calls).toHaveLength(2);
+
+    // First edge: handleSubmit → validateEmail.
+    const a0 = calls[0]!;
+    expect(a0[0]).toBe("annotate");
+    expect(a0[1]).toBe("handleSubmit");
+    expect(a0[2]).toBe("validateEmail");
+    expect(a0).toContain("cairntrace");
+    const d0 = JSON.parse(a0[a0.indexOf("--data") + 1]!);
+    expect(d0).toMatchObject({
+      runId: "run-abc",
+      stashId: "stash-123",
+      from: "handleSubmit",
+      to: "validateEmail",
+      edge: "handleSubmit->validateEmail",
+      traceLength: 3,
+    });
+
+    // Second edge: validateEmail → apiPost.
+    const a1 = calls[1]!;
+    expect(a1[1]).toBe("validateEmail");
+    expect(a1[2]).toBe("apiPost");
+  });
+
+  it("is a graceful no-op when codemap is absent (no crash)", async () => {
+    const missing: CodemapDeps = {
+      isAvailable: async () => false,
+      exec: async () => ({ exitCode: 127, stdout: "", stderr: "not found" }),
+    };
+    const out = await annotateCallPath(
+      ["handleSubmit", "validateEmail", "apiPost"],
+      "run-abc",
+      {},
+      missing,
+    );
+    expect(out.annotated).toBe(0);
+    expect(out.skipped).toBe(1);
+  });
+
+  it("does nothing for a sub-2-symbol trace", async () => {
+    const fake: CodemapDeps = {
+      isAvailable: async () => true,
+      exec: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+    };
+    const out = await annotateCallPath(["onlyOne"], "run-abc", {}, fake);
+    expect(out.annotated).toBe(0);
   });
 });

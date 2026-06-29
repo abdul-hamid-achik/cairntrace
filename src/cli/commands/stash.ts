@@ -2,6 +2,8 @@ import { execa } from "execa";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import type { OutputFormat } from "../format";
+import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
+import { expandSymbolQuery } from "./codemap.js";
 
 /* ---------------------------------------------------------------------------
  * fcheap shell-out wrapper
@@ -345,8 +347,7 @@ function stashRestoreMarkdown(r: {
     `- restoredTo: ${r.restoredTo}`,
   ].join("\n");
 }
-
-/* ----- search ----- */
+/* ----- search (FEATURES item 5: codemap-seeded symbol search) ----- */
 
 export interface StashSearchOptions {
   mode?: string;
@@ -358,28 +359,122 @@ export interface StashSearchOptions {
 }
 
 /**
- * `cairn stash search <query>` — search across all stashes.
+ * Injectable seams for `cairn stash search` so tests can substitute a fake
+ * codemap (symbol expansion) and a fake fcheap (the search itself) without
+ * touching $PATH. Mirrors the CodemapDeps seam from annotate.ts.
+ */
+export interface StashSearchDeps {
+  /** Codemap client for `semantic`/`find` symbol expansion. */
+  codemap?: CodemapDeps;
+  /** fcheap `search` executor; receives args WITHOUT the trailing --json. */
+  fcheapExec?: (args: string[]) => Promise<{
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  }>;
+}
+
+/** Default fcheap executor: shells `fcheap <args> --json` via execa. */
+const defaultFcheapExec: NonNullable<StashSearchDeps["fcheapExec"]> = async (
+  args,
+) => {
+  try {
+    const r = await execa("fcheap", [...args, "--json"], {
+      reject: false,
+      timeout: 60_000,
+    });
+    return {
+      exitCode: r.exitCode ?? -1,
+      stdout: typeof r.stdout === "string" ? r.stdout : "",
+      stderr: typeof r.stderr === "string" ? r.stderr : "",
+    };
+  } catch (e) {
+    const err = e as Error & { code?: string };
+    if (err.code === "ENOENT" || err.message?.includes("ENOENT")) {
+      return {
+        exitCode: -1,
+        stdout: "",
+        stderr:
+          "fcheap not found on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
+      };
+    }
+    return { exitCode: -1, stdout: "", stderr: err.message };
+  }
+};
+
+export interface StashSearchOutcome {
+  /** The original user query (the symbol or free-text). */
+  query: string;
+  /** Terms fcheap was searched with (symbol + codemap-expanded terms). */
+  expandedTerms: string[];
+  results: StashSearchResult[];
+  error?: string;
+}
+
+/**
+ * Core of `cairn stash search <symbol>`: expand the symbol into fcheap search
+ * terms via `codemap semantic`/`find` (best-effort — falls back to the bare
+ * symbol when codemap is absent), then run `fcheap search`. Exported so tests
+ * can verify the codemap seeding + result parsing without a real fcheap.
+ * (FEATURES item 5 — fcheap as the run-artifact substrate, reverse direction.)
+ */
+export async function searchStashesForSymbol(
+  symbol: string,
+  opts: { mode?: string; limit?: number } = {},
+  deps: StashSearchDeps = {},
+): Promise<StashSearchOutcome> {
+  const expandedTerms = await expandSymbolQuery(
+    symbol,
+    deps.codemap ?? defaultCodemapDeps,
+  );
+  const fcheapExec = deps.fcheapExec ?? defaultFcheapExec;
+  const args = ["search", expandedTerms.join(" ")];
+  if (opts.mode) args.push("--mode", opts.mode);
+  if (opts.limit) args.push("--limit", String(opts.limit));
+
+  const r = await fcheapExec(args);
+  if (r.exitCode !== 0) {
+    return {
+      query: symbol,
+      expandedTerms,
+      results: [],
+      error: r.stderr || "fcheap failed",
+    };
+  }
+  const results = parseJson<StashSearchResult[]>(r.stdout) ?? [];
+  return { query: symbol, expandedTerms, results };
+}
+
+/**
+ * `cairn stash search <query>` — search across all stashes. When codemap is on
+ * $PATH the query is seeded with the symbol's file + docstring terms (feature
+ * 5) so stashes whose metadata references the symbol surface; otherwise this
+ * is plain `fcheap search` (no regression).
  */
 export async function stashSearchCommand(
   query: string,
   opts: StashSearchOptions,
+  deps: StashSearchDeps = {},
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
-  const args = ["search", query];
-  if (opts.mode) args.push("--mode", opts.mode);
-  if (opts.limit) args.push("--limit", String(opts.limit));
+  const outcome = await searchStashesForSymbol(
+    query,
+    { mode: opts.mode, limit: opts.limit },
+    deps,
+  );
 
-  const r = await runFcheap(args, { json: true });
-
-  if (!r.ok) {
-    process.stderr.write(
-      `cairn stash search: ${r.stderr || "fcheap failed"}\n`,
-    );
+  if (outcome.error) {
+    process.stderr.write(`cairn stash search: ${outcome.error}\n`);
     process.exit(2);
   }
 
-  const results = parseJson<StashSearchResult[]>(r.stdout) ?? [];
-  const result = { query, results };
+  const result = {
+    query: outcome.query,
+    results: outcome.results,
+    ...(outcome.expandedTerms.length > 1
+      ? { expandedTerms: outcome.expandedTerms }
+      : {}),
+  };
 
   process.stdout.write(emit(format, result, () => stashSearchMarkdown(result)));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");

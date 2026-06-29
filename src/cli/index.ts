@@ -267,6 +267,10 @@ spec
   .description("Write a starter behavioral spec YAML")
   .requiredOption("--intent <text>", "one-line intent for the spec")
   .option("--out <dir>", "output directory (defaults to ./flows)")
+  .option(
+    "--from-codemap [query]",
+    "bind coversSymbol to an untested entrypoint via codemap orphans/semantic",
+  )
   .action((name: string, opts) => scaffoldCommand(name, opts));
 
 addFormatFlags(

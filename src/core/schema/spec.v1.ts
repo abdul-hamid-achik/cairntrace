@@ -705,6 +705,8 @@ export const SpecSchema = z
       .optional(),
 
     metadata: SpecMetadataSchema.optional(),
+    /** Symbol this spec covers (FEATURES item 6): bound by `cairn spec scaffold --from-codemap`. */
+    coversSymbol: z.string().optional(),
     imports: z.array(z.string()).optional(),
     preconditions: PreconditionsSchema.optional(),
     session: SessionSchema.optional(),

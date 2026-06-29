@@ -33,6 +33,14 @@ export interface InvestigateResult {
   codeMatches: CodeMatch[];
   query?: string;
   mode?: string;
+  /**
+   * Entry→failure call trace reconstructed from the ranked code matches via
+   * `codemap callers` (FEATURES item 4). Ordered list of symbols; empty when
+   * no chain could be built or codemap is absent.
+   */
+  failureTrace?: string[];
+  /** Number of codemap path annotations emitted for the failure trace edges. */
+  pathAnnotations?: number;
   error?: string;
 }
 
@@ -457,6 +465,185 @@ function buildSemanticQuery(ctx: FailureContext): string {
 }
 
 /* ---------------------------------------------------------------------------
+ * Call-trace reconstruction + per-edge path annotations
+ * (CODEMAP-INTEGRATION.md item D / FEATURES item 4)
+ *
+ * Once `rankCodeMatches` has resolved a `symbol` per match, reconstruct the
+ * entry→failure call chain from `codemap callers` edges among those symbols,
+ * then emit one codemap **path** annotation per edge:
+ *   `codemap annotate <from> <to> --source cairntrace --note … --data … --json`
+ * The annotation `data` carries a `stashId` pointer (feature 5) so a codemap
+ * consumer can `fcheap restore` the full evidence bundle. Best-effort: codemap
+ * absent → no trace, no annotations, never crashes the run.
+ * ------------------------------------------------------------------------- */
+
+export interface CallPathAnnotateResult {
+  /** The ordered symbol trace the annotations were emitted for. */
+  trace: string[];
+  /** Number of per-edge path annotations successfully written. */
+  annotated: number;
+  skipped: number;
+  errors: string[];
+}
+
+/**
+ * Reconstruct an entry→failure call trace from ranked code matches. Uses
+ * `codemap callers <sym> --json` to build edges among the resolved candidate
+ * symbols (a→b when a is in b's caller list), then returns the longest path
+ * through that DAG. Returns [] when fewer than two candidates have resolved
+ * symbols, when codemap is absent, or when no edges connect the candidates.
+ * Best-effort: never throws.
+ */
+export async function reconstructFailureTrace(
+  matches: CodeMatch[],
+  deps: CodemapDeps = investigateCodemapDeps,
+): Promise<string[]> {
+  // Candidate symbols = resolved symbols from ranked matches, deduped,
+  // preserving rank order.
+  const candidates: string[] = [];
+  for (const m of matches) {
+    if (m.symbol && !candidates.includes(m.symbol)) candidates.push(m.symbol);
+  }
+  if (candidates.length < 2) return [];
+  if (!(await deps.isAvailable())) return [];
+
+  // Build caller-name sets per candidate symbol.
+  const callersOf = new Map<string, Set<string>>();
+  for (const s of candidates) {
+    const out = await safeExec(deps, ["callers", s, "--json"]);
+    const names = new Set<string>();
+    for (const row of parseJsonArray(out)) {
+      const name = pickString(row, ["symbol", "name", "id", "caller"]);
+      if (name) names.add(name);
+    }
+    // Also tolerate { callers: [...] } object-wrapped output.
+    const obj = parseJsonObject(out);
+    const arr = obj.callers;
+    if (Array.isArray(arr)) {
+      for (const row of arr) {
+        const name = pickString(row, ["symbol", "name", "id", "caller"]);
+        if (name) names.add(name);
+      }
+    }
+    callersOf.set(s, names);
+  }
+
+  // Edges a→b (a calls b) restricted to candidate symbols.
+  const outEdges = new Map<string, string[]>();
+  for (const s of candidates) outEdges.set(s, []);
+  for (const b of candidates) {
+    for (const a of callersOf.get(b) ?? []) {
+      if (candidates.includes(a)) outEdges.get(a)!.push(b);
+    }
+  }
+
+  const trace = longestDagPath(candidates, outEdges);
+  return trace.length >= 2 ? trace : [];
+}
+
+/**
+ * Longest simple path through a DAG given an adjacency list. Ties break toward
+ * earlier candidates (rank order). Cycle-safe via a visiting set. Returns []
+ * when no node has an outgoing edge.
+ */
+function longestDagPath(
+  nodes: string[],
+  outEdges: Map<string, string[]>,
+): string[] {
+  const memo = new Map<string, string[]>();
+  const visiting = new Set<string>();
+  function bestFrom(n: string): string[] {
+    if (memo.has(n)) return memo.get(n)!;
+    if (visiting.has(n)) return [n]; // cycle guard — stop here
+    visiting.add(n);
+    let best: string[] = [n];
+    for (const next of outEdges.get(n) ?? []) {
+      const sub = bestFrom(next);
+      if (sub.length + 1 > best.length) best = [n, ...sub];
+    }
+    visiting.delete(n);
+    memo.set(n, best);
+    return best;
+  }
+  let best: string[] = [];
+  for (const n of nodes) {
+    const p = bestFrom(n);
+    if (p.length > best.length) best = p;
+  }
+  return best;
+}
+
+/**
+ * Emit one codemap path annotation per consecutive edge of `trace`:
+ * `codemap annotate <from> <to> --source cairntrace --note … --data … --json`.
+ * The `data` payload carries `{ runId, stashId?, from, to, edge, traceLength }`
+ * — the `stashId` pointer (feature 5) lets a codemap consumer hydrate the full
+ * evidence bundle via `fcheap restore`. Best-effort: codemap absent → skipped,
+ * never throws.
+ */
+export async function annotateCallPath(
+  trace: string[],
+  runId: string,
+  opts: { source?: string; stashId?: string },
+  deps: CodemapDeps = investigateCodemapDeps,
+): Promise<CallPathAnnotateResult> {
+  const out: CallPathAnnotateResult = {
+    trace,
+    annotated: 0,
+    skipped: 0,
+    errors: [],
+  };
+  if (trace.length < 2) return out;
+  if (!(await deps.isAvailable())) {
+    out.skipped = 1;
+    return out;
+  }
+  const source = opts.source ?? "cairntrace";
+  for (let i = 0; i < trace.length - 1; i++) {
+    const from = trace[i]!;
+    const to = trace[i + 1]!;
+    const note = `cairntrace failure trace ${runId}: ${from} → ${to}`;
+    const data = JSON.stringify({
+      runId,
+      ...(opts.stashId ? { stashId: opts.stashId } : {}),
+      from,
+      to,
+      edge: `${from}->${to}`,
+      traceLength: trace.length,
+    });
+    try {
+      const r = await deps.exec([
+        "annotate",
+        from,
+        to,
+        "--source",
+        source,
+        "--note",
+        note,
+        "--data",
+        data,
+        "--json",
+      ]);
+      if (r.exitCode === 0) {
+        out.annotated++;
+      } else {
+        out.errors.push(
+          `${from}->${to}: ${r.stderr || "codemap annotate failed"}`,
+        );
+      }
+    } catch (e) {
+      out.errors.push(`${from}->${to}: ${(e as Error).message}`);
+    }
+  }
+  if (out.annotated > 0) {
+    process.stderr.write(
+      `cairn: annotated ${out.annotated} call-path edge(s) into codemap\n`,
+    );
+  }
+  return out;
+}
+
+/* ---------------------------------------------------------------------------
  * investigate command
  *
  * `cairn investigate <run-id> [--codebase <dir>] [--connect] [--query <q>]
@@ -564,6 +751,22 @@ export async function investigateCommand(
     process.stderr.write(`cairn investigate: ${result.error}\n`);
   }
 
+  // Reconstruct the entry→failure call trace from the ranked matches and
+  // emit one codemap path annotation per edge. Best-effort: skipped when
+  // codemap is absent or no trace can be reconstructed. (FEATURES item 4)
+  if (result.codeMatches.length > 0) {
+    const trace = await reconstructFailureTrace(result.codeMatches);
+    result.failureTrace = trace;
+    if (trace.length >= 2) {
+      const cp = await annotateCallPath(
+        trace,
+        runId,
+        result.stashId ? { stashId: result.stashId } : {},
+      );
+      result.pathAnnotations = cp.annotated;
+    }
+  }
+
   // Write investigate.json to the run directory so agent_context.md can
   // surface the code matches on the next render.
   try {
@@ -610,6 +813,18 @@ function investigateMarkdown(r: InvestigateResult): string {
     lines.push(
       "",
       "No code matches. Use --connect --codebase <dir> to run fcheap connect.",
+    );
+  }
+
+  if (r.failureTrace && r.failureTrace.length >= 2) {
+    lines.push(
+      "",
+      "## Failure trace",
+      "",
+      `- ${r.failureTrace.join(" → ")}`,
+      ...(r.pathAnnotations
+        ? [`- path annotations: ${r.pathAnnotations}`]
+        : []),
     );
   }
 
