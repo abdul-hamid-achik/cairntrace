@@ -1,9 +1,11 @@
 import { execa } from "execa";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { maybeAutoStash, isFcheapAvailable } from "./stash";
+import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { join, resolve } from "node:path";
+import type { RunResult } from "../../core/schema/run.v1.js";
 
 /* ---------------------------------------------------------------------------
  * Types
@@ -14,6 +16,14 @@ export interface CodeMatch {
   line: number;
   score: number;
   snippet?: string;
+  /** Enclosing symbol resolved by `codemap symbol-at` (item 3). */
+  symbol?: string;
+  /** Number of inbound callers (`codemap callers` depth). */
+  callers?: number;
+  /** Blast-radius size (`codemap impact` affected-node count). */
+  blastRadius?: number;
+  /** Graph-derived rank: hotspot centrality + caller depth + blast radius. */
+  codemapScore?: number;
 }
 
 export interface InvestigateResult {
@@ -134,6 +144,319 @@ async function isVidtraceAvailable(): Promise<boolean> {
 }
 
 /* ---------------------------------------------------------------------------
+ * codemap structural ranking (CODEMAP-INTEGRATION.md item C / FEATURES item 3)
+ *
+ * fcheap/vecgrep returns N raw file:line search matches. We re-rank them by
+ * the code graph instead of raw search score:
+ *   - `codemap hotspots`   → per-symbol centrality
+ *   - `codemap callers`    → inbound caller depth
+ *   - `codemap impact`     → blast radius
+ *   - `codemap symbol-at`  → resolve a file:line to its enclosing symbol
+ *   - `codemap semantic` / `codemap find` → confirm a match is on the failing
+ *     semantic path (failing-outcome text + failing network URLs are the query)
+ * Each match gains { symbol, callers, blastRadius, codemapScore } and the
+ * result is sorted by codemapScore desc. When codemap is absent we fall back
+ * to the original fcheap ranking (no regression). All codemap JSON shapes are
+ * parsed defensively — a missing/changed field degrades to a 0 contribution,
+ * never a crash.
+ * ------------------------------------------------------------------------- */
+
+export interface FailureContext {
+  /** Concatenated text from failed outcomes' evidence files. */
+  failingText: string;
+  /** URLs from `network/failed_requests.ndjson` (status >= 400). */
+  failingUrls: string[];
+}
+
+/** Default codemap client for investigate — 30s timeout for graph queries. */
+const investigateCodemapDeps: CodemapDeps = {
+  isAvailable: defaultCodemapDeps.isAvailable,
+  async exec(args) {
+    const r = await execa("codemap", args, { reject: false, timeout: 30_000 });
+    return {
+      exitCode: r.exitCode ?? 0,
+      stdout: typeof r.stdout === "string" ? r.stdout : "",
+      stderr: typeof r.stderr === "string" ? r.stderr : "",
+    };
+  },
+};
+
+/** Best-effort: read `run.json` from a run dir; undefined if missing/invalid. */
+function readRunResult(runDir: string): RunResult | undefined {
+  try {
+    return JSON.parse(
+      readFileSync(join(runDir, "run.json"), "utf8"),
+    ) as RunResult;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Gather failing-outcome evidence text + failing network URLs from a run dir.
+ * Feeds `codemap semantic` / `codemap find` so the re-rank favours matches on
+ * the failing call path.
+ */
+export async function gatherFailureContext(
+  runDir: string,
+): Promise<FailureContext> {
+  const ctx: FailureContext = { failingText: "", failingUrls: [] };
+  const run = readRunResult(runDir);
+
+  // Failing outcome evidence text (best-effort read of each evidence md).
+  if (run) {
+    const chunks: string[] = [];
+    for (const o of run.outcomes) {
+      if (o.status !== "failed" || !o.evidence) continue;
+      try {
+        const text = readFileSync(join(runDir, o.evidence), "utf8");
+        chunks.push(text);
+      } catch {
+        // evidence file may be absent — skip
+      }
+    }
+    ctx.failingText = chunks.join("\n").slice(0, 2000);
+  }
+
+  // Failing network request URLs from network/failed_requests.ndjson.
+  try {
+    const raw = readFileSync(
+      join(runDir, "network/failed_requests.ndjson"),
+      "utf8",
+    );
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const entry = JSON.parse(trimmed) as { url?: string; status?: number };
+        if (typeof entry.url === "string") ctx.failingUrls.push(entry.url);
+      } catch {
+        // skip malformed line
+      }
+    }
+  } catch {
+    // no network log — fine
+  }
+
+  return ctx;
+}
+
+/** Parse codemap JSON that may be a bare array or { results/symbols/...: [] }. */
+function parseJsonArray(stdout: string): unknown[] {
+  if (!stdout) return [];
+  try {
+    const data = JSON.parse(stdout);
+    if (Array.isArray(data)) return data;
+    if (data && typeof data === "object") {
+      const obj = data as Record<string, unknown>;
+      for (const key of [
+        "results",
+        "symbols",
+        "hotspots",
+        "callers",
+        "matches",
+        "affected",
+        "items",
+      ]) {
+        if (Array.isArray(obj[key])) return obj[key] as unknown[];
+      }
+    }
+  } catch {
+    // not JSON — caller treats as empty
+  }
+  return [];
+}
+
+/** First numeric value found under any of the candidate keys on an object. */
+function pickNumber(obj: unknown, keys: string[]): number | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  const o = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return undefined;
+}
+
+/** First string value found under any of the candidate keys on an object. */
+function pickString(obj: unknown, keys: string[]): string | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  const o = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+/**
+ * Re-rank fcheap code matches by codemap graph centrality + caller depth +
+ * blast radius. Returns a new array sorted by `codemapScore` desc (stable on
+ * ties — original fcheap order preserved). When codemap is unavailable, the
+ * input matches are returned unchanged (graceful fallback, no regression).
+ */
+export async function rankCodeMatches(
+  matches: CodeMatch[],
+  ctx: FailureContext,
+  deps: CodemapDeps = investigateCodemapDeps,
+): Promise<CodeMatch[]> {
+  if (matches.length === 0) return matches;
+
+  if (!(await deps.isAvailable())) return matches;
+
+  // 1. Hotspot centrality table keyed by symbol and by file.
+  const centralityBySymbol = new Map<string, number>();
+  const centralityByFile = new Map<string, number>();
+  const hotspotRows = await safeExec(deps, ["hotspots", "--json"]);
+  for (const row of parseJsonArray(hotspotRows)) {
+    const sym = pickString(row, ["symbol", "name", "id"]);
+    const file = pickString(row, ["file", "path"]);
+    const cent =
+      pickNumber(row, ["score", "centrality", "weight", "rank"]) ?? 0;
+    if (sym) centralityBySymbol.set(sym, cent);
+    if (file) centralityByFile.set(file, cent);
+  }
+  // Normalize by the observed max (not a floor of 1 — centrality is a [0,1]
+  // float, so flooring at 1 would shrink every score). Guard div-by-zero.
+  const maxCentrality = Math.max(...centralityBySymbol.values(), 0) || 1;
+
+  // 2. Semantic/find confirmation set — symbols & file:line that codemap's
+  //    semantic search surfaces for the failing context. Matches present here
+  //    get a small bonus so the failing call path floats up.
+  const query = buildSemanticQuery(ctx);
+  const semanticSymbols = new Set<string>();
+  const semanticLocations = new Set<string>();
+  if (query) {
+    for (const cmd of ["semantic", "find"] as const) {
+      const rows = await safeExec(deps, [cmd, query, "--json"]);
+      for (const row of parseJsonArray(rows)) {
+        const sym = pickString(row, ["symbol", "name", "id"]);
+        const file = pickString(row, ["file", "path"]);
+        const line = pickNumber(row, ["line", "lineno"]);
+        if (sym) semanticSymbols.add(sym);
+        if (file && typeof line === "number")
+          semanticLocations.add(`${file}:${line}`);
+      }
+    }
+  }
+
+  // 3. Per-match: resolve symbol, fetch callers + impact, compute codemapScore.
+  const enriched = await Promise.all(
+    matches.map(async (m) => {
+      const symbol = await resolveSymbolAt(deps, m.file, m.line);
+      let centrality = 0;
+      let callers: number | undefined;
+      let blastRadius: number | undefined;
+      if (symbol) {
+        centrality = centralityBySymbol.get(symbol) ?? 0;
+        const callersR = await safeExec(deps, ["callers", symbol, "--json"]);
+        const callerRows = parseJsonArray(callersR);
+        // Prefer an explicit depth field; otherwise count returned callers.
+        callers =
+          pickNumber(parseJsonObject(callersR), ["depth", "callerDepth"]) ??
+          callerRows.length;
+        const impactOut = await safeExec(deps, ["impact", symbol, "--json"]);
+        const impactRows = parseJsonArray(impactOut);
+        blastRadius =
+          pickNumber(parseJsonObject(impactOut), [
+            "blastRadius",
+            "blast_radius",
+            "affectedCount",
+          ]) ?? impactRows.length;
+      }
+      if (centrality === 0) {
+        centrality = centralityByFile.get(m.file) ?? 0;
+      }
+
+      const onSemanticPath =
+        (symbol !== undefined && semanticSymbols.has(symbol)) ||
+        semanticLocations.has(`${m.file}:${m.line}`);
+
+      return {
+        ...m,
+        ...(symbol ? { symbol } : {}),
+        ...(callers !== undefined ? { callers } : {}),
+        ...(blastRadius !== undefined ? { blastRadius } : {}),
+        onSemanticPath,
+        centrality,
+      } as CodeMatch & { onSemanticPath: boolean; centrality: number };
+    }),
+  );
+
+  const maxCallers = Math.max(...enriched.map((e) => e.callers ?? 0), 0) || 1;
+  const maxBlast = Math.max(...enriched.map((e) => e.blastRadius ?? 0), 0) || 1;
+
+  const scored = enriched.map((e) => {
+    const normCentrality = e.centrality / maxCentrality;
+    const normCallers = (e.callers ?? 0) / maxCallers;
+    const normBlast = (e.blastRadius ?? 0) / maxBlast;
+    const semanticBonus = e.onSemanticPath ? 1 : 0;
+    // Graph-driven blend: centrality dominates, caller depth + blast radius
+    // break ties toward load-bearing code, semantic bonus nudges the failing
+    // call path to the top. Original `score` is preserved untouched.
+    const codemapScore =
+      0.45 * normCentrality +
+      0.25 * normCallers +
+      0.15 * normBlast +
+      0.15 * semanticBonus;
+    const { onSemanticPath: _onPath, centrality: _cent, ...rest } = e;
+    return { ...rest, codemapScore };
+  });
+
+  // Stable sort by codemapScore desc — ties keep original fcheap order.
+  return scored
+    .map((m, i) => ({ m, i }))
+    .toSorted((a, b) => b.m.codemapScore! - a.m.codemapScore! || a.i - b.i)
+    .map((x) => x.m);
+}
+
+/** Run a codemap subcommand via the deps seam; never throws. */
+async function safeExec(deps: CodemapDeps, args: string[]): Promise<string> {
+  try {
+    const r = await deps.exec(args);
+    return r.exitCode === 0 ? r.stdout : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Parse a codemap JSON object (non-array); {} on failure. */
+function parseJsonObject(stdout: string): Record<string, unknown> {
+  if (!stdout) return {};
+  try {
+    const data = JSON.parse(stdout);
+    return data && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Resolve a file:line to its enclosing symbol via `codemap symbol-at`. */
+async function resolveSymbolAt(
+  deps: CodemapDeps,
+  file: string,
+  line: number,
+): Promise<string | undefined> {
+  const out = await safeExec(deps, ["symbol-at", `${file}:${line}`, "--json"]);
+  const obj = parseJsonObject(out);
+  return pickString(obj, ["symbol", "name", "id"]);
+}
+
+/** Build a compact semantic query from failing text + failing URLs. */
+function buildSemanticQuery(ctx: FailureContext): string {
+  const parts: string[] = [];
+  if (ctx.failingText) {
+    // Take the first few whitespace-normalized lines of evidence text.
+    const text = ctx.failingText.replace(/\s+/g, " ").trim().slice(0, 200);
+    if (text) parts.push(text);
+  }
+  for (const url of ctx.failingUrls.slice(0, 3)) parts.push(url);
+  return parts.join(" ").trim();
+}
+
+/* ---------------------------------------------------------------------------
  * investigate command
  *
  * `cairn investigate <run-id> [--codebase <dir>] [--connect] [--query <q>]
@@ -224,6 +547,13 @@ export async function investigateCommand(
     if (connectR.ok) {
       result.codeMatches = parseCodeMatches(connectR.stdout);
       result.mode = opts.mode;
+      // Re-rank the raw search matches by the codemap graph (centrality +
+      // caller depth + blast radius). Best-effort: falls back to the fcheap
+      // ranking unchanged when codemap isn't installed. (FEATURES item 3)
+      result.codeMatches = await rankCodeMatches(
+        result.codeMatches,
+        await gatherFailureContext(runDir),
+      );
     } else {
       result.error = `fcheap connect failed: ${connectR.stderr}`;
       process.stderr.write(`cairn investigate: ${result.error}\n`);
@@ -262,8 +592,17 @@ function investigateMarkdown(r: InvestigateResult): string {
     lines.push("", "## Code Matches", "");
     for (const m of r.codeMatches) {
       const score = ` (score: ${m.score.toFixed(2)})`;
+      const codemap = m.codemapScore
+        ? ` · codemap: ${m.codemapScore.toFixed(2)}`
+        : "";
+      const sym = m.symbol ? ` [${m.symbol}]` : "";
+      const callers = m.callers !== undefined ? ` ←${m.callers}` : "";
+      const blast =
+        m.blastRadius !== undefined ? ` · blast:${m.blastRadius}` : "";
       const snippet = m.snippet ? `: ${m.snippet}` : "";
-      lines.push(`- ${m.file}:${m.line}${score}${snippet}`);
+      lines.push(
+        `- ${m.file}:${m.line}${sym}${score}${codemap}${callers}${blast}${snippet}`,
+      );
     }
   } else if (r.error) {
     lines.push("", "## Error", "", r.error);

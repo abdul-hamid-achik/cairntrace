@@ -47,6 +47,33 @@ export async function isCodemapAvailable(): Promise<boolean> {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Codemap subprocess seam
+ *
+ * A tiny injectable interface over `codemap <cmd> --json` so callers (and
+ * tests) can substitute a fake codemap without touching $PATH. The default
+ * implementation shells out via execa and degrades gracefully when codemap
+ * isn't installed. Shared with investigate.ts (type-only import).
+ * ------------------------------------------------------------------------- */
+export interface CodemapDeps {
+  isAvailable: () => Promise<boolean>;
+  exec: (
+    args: string[],
+  ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+}
+
+export const defaultCodemapDeps: CodemapDeps = {
+  isAvailable: isCodemapAvailable,
+  async exec(args) {
+    const r = await execa("codemap", args, { reject: false, timeout: 10_000 });
+    return {
+      exitCode: r.exitCode ?? 0,
+      stdout: typeof r.stdout === "string" ? r.stdout : "",
+      stderr: typeof r.stderr === "string" ? r.stderr : "",
+    };
+  },
+};
+
 /**
  * `cairn annotate <symbol>` — pin a note and/or external data to a code symbol
  * via codemap. Also supports call-path annotations with --from and --to.
@@ -268,6 +295,7 @@ export async function maybeAutoAnnotateRun(
     autoAnnotate?: string;
     source?: string;
   },
+  deps: CodemapDeps = defaultCodemapDeps,
 ): Promise<AutoAnnotateRunResult> {
   const out: AutoAnnotateRunResult = {
     runId: result.runId,
@@ -278,7 +306,9 @@ export async function maybeAutoAnnotateRun(
 
   if (opts.autoAnnotate !== "on-run") return out;
 
-  const codemapOk = await isCodemapAvailable();
+  // Best-effort: if codemap isn't on $PATH, record a skip and never crash the
+  // run. The deps seam lets tests inject a fake codemap deterministically.
+  const codemapOk = await deps.isAvailable();
   if (!codemapOk) {
     out.errors.push("codemap not on $PATH");
     out.skipped = 1;
@@ -302,21 +332,17 @@ export async function maybeAutoAnnotateRun(
   const note = `cairntrace run ${result.runId}: ${result.status} (${result.outcomes.filter((o) => o.status === "passed").length}/${result.outcomes.length} outcomes passed)`;
 
   try {
-    const r = await execa(
-      "codemap",
-      [
-        "annotate",
-        symbol,
-        "--source",
-        source,
-        "--note",
-        note,
-        "--data",
-        data,
-        "--json",
-      ],
-      { reject: false, timeout: 10_000 },
-    );
+    const r = await deps.exec([
+      "annotate",
+      symbol,
+      "--source",
+      source,
+      "--note",
+      note,
+      "--data",
+      data,
+      "--json",
+    ]);
     if (r.exitCode === 0) {
       out.annotated = 1;
       process.stderr.write(
