@@ -86,7 +86,7 @@ export interface ArtifactRef {
   path: string;
   /** Path relative to the run directory. */
   relativePath: string;
-  kind: "download" | "transform" | "request" | "eval";
+  kind: "download" | "transform" | "request" | "eval" | "monitor";
 }
 
 export interface NetworkFilter {
@@ -203,6 +203,16 @@ export interface BrowserBackend {
    * succeeded so the runner can decide whether to record the artifact path.
    */
   stopVideo?(path: string): Promise<{ ok: boolean; path: string }>;
+
+  /* ----- process monitoring (opt-in --monitor runs) ----- */
+  /**
+   * The root PID of the browser process tree the backend spawned, or undefined
+   * when the browser hasn't launched yet / the backend can't determine it.
+   * Used by the `--monitor` run sampler and the `monitor` step to target
+   * `monitor tree <pid>` / `monitor profile <pid>`. Optional: backends without
+   * an owned process (e.g. a remote browser) omit it and monitoring no-ops.
+   */
+  browserPid?(): number | undefined;
 
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;

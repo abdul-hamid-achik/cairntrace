@@ -336,6 +336,54 @@ export const ScriptVerifierSchema = z
   .strict();
 export type ScriptVerifier = z.infer<typeof ScriptVerifierSchema>;
 
+/**
+ * #11 — assert on monitor-reported browser process metrics as an outcome.
+ *
+ * Backed by the `--monitor` run sampler (ProcessMetricsSummary). Each matcher
+ * is optional; every present matcher must pass. RSS matchers compare against
+ * megabytes (author-friendly: `peakRss: { below: 500 }` = 500 MB). CPU
+ * matchers compare against summed tree CPU percent (may exceed 100 on
+ * multi-core). `samples` compares against the number of successful ticks.
+ *
+ * Reports `skipped` (not `failed`) when no sampler ran — i.e. the run wasn't
+ * started with `--monitor` / `MONITOR=1`, so there are no metrics to assert on.
+ */
+const processMetricMatcherSchema = z
+  .object({
+    below: z.number().optional(),
+    atLeast: z.number().optional(),
+    equals: z.number().optional(),
+  })
+  .strict()
+  .refine(
+    (m) =>
+      [m.below, m.atLeast, m.equals].filter((x) => x !== undefined).length ===
+      1,
+    { message: "exactly one of: below, atLeast, equals" },
+  );
+
+export const ProcessVerifierSchema = z
+  .object({
+    process: z
+      .object({
+        /** Peak tree RSS (MB). */
+        peakRss: processMetricMatcherSchema.optional(),
+        /** Mean tree RSS (MB). */
+        meanRss: processMetricMatcherSchema.optional(),
+        /** Final tree RSS at the last sample (MB). */
+        finalRss: processMetricMatcherSchema.optional(),
+        /** Peak summed tree CPU%. */
+        peakCpu: processMetricMatcherSchema.optional(),
+        /** Mean summed tree CPU%. */
+        meanCpu: processMetricMatcherSchema.optional(),
+        /** Number of successful sample points. */
+        samples: processMetricMatcherSchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+export type ProcessVerifier = z.infer<typeof ProcessVerifierSchema>;
+
 /* ----- the union ----- */
 
 export const VerifierSchema = z.union([
@@ -350,6 +398,7 @@ export const VerifierSchema = z.union([
   FileVerifierSchema,
   HttpJsonVerifierSchema,
   ScriptVerifierSchema,
+  ProcessVerifierSchema,
 ]);
 export type Verifier = z.infer<typeof VerifierSchema>;
 
@@ -366,6 +415,7 @@ export const VerifierKindSchema = z.enum([
   "file",
   "httpJson",
   "script",
+  "process",
 ]);
 export type VerifierKind = z.infer<typeof VerifierKindSchema>;
 
@@ -390,6 +440,8 @@ export const isHttpJsonVerifier = (v: Verifier): v is HttpJsonVerifier =>
   "httpJson" in v;
 export const isScriptVerifier = (v: Verifier): v is ScriptVerifier =>
   "script" in v;
+export const isProcessVerifier = (v: Verifier): v is ProcessVerifier =>
+  "process" in v;
 
 export const verifierKind = (v: Verifier): VerifierKind => {
   if (isTextVerifier(v)) return "text";
@@ -402,5 +454,6 @@ export const verifierKind = (v: Verifier): VerifierKind => {
   if (isXlsxVerifier(v)) return "xlsx";
   if (isFileVerifier(v)) return "file";
   if (isHttpJsonVerifier(v)) return "httpJson";
-  return "script";
+  if (isScriptVerifier(v)) return "script";
+  return "process";
 };

@@ -1,5 +1,6 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
 import type { ArtifactRef } from "../../../adapters/browserBackend";
+import type { ProcessMetricsSummary } from "../../monitor/processSampler";
 import type { Verifier } from "../../schema/verifier.v1";
 
 /**
@@ -44,6 +45,11 @@ export interface VerifierContext {
    * have to be threaded through per-outcome fixtures maps.
    */
   vars?: Record<string, string | number | boolean>;
+  /**
+   * Process metrics collected by the `--monitor` run sampler, for the
+   * `process` verifier. Absent when the run wasn't monitored.
+   */
+  processMetrics?: ProcessMetricsSummary;
 }
 
 /**

@@ -499,6 +499,42 @@ export const BatchStepSchema = z
   .strict();
 export type BatchStep = z.infer<typeof BatchStepSchema>;
 
+/**
+ * `monitor` — capture a process profile or one-shot sample of the browser
+ * process tree at a point in the flow, via the external `monitor` CLI. Useful
+ * for taking a heap profile after navigating to a heavy screen, or a process
+ * snapshot after a memory-intensive action.
+ *
+ * The step targets the backend's `browserPid()`; it fails if no browser PID is
+ * available. With `assign`, the captured result is written to
+ * `monitor/<assign>.json` and registered as a named artifact (kind `monitor`)
+ * so later steps / script verifiers can reference it via
+ * `${artifacts.<assign>.path}`. The `monitor` binary missing is a step failure
+ * (the author explicitly asked to capture at this point), not a silent skip.
+ *
+ * `action: profile` requires `type` (heap | cpu | goroutine | sample).
+ * `action: snapshot` captures a single `monitor process <pid>` sample.
+ */
+export const MonitorStepSchema = z
+  .object({
+    ...stepCommon,
+    monitor: z
+      .object({
+        action: z.enum(["profile", "snapshot"]),
+        type: z.enum(["heap", "cpu", "goroutine", "sample"]).optional(),
+        assign: z.string().min(1).optional(),
+        label: z.string().optional(),
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .refine((m) => (m.action === "profile" ? m.type !== undefined : true), {
+        message:
+          "profile action requires a type: heap | cpu | goroutine | sample",
+      }),
+  })
+  .strict();
+export type MonitorStep = z.infer<typeof MonitorStepSchema>;
+
 export const StepSchema = z.union([
   OpenStepSchema,
   ClickStepSchema,
@@ -516,6 +552,7 @@ export const StepSchema = z.union([
   UseStepSchema,
   BatchStepSchema,
   EvalStepSchema,
+  MonitorStepSchema,
 ]);
 export type Step = z.infer<typeof StepSchema>;
 

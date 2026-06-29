@@ -48,6 +48,16 @@ export class MockBrowserBackend implements BrowserBackend {
   public lastEvaluatedScript = "";
   public lastEvaluateOptions: { timeoutMs?: number } | undefined;
   public lastRequest: BackendRequest | undefined;
+  /** Settable browser PID for --monitor / monitor-step tests. */
+  private mockBrowserPid: number | undefined;
+
+  setBrowserPid(pid: number | undefined): void {
+    this.mockBrowserPid = pid;
+  }
+
+  browserPid(): number | undefined {
+    return this.mockBrowserPid;
+  }
 
   /* ----- scripting hooks for tests ----- */
 

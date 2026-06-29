@@ -8,6 +8,7 @@ import {
   isNetworkVerifier,
   isNoFailedRequestsVerifier,
   isNotTextVerifier,
+  isProcessVerifier,
   isScriptVerifier,
   isTextVerifier,
   isUrlVerifier,
@@ -20,6 +21,7 @@ import { evaluateHttpJson } from "./verifiers/httpJson";
 import { evaluateNetwork } from "./verifiers/network";
 import { evaluateNoFailedRequests } from "./verifiers/noFailedRequests";
 import { evaluateNotText } from "./verifiers/notText";
+import { evaluateProcess } from "./verifiers/process";
 import { evaluateScript } from "./verifiers/script";
 import { evaluateText } from "./verifiers/text";
 import { evaluateUrl } from "./verifiers/url";
@@ -91,6 +93,7 @@ async function dispatch(
     if (isFileVerifier(v)) return await evaluateFile(v, ctx);
     if (isHttpJsonVerifier(v)) return await evaluateHttpJson(v, backend, ctx);
     if (isScriptVerifier(v)) return await evaluateScript(v, backend, ctx);
+    if (isProcessVerifier(v)) return await evaluateProcess(v, ctx);
   } catch (e) {
     return {
       passed: false,

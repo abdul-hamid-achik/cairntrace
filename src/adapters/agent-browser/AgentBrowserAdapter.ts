@@ -431,6 +431,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
   }
 
+  /**
+   * The agent-browser session daemon PID — the root of the browser process
+   * tree (`monitor tree <pid>` captures its Chrome children). Read live from
+   * the daemon's pid file, so it's valid once the first command has launched
+   * the session and undefined before that.
+   */
+  browserPid(): number | undefined {
+    return this.readDaemonPid();
+  }
+
   async doctor(): Promise<{
     ok: boolean;
     report: unknown;

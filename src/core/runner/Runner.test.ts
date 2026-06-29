@@ -1906,6 +1906,228 @@ steps:
   });
 });
 
+describe("runSpec --monitor integration", () => {
+  it("samples the browser tree and satisfies a process verifier", async () => {
+    const specPath = await writeSpec(
+      "monitor_budget",
+      `version: 1
+name: monitor_budget
+intent: heavy screen stays within RSS budget
+outcomes:
+  - id: rss_under_budget
+    description: peak browser RSS stays under 600MB
+    verify:
+      process: { peakRss: { below: 600 }, samples: { atLeast: 1 } }
+steps:
+  - open: /heavy
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/heavy");
+    backend.setBrowserPid(4321);
+
+    const fakeClient = {
+      available: async () => true,
+      sampleProcess: async (pid: number) => ({
+        pid,
+        name: "chromium",
+        cpuPercent: 50,
+        memoryBytes: 200 * 1024 * 1024,
+        memoryPercent: 5,
+        threads: 10,
+        timestampMs: Date.now(),
+      }),
+      processTree: async () => [
+        {
+          pid: 4321,
+          name: "chromium",
+          cpu_percent: 50,
+          memory: 200 * 1024 * 1024,
+          memory_percent: 5,
+          threads: 10,
+          is_system: false,
+          is_protected: false,
+        },
+      ],
+      captureProfile: async (pid: number, type: string) => ({
+        pid,
+        type,
+        taken: "2026-01-01T00:00:00Z",
+      }),
+    };
+
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      monitor: true,
+      monitorClient: fakeClient,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.artifacts.processMetrics).toBe("diagnostics/process.json");
+    const metrics = JSON.parse(
+      await readFile(join(result.runDir, "diagnostics/process.json"), "utf8"),
+    );
+    expect(metrics.peakRssBytes).toBe(200 * 1024 * 1024);
+    expect(result.outcomes[0]).toMatchObject({ status: "passed" });
+    // The markdown report is recorded as a diagnostics artifact.
+    expect(result.artifacts.diagnostics).toContain("diagnostics/process.md");
+  });
+
+  it("skips the process verifier when --monitor is not passed", async () => {
+    const specPath = await writeSpec(
+      "monitor_absent",
+      `version: 1
+name: monitor_absent
+intent: process budget without monitoring
+outcomes:
+  - id: rss_under_budget
+    description: peak browser RSS stays under 600MB
+    verify:
+      process: { peakRss: { below: 600 } }
+steps:
+  - open: /heavy
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/heavy");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(result.outcomes[0]).toMatchObject({ status: "skipped" });
+    expect(result.artifacts.processMetrics).toBeUndefined();
+  });
+
+  it("writes target.json when launched under MONITOR=1", async () => {
+    const specPath = await writeSpec(
+      "monitor_env",
+      `version: 1
+name: monitor_env
+intent: env-detected monitoring
+outcomes:
+  - id: opened
+    description: page opened
+    verify: { url: { endsWith: /x } }
+steps:
+  - open: /x
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/x");
+    backend.setBrowserPid(7788);
+    const fakeClient = {
+      available: async () => true,
+      sampleProcess: async () => undefined,
+      processTree: async () => [],
+      captureProfile: async () => undefined,
+    };
+    const prev = process.env["MONITOR"];
+    process.env["MONITOR"] = "1";
+    try {
+      const result = await runSpec({
+        specPath,
+        backend,
+        artifactRoot,
+        monitorClient: fakeClient,
+      });
+      const target = JSON.parse(
+        await readFile(join(result.runDir, "diagnostics/target.json"), "utf8"),
+      );
+      expect(target.pid).toBe(7788);
+    } finally {
+      if (prev === undefined) delete process.env["MONITOR"];
+      else process.env["MONITOR"] = prev;
+    }
+  });
+});
+
+describe("runSpec monitor step", () => {
+  it("captures a snapshot and registers it as a named artifact", async () => {
+    const specPath = await writeSpec(
+      "monitor_snapshot",
+      `version: 1
+name: monitor_snapshot
+intent: capture a process snapshot mid-flow
+outcomes:
+  - id: opened
+    description: dashboard opened
+    verify: { url: { endsWith: /dashboard } }
+steps:
+  - open: /dashboard
+  - monitor: { action: snapshot, assign: snap, label: after-open }
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/dashboard");
+    backend.setBrowserPid(2468);
+    const fakeClient = {
+      available: async () => true,
+      sampleProcess: async (pid: number) => ({
+        pid,
+        name: "chromium",
+        cpuPercent: 12.3,
+        memoryBytes: 80 * 1024 * 1024,
+        memoryPercent: 4,
+        threads: 8,
+        timestampMs: Date.now(),
+      }),
+      processTree: async () => [],
+      captureProfile: async () => undefined,
+    };
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      monitorClient: fakeClient,
+    });
+    expect(result.status).toBe("passed");
+    expect(result.steps[1]).toMatchObject({ status: "passed" });
+    expect(result.steps[1]!.artifacts).toContain(
+      "monitor/002_snapshot_after-open.json",
+    );
+    const captured = JSON.parse(
+      await readFile(
+        join(result.runDir, "monitor/002_snapshot_after-open.json"),
+        "utf8",
+      ),
+    );
+    expect(captured.pid).toBe(2468);
+  });
+
+  it("fails the step when no browser PID is available", async () => {
+    const specPath = await writeSpec(
+      "monitor_no_pid",
+      `version: 1
+name: monitor_no_pid
+intent: monitor step without a browser
+outcomes:
+  - id: blank_page
+    description: still on a blank page
+    verify: { url: { startsWith: about } }
+steps:
+  - monitor: { action: snapshot }
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const fakeClient = {
+      available: async () => true,
+      sampleProcess: async () => undefined,
+      processTree: async () => [],
+      captureProfile: async () => undefined,
+    };
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      monitorClient: fakeClient,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.status).toBe("failed");
+    expect(result.steps[0]!.error).toContain("browser PID");
+  });
+});
+
 /**
  * MockBrowserBackend with video recording support.
  * Writes a real (empty) file to the requested path so the artifact

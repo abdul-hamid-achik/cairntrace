@@ -22,6 +22,7 @@ import type { ExitCode } from "../schema/shared";
 import {
   openPath,
   type EvalStep,
+  type MonitorStep,
   type RequestStep,
   type Spec,
   type Step,
@@ -47,6 +48,16 @@ import {
 import { generateRunId } from "./runId";
 import { isRelativeUrl, joinUrl, resolveUrl } from "./url";
 import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
+import {
+  type MonitorClient,
+  type ProfileType,
+  defaultMonitorClient,
+} from "../monitor/monitorClient";
+import {
+  ProcessSampler,
+  type ProcessMetricsSummary,
+  renderProcessMarkdown,
+} from "../monitor/processSampler";
 
 /**
  * Optional progress callbacks the runner invokes during execution.
@@ -104,6 +115,21 @@ export interface RunOptions {
     timestamp: string;
     data?: Record<string, unknown>;
   }>;
+  /**
+   * Opt-in process monitoring. `true` or a config object enables the
+   * `--monitor` sampler: the browser process tree's CPU/RSS is sampled during
+   * the run and reduced into `diagnostics/process.{md,json}. Zero-cost when
+   * absent/false. Implicitly enabled when `MONITOR=1` is in the env (the run
+   * was launched under `monitor run`).
+   */
+  monitor?: boolean | MonitorConfig;
+  /** Inject a MonitorClient for tests. Defaults to the real `monitor` CLI. */
+  monitorClient?: MonitorClient;
+}
+
+export interface MonitorConfig {
+  /** Sampling interval in milliseconds. Default 1000. */
+  intervalMs?: number;
 }
 
 /**
@@ -291,6 +317,50 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
 
+  // Opt-in process monitoring (`--monitor` or MONITOR=1). The sampler targets
+  // the backend's browserPid() and may start lazily — agent-browser spawns its
+  // daemon on the first command, so the PID can be unavailable until after the
+  // first step. Zero-cost when monitoring is disabled.
+  const monitorClient = opts.monitorClient ?? defaultMonitorClient();
+  const monitorEnabled =
+    opts.monitor !== undefined && opts.monitor !== false
+      ? true
+      : isTruthyEnv(process.env["MONITOR"]);
+  const monitorIntervalMs =
+    typeof opts.monitor === "object" && opts.monitor
+      ? opts.monitor.intervalMs
+      : undefined;
+  let sampler: ProcessSampler | undefined;
+  let processMetricsSummary: ProcessMetricsSummary | undefined;
+  const maybeStartSampler = (): void => {
+    if (!monitorEnabled || sampler) return;
+    const pid = opts.backend.browserPid?.();
+    if (pid === undefined || pid <= 1) return;
+    sampler = new ProcessSampler({
+      pid,
+      ...(monitorIntervalMs !== undefined
+        ? { intervalMs: monitorIntervalMs }
+        : {}),
+      client: monitorClient,
+    });
+    sampler.start();
+    // When launched under `monitor run`, surface the target PID so the parent
+    // monitor can observe the exact browser process tree.
+    if (isTruthyEnv(process.env["MONITOR"])) {
+      void Bun_writeFile(
+        writer.resolve("diagnostics/target.json"),
+        redactor.text(
+          JSON.stringify(
+            { pid, backend: backendName, writtenAt: new Date().toISOString() },
+            null,
+            2,
+          ) + "\n",
+        ),
+        true,
+      ).catch(() => undefined);
+    }
+  };
+  maybeStartSampler();
   for (let i = 0; i < (resolved.steps ?? []).length; i++) {
     const step = resolved.steps![i]!;
     const stepId = step.id ?? `step_${i + 1}`;
@@ -494,6 +564,36 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
             assign: ev.assign,
           });
         }
+      } else if ("monitor" in stepToRun) {
+        const mon = await runMonitorStep({
+          step: stepToRun as MonitorStep,
+          backend: opts.backend,
+          client: monitorClient,
+          writer,
+          redactor,
+          index: i + 1,
+        });
+        if (!mon.ok) {
+          stepStatus = "failed";
+          stepError = mon.error;
+        } else {
+          stepArtifacts.push(mon.relativePath);
+          if (mon.assign) {
+            namedArtifacts[mon.assign] = {
+              kind: "monitor" as ArtifactRef["kind"],
+              path: writer.resolve(mon.relativePath),
+              relativePath: mon.relativePath,
+            };
+          }
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.monitor",
+            stepId,
+            action: mon.action,
+            path: mon.relativePath,
+            ...(mon.assign ? { assign: mon.assign } : {}),
+          });
+        }
       } else {
         const r = await opts.backend.runStep(stepToRun);
         stepResolved = r.resolvedElement;
@@ -522,6 +622,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       stepError = addEnospcHint((e as Error).message);
       didError = true;
     }
+
+    // The browser PID may only be known after the first navigation (agent-browser
+    // spawns its daemon lazily), so retry starting the sampler each step.
+    maybeStartSampler();
 
     // Capture snapshot and (on failure or always) screenshot.
     if (
@@ -605,6 +709,42 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     } else {
       // Stop on first failure to avoid cascading noise.
       break;
+    }
+  }
+
+  // Stop the process sampler (if it ever started) and reduce its samples into
+  // diagnostics/process.{json,md}. Zero-cost when monitoring was disabled or
+  // no browser PID ever became available.
+  let processMetricsArtifact: string | undefined;
+  if (sampler) {
+    processMetricsSummary = await sampler.stop();
+    if (
+      processMetricsSummary.samples.length > 0 ||
+      processMetricsSummary.tree.length > 0
+    ) {
+      const jsonRel = "diagnostics/process.json";
+      const mdRel = "diagnostics/process.md";
+      await Bun_writeFile(
+        writer.resolve(jsonRel),
+        redactor.text(JSON.stringify(processMetricsSummary, null, 2) + "\n"),
+        true,
+      );
+      await Bun_writeFile(
+        writer.resolve(mdRel),
+        redactor.text(renderProcessMarkdown(processMetricsSummary)),
+        true,
+      );
+      processMetricsArtifact = jsonRel;
+      diagnostics.push(mdRel);
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.monitor",
+        action: "summary",
+        path: jsonRel,
+        samples: processMetricsSummary.samples.length,
+        peakRssBytes: processMetricsSummary.peakRssBytes,
+        peakCpuPercent: processMetricsSummary.peakCpuPercent,
+      });
     }
   }
 
@@ -696,6 +836,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     evals: evalValues,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     vars: resolvedVars,
+    ...(processMetricsSummary ? { processMetrics: processMetricsSummary } : {}),
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
   const evaluated = await evaluateOutcomes(
@@ -859,6 +1000,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(Object.keys(evals).length > 0 ? { evals } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
+    ...(processMetricsArtifact
+      ? { processMetrics: processMetricsArtifact }
+      : {}),
     ...(videoPath ? { video: videoPath } : {}),
     ...(Object.keys(clips).length > 0 ? { clips } : {}),
   };
@@ -936,6 +1080,10 @@ async function safe<T>(fn: () => Promise<T>): Promise<T | undefined> {
   } catch {
     return undefined;
   }
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value !== undefined && value !== "" && value !== "0";
 }
 
 function pad(n: number): string {
@@ -1388,6 +1536,92 @@ async function runEvalStep(opts: {
   return { ok: true, value };
 }
 
+/**
+ * Execute a `monitor` step: capture a process profile or one-shot sample of
+ * the backend's browser process tree via the external `monitor` CLI, and
+ * write it to `monitor/<padded>-<action>.json`. With `assign`, register the
+ * result as a named artifact (kind `monitor`) reusable via
+ * `${artifacts.<assign>.path}`. Fails the step if no browser PID is available
+ * or the monitor binary is missing — the author explicitly asked to capture
+ * at this point, so a silent skip would hide the gap.
+ */
+async function runMonitorStep(opts: {
+  step: MonitorStep;
+  backend: BrowserBackend;
+  client: MonitorClient;
+  writer: ArtifactWriter;
+  redactor: ReturnType<typeof createArtifactRedactor>;
+  index: number;
+}): Promise<
+  | { ok: true; action: string; relativePath: string; assign?: string }
+  | { ok: false; error: string }
+> {
+  const target = opts.step.monitor;
+  const pid = opts.backend.browserPid?.();
+  if (pid === undefined || pid <= 1) {
+    return {
+      ok: false,
+      error:
+        "monitor step needs a browser PID, but the backend has no spawned browser process (start the run with an `open` step first, or use a backend that exposes browserPid)",
+    };
+  }
+  if (!(await opts.client.available())) {
+    return {
+      ok: false,
+      error:
+        "monitor step needs the `monitor` CLI on PATH (github.com/abdul-hamid-achik/monitor) — install it to capture process profiles/snapshots",
+    };
+  }
+  const labelSlug = target.label
+    ? `_${target.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+    : "";
+  const base = `${pad(opts.index)}_${target.action}${labelSlug}`;
+  const relativePath = `monitor/${base}.json`;
+
+  if (target.action === "profile") {
+    const profile = await opts.client.captureProfile(
+      pid,
+      (target.type ?? "heap") as ProfileType,
+    );
+    if (!profile) {
+      return {
+        ok: false,
+        error: `monitor profile <pid> --type ${target.type ?? "heap"} returned no result (process exited or profile failed)`,
+      };
+    }
+    await Bun_writeFile(
+      opts.writer.resolve(relativePath),
+      opts.redactor.text(JSON.stringify(profile, null, 2) + "\n"),
+      true,
+    );
+    return {
+      ok: true,
+      action: `profile:${profile.type}`,
+      relativePath,
+      ...(target.assign ? { assign: target.assign } : {}),
+    };
+  }
+  // action === "snapshot"
+  const sample = await opts.client.sampleProcess(pid);
+  if (!sample) {
+    return {
+      ok: false,
+      error: `monitor process ${pid} returned no result (process exited or sample failed)`,
+    };
+  }
+  await Bun_writeFile(
+    opts.writer.resolve(relativePath),
+    opts.redactor.text(JSON.stringify(sample, null, 2) + "\n"),
+    true,
+  );
+  return {
+    ok: true,
+    action: "snapshot",
+    relativePath,
+    ...(target.assign ? { assign: target.assign } : {}),
+  };
+}
+
 async function ensureParentDir(absPath: string): Promise<void> {
   const { mkdir } = await import("node:fs/promises");
   await mkdir(dirname(absPath), { recursive: true });
@@ -1539,6 +1773,12 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   if ("scroll" in step) return { kind: "scroll", scroll: step.scroll };
   if ("snapshot" in step) return { kind: "snapshot" };
   if ("type" in step) return { kind: "type" };
+  if ("monitor" in step)
+    return {
+      kind: "monitor",
+      action: step.monitor.action,
+      type: step.monitor.type,
+    };
   return { kind: "use", action: step.use };
 }
 

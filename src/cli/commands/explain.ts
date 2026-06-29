@@ -133,6 +133,13 @@ export function buildExplain(): ExplainResult {
               "Auto-annotate each run (pass+fail) into codemap with run context (specName, contractHash, runId, status, outcomes, failedVerifier). Best-effort: skipped if codemap isn't installed. Overrides config annotate.autoAnnotate.",
           },
           {
+            name: "--monitor",
+            type: "boolean",
+            default: false,
+            description:
+              "Sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json} and enables the `process` verifier. Implicitly on under MONITOR=1. Zero-cost when absent.",
+          },
+          {
             name: "--format",
             type: "enum",
             values: ["json", "yaml", "md"],
@@ -1132,6 +1139,14 @@ export function buildExplain(): ExplainResult {
         yamlExample:
           'steps:\n  - eval:\n      js: "window.__APP__.$store.state.profile.answers"\n      assign: answersBefore\n  - eval:\n      file: ./scripts/seed-state.js\n      assign: seeded\n      args: { flag: "stripped" }\n  - fill: { by: label, name: Token, value: "${evals.answersBefore.value.token}" }',
       },
+      {
+        id: "monitor",
+        kind: "process",
+        summary:
+          "Capture a process profile (heap/cpu/goroutine/sample) or one-shot sample of the backend's browser process tree at a point in the flow, via the external `monitor` CLI. With assign, the result is written to monitor/<assign>.json and reusable via ${artifacts.<assign>.path}. Fails if no browser PID is available or monitor isn't installed. Requires action: profile|snapshot; profile requires type",
+        yamlExample:
+          "steps:\n  - open: /heavy-dashboard\n  - monitor: { action: profile, type: heap, assign: heapAfterLoad }\n  - monitor: { action: snapshot, label: after-scroll }",
+      },
     ],
     verifiers: [
       {
@@ -1385,6 +1400,46 @@ export function buildExplain(): ExplainResult {
             name: "validations",
             type: "array",
             description: "sheet, column header, and optional validation type",
+          },
+        ],
+      },
+      {
+        id: "process",
+        kind: "process",
+        summary:
+          "Assert on monitor-reported browser process metrics (peak/mean RSS+CPU, samples) collected by the --monitor run sampler. Reports skipped (not failed) when the run wasn't monitored. RSS matchers compare against megabytes; CPU against summed tree CPU percent",
+        yamlExample:
+          "verify:\n  process:\n    peakRss: { below: 500 }\n    meanCpu: { below: 90 }",
+        parameters: [
+          {
+            name: "peakRss",
+            type: "matcher",
+            description: "peak tree RSS (MB): { below | atLeast | equals }",
+          },
+          {
+            name: "meanRss",
+            type: "matcher",
+            description: "mean tree RSS (MB)",
+          },
+          {
+            name: "finalRss",
+            type: "matcher",
+            description: "final tree RSS at the last sample (MB)",
+          },
+          {
+            name: "peakCpu",
+            type: "matcher",
+            description: "peak summed tree CPU%",
+          },
+          {
+            name: "meanCpu",
+            type: "matcher",
+            description: "mean summed tree CPU%",
+          },
+          {
+            name: "samples",
+            type: "matcher",
+            description: "number of successful sample points",
           },
         ],
       },

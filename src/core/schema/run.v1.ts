@@ -66,6 +66,8 @@ export const RunArtifactsSchema = z
     /** eval-step captured values (evals/<assign>.json), by assign name. */
     evals: z.record(z.string(), RelativePathSchema).optional(),
     diagnostics: z.array(RelativePathSchema).optional(),
+    /** `diagnostics/process.json` from a --monitor run (browser process metrics). */
+    processMetrics: RelativePathSchema.optional(),
     console: RelativePathSchema.optional(),
     network: RelativePathSchema.optional(),
     trace: RelativePathSchema.optional(),

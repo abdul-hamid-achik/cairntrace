@@ -108,6 +108,11 @@ addFormatFlags(
       "--auto-annotate <mode>",
       "auto-annotate runs into codemap: on-run (pass+fail) | never (default: config annotate.autoAnnotate or never)",
     )
+    .option(
+      "--monitor",
+      "sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json}. Zero-cost when absent.",
+      false,
+    )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
 

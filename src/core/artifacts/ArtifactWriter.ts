@@ -38,6 +38,7 @@ export interface RunEvent {
     | "artifact.clip"
     | "artifact.request"
     | "artifact.eval"
+    | "artifact.monitor"
     | "artifact.video"
     | "viewport.set"
     | "services.docker.start"

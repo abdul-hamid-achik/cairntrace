@@ -236,6 +236,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Reusable Actions",
         body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, `download.saveAs`, and `transform.saveAs`.",
       },
+      {
+        title: "Process Monitoring",
+        body: "`monitor` captures a process profile (`action: profile`, with `type: heap|cpu|goroutine|sample`) or a one-shot sample (`action: snapshot`) of the backend's browser process tree at a point in the flow, via the external `monitor` CLI. It targets `backend.browserPid()`, so it fails if no browser has spawned yet or `monitor` isn't on PATH. With `assign`, the result is written to `monitor/<assign>.json` and registered as a named artifact reusable via `${artifacts.<assign>.path}`. Pair it with `cairn run --monitor` (which samples CPU/RSS across the whole run) and the `process` verifier to assert perf budgets.",
+      },
     ],
     examples: [
       {
@@ -296,6 +300,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       {
         title: "Script Escape Hatch",
         body: "`script` defaults to browser page context and must return `{ ok, evidence }`. Set `runtime: node` to run a JS/TS module in Node with filesystem and npm package access.",
+      },
+      {
+        title: "Process Budget",
+        body: "`process` asserts on monitor-reported browser process metrics collected by `cairn run --monitor` (or a run launched under `MONITOR=1`): `peakRss`, `meanRss`, `finalRss` (megabytes), `peakCpu`, `meanCpu` (summed tree CPU percent), and `samples` (count). Each matcher is `{ below | atLeast | equals }` and all present matchers must pass. It reports `skipped` (not `failed`) when the run wasn't monitored, so a spec carrying a perf budget doesn't fail on every non-monitored run. The sampler writes `diagnostics/process.{md,json}` with the timeline and final `monitor tree`.",
       },
       {
         title: "Evidence",

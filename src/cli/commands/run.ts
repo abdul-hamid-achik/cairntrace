@@ -61,6 +61,8 @@ export interface RunCommandOptions {
   stashOnFailure?: boolean;
   /** Auto-annotate runs into codemap (on-run | never). */
   autoAnnotate?: string;
+  /** Sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI. */
+  monitor?: boolean;
 }
 
 /**
@@ -376,6 +378,7 @@ async function runSingle(
         ? { servicesEvents }
         : {}),
       workerIndex: 0,
+      ...(opts.monitor ? { monitor: opts.monitor } : {}),
       ...(listener ? { listener } : {}),
     });
     exitCode = result.exitCode;
@@ -475,6 +478,7 @@ async function runBatch(
             ? { servicesEvents }
             : {}),
           workerIndex,
+          ...(opts.monitor ? { monitor: opts.monitor } : {}),
         });
         if (interactive) {
           const mark =

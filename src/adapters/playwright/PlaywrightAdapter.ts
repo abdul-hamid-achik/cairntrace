@@ -1029,6 +1029,15 @@ export class PlaywrightAdapter implements BrowserBackend {
     };
   }
 
+  /**
+   * The spawned Chromium process PID — the root of the browser process tree
+   * (`monitor tree <pid>` captures renderer/GPU/worker children). Valid once
+   * the browser has launched and undefined before/after.
+   */
+  browserPid(): number | undefined {
+    return this.browserProcessPid();
+  }
+
   private browserProcessPid(): number | undefined {
     const proc = (
       this.browser as unknown as
