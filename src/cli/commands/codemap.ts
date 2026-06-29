@@ -253,6 +253,59 @@ export async function codemapProjects(
   return out;
 }
 
+/** Per-project index drift from `codemap status --json` (`stale` field). */
+export interface CodemapStaleness {
+  changed: number;
+  new: number;
+  deleted: number;
+}
+
+/** Defensively-parsed `codemap status --json` report (feature 7 freshness). */
+export interface CodemapStatusReport {
+  project: string;
+  root: string;
+  registered: boolean;
+  nodes: number;
+  files: number;
+  vectors: number;
+  stale?: CodemapStaleness;
+}
+
+/**
+ * `codemap status --json` — the current project's index status + freshness
+ * (`stale`: changed/new/deleted file counts). Used by `cairn doctor` (feature 7)
+ * to report "indexed: yes (N symbols, fresh|stale)". Returns null when codemap
+ * is absent.
+ */
+export async function codemapStatus(
+  deps: CodemapDeps = defaultCodemapDeps,
+): Promise<CodemapStatusReport | null> {
+  if (!(await deps.isAvailable())) return null;
+  const obj = parseJsonObject(
+    await safeCodemapExec(deps, ["status", "--json"]),
+  );
+  const staleRaw = obj.stale ?? obj.Stale;
+  const stale =
+    staleRaw && typeof staleRaw === "object"
+      ? {
+          changed:
+            pickNumber(staleRaw as Record<string, unknown>, ["changed"]) ?? 0,
+          new: pickNumber(staleRaw as Record<string, unknown>, ["new"]) ?? 0,
+          deleted:
+            pickNumber(staleRaw as Record<string, unknown>, ["deleted"]) ?? 0,
+        }
+      : undefined;
+  return {
+    project: pickString(obj, ["project", "name"]) ?? "",
+    root: pickString(obj, ["root", "path"]) ?? "",
+    registered: Boolean(obj.registered ?? obj.Registered ?? false),
+    nodes: pickNumber(obj, ["nodes", "symbols", "symbolCount"]) ?? 0,
+    files: pickNumber(obj, ["files"]) ?? 0,
+    vectors: pickNumber(obj, ["vectors"]) ?? 0,
+    ...(stale ? { stale } : {}),
+  };
+}
+
 /* ---------------------------------------------------------------------------
  * expandSymbolQuery — feature 5 (seed `cairn stash search <symbol>`)
  *

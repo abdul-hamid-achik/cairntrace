@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execa } from "execa";
 import { emit, resolveFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
-import { codemapProjects } from "./codemap.js";
+import { codemapProjects, codemapStatus } from "./codemap.js";
 
 /** Injectable codemap seam for `cairn doctor` (FEATURES item 7). */
 export interface DoctorDeps {
@@ -88,11 +88,9 @@ export async function doctorCommand(
       : "codemap not on $PATH (cairn annotate will be unavailable)",
   });
 
-  // Resolve the target codebase from the `codemap projects` registry and
-  // report whether it is indexed (symbol count) — no hardcoded codemap.path.
-  // (FEATURES item 7) NOTE: `codemap status` (per-project freshness) is not
-  // yet shipped, so we report "indexed: yes (N symbols)" without a freshness
-  // verdict. TODO: add freshness once codemap_status lands.
+  // Resolve the target codebase's codemap index status + freshness
+  // (`codemap status --json` for the current project, falling back to the
+  // `codemap projects` registry). (FEATURES item 7)
   const indexCheck = await resolveCodemapIndexCheck(deps.codemap, codemap.ok);
   if (indexCheck) checks.push(indexCheck);
 
@@ -137,18 +135,41 @@ export async function doctorCommand(
 }
 
 /**
- * Resolve the target codebase from the `codemap projects` registry and build
- * the doctor "codebase indexed" check. Picks the registry project whose path
- * contains the current working directory (falling back to the first project).
- * Returns undefined when codemap is absent (the `codemap` availability check
- * already flags that). No `codemap status` freshness — best-effort + TODO.
- * (FEATURES item 7)
+ * Resolve the target codebase's codemap index status + freshness and build the
+ * doctor "codebase indexed" check. Prefers `codemap status --json` (current
+ * project: node count + `stale` drift); falls back to the `codemap projects`
+ * registry when `status` isn't registered. Returns undefined when codemap is
+ * absent (the `codemap` availability check already flags that). (FEATURES item 7)
  */
 export async function resolveCodemapIndexCheck(
   deps: CodemapDeps,
   codemapOnPath: boolean,
 ): Promise<{ name: string; ok: boolean; detail: string } | undefined> {
   if (!codemapOnPath) return undefined;
+
+  // Prefer `codemap status --json` — it carries the per-project freshness
+  // (`stale`: changed/new/deleted file counts) that the registry listing lacks.
+  const status = await codemapStatus(deps);
+  if (status && status.registered) {
+    const fresh = status.stale
+      ? status.stale.changed + status.stale.new + status.stale.deleted === 0
+      : true;
+    const freshness = status.stale
+      ? fresh
+        ? ", fresh"
+        : `, stale: ${status.stale.changed} changed, ${status.stale.new} new, ${status.stale.deleted} deleted`
+      : "";
+    const where = status.root ? ` at ${status.root}` : "";
+    return {
+      name: "codemap-index",
+      ok: true,
+      detail: `codebase indexed: yes (${status.nodes} symbols${where}${freshness})`,
+    };
+  }
+
+  // Fallback: the `codemap projects` registry (e.g. status didn't resolve the
+  // cwd's project). No freshness verdict here — `codemap status` is the source
+  // of drift, and it didn't report this project as registered.
   const projects = await codemapProjects(deps);
   if (projects.length === 0) {
     return {

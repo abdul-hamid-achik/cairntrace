@@ -79,3 +79,87 @@ describe("resolveCodemapIndexCheck (feature 7)", () => {
     expect(check!.detail).toBe("codebase indexed: yes at /repo/myapp");
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * resolveCodemapIndexCheck — `codemap status` freshness (feature 7, codemap_status)
+ * ------------------------------------------------------------------------- */
+function fakeCodemapWithStatus(
+  nodes: number,
+  stale: { changed: number; new: number; deleted: number } | undefined,
+  root = "/repo/myapp",
+): CodemapDeps {
+  return {
+    isAvailable: async () => true,
+    async exec(args) {
+      if (args[0] === "status") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            project: "myapp",
+            root,
+            registered: true,
+            nodes,
+            files: 30,
+            vectors: nodes,
+            ...(stale ? { stale } : {}),
+          }),
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: `unknown ${args[0]}` };
+    },
+  };
+}
+
+describe("resolveCodemapIndexCheck — freshness (codemap status)", () => {
+  it("reports 'fresh' when there is no drift", async () => {
+    const check = await resolveCodemapIndexCheck(
+      fakeCodemapWithStatus(4522, { changed: 0, new: 0, deleted: 0 }),
+      true,
+    );
+    expect(check!.ok).toBe(true);
+    expect(check!.detail).toMatch(/4522 symbols/);
+    expect(check!.detail).toContain(", fresh");
+  });
+
+  it("reports 'stale: N changed…' when the index has drifted", async () => {
+    const check = await resolveCodemapIndexCheck(
+      fakeCodemapWithStatus(100, { changed: 3, new: 1, deleted: 0 }),
+      true,
+    );
+    expect(check!.ok).toBe(true);
+    expect(check!.detail).toContain("stale: 3 changed, 1 new, 0 deleted");
+  });
+
+  it("falls back to the registry when status is not registered", async () => {
+    // status returns registered:false -> the projects fallback path is used.
+    const notRegistered: CodemapDeps = {
+      isAvailable: async () => true,
+      async exec(args) {
+        if (args[0] === "status")
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              project: "",
+              root: "",
+              registered: false,
+              nodes: 0,
+            }),
+            stderr: "",
+          };
+        if (args[0] === "projects")
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              { name: "myapp", path: "/repo/myapp", symbols: 50 },
+            ]),
+            stderr: "",
+          };
+        return { exitCode: 1, stdout: "", stderr: "" };
+      },
+    };
+    const check = await resolveCodemapIndexCheck(notRegistered, true);
+    expect(check!.detail).toMatch(/50 symbols/);
+    expect(check!.detail).not.toContain("fresh");
+  });
+});
