@@ -77,6 +77,17 @@ export function pickNumber(obj: unknown, keys: string[]): number | undefined {
   return undefined;
 }
 
+/** First boolean value found under any of the candidate keys on an object. */
+export function pickBoolean(obj: unknown, keys: string[]): boolean | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  const o = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === "boolean") return v;
+  }
+  return undefined;
+}
+
 /** Run a codemap subcommand via the deps seam; never throws. Returns stdout or "". */
 export async function safeCodemapExec(
   deps: CodemapDeps,
@@ -309,4 +320,302 @@ export async function resolveCodemapSymbolForScaffold(
     orphans[0] ??
     semantic[0]
   );
+}
+
+/* ---------------------------------------------------------------------------
+ * codemap review / risk / read-order (FEATURES items 1, 8, 9)
+ *
+ * codemap v0.19.0 ships three diff/impact-scoped commands the previously-
+ * blocked cairntrace features consume:
+ *   - `codemap review --since <ref> --json` → diff-scoped blast radius (item 1)
+ *   - `codemap risk <symbol> --json`        → change-risk score (items 8 + 9)
+ *   - `codemap read-order [query] --json`   → ranked entrypoints (item 9)
+ * All shapes are parsed defensively (alias field names + bare-array vs
+ * object-wrapped tolerated); every wrapper degrades to an empty/no-op report
+ * when codemap is absent, so callers never crash on a missing codemap.
+ * ------------------------------------------------------------------------- */
+
+/** A blast-radius / covering-test node from `codemap review`. */
+export interface CodemapImpactNode {
+  symbol?: string;
+  file?: string;
+}
+
+/** Defensively-parsed `codemap review --since <ref> --json` report (item 1). */
+export interface CodemapReviewReport {
+  /** File paths extracted from `blast_radius` (each entry's file/path). */
+  blastRadiusFiles: string[];
+  /** Symbol names extracted from `blast_radius` (each entry's symbol/name). */
+  blastRadiusSymbols: string[];
+  /** File paths from `changed_files` (each entry's path, or bare strings). */
+  changedFiles: string[];
+  /** Symbol names from `changed_symbols` (each entry's symbol/name). */
+  changedSymbols: string[];
+  /** Whether codemap reported the codebase as indexed. */
+  indexed: boolean;
+  /** Staleness flag from the report (false when absent). */
+  stale: boolean;
+}
+
+const EMPTY_REVIEW: CodemapReviewReport = {
+  blastRadiusFiles: [],
+  blastRadiusSymbols: [],
+  changedFiles: [],
+  changedSymbols: [],
+  indexed: false,
+  stale: false,
+};
+
+function impactNodes(raw: unknown): CodemapImpactNode[] {
+  if (!Array.isArray(raw)) return [];
+  return raw as CodemapImpactNode[];
+}
+
+/**
+ * Parse a `codemap review` report object into a CodemapReviewReport. Tolerates
+ * `blast_radius` / `blastRadius`, `changed_files` / `changedFiles`, and
+ * `changed_symbols` / `changedSymbols` alias pairs. Returns an empty report
+ * on non-JSON / non-object input.
+ */
+export function parseReviewReport(stdout: string): CodemapReviewReport {
+  const obj = parseJsonObject(stdout);
+  if (Object.keys(obj).length === 0) return { ...EMPTY_REVIEW };
+
+  const blast = impactNodes(obj.blast_radius ?? obj.blastRadius);
+  const blastRadiusFiles: string[] = [];
+  const blastRadiusSymbols: string[] = [];
+  for (const row of blast) {
+    const file = pickString(row, ["file", "path"]);
+    const symbol = pickString(row, ["symbol", "name", "id"]);
+    if (file) blastRadiusFiles.push(file);
+    if (symbol) blastRadiusSymbols.push(symbol);
+  }
+
+  const changed = impactNodes(obj.changed_files ?? obj.changedFiles);
+  const changedFiles: string[] = [];
+  for (const row of changed) {
+    const file =
+      typeof row === "string" ? row : pickString(row, ["path", "file"]);
+    if (file) changedFiles.push(file);
+  }
+
+  const changedSyms = impactNodes(obj.changed_symbols ?? obj.changedSymbols);
+  const changedSymbols: string[] = [];
+  for (const row of changedSyms) {
+    const symbol = pickString(row, ["symbol", "name", "id"]);
+    if (symbol) changedSymbols.push(symbol);
+  }
+
+  return {
+    blastRadiusFiles,
+    blastRadiusSymbols,
+    changedFiles,
+    changedSymbols,
+    indexed: obj.indexed === true,
+    stale: obj.stale === true,
+  };
+}
+
+/**
+ * `codemap review --since <ref> --json` — diff-scoped blast radius + changed
+ * symbols for impact-driven spec selection (feature 1). Best-effort: empty
+ * report when codemap is absent or `since` is empty.
+ */
+export async function codemapReview(
+  since: string,
+  deps: CodemapDeps = defaultCodemapDeps,
+): Promise<CodemapReviewReport> {
+  if (!since || !(await deps.isAvailable())) return { ...EMPTY_REVIEW };
+  return parseReviewReport(
+    await safeCodemapExec(deps, ["review", "--since", since, "--json"]),
+  );
+}
+
+/** A single change-risk factor from `codemap risk`. */
+export interface CodemapRiskFactor {
+  factor?: string;
+  severity?: string;
+  detail?: string;
+}
+
+/** Defensively-parsed `codemap risk <symbol> --json` report (items 8 + 9). */
+export interface CodemapRiskReport {
+  symbol: string;
+  found: boolean;
+  /** Change-risk score in [0, 1] (0 when unknown / not found). */
+  score: number;
+  level: "low" | "medium" | "high" | "unknown";
+  callers: number;
+  coveringTests: number;
+  factors: CodemapRiskFactor[];
+  note?: string;
+}
+
+/** An empty (codemap-absent / unknown-symbol) risk report. */
+export function emptyRiskReport(symbol: string): CodemapRiskReport {
+  return {
+    symbol,
+    found: false,
+    score: 0,
+    level: "unknown",
+    callers: 0,
+    coveringTests: 0,
+    factors: [],
+  };
+}
+
+/**
+ * Parse a `codemap risk` report object into a CodemapRiskReport. Tolerates
+ * `score` / `risk` / `risk_score`, `level` / `severity` / `risk_level`, and
+ * `covering_tests` / `coveringTests` / `tests` aliases. Returns an empty
+ * report on non-JSON / non-object input.
+ */
+export function parseRiskReport(
+  stdout: string,
+  symbol: string,
+): CodemapRiskReport {
+  const obj = parseJsonObject(stdout);
+  if (Object.keys(obj).length === 0) return emptyRiskReport(symbol);
+
+  const found = obj.found === true;
+  const score = pickNumber(obj, ["score", "risk", "risk_score"]) ?? 0;
+  const levelRaw = pickString(obj, ["level", "severity", "risk_level"]);
+  const level: CodemapRiskReport["level"] =
+    levelRaw === "low" || levelRaw === "medium" || levelRaw === "high"
+      ? levelRaw
+      : "unknown";
+  const callers = pickNumber(obj, ["callers", "caller_count", "fan_in"]) ?? 0;
+  const coveringTests =
+    pickNumber(obj, ["covering_tests", "coveringTests", "tests"]) ?? 0;
+
+  const factorsRaw = Array.isArray(obj.factors) ? obj.factors : [];
+  const factors: CodemapRiskFactor[] = [];
+  for (const f of factorsRaw) {
+    const factor = pickString(f, ["factor", "name"]);
+    const severity = pickString(f, ["severity", "level"]);
+    const detail = pickString(f, ["detail", "description"]);
+    factors.push({
+      ...(factor ? { factor } : {}),
+      ...(severity ? { severity } : {}),
+      ...(detail ? { detail } : {}),
+    });
+  }
+
+  const note = pickString(obj, ["note"]);
+  return {
+    symbol,
+    found,
+    score,
+    level,
+    callers,
+    coveringTests,
+    factors,
+    ...(note ? { note } : {}),
+  };
+}
+
+/**
+ * `codemap risk <symbol> --json` — change-risk score (untested + fan-in +
+ * cross-package + ambiguity) for one symbol. Powers risk-ranked investigate
+ * (feature 8) and cover-the-riskiest scaffolding (feature 9). Best-effort:
+ * empty report (found:false, score:0) when codemap is absent or the symbol is
+ * empty.
+ */
+export async function codemapRisk(
+  symbol: string,
+  deps: CodemapDeps = defaultCodemapDeps,
+): Promise<CodemapRiskReport> {
+  if (!symbol || !(await deps.isAvailable())) return emptyRiskReport(symbol);
+  return parseRiskReport(
+    await safeCodemapExec(deps, ["risk", symbol, "--json"]),
+    symbol,
+  );
+}
+
+/** A ranked entrypoint row from `codemap read-order`. */
+export interface CodemapReadOrderEntry {
+  rank: number;
+  symbol: string;
+  fqn?: string;
+  kind?: string;
+  file?: string;
+  startLine?: number;
+  /** Graph-derived rank score (centrality + in-degree). */
+  score: number;
+  inDegree: number;
+  entrypoint: boolean;
+  reason?: string;
+}
+
+/** Defensively-parsed `codemap read-order [query] --json` report (item 9). */
+export interface CodemapReadOrderReport {
+  entries: CodemapReadOrderEntry[];
+  indexed: boolean;
+}
+
+/** Parse a `codemap read-order` report into entries (tolerates bare arrays). */
+export function parseReadOrderReport(stdout: string): CodemapReadOrderReport {
+  if (!stdout) return { entries: [], indexed: false };
+  let data: unknown;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    return { entries: [], indexed: false };
+  }
+  const obj =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
+  const entriesRaw = Array.isArray(data)
+    ? data
+    : Array.isArray(obj.entries)
+      ? obj.entries
+      : Array.isArray(obj.results)
+        ? obj.results
+        : [];
+  const indexed = obj.indexed === true;
+
+  const entries: CodemapReadOrderEntry[] = [];
+  for (const row of entriesRaw) {
+    const symbol = pickString(row, ["symbol", "name", "id"]);
+    if (!symbol) continue;
+    const fqn = pickString(row, ["fqn", "qualified_name", "qualified"]);
+    const kind = pickString(row, ["kind", "type"]);
+    const file = pickString(row, ["file", "path"]);
+    const startLine = pickNumber(row, ["start_line", "line", "lineno"]);
+    const score = pickNumber(row, ["score", "rank_score"]) ?? 0;
+    const inDegree = pickNumber(row, ["in_degree", "inDegree", "fan_in"]) ?? 0;
+    const entrypoint =
+      pickBoolean(row, ["entrypoint", "is_entrypoint", "is_entry"]) ?? false;
+    const reason = pickString(row, ["reason", "rationale"]);
+    entries.push({
+      rank: pickNumber(row, ["rank", "index"]) ?? entries.length,
+      symbol,
+      ...(fqn ? { fqn } : {}),
+      ...(kind ? { kind } : {}),
+      ...(file ? { file } : {}),
+      ...(startLine !== undefined ? { startLine } : {}),
+      score,
+      inDegree,
+      entrypoint,
+      ...(reason ? { reason } : {}),
+    });
+  }
+  return { entries, indexed };
+}
+
+/**
+ * `codemap read-order [query] --json` — entrypoints ranked by graph centrality
+ * + in-degree. Powers cover-the-riskiest scaffolding (feature 9). Best-effort:
+ * empty report when codemap is absent.
+ */
+export async function codemapReadOrder(
+  deps: CodemapDeps = defaultCodemapDeps,
+  query?: string,
+): Promise<CodemapReadOrderReport> {
+  if (!(await deps.isAvailable())) return { entries: [], indexed: false };
+  const args = ["read-order"];
+  if (query && query.trim().length > 0) args.push(query.trim());
+  args.push("--json");
+  return parseReadOrderReport(await safeCodemapExec(deps, args));
 }

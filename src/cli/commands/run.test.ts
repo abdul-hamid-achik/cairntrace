@@ -1,15 +1,17 @@
 import { execa } from "execa";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunResultSchema } from "../../core/schema/run.v1";
 import {
   expandSpecArgs,
   maybeInjectTvaultSecrets,
+  selectSpecsByBlastRadius,
   synthesizeErroredResult,
   type RunCommandOptions,
 } from "./run";
+import type { CodemapDeps } from "./annotate";
 
 // Mock the tvault helper so CLI tests don't require a real TinyVault project.
 vi.mock("./secrets", async () => {
@@ -423,5 +425,166 @@ steps: []
       group: "myapp",
       env: "preview",
     });
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * selectSpecsByBlastRadius — `cairn run --since-codemap <ref>` (FEATURES item 1)
+ *
+ * Intersects `codemap review --since <ref>` blast-radius file paths against
+ * each spec's `coversSymbol` code-match provenance. A fake codemap verifies
+ * selection without codemap on $PATH; the codemap-absent path degrades to
+ * run-all (no crash).
+ * ------------------------------------------------------------------------- */
+
+async function writeSpecs(
+  dir: string,
+  specs: Record<string, string | undefined>,
+): Promise<string[]> {
+  const paths: string[] = [];
+  for (const [name, coversSymbol] of Object.entries(specs)) {
+    const p = join(dir, `${name}.yml`);
+    const yaml =
+      `version: 1\nname: ${name}\nintent: t\noutcomes:\n  - id: o\n    description: o\n    verify: { text: x }\n` +
+      (coversSymbol ? `coversSymbol: ${coversSymbol}\n` : "");
+    await writeFile(p, yaml);
+    paths.push(p);
+  }
+  return paths;
+}
+
+/** Fake codemap: review blast radius hits handler.ts; semantic resolves symbols. */
+function fakeReviewCodemap(symbolFiles: Record<string, string>): CodemapDeps {
+  const review = {
+    indexed: true,
+    stale: false,
+    changed_files: [{ path: "src/forms/handler.ts" }],
+    blast_radius: [
+      { symbol: "handleSubmit", file: "src/forms/handler.ts" },
+      { symbol: "validateEmail", file: "src/forms/validate.ts" },
+    ],
+  };
+  return {
+    isAvailable: async () => true,
+    async exec(args) {
+      if (args[0] === "review")
+        return { exitCode: 0, stdout: JSON.stringify(review), stderr: "" };
+      if (args[0] === "semantic" || args[0] === "find") {
+        const sym = args[1] ?? "";
+        const file = symbolFiles[sym];
+        return {
+          exitCode: 0,
+          stdout: file ? JSON.stringify([{ symbol: sym, file }]) : "[]",
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: "unknown" };
+    },
+  };
+}
+
+const unavailableCodemap: CodemapDeps = {
+  isAvailable: async () => false,
+  exec: async () => ({ exitCode: 127, stdout: "", stderr: "not found" }),
+};
+
+describe("selectSpecsByBlastRadius (feature 1)", () => {
+  it("selects only specs whose coversSymbol is in the blast radius", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-since-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      email_check: "validateEmail",
+      unrelated: "apiPost",
+      uncovered: undefined,
+    });
+    const selected = await selectSpecsByBlastRadius(
+      paths,
+      "HEAD~1",
+      fakeReviewCodemap({ handleSubmit: "src/forms/handler.ts" }),
+    );
+    // handleSubmit + validateEmail are named in the blast radius; apiPost and
+    // the uncovered spec are not.
+    expect(selected.map((p) => basename(p)).toSorted()).toEqual(
+      ["email_check.yml", "form_submit.yml"].toSorted(),
+    );
+  });
+  it("selects a spec whose coversSymbol resolves to a blast-radius file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-since-file-"));
+    const paths = await writeSpecs(dir, { handler_spec: "handleSubmit" });
+    // handleSubmit is NOT in the blast-radius symbol set here, but semantic
+    // resolves it to handler.ts which IS a blast-radius file.
+    const deps = {
+      ...fakeReviewCodemap({ handleSubmit: "src/forms/handler.ts" }),
+    };
+    // Override review so blast_radius has only the file, not the symbol.
+    const reviewFileOnly = {
+      indexed: true,
+      stale: false,
+      changed_files: [{ path: "src/forms/handler.ts" }],
+      blast_radius: [{ symbol: "someOtherSym", file: "src/forms/handler.ts" }],
+    };
+    deps.exec = async (args) =>
+      args[0] === "review"
+        ? { exitCode: 0, stdout: JSON.stringify(reviewFileOnly), stderr: "" }
+        : fakeReviewCodemap({ handleSubmit: "src/forms/handler.ts" }).exec(
+            args,
+          );
+    const selected = await selectSpecsByBlastRadius(paths, "HEAD~1", deps);
+    expect(selected).toHaveLength(1);
+  });
+
+  it("selects ~0 specs for a one-line CSS edit (empty blast radius)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-since-css-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      email_check: "validateEmail",
+    });
+    const cssEditReview = {
+      indexed: true,
+      stale: false,
+      changed_files: [{ path: "src/styles/main.css" }],
+      blast_radius: [],
+    };
+    const deps: CodemapDeps = {
+      isAvailable: async () => true,
+      exec: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify(cssEditReview),
+        stderr: "",
+      }),
+    };
+    const selected = await selectSpecsByBlastRadius(paths, "HEAD~1", deps);
+    expect(selected).toEqual([]);
+  });
+
+  it("degrades to run-all when codemap is absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-since-absent-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      email_check: "validateEmail",
+    });
+    const selected = await selectSpecsByBlastRadius(
+      paths,
+      "HEAD~1",
+      unavailableCodemap,
+    );
+    expect(selected).toEqual(paths);
+  });
+
+  it("degrades to run-all when since is blank", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-since-blank-"));
+    const paths = await writeSpecs(dir, { form_submit: "handleSubmit" });
+    const selected = await selectSpecsByBlastRadius(
+      paths,
+      "",
+      unavailableCodemap,
+    );
+    expect(selected).toEqual(paths);
+  });
+
+  it("returns empty input unchanged", async () => {
+    expect(
+      await selectSpecsByBlastRadius([], "HEAD~1", unavailableCodemap),
+    ).toEqual([]);
   });
 });

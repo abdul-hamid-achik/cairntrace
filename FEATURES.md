@@ -31,7 +31,7 @@ done — no diff parsing, no symbol resolution, no graph walk on the cairntrace 
 
 ## Features to implement
 
-### [ ] 1 — `cairn run --since-codemap <ref>`: impact-driven spec selection · M · **high**
+### [x] 1 — `cairn run --since-codemap <ref>`: impact-driven spec selection · M · **high**
 Run only the browser specs a change can actually hit. Pipe `codemap review --since <ref> --json` →
 intersect `blast_radius` file paths against each spec's `coversPaths` / code-match provenance → run that
 minimal set. Mirrors glyphrun's `affected-specs` and codemap's `review`.
@@ -101,7 +101,7 @@ hardcoded `codemap.path`; `doctor` reports `codemap_status` ("codebase indexed: 
 > NOT shipped in codemap yet, so `cairn doctor` reports "codebase indexed: yes (N symbols)" without a
 > freshness verdict — a TODO in `src/cli/commands/doctor.ts` adds freshness once `codemap_status` lands.
 
-### [ ] 8 — risk-ranked investigate (uses the new `codemap risk`) · S · **high**
+### [x] 8 — risk-ranked investigate (uses the new `codemap risk`) · S · **high**
 `cairn investigate` already surfaces N code candidates for a failing run; now rank them by **change-risk**,
 not just search score. For each candidate symbol call `codemap_risk` and sort by its `score` — so the
 load-bearing, untested, widely-called code that a failure most likely flows through floats to the top.
@@ -111,7 +111,7 @@ ranking with a single "how dangerous is this code" number.
 - **cairntrace:** enrich the investigate pipeline; show `⚠ high` next to risky matches in `agent_context.md`.
 - **Accept:** a failure touching an untested hub ranks that hub first, tagged `high (0.93)`.
 
-### [ ] 9 — cover-the-riskiest scaffolding (uses `read-order` + `risk`) · M · medium
+### [x] 9 — cover-the-riskiest scaffolding (uses `read-order` + `risk`) · M · medium
 Turn feature 6's "scaffold from untested entrypoints" into "scaffold from the **riskiest** untested
 entrypoints first": `codemap read-order` ranks the entrypoints, `codemap risk` flags which are untested +
 load-bearing, and `cairn spec scaffold` targets those — so the first browser specs an agent writes cover the

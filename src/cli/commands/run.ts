@@ -1,4 +1,5 @@
-import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { parse as parseYaml } from "yaml";
 import { homedir } from "node:os";
 import {
   basename,
@@ -27,7 +28,9 @@ import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { getTvaultEnv, tvaultArgs } from "./secrets";
 import { maybeAutoStash } from "./stash";
-import { maybeAutoAnnotateRun } from "./annotate";
+import { defaultCodemapDeps, maybeAutoAnnotateRun } from "./annotate";
+import type { CodemapDeps } from "./annotate";
+import { codemapReview, codemapSemantic } from "./codemap";
 import { stampSpecContractHash } from "./spec/verify";
 
 export interface RunCommandOptions {
@@ -63,6 +66,13 @@ export interface RunCommandOptions {
   autoAnnotate?: string;
   /** Sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI. */
   monitor?: boolean;
+  /**
+   * `--since-codemap <ref>` (FEATURES item 1): run only the specs whose
+   * `coversSymbol` code-match provenance intersects the blast radius of
+   * `codemap review --since <ref>`. Degrades to "run all" when codemap is
+   * absent (best-effort, never fails the run).
+   */
+  sinceCodemap?: string;
 }
 
 /**
@@ -107,6 +117,22 @@ export async function runCommand(
   if (expandedSpecs.length === 0) {
     process.stderr.write("cairn run: at least one spec path is required\n");
     process.exit(2);
+  }
+
+  // `--since-codemap <ref>` (FEATURES item 1): narrow to the specs a change can
+  // actually hit via `codemap review` blast-radius intersection. Best-effort —
+  // degrades to the full set when codemap is absent.
+  if (opts.sinceCodemap) {
+    expandedSpecs = await selectSpecsByBlastRadius(
+      expandedSpecs,
+      opts.sinceCodemap,
+    );
+    if (expandedSpecs.length === 0) {
+      process.stderr.write(
+        `cairn run: --since-codemap ${opts.sinceCodemap} selected 0 specs (blast radius matched no spec's coversSymbol); nothing to run\n`,
+      );
+      process.exit(0);
+    }
   }
 
   try {
@@ -754,6 +780,72 @@ async function collectSpecFiles(dir: string): Promise<string[]> {
     }
   }
   return out;
+}
+
+/**
+ * Read a spec's `coversSymbol` binding from disk via a loose YAML parse (no
+ * zod validation, no contractHash check) — selection only needs the symbol
+ * name. Returns undefined when the field is absent or the file can't be parsed.
+ */
+async function readCoversSymbol(specPath: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(specPath, "utf8");
+    const doc = parseYaml(raw) as Record<string, unknown> | null;
+    const sym = doc?.coversSymbol;
+    return typeof sym === "string" && sym.length > 0 ? sym : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `--since-codemap <ref>` (FEATURES item 1): intersect `codemap review --since
+ * <ref>` blast-radius file paths against each spec's `coversSymbol` code-match
+ * provenance and return only the minimal set a change can actually hit.
+ *
+ * A spec is selected when EITHER its `coversSymbol` is directly named in the
+ * blast-radius symbol set, OR resolving that symbol to a file via
+ * `codemap semantic` yields a path in the blast-radius file set.
+ *
+ * Degrades to the full input list (run-all) when codemap is absent, when
+ * `since` is blank, or when codemap failed to produce a positive review —
+ * best-effort, never fails the run. An indexed review with an empty blast
+ * radius (e.g. a one-line CSS edit touching no symbols) selects no specs.
+ */
+export async function selectSpecsByBlastRadius(
+  specs: string[],
+  since: string,
+  deps: CodemapDeps = defaultCodemapDeps,
+): Promise<string[]> {
+  if (specs.length === 0 || !since) return specs;
+  if (!(await deps.isAvailable())) return specs;
+  const review = await codemapReview(since, deps);
+  // codemap failed / returned nothing → run-all so a broken codemap never
+  // silently skips a run.
+  if (!review.indexed && review.blastRadiusFiles.length === 0) return specs;
+  // Indexed but empty radius → genuinely nothing impacted (CSS edit case).
+  if (
+    review.blastRadiusFiles.length === 0 &&
+    review.blastRadiusSymbols.length === 0
+  )
+    return [];
+  const blastFiles = new Set(review.blastRadiusFiles);
+  const blastSymbols = new Set(review.blastRadiusSymbols);
+  const selected: string[] = [];
+  for (const specPath of specs) {
+    const sym = await readCoversSymbol(specPath);
+    if (!sym) continue; // uncovered spec — not selected by blast radius
+    if (blastSymbols.has(sym)) {
+      selected.push(specPath);
+      continue;
+    }
+    // Resolve the symbol to its file(s) via codemap semantic and intersect.
+    const files = (await codemapSemantic(sym, deps))
+      .map((s) => s.file)
+      .filter((f): f is string => !!f);
+    if (files.some((f) => blastFiles.has(f))) selected.push(specPath);
+  }
+  return selected;
 }
 
 async function writeJUnitIfRequested(

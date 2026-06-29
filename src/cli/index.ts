@@ -113,6 +113,10 @@ addFormatFlags(
       "sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json}. Zero-cost when absent.",
       false,
     )
+    .option(
+      "--since-codemap <ref>",
+      "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
+    )
     .option("--no-color", "disable ANSI colors in interactive output"),
 ).action((specs: string[], opts) => runCommand(specs, opts));
 
@@ -270,6 +274,15 @@ spec
   .option(
     "--from-codemap [query]",
     "bind coversSymbol to an untested entrypoint via codemap orphans/semantic",
+  )
+  .option(
+    "--from-risk",
+    "scaffold N stubs bound to the highest-risk untested entrypoints (read-order + risk)",
+  )
+  .option(
+    "--top <n>",
+    "number of risky entrypoints to scaffold with --from-risk",
+    "3",
   )
   .action((name: string, opts) => scaffoldCommand(name, opts));
 

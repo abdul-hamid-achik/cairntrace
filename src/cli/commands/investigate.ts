@@ -4,6 +4,7 @@ import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { maybeAutoStash, isFcheapAvailable } from "./stash";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
+import { codemapRisk, type CodemapRiskFactor } from "./codemap.js";
 import { join, resolve } from "node:path";
 import type { RunResult } from "../../core/schema/run.v1.js";
 
@@ -24,6 +25,12 @@ export interface CodeMatch {
   blastRadius?: number;
   /** Graph-derived rank: hotspot centrality + caller depth + blast radius. */
   codemapScore?: number;
+  /** Change-risk score from `codemap risk` (item 8): 0..1; absent when codemap unavailable. */
+  riskScore?: number;
+  /** Risk level: low | medium | high | unknown (item 8). */
+  riskLevel?: string;
+  /** Risk factors from `codemap risk` (item 8). */
+  riskFactors?: CodemapRiskFactor[];
 }
 
 export interface InvestigateResult {
@@ -372,6 +379,9 @@ export async function rankCodeMatches(
             "affectedCount",
           ]) ?? impactRows.length;
       }
+      // Item 8: change-risk per resolved symbol (`codemap risk`). Absent/unknown
+      // symbols get no risk fields, so ranking falls back to codemapScore.
+      const risk = symbol ? await codemapRisk(symbol, deps) : null;
       if (centrality === 0) {
         centrality = centralityByFile.get(m.file) ?? 0;
       }
@@ -385,6 +395,13 @@ export async function rankCodeMatches(
         ...(symbol ? { symbol } : {}),
         ...(callers !== undefined ? { callers } : {}),
         ...(blastRadius !== undefined ? { blastRadius } : {}),
+        ...(risk && risk.found
+          ? {
+              riskScore: risk.score,
+              riskLevel: risk.level,
+              riskFactors: risk.factors,
+            }
+          : {}),
         onSemanticPath,
         centrality,
       } as CodeMatch & { onSemanticPath: boolean; centrality: number };
@@ -411,10 +428,17 @@ export async function rankCodeMatches(
     return { ...rest, codemapScore };
   });
 
-  // Stable sort by codemapScore desc — ties keep original fcheap order.
+  // Item 8: sort by change-risk first (a risky untested hub floats to the top),
+  // then codemapScore, then original fcheap order. When codemap is absent every
+  // risk/codemap score is 0, so this collapses to the original order (no regression).
   return scored
     .map((m, i) => ({ m, i }))
-    .toSorted((a, b) => b.m.codemapScore! - a.m.codemapScore! || a.i - b.i)
+    .toSorted(
+      (a, b) =>
+        (b.m.riskScore ?? 0) - (a.m.riskScore ?? 0) ||
+        (b.m.codemapScore ?? 0) - (a.m.codemapScore ?? 0) ||
+        a.i - b.i,
+    )
     .map((x) => x.m);
 }
 
@@ -798,13 +822,19 @@ function investigateMarkdown(r: InvestigateResult): string {
       const codemap = m.codemapScore
         ? ` · codemap: ${m.codemapScore.toFixed(2)}`
         : "";
+      // Item 8: surface change-risk. A `high` level gets a ⚠ marker so risky
+      // matches stand out in agent_context.md / the markdown report.
+      const risk = m.riskScore
+        ? ` · risk:${m.riskLevel ?? "?"}(${m.riskScore.toFixed(2)})` +
+          (m.riskLevel === "high" ? " ⚠ high" : "")
+        : "";
       const sym = m.symbol ? ` [${m.symbol}]` : "";
       const callers = m.callers !== undefined ? ` ←${m.callers}` : "";
       const blast =
         m.blastRadius !== undefined ? ` · blast:${m.blastRadius}` : "";
       const snippet = m.snippet ? `: ${m.snippet}` : "";
       lines.push(
-        `- ${m.file}:${m.line}${sym}${score}${codemap}${callers}${blast}${snippet}`,
+        `- ${m.file}:${m.line}${sym}${score}${codemap}${risk}${callers}${blast}${snippet}`,
       );
     }
   } else if (r.error) {

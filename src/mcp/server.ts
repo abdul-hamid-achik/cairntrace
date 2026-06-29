@@ -12,6 +12,7 @@ import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { validateConfigFile } from "../cli/commands/config/validate";
 import { isFcheapAvailable } from "../cli/commands/stash";
+import { selectSpecsByBlastRadius } from "../cli/commands/run";
 import {
   resolveArtifactRoot,
   resolveRunRef,
@@ -154,9 +155,41 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe("Override run artifact root directory"),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            "git ref for `codemap review --since <ref>` impact-driven " +
+              "selection: skip the run unless the spec's coversSymbol " +
+              "intersects the blast radius (degrades to running when " +
+              "codemap is absent)",
+          ),
       },
     },
-    async ({ path, env, mock, coldStart, artifactRoot }) => {
+    async ({ path, env, mock, coldStart, artifactRoot, since }) => {
+      // `since` (FEATURES item 1): impact-driven selection. Skip the run unless
+      // the spec's coversSymbol intersects `codemap review --since <ref>`
+      // blast radius. Degrades to running when codemap is absent.
+      if (since) {
+        const selected = await selectSpecsByBlastRadius([path], since);
+        if (!selected.includes(path)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `skipped: ${path} not in blast radius of ${since} (--since-codemap)`,
+              },
+            ],
+            structuredContent: {
+              status: "skipped",
+              reason: "not_in_blast_radius",
+              since,
+              path,
+            },
+            isError: false,
+          };
+        }
+      }
       const backend = mock
         ? new MockBrowserBackend()
         : new AgentBrowserAdapter({

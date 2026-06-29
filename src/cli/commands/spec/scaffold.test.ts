@@ -1,8 +1,8 @@
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { scaffoldCommand } from "./scaffold.js";
+import { scaffoldCommand, selectRiskyUntestedEntrypoints } from "./scaffold.js";
 import type { CodemapDeps } from "../annotate.js";
 
 /* ---------------------------------------------------------------------------
@@ -112,5 +112,147 @@ describe("scaffoldCommand --from-codemap (feature 6)", () => {
     );
     const yaml = await readFile(join(outDir, `${name}.yml`), "utf8");
     expect(yaml).not.toMatch(/coversSymbol:/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * scaffoldCommand `--from-risk` + selectRiskyUntestedEntrypoints (FEATURES item 9)
+ *
+ * `codemap read-order` ranks entrypoints; `codemap risk` flags which are
+ * untested + load-bearing. `--from-risk --top N` scaffolds N stubs bound to
+ * the highest-risk untested entrypoints.
+ * ------------------------------------------------------------------------- */
+function riskFakeCodemap(): CodemapDeps {
+  // read-order returns 3 entrypoints; risk makes handleSubmit the riskiest untested one.
+  const entries = [
+    {
+      rank: 1,
+      symbol: "handleSubmit",
+      kind: "handler",
+      file: "src/forms.ts",
+      start_line: 5,
+      score: 0.9,
+      in_degree: 6,
+      entrypoint: true,
+      reason: "central",
+    },
+    {
+      rank: 2,
+      symbol: "renderPage",
+      kind: "view",
+      file: "src/view.ts",
+      start_line: 1,
+      score: 0.5,
+      in_degree: 2,
+      entrypoint: true,
+      reason: "leaf",
+    },
+    {
+      rank: 3,
+      symbol: "util",
+      kind: "helper",
+      file: "src/util.ts",
+      start_line: 1,
+      score: 0.1,
+      in_degree: 0,
+      entrypoint: false,
+      reason: "",
+    },
+  ];
+  const risk: Record<string, { score: number; level: string; tests: number }> =
+    {
+      handleSubmit: { score: 0.93, level: "high", tests: 0 },
+      renderPage: { score: 0.3, level: "medium", tests: 2 }, // has covering tests -> filtered out
+      util: { score: 0.05, level: "low", tests: 0 },
+    };
+  return {
+    isAvailable: async () => true,
+    async exec(args) {
+      if (args[0] === "read-order")
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ entries, indexed: true }),
+          stderr: "",
+        };
+      if (args[0] === "risk") {
+        const sym = args[1] ?? "";
+        const r = risk[sym] ?? { score: 0, level: "low", tests: 0 };
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            symbol: sym,
+            found: true,
+            score: r.score,
+            level: r.level,
+            callers: 0,
+            covering_tests: r.tests,
+            factors: [],
+          }),
+          stderr: "",
+        };
+      }
+      return { exitCode: 1, stdout: "", stderr: `unknown ${args[0]}` };
+    },
+  };
+}
+
+describe("selectRiskyUntestedEntrypoints (item 9)", () => {
+  it("returns entrypoints with no covering tests, sorted by risk desc", async () => {
+    const sel = await selectRiskyUntestedEntrypoints(riskFakeCodemap(), 3);
+    // renderPage is tested (covering_tests=2) -> excluded; util is not an entrypoint -> excluded.
+    const syms = sel.map((e) => e.symbol);
+    expect(syms).toEqual(["handleSubmit"]);
+    expect(sel[0]!.riskScore).toBeCloseTo(0.93, 5);
+    expect(sel[0]!.riskLevel).toBe("high");
+    expect(sel[0]!.coveringTests).toBe(0);
+  });
+
+  it("returns [] when codemap is absent", async () => {
+    const sel = await selectRiskyUntestedEntrypoints(unavailable, 3);
+    expect(sel).toEqual([]);
+  });
+});
+
+describe("scaffoldCommand --from-risk (item 9)", () => {
+  it("writes a stub per risky untested entrypoint, bound to coversSymbol", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-risk-scaffold-"));
+    try {
+      await scaffoldCommand(
+        "ignored_name",
+        {
+          intent: "cover the riskiest untested entrypoints",
+          out: dir,
+          fromRisk: true,
+          top: 3,
+        },
+        riskFakeCodemap(),
+      );
+      const files = (await readdir(dir)).filter((f) => f.endsWith(".yml"));
+      expect(files).toContain("handle_submit.yml");
+      // renderPage was tested -> no stub for it.
+      expect(files).not.toContain("render_page.yml");
+      const yaml = await readFile(join(dir, "handle_submit.yml"), "utf8");
+      expect(yaml).toMatch(/coversSymbol:\s*handleSubmit/);
+      expect(yaml).toContain("risk high");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing and reports when no untested entrypoints are found", async () => {
+    const dir = await mkdtemp(
+      join(tmpdir(), "cairntrace-risk-scaffold-empty-"),
+    );
+    try {
+      await scaffoldCommand(
+        "x",
+        { intent: "none", out: dir, fromRisk: true, top: 3 },
+        unavailable,
+      );
+      const files = (await readdir(dir)).filter((f) => f.endsWith(".yml"));
+      expect(files).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

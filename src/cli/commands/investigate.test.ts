@@ -169,6 +169,17 @@ function fakeCodemap(): CodemapDeps {
     },
     callers: (args) => ({ depth: callers[args[1] ?? ""] ?? 0, callers: [] }),
     impact: (args) => ({ blastRadius: blast[args[1] ?? ""] ?? 0 }),
+    // Item 8: default risk is 0 for every symbol so the item-3 codemapScore
+    // ranking (apiPost first) is unchanged; the item-8 test uses a risk-heavy fake.
+    risk: (args) => ({
+      symbol: args[1] ?? "",
+      found: true,
+      score: 0,
+      level: "low",
+      callers: 0,
+      covering_tests: 0,
+      factors: [],
+    }),
     // semantic + find only surface the failing-call-path symbol.
     semantic: () => [
       { symbol: "apiPost", file: "src/api/client.ts", line: 10 },
@@ -255,6 +266,98 @@ describe("rankCodeMatches", () => {
       fakeCodemap(),
     );
     expect(ranked).toEqual([]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * rankByRisk — change-risk ranking (FEATURES item 8)
+ *
+ * `codemap risk` per candidate re-ranks so a load-bearing, untested hub floats
+ * above the failing-call-path hit (which item 3 ranks first by centrality).
+ * ------------------------------------------------------------------------- */
+describe("rankCodeMatches — risk ranking (item 8)", () => {
+  const matches: CodeMatch[] = [
+    { file: "src/auth/login.ts", line: 42, score: 0.9 }, // untested hub
+    { file: "src/api/client.ts", line: 10, score: 0.7 }, // failing call path
+    { file: "src/ui/button.ts", line: 3, score: 0.5 },
+  ];
+
+  /** Fake codemap where `login` is a high-risk untested hub (risk 0.93). */
+  function riskHeavyCodemap(): CodemapDeps {
+    const base = fakeCodemap();
+    const riskBySymbol: Record<
+      string,
+      { score: number; level: string; tests: number }
+    > = {
+      login: { score: 0.93, level: "high", tests: 0 },
+      apiPost: { score: 0.4, level: "medium", tests: 2 },
+      Button: { score: 0.1, level: "low", tests: 1 },
+    };
+    return {
+      isAvailable: async () => true,
+      async exec(args) {
+        if (args[0] === "risk") {
+          const sym = args[1] ?? "";
+          const r = riskBySymbol[sym] ?? { score: 0, level: "low", tests: 0 };
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              symbol: sym,
+              found: true,
+              score: r.score,
+              level: r.level,
+              callers: 0,
+              covering_tests: r.tests,
+              factors: [{ factor: "untested", severity: r.score, detail: "" }],
+            }),
+            stderr: "",
+          };
+        }
+        return base.exec(args);
+      },
+    };
+  }
+
+  it("ranks a high-risk untested hub first, ahead of the failing call path", async () => {
+    const ranked = await rankCodeMatches(
+      matches,
+      {
+        failingText: "redirect failed",
+        failingUrls: ["https://app.test/api/inventory"],
+      },
+      riskHeavyCodemap(),
+    );
+    // login (risk 0.93, high) floats above apiPost (risk 0.4) despite apiPost's
+    // higher codemapScore — risk is the primary sort key.
+    expect(ranked[0]!.symbol).toBe("login");
+    expect(ranked[0]!.riskScore).toBeCloseTo(0.93, 5);
+    expect(ranked[0]!.riskLevel).toBe("high");
+    expect(ranked[1]!.symbol).toBe("apiPost");
+    expect((ranked[1]!.riskScore ?? 0) < (ranked[0]!.riskScore ?? 0)).toBe(
+      true,
+    );
+    // Every resolved match carries risk fields.
+    for (const m of ranked) {
+      if (m.symbol) expect(typeof m.riskScore).toBe("number");
+    }
+  });
+
+  it("leaves risk fields undefined when codemap is absent (no regression)", async () => {
+    const absent: CodemapDeps = {
+      isAvailable: async () => false,
+      async exec() {
+        return { exitCode: 1, stdout: "", stderr: "" };
+      },
+    };
+    const ranked = await rankCodeMatches(
+      matches,
+      { failingText: "", failingUrls: [] },
+      absent,
+    );
+    for (const m of ranked) {
+      expect(m.riskScore).toBeUndefined();
+      expect(m.riskLevel).toBeUndefined();
+    }
   });
 });
 

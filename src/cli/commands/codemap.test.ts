@@ -2,10 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   codemapOrphans,
   codemapProjects,
+  codemapReadOrder,
+  codemapReview,
+  codemapRisk,
   codemapSemantic,
+  emptyRiskReport,
   expandSymbolQuery,
   parseJsonArray,
   parseJsonObject,
+  parseReadOrderReport,
+  parseReviewReport,
+  parseRiskReport,
+  pickBoolean,
   pickNumber,
   pickString,
   resolveCodemapSymbolForScaffold,
@@ -196,5 +204,287 @@ describe("resolveCodemapSymbolForScaffold (feature 6)", () => {
     expect(
       await resolveCodemapSymbolForScaffold("handleSubmit", unavailable),
     ).toBeUndefined();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * codemapReview / codemapRisk / codemapReadOrder (FEATURES items 1, 8, 9)
+ *
+ * A fake codemap exercising the v0.19.0 review/risk/read-order JSON shapes
+ * (alias field names + bare-array vs object-wrapped tolerated by the parsers).
+ * ------------------------------------------------------------------------- */
+
+function fakeReviewCodemap(): CodemapDeps {
+  const review = {
+    project: "myapp",
+    mode: "since",
+    since: "HEAD~1",
+    indexed: true,
+    is_repo: true,
+    stale: false,
+    changed_files: [
+      {
+        path: "src/forms/handler.ts",
+        status: "modified",
+        symbols: ["handleSubmit"],
+      },
+    ],
+    changed_symbols: [{ symbol: "handleSubmit", file: "src/forms/handler.ts" }],
+    blast_radius: [
+      { symbol: "handleSubmit", file: "src/forms/handler.ts" },
+      { symbol: "validateEmail", file: "src/forms/validate.ts" },
+    ],
+    covering_tests: [],
+    untested: [{ symbol: "handleSubmit", file: "src/forms/handler.ts" }],
+    hotspots: [],
+  };
+  const risk: Record<string, unknown> = {
+    handleSubmit: {
+      symbol: "handleSubmit",
+      found: true,
+      score: 0.93,
+      level: "high",
+      callers: 12,
+      covering_tests: 0,
+      factors: [
+        { factor: "untested", severity: "high", detail: "no covering tests" },
+      ],
+    },
+    validateEmail: {
+      symbol: "validateEmail",
+      found: true,
+      score: 0.4,
+      level: "medium",
+      callers: 3,
+      covering_tests: 2,
+      factors: [],
+    },
+  };
+  const readOrder = {
+    project: "myapp",
+    indexed: true,
+    entries: [
+      {
+        rank: 1,
+        symbol: "handleSubmit",
+        kind: "handler",
+        file: "src/forms/handler.ts",
+        start_line: 22,
+        score: 0.9,
+        in_degree: 12,
+        entrypoint: true,
+        reason: "top entrypoint",
+      },
+      {
+        rank: 2,
+        symbol: "validateEmail",
+        kind: "function",
+        file: "src/forms/validate.ts",
+        start_line: 8,
+        score: 0.6,
+        in_degree: 3,
+        entrypoint: true,
+        reason: "called by submit",
+      },
+      {
+        rank: 3,
+        symbol: "internal",
+        kind: "function",
+        file: "src/util.ts",
+        start_line: 1,
+        score: 0.1,
+        in_degree: 1,
+        entrypoint: false,
+      },
+    ],
+  };
+  return {
+    isAvailable: async () => true,
+    async exec(args) {
+      const cmd = args[0]!;
+      if (cmd === "review")
+        return { exitCode: 0, stdout: JSON.stringify(review), stderr: "" };
+      if (cmd === "risk")
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify(risk[args[1] ?? ""] ?? { found: false }),
+          stderr: "",
+        };
+      if (cmd === "read-order")
+        return { exitCode: 0, stdout: JSON.stringify(readOrder), stderr: "" };
+      return { exitCode: 1, stdout: "", stderr: `unknown ${cmd}` };
+    },
+  };
+}
+
+describe("pickBoolean", () => {
+  it("returns the first boolean under candidate keys", () => {
+    expect(pickBoolean({ entrypoint: true }, ["entrypoint"])).toBe(true);
+    expect(pickBoolean({ is_entry: false }, ["entrypoint", "is_entry"])).toBe(
+      false,
+    );
+  });
+  it("returns undefined when no boolean key matches", () => {
+    expect(pickBoolean({ entrypoint: "yes" }, ["entrypoint"])).toBeUndefined();
+    expect(pickBoolean(null, ["entrypoint"])).toBeUndefined();
+  });
+});
+
+describe("parseReviewReport / codemapReview (feature 1)", () => {
+  it("extracts blast-radius files + symbols from the v0.19.0 shape", () => {
+    const r = parseReviewReport(
+      JSON.stringify({
+        blast_radius: [
+          { symbol: "handleSubmit", file: "src/forms/handler.ts" },
+          { symbol: "validateEmail", path: "src/forms/validate.ts" },
+        ],
+        changed_files: [{ path: "src/forms/handler.ts" }, "src/index.css"],
+        changed_symbols: [{ name: "handleSubmit" }],
+        indexed: true,
+        stale: false,
+      }),
+    );
+    expect(r.blastRadiusFiles).toEqual([
+      "src/forms/handler.ts",
+      "src/forms/validate.ts",
+    ]);
+    expect(r.blastRadiusSymbols).toEqual(["handleSubmit", "validateEmail"]);
+    expect(r.changedFiles).toEqual(["src/forms/handler.ts", "src/index.css"]);
+    expect(r.changedSymbols).toEqual(["handleSubmit"]);
+    expect(r.indexed).toBe(true);
+    expect(r.stale).toBe(false);
+  });
+
+  it("returns an empty report on non-JSON input", () => {
+    const r = parseReviewReport("not json");
+    expect(r.blastRadiusFiles).toEqual([]);
+    expect(r.indexed).toBe(false);
+  });
+
+  it("codemapReview returns the report via the deps seam", async () => {
+    const r = await codemapReview("HEAD~1", fakeReviewCodemap());
+    expect(r.blastRadiusFiles).toContain("src/forms/handler.ts");
+    expect(r.blastRadiusSymbols).toContain("handleSubmit");
+    expect(r.indexed).toBe(true);
+  });
+
+  it("codemapReview degrades to empty when codemap is absent", async () => {
+    const r = await codemapReview("HEAD~1", unavailable);
+    expect(r.blastRadiusFiles).toEqual([]);
+    expect(r.indexed).toBe(false);
+  });
+
+  it("codemapReview degrades to empty for a blank ref", async () => {
+    const r = await codemapReview("", fakeReviewCodemap());
+    expect(r.blastRadiusFiles).toEqual([]);
+  });
+});
+
+describe("parseRiskReport / codemapRisk (feature 8)", () => {
+  it("parses the v0.19.0 risk shape with alias field names", () => {
+    const r = parseRiskReport(
+      JSON.stringify({
+        symbol: "handleSubmit",
+        found: true,
+        risk_score: 0.93,
+        risk_level: "high",
+        caller_count: 12,
+        coveringTests: 0,
+        factors: [{ name: "untested", severity: "high", description: "none" }],
+        note: "hub",
+      }),
+      "handleSubmit",
+    );
+    expect(r.found).toBe(true);
+    expect(r.score).toBeCloseTo(0.93, 5);
+    expect(r.level).toBe("high");
+    expect(r.callers).toBe(12);
+    expect(r.coveringTests).toBe(0);
+    expect(r.factors[0]!.factor).toBe("untested");
+    expect(r.factors[0]!.detail).toBe("none");
+    expect(r.note).toBe("hub");
+  });
+
+  it("maps an unknown level to 'unknown'", () => {
+    const r = parseRiskReport(
+      JSON.stringify({ found: true, score: 0.5, level: "critical" }),
+      "x",
+    );
+    expect(r.level).toBe("unknown");
+    expect(r.score).toBe(0.5);
+  });
+
+  it("returns an empty report on non-JSON input", () => {
+    const r = parseRiskReport("oops", "handleSubmit");
+    expect(r).toEqual(emptyRiskReport("handleSubmit"));
+  });
+
+  it("codemapRisk returns the report via the deps seam", async () => {
+    const r = await codemapRisk("handleSubmit", fakeReviewCodemap());
+    expect(r.found).toBe(true);
+    expect(r.score).toBeCloseTo(0.93, 5);
+    expect(r.level).toBe("high");
+    expect(r.coveringTests).toBe(0);
+  });
+
+  it("codemapRisk degrades to an empty report when codemap is absent", async () => {
+    const r = await codemapRisk("handleSubmit", unavailable);
+    expect(r.found).toBe(false);
+    expect(r.score).toBe(0);
+    expect(r.level).toBe("unknown");
+  });
+});
+
+describe("parseReadOrderReport / codemapReadOrder (feature 9)", () => {
+  it("parses the v0.19.0 read-order shape, tolerating a bare array", () => {
+    const r = parseReadOrderReport(
+      JSON.stringify([
+        {
+          rank: 1,
+          symbol: "handleSubmit",
+          entrypoint: true,
+          score: 0.9,
+          in_degree: 5,
+          file: "a.ts",
+          start_line: 22,
+        },
+        { name: "internal", entrypoint: false },
+      ]),
+    );
+    expect(r.entries).toHaveLength(2);
+    expect(r.entries[0]!.symbol).toBe("handleSubmit");
+    expect(r.entries[0]!.entrypoint).toBe(true);
+    expect(r.entries[0]!.startLine).toBe(22);
+    expect(r.entries[1]!.symbol).toBe("internal");
+    expect(r.entries[1]!.entrypoint).toBe(false);
+  });
+
+  it("parses the object-wrapped form with entries[]", () => {
+    const r = parseReadOrderReport(
+      JSON.stringify({
+        indexed: true,
+        entries: [{ symbol: "handleSubmit", rank: 1, entrypoint: true }],
+      }),
+    );
+    expect(r.entries).toHaveLength(1);
+    expect(r.indexed).toBe(true);
+  });
+
+  it("returns empty on non-JSON input", () => {
+    const r = parseReadOrderReport("nope");
+    expect(r.entries).toEqual([]);
+  });
+
+  it("codemapReadOrder returns ranked entries via the deps seam", async () => {
+    const r = await codemapReadOrder(fakeReviewCodemap());
+    expect(r.entries).toHaveLength(3);
+    expect(r.entries[0]!.symbol).toBe("handleSubmit");
+    expect(r.entries[0]!.entrypoint).toBe(true);
+    expect(r.entries.filter((e) => e.entrypoint)).toHaveLength(2);
+  });
+
+  it("codemapReadOrder degrades to empty when codemap is absent", async () => {
+    const r = await codemapReadOrder(unavailable);
+    expect(r.entries).toEqual([]);
   });
 });
