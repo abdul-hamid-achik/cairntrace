@@ -6,8 +6,18 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
 
+
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' }],
+    ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/apple-touch-icon.png' }],
+    ['meta', { name: 'description', content: 'cairntrace documentation site.' }],
+  ],
+
+  sitemap: { hostname: 'https://cairntrace.dev' },
   themeConfig: {
     siteTitle: 'Cairntrace',
+    logo: '/logo.svg',
     nav: [
       { text: 'Guide', link: '/overview' },
       { text: 'Authoring', link: '/authoring' },
