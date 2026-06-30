@@ -17,7 +17,7 @@ export default defineConfig({
   sitemap: { hostname: 'https://cairntrace.dev' },
   themeConfig: {
     siteTitle: 'Cairntrace',
-    logo: '/logo.svg',
+    logo: { src: '/logo.svg', dark: '/logo-dark.svg' },
     nav: [
       { text: 'Guide', link: '/overview' },
       { text: 'Authoring', link: '/authoring' },

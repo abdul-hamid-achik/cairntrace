@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 120" width="480" height="120">
+  <defs>
+    <linearGradient id="ct-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#6EE7B7"/>
+    </linearGradient>
+  </defs>
+  <title>cairntrace</title>
+  <!-- cairn: weathered stacked stones, slight asymmetry -->
+  <g transform="translate(28,18)">
+    <!-- shadow -->
+    <ellipse cx="40" cy="84" rx="38" ry="5" fill="#D1FAE5" opacity="0.15"/>
+    <!-- bottom stone, slightly off-center -->
+    <path d="M 8 50 L 14 78 L 72 78 L 78 50 Z" fill="url(#ct-grad)" />
+    <!-- second stone -->
+    <path d="M 14 30 L 22 52 L 62 52 L 70 30 Z" fill="url(#ct-grad)" />
+    <!-- third stone -->
+    <path d="M 22 12 L 28 32 L 56 32 L 62 12 Z" fill="url(#ct-grad)" />
+    <!-- top stone (smallest, slightly tilted) -->
+    <path d="M 30 -4 L 35 14 L 50 14 L 55 -4 Z" fill="url(#ct-grad)" />
+    <!-- highlight strokes -->
+    <line x1="14" y1="56" x2="72" y2="56" stroke="#ECFDF5" stroke-width="0.6" opacity="0.4"/>
+    <line x1="22" y1="35" x2="62" y2="35" stroke="#ECFDF5" stroke-width="0.6" opacity="0.4"/>
+  </g>
+  <!-- wordmark -->
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-weight="700" font-size="54" letter-spacing="-2.5">
+    <text x="135" y="76" fill="#D1FAE5">cairntrace</text>
+  </g>
+</svg>
