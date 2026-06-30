@@ -44,7 +44,7 @@ Step `timeoutMs` ceiling hit. Triage:
 - Is this a form submission to a slow backend? Override per-step with `timeoutMs: 60000`.
 - Is this on `localhost` and the dev server is slow to respond? Restart the dev server.
 
-A blanket `run.timeoutMs: 600000` is a code smell. Fix the slow step.
+A blanket `timeoutMs: 600000` on every step is a code smell. Fix the slow step.
 
 ## "Contract hash mismatch"
 
@@ -68,23 +68,16 @@ The CLI couldn't connect to `agent-browser` or Playwright. Common causes:
 
 You tried to override a reserved env var like `PATH` or `HOME`. The runner refuses. Workaround: rename the variable in your spec, e.g. `${env.MY_API_PATH}`.
 
-## "Redaction layer rejected your config pattern"
+## "My secret still appears in artifacts"
 
-Your `cairntrace.config.yml > redaction.patterns` has a regex that doesn't compile. The runner fails at parse-time so it doesn't ship a broken redactor.
+The redaction layer scrubs any object key matching the built-in sensitive-key heuristic (`authorization`, `cookie`, `token`, `secret`, `password`, `api_key`, …), the `Authorization`/`Cookie`/`Set-Cookie` header lines, token-bearing query params, and any literal value you list in the spec's `redaction:` block. If a secret still leaks, its key does not match the heuristic and you did not list its value:
 
-Test the regex in isolation:
-
-```bash
-node -e 'new RegExp(process.argv[1])' "authorization: .*"
+```yaml
+redaction:
+  values: ["AKIA...your-literal-key..."]
 ```
 
-Then fix the pattern and retry.
-
-## "Evaluator failed because no consent"
-
-`type: 'script'` outcomes sometimes prompt the user before running. In `--json` / `--yaml` modes, prompts are off by design. In interactive modes, the prompt is a typed-args flag (`--confirm=true`).
-
-If you never want a prompt, set `mcp.perToolConfirm: []` (the default).
+Vault (tvault) secrets are registered automatically and scrubbed regardless of key name. Redaction is literal-value replacement, not regex — add the full secret string to `redaction.values`.
 
 ## Performance: the spec takes minutes to run
 
@@ -101,7 +94,7 @@ If you never want a prompt, set `mcp.perToolConfirm: []` (the default).
 
 ## Common misconfigurations
 
-- Forgot to set `run.out`. Artifacts land in `./run/` and the CLI's working directory, not your project's test output dir.
+- Forgot to set `artifactRoot`. Artifacts land in `~/.cairntrace/runs` by default, not your project's test output dir.
 - Set `artifacts.screenshots: 'always'` for a spec that takes 200 steps. Disk fill. Set it to `'on-failure'` until you know what you're capturing.
 - Two specs share a session resume name but expect different sessions. Resume names are project-scoped; namespace them per-spec.
 

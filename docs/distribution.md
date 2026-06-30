@@ -24,7 +24,7 @@ bun install
 ./bin/cairn --version
 ```
 
-The CLI's version command reads the tag (or `git describe`) so `bin/cairn version` always matches what you checked out. Pinning is a single git command and avoids version drift across teammates.
+The CLI's `--version` reads `package.json` at runtime, so `./bin/cairn --version` always matches the checkout's `package.json` version. Pinning is a single `git checkout` and avoids version drift across teammates.
 
 ## HEAD / main workflow
 
@@ -37,7 +37,7 @@ bun install
 ./bin/cairn run examples/specs/hello.yml --format md
 ```
 
-There is no `dev` script that runs the spec suite with mock data — `task verify` (when imported from the dev toolbox) is the canonical run. Without it, `bun run verify` is the closest equivalent.
+The canonical local gate is `bun run verify` (typecheck + lint + format check + knip + tests). There is no separate `dev` script that runs the spec suite with mock data — `bun run verify` is it.
 
 ## Symlink-on-PATH convenience
 

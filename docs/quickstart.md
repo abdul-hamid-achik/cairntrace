@@ -26,4 +26,4 @@ Then run it:
 ./bin/cairn run examples/specs/hello.yml --format md
 ```
 
-You should see a successful outcome report and a `run/` artifact folder.
+You should see a successful outcome report and a run dir under `~/.cairntrace/runs/`.

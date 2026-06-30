@@ -9,7 +9,9 @@ A grab-bag of pages on topics that don't fit cleanly under [Steps](/steps), [Ver
 
 ## Available topics
 
-- [Video recording fallback](/video-screenshot-fallback) — when the native recorder is unavailable, stitch per-step screenshots into a timelapse video.
+- [Video recording fallback](/video-screenshot-fallback) — proposed: stitch per-step screenshots into a timelapse video when the native recorder is unavailable.
+- [Process monitoring](/monitor) — sample the browser process tree with `--monitor`; the `monitor` step and `process` verifier turn "the spec got slow" into an assertable budget.
+- [Services lifecycle](/services) — the config-driven docker/seed/tmux environment `cairn run` owns, and when to disable it per environment.
 
 ## Authoring a topic page
 

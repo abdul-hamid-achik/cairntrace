@@ -91,7 +91,7 @@ Then run all specs that import that snippet to confirm the contract hash drift d
 cairn run specs --cold-start --format json
 ```
 
-The `--recursive` flag (`cairn run --recursive`) walks the spec tree in one shot.
+Passing a directory (`cairn run specs/`) walks the spec tree recursively for `*.yml` in one shot — there is no separate `--recursive` flag.
 
 ## Cookbook: building a snippet library
 

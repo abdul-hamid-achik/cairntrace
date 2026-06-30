@@ -59,4 +59,4 @@ This is deliberate. The contract hash, the verifier vocabulary, the step vocabul
 - New capture mode: see how `artifacts.capture.video` evolved (see [video-screenshot-fallback](/video-screenshot-fallback)).
 - New backend: implement the `BrowserBackend` interface, register in `cairntrace.config.yml`, ship a smoke spec under `specs/`.
 
-If the extension is small enough to fit inside `script:` or `controls:`, do that first.
+If the extension is small enough to fit inside an `eval:` step or a `script:` verifier, do that first.

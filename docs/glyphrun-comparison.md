@@ -9,9 +9,9 @@ A side-by-side for the two spec runners under [the-lacanians](https://www.thelac
 | **Behavior contract** | `intent + outcomes` in `spec.yml` | `intent + outcomes` in `spec.yml` |
 | **Repairable hints** | typed `steps:` vocabulary | typed `steps:` vocabulary |
 | **Agent interface** | CLI + MCP server + artifact pack | CLI + MCP server + artifact pack |
-| **Closed verifiers** | `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `script` | same |
+| **Closed verifiers** | `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process` | same |
 | **Cold-start contract** | required; login/checkpoint/preconditions | required; login/checkpoint/preconditions |
-| **Artifact format** | `run.{json,yaml,md}`, `report.html`, `outcomes/<id>.md`, `screens/`, `network/`, `console/`, `spec.resolved.yml` | same shape, plus `frames/frames.ndjson` and `raw/pty.raw.log` |
+| **Artifact format** | `run.{json,yaml,md}`, `report.html`, `outcomes/<id>.md`, `screenshots/`, `network/`, `console/`, `spec.resolved.yml` | same shape, plus `frames/frames.ndjson` and `raw/pty.raw.log` |
 | **MCP tools** | `cairn_*` mirrors every CLI verb | `glyph_*` mirrors every CLI verb |
 
 ## Where they diverge

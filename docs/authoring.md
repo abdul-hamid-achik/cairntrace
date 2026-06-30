@@ -10,7 +10,7 @@ Start every spec with `intent` and `outcomes`, never with steps. `intent` is one
 intent: Search for "spiced chickpeas", filter by category, and see exactly 7 results.
 outcomes:
   - id: results-narrowed
-    count: { path: "[data-testid='result-count']", equals: 7 }
+    count: { selector: "[data-testid='result-count']", equals: 7 }
   - id: filter-applied
     text: { contains: "category:baking" }
 steps:
@@ -22,21 +22,21 @@ If a colleague can delete every `step:` in the file and you can still describe w
 
 ## Outcomes are typed observables
 
-The verifier vocabulary is closed: `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `script`. If you find yourself wanting a new verb, use `script` with a small JS expression and a `.raw.json` sidecar — never invent a new verifier type, because then every agent has to learn the new vocabulary.
+The verifier vocabulary is closed: `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process`. If you find yourself wanting a new verb, use `script` with a small JS expression and a `.raw.json` sidecar — never invent a new verifier type, because then every agent has to learn the new vocabulary.
 
 Each outcome must be enforceable from a single page state. Outcomes are not assertions-in-time; they are assertions-on-state. If you need a sequence ("after step 3 the cart is empty, after step 5 it has 3 items"), write two outcomes and pin them to their step.
 
 ```yaml
 outcomes:
   - id: cart-empty-after-clear
-    count: { path: "[data-testid='cart-count']", equals: 0 }
+    count: { selector: "[data-testid='cart-count']", equals: 0 }
   - id: cart-three-after-add
-    count: { path: "[data-testid='cart-count']", equals: 3 }
+    count: { selector: "[data-testid='cart-count']", equals: 3 }
 ```
 
 ## Steps are hints, not scripts
 
-A `step` is an instruction a code generator (you) or a runtime (cairn) might rewrite without changing the contract. Steps must use the typed step vocabulary too (`open`, `wait`, `type`, `click`, `key`, `keypress`, `run`, `request`, `screenshot`, `batch`, `controls`, `script`, `checkpoint`, `capture`, `paste`, `eval`, `scroll`, `hover`). Free-form prose inside a `script:` step is allowed, but if you find yourself reaching for it, stop and ask whether one of the typed steps already encodes the intent.
+A `step` is an instruction a code generator (you) or a runtime (cairn) might rewrite without changing the contract. Steps must use the typed step vocabulary too (`open`, `wait`, `click`, `hover`, `fill`, `type`, `press`, `scroll`, `upload`, `download`, `transform`, `request`, `snapshot`, `use`, `batch`, `eval`, `monitor`). Free-form prose inside an `eval:` step is allowed, but if you find yourself reaching for it, stop and ask whether one of the typed steps already encodes the intent.
 
 The same locator philosophy that drives `playwright` should drive cairn: prefer semantic locators (`by: role|label|text`), fall back to `data-testid`, and only touch CSS/XPath when nothing else survives.
 
@@ -45,7 +45,7 @@ steps:
   - open: { path: "/settings" }
   - click: { by: { role: tab, name: "API tokens" } }
   - click: { by: { role: button, name: "Rotate token" } }
-  - confirm: { by: { role: button, name: "Yes, rotate" } }
+  - click: { by: { role: button, name: "Yes, rotate" } }
 ```
 
 ## Cold-start is not optional

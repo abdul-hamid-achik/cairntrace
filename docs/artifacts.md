@@ -4,7 +4,7 @@ Every `cairn run` writes a self-contained **artifact pack** to a directory on di
 
 ## Where artifacts land
 
-`<run-dir>` defaults to `./run/<spec-base-name>-<YYYY-MM-DDTHH-MM-SS>-<short-id>/`. Override with `--out <dir>` or set `run.out` in `cairntrace.config.yml`.
+`<run-dir>` defaults to `~/.cairntrace/runs/<spec-base-name>-<YYYY-MM-DDTHH-MM-SS>-<short-id>/`. Override with `--artifact-root <path>` or set `artifactRoot` in `cairntrace.config.yml`.
 
 ```
 run/my-spec-2026-06-29T18-22-04-c5a3/
@@ -21,8 +21,8 @@ run/my-spec-2026-06-29T18-22-04-c5a3/
 │   └── <id>.raw.json     # full return value (only for `script:` outcomes)
 ├── snapshots/            # accessibility snapshots per step (when enabled)
 ├── screenshots/          # viewport PNGs per step (when enabled)
-├── console/              # console.ndjson (when enabled)
-├── network/              # network.har + network.ndjson (when enabled)
+├── console/              # console.ndjson + errors.ndjson (when enabled)
+├── network/              # requests.ndjson (when enabled)
 ├── frames/frames.ndjson  # per-step frame markers (when recording)
 └── raw/                  # any backend-provided raw artifacts (PTY logs, video, etc.)
 ```
@@ -105,16 +105,16 @@ The redaction layer catches these on the way out. If you see one anyway, that's 
 - Bearer tokens, API keys, basic-auth credentials.
 - Postgres / MySQL connection strings.
 - AWS / GCP access keys.
-- Anything matching a user-supplied regex (`cairntrace.config.yml > redaction.patterns`).
+- Anything you list in the spec's `redaction:` block (literal `values`, plus `headers`/`queryParams`/`storageKeys`), and anything whose key matches the built-in sensitive-key heuristic (`authorization`, `cookie`, `token`, `secret`, `password`, `api_key`, …).
 
-The redactor compiles the patterns on construction, and the runner applies it to every captured field — `network.har` body fields, console messages, even script return values that contain the redacted shape.
+The redactor scrubs on the way out — literal secret values are replaced with `[redacted]`, sensitive keys are zeroed, and `Authorization`/`Cookie` header lines and token-bearing query params are stripped via built-in patterns. It applies to every captured field: `network/` bodies, console messages, even `eval`/`script` return values.
 
 ## Sharing an artifact pack
 
 A run dir is a directory. Compress it (`tar -czf my-spec-run.tgz run/my-spec-2026-...`) and you can:
 
 - Email it to a teammate — `report.html` opens in any browser.
-- Host it on the local-first stash (`cairn stash save <run-dir> --name <label>`).
+- Host it on the local-first stash (`cairn stash save <run-id> --tag <label>`).
 - Hand it to a repair bot. The repair engine reads the agent context and proposes step rewrites against `spec.yml`.
 
 Anywhere the directory is mounted, the data is self-describing. Nothing required to read it other than a markdown viewer.

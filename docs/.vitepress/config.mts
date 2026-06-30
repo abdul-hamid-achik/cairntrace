@@ -23,6 +23,7 @@ export default defineConfig({
       { text: 'Authoring', link: '/authoring' },
       { text: 'Reference', link: '/steps' },
       { text: 'Agents', link: '/agents' },
+      { text: 'Commands', link: '/commands' },
     ],
 
     sidebar: {
@@ -49,6 +50,22 @@ export default defineConfig({
             { text: 'Troubleshooting', link: '/troubleshooting' },
             { text: 'Glyphrun Comparison', link: '/glyphrun-comparison' },
             { text: 'Topics', link: '/topics' },
+          ],
+        },
+        {
+          text: 'Commands',
+          items: [
+            { text: 'All commands', link: '/commands' },
+            { text: 'Doctor & clean', link: '/doctor' },
+            { text: 'Discover & snapshot', link: '/discover' },
+            { text: 'Checkpoints & login', link: '/checkpoint' },
+            { text: 'Stash', link: '/stash' },
+            { text: 'Clip', link: '/clip' },
+            { text: 'Process monitoring', link: '/monitor' },
+            { text: 'Investigate & audit', link: '/investigate' },
+            { text: 'Annotate', link: '/annotate' },
+            { text: 'Secrets', link: '/secrets' },
+            { text: 'Services', link: '/services' },
           ],
         },
         {

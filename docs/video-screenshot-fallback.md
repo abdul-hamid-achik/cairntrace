@@ -1,7 +1,6 @@
 # Video recording fallback for backends without native recording (screenshot timelapse)
 
-**Status:** Proposed (targets 1.14.0). Motivated by recording a demo of an OPG-15061 fix on the
-graphite SPA, where neither backend could practically produce a video.
+**Status:** Proposed (not yet implemented). Motivated by recording a demo of an OPG-15061 fix on the graphite SPA, where neither backend could practically produce a video.
 
 ## Problem
 

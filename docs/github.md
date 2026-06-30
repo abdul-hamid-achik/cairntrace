@@ -1,41 +1,57 @@
 # GitHub
 
-Cairntrace development happens on `main`, with GitHub Actions enforcing the same checks locally and in CI. Releases are git tags mirrored as GitHub release pages; cairntrace is **not** published to npm or any other registry.
+Cairntrace development happens on `main`, with a single GitHub Actions workflow enforcing the same checks locally and in CI. Releases are git tags mirrored as GitHub release pages; cairntrace is **not** published to npm or any other registry — it installs by clone + `bun install` (see [Distribution](/distribution)).
 
 ## Repository layout
 
-- `cmd/cairn/` — entrypoint, dispatches CLI vs MCP.
-- `internal/spec/` — spec parsing, validation, contract hash.
-- `internal/core/` — runner + outcome evaluator.
-- `internal/adapters/` — browser-backend adapters (`agent-browser`, `Playwright`, `Mock`).
-- `internal/mcp/` — stdio MCP server.
-- `internal/cli/` — cobra command handlers (thin).
-- `specs/` — glyphrun E2E specs (`*.yml`).
-- `examples/` — demo app + spec YAMLs meant to be copied.
-- `docs/` — this site.
-- `AGENTS.md` / `CLAUDE.md` — agent guidance.
+```
+bin/cairn          bun shebang launcher (the CLI + MCP entrypoint)
+src/
+  cli/             commands/* — one file per CLI subcommand (commander)
+  core/
+    parser/        parseSpec (YAML + zod + ${X} substitution + imports + baseUrl)
+    runner/        Runner, OutcomeEvaluator, verifiers/, services lifecycle
+    artifacts/     ArtifactWriter, renderers/, evidence, agentContext
+    schema/        zod-first schemas (spec.v1, verifier.v1, config.v1, …)
+    checkpoint/    CheckpointStore (~/.cairntrace/checkpoints/<name>.json)
+    config/        loader for cairntrace.config.yml
+    contractHash   sha256 over intent + outcomes
+    healer/        snapshotParser, Healer
+  adapters/
+    agent-browser/ real backend (commandBuilder + AgentBrowserAdapter)
+    playwright/    Playwright backend (native traces, video, HAR)
+    mock/          MockBrowserBackend for tests + --mock
+  mcp/             buildMcpServer() — tools mirror the CLI surface
+examples/          demo-app + spec YAMLs (see examples/README.md)
+docs/              this VitePress site
+AGENTS.md / CLAUDE.md — agent guidance
+```
 
-The dependency direction is one-way: `cmd → core → {spec, adapters, mcp, cli}`. The CLI, MCP, and any future surface are thin callers of `internal/core` — never the reverse.
+The dependency direction is one-way: `cli → core → {adapters, mcp}`. The CLI, MCP, and any future surface are thin callers of `src/core` — never the reverse. No per-agent code paths live in core.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every PR. The CI matrix mirrors what `bun run verify` does locally:
+`.github/workflows/ci.yml` runs on every push to `main` and every PR (concurrency cancels superseded runs on the same ref). The job:
 
-1. `lefthook pre-commit` — typecheck (TS), lint (oxlint), format check (oxfmt), knip, vitest.
-2. Build the CLI artifact.
-3. Glyphrun flow suite (skipped on cold runners because they need a real browser backend).
-4. Mark release artifacts into GitHub Releases on tag.
+1. Sets up Bun (latest) + installs deps (`bun install`).
+2. Installs Playwright Chromium (`bunx playwright install --with-deps chromium`).
+3. Runs `bun run verify` — typecheck (`tsc --noEmit`), lint (`oxlint`), format check (`oxfmt`), knip, and the vitest suite (coverage threshold 80%).
+4. Smoke-runs a real spec end-to-end against Chromium: boots `examples/demo-app/server.ts`, waits for it to answer on `:8787`, then `./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright`.
 
-A red CI on `main` is a P1. Open a revert PR before shipping the next fix.
+A red CI on `main` is a P1. Open a revert PR before shipping the next fix. CI runs the same `bun run verify` you run locally — if it fails locally, it fails in CI.
 
 ## Releases
 
+Releases are SemVer tags mirrored to GitHub releases. Bump only `package.json`'s `version` in the release commit, then:
+
 ```bash
-git tag -s v1.25.0 -m "v1.25.0 — codemap integration"
-git push origin v1.25.0
+git tag -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin main
+git push origin vX.Y.Z
+gh release create vX.Y.Z --title vX.Y.Z --generate-notes
 ```
 
-GitHub Actions handles the rest — GoReleaser builds binaries for darwin/linux × arm64/amd64, attaches them to the GitHub release, and updates the Homebrew tap via a workflow in the dedicated `homebrew-tap` repository.
+Versioning (see AGENTS.md): patch for fixes/docs/polish, minor for new agent-callable commands/steps/verifiers/stable schema fields, major for breaking CLI/spec/artifact/MCP contracts. `vX.Y.Z` tags are the only tag kind — do not create or move a floating `latest` tag; GitHub marks the newest release "Latest" automatically. Do not rewrite old tags/releases unless explicitly asked.
 
 ## Branching and PRs
 
@@ -56,18 +72,15 @@ The `AGENTS.md` and `CLAUDE.md` files pin the working rules for AI coding agents
 - Don't commit one-off scratch markdown notes — keep the repo clean.
 - Don't bypass `lefthook` or CI without calling it out in the PR body.
 
-## Homebrew tap
+## Companion tools (not cairntrace)
 
-`abdul-hamid-achik/homebrew-tap` carries the `cairn` formula, updated automatically on each GitHub release. End users that want the CLI on `$PATH`:
+`cairn doctor` checks a set of optional companion tools on `$PATH`. Each has its own install path; cairntrace itself is **not** on Homebrew — it installs by clone. The companions:
 
-```bash
-brew install abdul-hamid-achik/tap/cairn
-```
-
-That's it — no `npm install` or `bun install` step. The tap CI runs against the latest release on every push.
+- `fcheap`, `vecgrep`, `vidtrace`, `codemap`, `tvault` — install via the maintainer's Homebrew tap (e.g. `brew install abdul-hamid-achik/tap/fcheap`) or per their own docs. `cairn doctor --format md` tells you which are missing.
 
 ## See also
 
-- [Distribution](/distribution) — install paths and version pinning
+- [Distribution](/distribution) — clone-to-install, version pinning
 - [Configuration](/configuration) — config schema and env resolution
+- [Doctor & clean](/doctor) — the companion-tool availability check
 - [Overview](/overview) — what cairntrace is

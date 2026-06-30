@@ -13,4 +13,5 @@ The "intent + outcomes" pair is the contract. Steps are repairable hints. When t
 ## Where to go next
 
 - [Quickstart](/quickstart) — install `cairn` and run your first browser spec.
-- The full authoring guide, step vocabulary, and verifier reference are under way and will land in subsequent releases.
+- [Authoring](/authoring), [Steps](/steps), and [Verifiers](/verifiers) — the typed vocabularies and what makes a contract survive.
+- [Commands](/commands) — the `cairn` CLI surface: doctor, discover, checkpoints, stash, investigate, annotate, clip, process monitoring, secrets, and services.
