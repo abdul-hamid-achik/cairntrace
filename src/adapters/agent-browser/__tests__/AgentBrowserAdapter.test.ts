@@ -205,6 +205,36 @@ describe("AgentBrowserAdapter", () => {
   });
 });
 
+/**
+ * Mocked `get box @ref --json` + `eval ... --json` pair reporting the target
+ * comfortably inside a 1280x800 viewport at (0,0) scroll — the "scroll
+ * actually worked" case that `click`'s post-scroll viewport check should let
+ * through without blocking the action.
+ */
+const IN_VIEWPORT_BOX_AND_METRICS = [
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: { x: 100, y: 200, width: 80, height: 40 },
+      error: null,
+    }),
+    stderr: "",
+  },
+  {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: {
+        origin: "http://example.test",
+        result: { scrollX: 0, scrollY: 0, innerWidth: 1280, innerHeight: 800 },
+      },
+      error: null,
+    }),
+    stderr: "",
+  },
+];
+
 describe("strict semantic interaction resolution", () => {
   beforeEach(() => {
     execaMock.mockReset();
@@ -218,6 +248,8 @@ describe("strict semantic interaction resolution", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!) // get box (post-scroll check)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!) // eval viewport metrics
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // click
     const adapter = new AgentBrowserAdapter({ session: "click-test" });
 
@@ -244,11 +276,61 @@ describe("strict semantic interaction resolution", () => {
       expect.objectContaining({ reject: false }),
     );
     expect(execaMock).toHaveBeenNthCalledWith(
-      3,
+      5,
       "agent-browser",
       ["--session", "click-test", "click", "@e5"],
       expect.objectContaining({ reject: false }),
     );
+  });
+
+  it("fails the click loudly instead of silently no-op'ing when the target stays off-viewport after scrollIntoView", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Save" [ref=e9]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview (reports success but did nothing)
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          success: true,
+          data: { x: 100, y: 2358, width: 80, height: 40 },
+          error: null,
+        }),
+        stderr: "",
+      }) // get box — still far below the fold
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          success: true,
+          data: {
+            origin: "http://example.test",
+            result: {
+              scrollX: 0,
+              scrollY: 0,
+              innerWidth: 1280,
+              innerHeight: 577,
+            },
+          },
+          error: null,
+        }),
+        stderr: "",
+      }); // eval viewport metrics
+    const adapter = new AgentBrowserAdapter({ session: "fixed-footer-test" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "button", name: "Save" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("stayed off-viewport");
+    expect(result.stderr).toContain("position:fixed/sticky");
+    // The step never reached a real `click` invocation — no silent no-op.
+    expect(execaMock).toHaveBeenCalledTimes(4);
+    for (const call of execaMock.mock.calls) {
+      expect(call[1] as string[]).not.toContain("click");
+    }
   });
 
   it("fails AT the click step when nothing matches (no silent find no-op)", async () => {
@@ -284,6 +366,8 @@ describe("strict semantic interaction resolution", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
     const adapter = new AgentBrowserAdapter({ session: "case-test" });
 
@@ -369,6 +453,8 @@ describe("strict semantic interaction resolution", () => {
         stderr: "",
       })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
     const adapter = new AgentBrowserAdapter({ session: "nth-test" });
 

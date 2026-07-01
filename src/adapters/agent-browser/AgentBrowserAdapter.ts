@@ -30,8 +30,10 @@ import {
 } from "./commandBuilder";
 import {
   buildGlobalArgs,
+  parseBoxEnvelope,
   parseEnvelope,
   parseJsonArray,
+  parseViewportMetrics,
   quoteIfNeeded,
 } from "./parseOutput";
 import type { AgentBrowserOptions } from "./types";
@@ -244,7 +246,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /* ----- viewport ----- */
 
   async setViewport(width: number, height: number): Promise<void> {
-    await this.invoke(["viewport", String(width), String(height)]);
+    // agent-browser namespaces browser-settings mutators under `set` (`set
+    // viewport|device|geo|offline|headers|credentials|media`) — there is no
+    // bare top-level `viewport` command. Sending `viewport <w> <h>` hits
+    // "Unknown command: viewport" (exit 1), which the Runner's `safe()`
+    // wrapper swallows, so the configured viewport silently never applied.
+    await this.invoke(["set", "viewport", String(width), String(height)]);
   }
 
   /* ----- evaluation (script verifier escape hatch) ----- */
@@ -510,12 +517,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
    *      case-insensitive whole-name by default, visible-only (hidden nodes
    *      aren't in the a11y tree), and ambiguity is a hard error unless the
    *      locator carries `nth`.
+   *   4. `click` specifically gets an extra post-scroll viewport check (see
+   *      detectOffViewportAfterScroll): agent-browser's own `scrollintoview`
+   *      and `click` both report success even when the target sits fully
+   *      outside window.innerHeight, e.g. inside a `position: fixed`
+   *      container taller than the viewport — scrollIntoView cannot help
+   *      there (a fixed element's position doesn't change with document
+   *      scroll) yet `click` still exits 0 without the click ever landing.
    */
   private async runInteractiveStep(
     locator: Locator,
     action: "click" | "hover" | "fill" | "type" | "upload",
     value?: string,
   ): Promise<InvocationResult> {
+    const start = Date.now();
     if (locator.by === "selector") {
       // Selector locators skip snapshot resolution (agent-browser errors on
       // missing selectors already) but still get the scroll-into-view guard.
@@ -536,10 +551,72 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // itself will surface a real problem.
     await this.invoke(["scrollintoview", `@${resolved.element.ref}`]);
 
+    if (action === "click") {
+      const offViewport = await this.detectOffViewportAfterScroll(
+        resolved.element.ref!,
+      );
+      if (offViewport) {
+        return {
+          ...this.unresolvedFailure(action, start, [
+            `element resolved (${describeLocator(locator)} -> ref=${resolved.element.ref}) but stayed off-viewport after scrollIntoView: ${offViewport}`,
+            "this usually means the target is in a position:fixed/sticky container taller than the current viewport — scrollIntoView cannot bring it into view (a fixed element's position doesn't change with document scroll), and agent-browser's click would otherwise silently no-op instead of erroring",
+            "fix: widen the spec/environment `viewport: { width, height }` to fit the fixed content, or reduce the modal/dialog height in the app under test",
+          ]),
+          resolvedElement: toResolvedElement(resolved.element),
+        };
+      }
+    }
+
     const argv = [action, `@${resolved.element.ref}`];
     if (value !== undefined) argv.push(value);
     const r = await this.invoke(argv);
     return { ...r, resolvedElement: toResolvedElement(resolved.element) };
+  }
+
+  /**
+   * Best-effort, independent confirmation that a resolved element's
+   * bounding box actually falls within the live viewport after
+   * scrollIntoView. Needed because agent-browser's own actionability
+   * signals are not reliable for this case: in a local repro (fixture with a
+   * `position: fixed` dialog taller than the viewport, footer button beyond
+   * `window.innerHeight`), `scrollintoview` reports "✓ Done" with the
+   * element's box byte-for-byte unchanged, `is visible` reports `true`, and
+   * `click` exits 0 — yet `document.elementFromPoint` at the button's
+   * coordinates returns `null` and the app's click handler never fires.
+   *
+   * Returns a short human-readable reason when the target is confirmed
+   * off-viewport, or `undefined` when it's on-screen *or* when the check
+   * itself couldn't be completed (never blocks the action on an
+   * inconclusive result — e.g. an agent-browser version without `get box`).
+   */
+  private async detectOffViewportAfterScroll(
+    ref: string,
+  ): Promise<string | undefined> {
+    const boxResult = await this.invoke(["get", "box", `@${ref}`, "--json"]);
+    const box = boxResult.ok ? parseBoxEnvelope(boxResult.stdout) : undefined;
+    if (!box) return undefined;
+
+    const metricsResult = await this.invoke([
+      "eval",
+      "(() => ({ scrollX: window.scrollX, scrollY: window.scrollY, innerWidth: window.innerWidth, innerHeight: window.innerHeight }))()",
+      "--json",
+    ]);
+    const metrics = metricsResult.ok
+      ? parseViewportMetrics(metricsResult.stdout)
+      : undefined;
+    if (!metrics) return undefined;
+
+    const cx = box.x + box.width / 2 - metrics.scrollX;
+    const cy = box.y + box.height / 2 - metrics.scrollY;
+    if (
+      cx >= 0 &&
+      cx <= metrics.innerWidth &&
+      cy >= 0 &&
+      cy <= metrics.innerHeight
+    ) {
+      return undefined;
+    }
+    return `target center (${Math.round(cx)}, ${Math.round(cy)}) is outside the ${metrics.innerWidth}x${metrics.innerHeight} viewport`;
   }
 
   private locatorTimeoutMs(): number {

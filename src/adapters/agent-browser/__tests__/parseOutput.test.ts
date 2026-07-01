@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGlobalArgs,
+  parseBoxEnvelope,
   parseEnvelope,
   parseJsonArray,
+  parseViewportMetrics,
   quoteIfNeeded,
 } from "../parseOutput";
 
@@ -112,6 +114,70 @@ describe("buildGlobalArgs", () => {
     expect(
       buildGlobalArgs({ session: "x", headed: false, debug: false }),
     ).toEqual([]);
+  });
+});
+
+describe("parseBoxEnvelope", () => {
+  it("extracts x/y/width/height from a `get box --json` envelope", () => {
+    const stdout = JSON.stringify({
+      success: true,
+      data: { x: 1184.5, y: 2358.8, width: 80.4, height: 42 },
+      error: null,
+    });
+    expect(parseBoxEnvelope(stdout)).toEqual({
+      x: 1184.5,
+      y: 2358.8,
+      width: 80.4,
+      height: 42,
+    });
+  });
+
+  it("returns undefined for empty, malformed, or incomplete output", () => {
+    expect(parseBoxEnvelope("")).toBeUndefined();
+    expect(parseBoxEnvelope("not json")).toBeUndefined();
+    expect(
+      parseBoxEnvelope(
+        JSON.stringify({ success: false, data: null, error: "boom" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      parseBoxEnvelope(JSON.stringify({ success: true, data: { x: 1 } })),
+    ).toBeUndefined();
+  });
+});
+
+describe("parseViewportMetrics", () => {
+  it("extracts scroll/inner dimensions from an `eval ... --json` envelope", () => {
+    const stdout = JSON.stringify({
+      success: true,
+      data: {
+        origin: "http://example.test",
+        result: { scrollX: 0, scrollY: 0, innerWidth: 1280, innerHeight: 577 },
+      },
+      error: null,
+    });
+    expect(parseViewportMetrics(stdout)).toEqual({
+      scrollX: 0,
+      scrollY: 0,
+      innerWidth: 1280,
+      innerHeight: 577,
+    });
+  });
+
+  it("returns undefined for empty, malformed, or incomplete output", () => {
+    expect(parseViewportMetrics("")).toBeUndefined();
+    expect(parseViewportMetrics("not json")).toBeUndefined();
+    expect(
+      parseViewportMetrics(JSON.stringify({ success: true, data: {} })),
+    ).toBeUndefined();
+    expect(
+      parseViewportMetrics(
+        JSON.stringify({
+          success: true,
+          data: { result: { innerWidth: 1280 } },
+        }),
+      ),
+    ).toBeUndefined();
   });
 });
 

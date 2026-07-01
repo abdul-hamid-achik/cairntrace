@@ -3,6 +3,38 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.25.1]
+
+Two agent-browser reliability fixes that both manifested as silent no-ops.
+
+### Fixed
+- **`viewport:` was silently ignored under the agent-browser backend.**
+  `AgentBrowserAdapter.setViewport` sent `agent-browser viewport <w> <h>`, but
+  browser-settings mutators are namespaced under `set` — there is no bare
+  top-level `viewport` command. The command exited 1 ("Unknown command:
+  viewport"), `window.innerHeight` never changed, and because the Runner
+  routed `setViewport` through its error-swallowing `safe()` helper, no error
+  surfaced to the spec author — the `viewport.set` event was written
+  unconditionally and looked identical to a success. The adapter now sends
+  `set viewport <w> <h>`, and the Runner records `ok: true|false` (plus
+  `error:` on failure) on the `viewport.set` event so a broken apply is
+  visible in `events.ndjson` and diagnostics. The Playwright backend was
+  never affected (it applies viewport directly via `page.setViewportSize`).
+- **Off-viewport `click` silently no-op'd under agent-browser.** When a
+  target sits inside a `position: fixed` container taller than the viewport
+  (e.g. a modal footer button past `window.innerHeight`), `scrollintoview`
+  cannot bring it into view (a fixed element's position doesn't change with
+  document scroll), yet agent-browser's `scrollintoview`, `is visible`, and
+  `click` all report success — the click never lands and
+  `document.elementFromPoint` at the target returns `null`. `click` (only)
+  now runs an independent post-scroll viewport-membership check via `get
+  box` + `eval`, and fails the step loudly with a diagnostic when the
+  target's center is confirmed outside the live viewport, instead of
+  silently passing. The check is best-effort: an inconclusive result (older
+  agent-browser version, parse failure) never blocks the action. `hover` /
+  `fill` / `type` / `upload` and `by: selector` locators are unchanged for
+  now — extending the check there is straightforward if warranted.
+
 ## [1.23.7]
 
 The three follow-ups deferred from the v1.23.6 review.

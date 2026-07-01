@@ -287,14 +287,24 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // their page on state restore still end up at the requested size.
   const viewport = spec.viewport ?? runtime.viewport;
   if (viewport) {
-    await safe(async () =>
-      opts.backend.setViewport?.(viewport.width, viewport.height),
-    );
+    // Deliberately not routed through safe(): that helper discards the
+    // error, and a swallowed setViewport failure previously left the
+    // "viewport.set" event looking identical whether the resize actually
+    // took effect or the backend rejected/ignored it — silently misleading
+    // anyone debugging an off-viewport element. Record the outcome instead.
+    let viewportError: string | undefined;
+    try {
+      await opts.backend.setViewport?.(viewport.width, viewport.height);
+    } catch (e) {
+      viewportError = (e as Error).message;
+    }
     await writer.appendEvent({
       ts: new Date().toISOString(),
       type: "viewport.set",
       width: viewport.width,
       height: viewport.height,
+      ok: viewportError === undefined,
+      ...(viewportError ? { error: viewportError } : {}),
     });
   }
 

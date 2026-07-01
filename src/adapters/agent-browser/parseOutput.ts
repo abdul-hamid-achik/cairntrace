@@ -40,6 +40,80 @@ export function parseJsonArray<T>(stdout: string): T[] {
   }
 }
 
+export interface ElementBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Parse `get box @ref --json` output: `{ success, data: { x, y, width, height }, error }`. */
+export function parseBoxEnvelope(stdout: string): ElementBox | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      success?: boolean;
+      data?: Partial<Record<keyof ElementBox, unknown>>;
+    };
+    const d = parsed?.data;
+    if (
+      d &&
+      typeof d.x === "number" &&
+      typeof d.y === "number" &&
+      typeof d.width === "number" &&
+      typeof d.height === "number"
+    ) {
+      return { x: d.x, y: d.y, width: d.width, height: d.height };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface ViewportMetrics {
+  scrollX: number;
+  scrollY: number;
+  innerWidth: number;
+  innerHeight: number;
+}
+
+/**
+ * Parse `eval <js> --json` output for a JS object result:
+ * `{ success, data: { origin, result: { scrollX, scrollY, innerWidth, innerHeight } }, error }`.
+ */
+export function parseViewportMetrics(
+  stdout: string,
+): ViewportMetrics | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      success?: boolean;
+      data?: { result?: Partial<Record<keyof ViewportMetrics, unknown>> };
+    };
+    const r = parsed?.data?.result;
+    if (
+      r &&
+      typeof r.scrollX === "number" &&
+      typeof r.scrollY === "number" &&
+      typeof r.innerWidth === "number" &&
+      typeof r.innerHeight === "number"
+    ) {
+      return {
+        scrollX: r.scrollX,
+        scrollY: r.scrollY,
+        innerWidth: r.innerWidth,
+        innerHeight: r.innerHeight,
+      };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Build the agent-browser global-flag argv from the adapter options. */
 export function buildGlobalArgs(opts: AgentBrowserOptions): string[] {
   const a: string[] = [];
