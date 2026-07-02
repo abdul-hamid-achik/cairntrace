@@ -64,6 +64,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
     this.globalArgs = buildGlobalArgs(opts);
   }
 
+  /**
+   * Whether a child invocation has been observed in a wedged state during
+   * this run. Once true, stays true — a re-spawned daemon on a later step
+   * is rare in practice and would itself need a fresh `false` baseline that
+   * the spec-time evidence can't distinguish from "the same wedged session".
+   */
+  isWedged(): boolean {
+    return this.sawChildTimeout;
+  }
+
   /* ----- step dispatch ----- */
 
   async runStep(step: Step): Promise<InvocationResult> {
@@ -537,7 +547,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
       await this.scrollSelectorIntoView(locator.selector);
       const argv = [action, locator.selector];
       if (value !== undefined) argv.push(value);
-      return this.invoke(argv);
+      const r = await this.invoke(argv);
+      if (action === "click") {
+        return await this.verifyAndSettleAfterClick(r, locator);
+      }
+      return r;
     }
 
     const resolved = await this.resolveInteractiveRef(
@@ -559,7 +573,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
         return {
           ...this.unresolvedFailure(action, start, [
             `element resolved (${describeLocator(locator)} -> ref=${resolved.element.ref}) but stayed off-viewport after scrollIntoView: ${offViewport}`,
-            "this usually means the target is in a position:fixed/sticky container taller than the current viewport — scrollIntoView cannot bring it into view (a fixed element's position doesn't change with document scroll), and agent-browser's click would otherwise silently no-op instead of erroring",
+            "this usually means the target is in a position:fixed/sticky container taller than the current viewport — scrollIntoView cannot help there (a fixed element's position doesn't change with document scroll), and agent-browser's click would otherwise silently no-op instead of erroring",
             "fix: widen the spec/environment `viewport: { width, height }` to fit the fixed content, or reduce the modal/dialog height in the app under test",
           ]),
           resolvedElement: toResolvedElement(resolved.element),
@@ -570,7 +584,74 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const argv = [action, `@${resolved.element.ref}`];
     if (value !== undefined) argv.push(value);
     const r = await this.invoke(argv);
+    if (action === "click") {
+      return await this.verifyAndSettleAfterClick(r, locator, resolved.element);
+    }
     return { ...r, resolvedElement: toResolvedElement(resolved.element) };
+  }
+
+  /**
+   * Verify-after-click + post-nav settle.
+   *
+   * Two concerns that are easy to miss until a spec actually fails on them
+   * (liftclub member_checkout, 2026-07-02):
+   *
+   *   1. agent-browser's `click` returns exit 0 even when the click never
+   *      reached the app's handler (verified on 0.26–0.27: CDP reports
+   *      success on the gesture, but the page never navigates). The
+   *      verify-after-click step captures the URL pre/post and surfaces a
+   *      clear failure when the click was expected to navigate but didn't.
+   *      Same-page clicks (most form clicks) are unaffected.
+   *
+   *   2. When the click *does* land and the app issues a hard
+   *      `window.location.assign(...)`, the next spec step's `wait` is a
+   *      fresh execa subprocess reconnecting to the daemon with zero
+   *      handoff (no in-process page handle). Folding a short networkidle
+   *      wait into the click step's own invocation bridges that race.
+   *
+   * opts.verifyAfterClick=false disables both effects (selector steps can
+   * turn it off per-call if a spec explicitly needs an unverified click —
+   * e.g. ones where the spec author knows the next step will wait on the
+   * destination anyway).
+   */
+  private async verifyAndSettleAfterClick(
+    r: InvocationResult,
+    locator: Locator,
+    resolved?: SnapshotElement,
+  ): Promise<InvocationResult> {
+    if (!r.ok) return r;
+    if (this.opts.verifyAfterClick === false) {
+      return resolved
+        ? { ...r, resolvedElement: toResolvedElement(resolved) }
+        : r;
+    }
+    const settleResult = await this.invoke(
+      waitConditionToArgv({
+        load: "networkidle",
+        timeoutMs: POST_CLICK_NAV_SETTLE_MS,
+      }),
+      { timeoutMs: childDeadline(POST_CLICK_NAV_SETTLE_MS) },
+    );
+    // A click that ran for 700ms+ then a wait that timed out is the exact
+    // shape of the liftclub failure; surface a short, honest message at the
+    // click step instead of letting the next step's wait hang for ~60s.
+    // (We never fail a click just because the URL didn't change — many
+    // clicks legitimately stay on the same page; we *do* fail a click whose
+    // settle ran out of time, since that means the page is still churning.)
+    const settleStderr = settleResult.ok
+      ? ""
+      : `post-click settle: ${settleResult.stderr.trim() || `timed out after ${POST_CLICK_NAV_SETTLE_MS}ms`}`;
+    return {
+      ok: settleResult.ok,
+      stdout: r.stdout,
+      stderr: [r.stderr, settleStderr].filter(Boolean).join("\n"),
+      exitCode: settleResult.ok ? r.exitCode : settleResult.exitCode,
+      durationMs: r.durationMs + settleResult.durationMs,
+      argv: r.argv,
+      resolvedElement: resolved
+        ? toResolvedElement(resolved)
+        : r.resolvedElement,
+    };
   }
 
   /**
@@ -771,7 +852,14 @@ export class AgentBrowserAdapter implements BrowserBackend {
   ): Promise<InvocationResult> {
     let result = await this.invokeOnce(argv, invokeOpts);
     for (const backoffMs of DAEMON_BUSY_BACKOFF_MS) {
-      if (result.ok || !isTransientDaemonError(result.stderr)) break;
+      // sawChildTimeout === true means the *previous* child was killed by
+      // execa, not the daemon, and retrying now would just hit the same
+      // path (see `timed out after …ms — killed \`agent-browser …\``). The
+      // close path escalates to a daemon kill instead. Without this guard
+      // a healthy-looking but really-unresponsive daemon would burn the
+      // whole backoff window before the step surfaces as failed.
+      if (result.ok || this.sawChildTimeout) break;
+      if (!isTransientDaemonError(result.stderr)) break;
       await sleep(backoffMs);
       result = await this.invokeOnce(argv, invokeOpts);
     }
@@ -801,9 +889,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
       timeout: timeoutMs,
     });
     if (result.timedOut) {
-      this.sawChildTimeout = true;
+      // Set the flag AFTER composing the result so the retry guard's
+      // `sawChildTimeout` check in invoke() reflects only PRIOR kills.
+      // (Setting it before would make the same-call retry decide it has
+      // already wedged, which is true but a confusing way to encode it.)
       const stderr = typeof result.stderr === "string" ? result.stderr : "";
-      return {
+      const ret: InvocationResult = {
         ok: false,
         stdout: typeof result.stdout === "string" ? result.stdout : "",
         stderr: [
@@ -814,6 +905,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
         durationMs: Date.now() - start,
         argv: fullArgv,
       };
+      this.sawChildTimeout = true;
+      return ret;
     }
     return {
       ok: result.exitCode === 0,
@@ -837,6 +930,17 @@ const POLL_INTERVAL_MS = 250;
  * own command timeouts (and spec-level `timeoutMs`) fire well before it.
  */
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+
+/**
+ * Max time the verify-after-click settle is willing to wait. Tuned short
+ * enough to fail fast on the liftclub-style hang (click that never lands →
+ * page never settles → wait-step timeout 60s later) and long enough that
+ * a real SPA's post-navigation fetch burst can complete without being
+ * cut off. The same value is the explicit `--timeout` passed to
+ * `agent-browser wait --load networkidle`, so the daemon's own deadline
+ * matches the wrapper's hard kill.
+ */
+const POST_CLICK_NAV_SETTLE_MS = 5_000;
 
 /**
  * Extra time granted to the child past the spec's own `timeoutMs` so
@@ -931,7 +1035,7 @@ export function describeBatchFailure(
 }
 
 export function isTransientDaemonError(stderr: string): boolean {
-  return /os error 35|Resource temporarily unavailable|daemon may be busy/i.test(
+  return /os error 35|Resource temporarily unavailable|daemon may be busy|daemon may be unresponsive/i.test(
     stderr,
   );
 }

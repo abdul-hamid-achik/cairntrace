@@ -41,4 +41,13 @@ export interface AgentBrowserOptions {
   debug?: boolean;
   /** Extra global args to pass through. */
   extraGlobalArgs?: string[];
+  /**
+   * Enable the verify-after-click + post-nav settle guard. When true (the
+   * default), every click step is followed by a short networkidle wait and
+   * clicks whose settle times out fail at the click step instead of
+   * hanging the next step's wait. Set to false for backends / scenarios
+   * where a click is expected to NOT navigate and the next spec step does
+   * its own waiting.
+   */
+  verifyAfterClick?: boolean;
 }

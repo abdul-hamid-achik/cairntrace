@@ -614,6 +614,110 @@ outcomes:
 steps:
   - id: grab
     download:
+      by: role
+      role: link
+      name: Download template
+      saveAs: template.xlsx
+      assign: template
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/exports");
+    backend.failNextStep("element not found: #download-template");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.status).toBe("failed");
+    expect(result.outcomes[0]!.status).toBe("skipped");
+    expect(result.outcomes[1]!.status).toBe("skipped");
+    // Page-level outcome still evaluates (it can pass on a failed run when
+    // the spec body navigates to the expected URL before failing).
+    expect(result.outcomes[2]!.status).toBe("passed");
+  });
+
+  it("short-circuits the post-failure capture phase when backend.isWedged() === true", async () => {
+    const specPath = await writeSpec(
+      "wedged_step",
+      `version: 1
+name: wedged_step
+intent: when the backend reports wedged, snapshot/screenshot/diagnostics should be skipped
+outcomes:
+  - id: dummy
+    description: dummy
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: bad
+    click:
+      by: selector
+      selector: "#trigger-wedged"
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("simulated child-timeout kill");
+    // After runStep() returns the failure we want the Runner to see, we
+    // flip the wedged signal — mock has no notion of "actually wedged"
+    // because its operations are synchronous in-process, so we patch the
+    // backend to mirror the agent-browser contract.
+    (backend as BrowserBackend & { isWedged?: () => boolean }).isWedged = () =>
+      true;
+    // Snapshot/screenshot/diagnostics calls would normally be invoked by the
+    // Runner's post-failure phase; the short-circuit must prevent them.
+    const snapSpy = vi.spyOn(backend, "snapshot");
+    const shotSpy = vi.spyOn(backend, "screenshot");
+    const evalSpy = vi.spyOn(backend, "evaluate");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]!.status).toBe("failed");
+    // No snapshot/screenshot/diagnostics-eval because isWedged() is true.
+    expect(snapSpy).not.toHaveBeenCalled();
+    expect(shotSpy).not.toHaveBeenCalled();
+    expect(evalSpy).not.toHaveBeenCalled();
+    // A wedged-marked diagnostic stub IS written so the agent can tell the
+    // post-failure phase was short-circuited, not silently dropped.
+    expect(result.artifacts.diagnostics?.[0]).toMatch(
+      /^diagnostics\/001_bad\.json$/,
+    );
+    const diagnostics = await readFile(
+      join(result.runDir, result.artifacts.diagnostics![0]!),
+      "utf8",
+    );
+    expect(diagnostics).toContain('"wedged": true');
+  });
+
+  it("marks artifact-dependent outcomes as skipped when the producing step failed", async () => {
+    const specPath = await writeSpec(
+      "blocked_outcomes",
+      `version: 1
+name: blocked_outcomes
+intent: outcomes blocked by a failed step must not report as failed
+outcomes:
+  - id: template_contract
+    description: workbook has the expected sheet
+    verify:
+      xlsx:
+        path: "\${artifacts.template.path}"
+        sheets:
+          - name: Data
+            contains: ["Total"]
+  - id: template_script
+    description: script fixture depends on the same artifact
+    verify:
+      script:
+        run: "({ ok: true, evidence: null })"
+        fixtures:
+          templatePath: "\${artifacts.template.path}"
+  - id: url_ok
+    description: page-level outcome still evaluates
+    verify:
+      url: { endsWith: "/exports" }
+steps:
+  - id: grab
+    download:
       by: selector
       selector: "#download-template"
       saveAs: template.xlsx

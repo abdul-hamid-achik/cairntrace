@@ -213,6 +213,19 @@ export interface BrowserBackend {
    * an owned process (e.g. a remote browser) omit it and monitoring no-ops.
    */
   browserPid?(): number | undefined;
+  /**
+   * Whether the backend's process has been observed in a wedged state during
+   * this run. When true, follow-up operations (snapshot, screenshot, post-failure
+   * diagnostics, even the next step) should be skipped or shortcut — the agent's
+   * sub-process has already been killed and the daemon is suspect, so another
+   * invocation would either hang or just add wall time without yielding useful
+   * evidence. Backends that don't track this (Playwright, mock) return false.
+   *
+   * Cairn flips this on after a child-timeout kill in the agent-browser adapter;
+   * the Runner's post-failure diagnostics phase checks it before issuing more
+   * commands, and the close path escalates to a daemon kill when it's set.
+   */
+  isWedged?(): boolean;
 
   /* ----- lifecycle ----- */
   close(): Promise<InvocationResult>;

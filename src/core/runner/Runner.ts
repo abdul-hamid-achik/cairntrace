@@ -637,50 +637,29 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // spawns its daemon lazily), so retry starting the sampler each step.
     maybeStartSampler();
 
-    // Capture snapshot and (on failure or always) screenshot.
-    if (
-      policy.snapshots === "always" ||
-      (policy.snapshots === "on-failure" && stepStatus !== "passed")
-    ) {
-      const rel = `snapshots/${pad(i + 1)}_${stepId}.txt`;
-      const snap = await safe(() => opts.backend.snapshot());
-      if (snap && snap.ok) {
-        await Bun_writeFile(writer.resolve(rel), redactor.text(snap.text));
-        latestSnapshot = rel;
-        stepArtifacts.push(rel);
-        await writer.appendEvent({
-          ts: new Date().toISOString(),
-          type: "artifact.snapshot",
-          stepId,
-          path: rel,
-        });
-      }
-    }
-    const shouldShoot =
-      policy.screenshots === "always" ||
-      (policy.screenshots === "on-failure" && stepStatus !== "passed");
-    if (shouldShoot) {
-      const rel = `screenshots/${pad(i + 1)}_${stepId}.png`;
-      const shot = await safe(() =>
-        opts.backend.screenshot({ path: writer.resolve(rel) }),
-      );
-      if (shot && shot.ok) {
-        latestScreenshot = rel;
-        stepArtifacts.push(rel);
-        await writer.appendEvent({
-          ts: new Date().toISOString(),
-          type: "artifact.screenshot",
-          stepId,
-          path: rel,
-        });
-      }
-    }
-    if (stepStatus !== "passed") {
+    // When the backend is wedged, every follow-up subprocess (snapshot,
+    // screenshot, diagnostics-eval) re-queues behind an unresponsive daemon
+    // and just adds wall time without yielding useful evidence. Skip the
+    // post-failure capture phase and record a single artifact noting the
+    // short-circuit. The close() call further down escalates to a daemon
+    // kill for the same reason.
+    if (opts.backend.isWedged?.()) {
       const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
-      const captured = await captureDiagnostics(opts.backend, step, stepError);
       await Bun_writeFile(
         writer.resolve(rel),
-        redactor.text(renderDiagnostics(captured)),
+        redactor.text(
+          JSON.stringify(
+            {
+              stepId,
+              status: stepStatus,
+              stepError,
+              wedged: true,
+              note: "backend reported isWedged() === true after a child-timeout kill; post-failure capture was skipped to avoid hitting the unresponsive daemon. The close path will escalate to a daemon kill.",
+            },
+            null,
+            2,
+          ) + "\n",
+        ),
         true,
       );
       latestDiagnostics = rel;
@@ -691,7 +670,69 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         type: "artifact.diagnostics",
         stepId,
         path: rel,
+        wedged: true,
       });
+    } else {
+      // Capture snapshot and (on failure or always) screenshot.
+      if (
+        policy.snapshots === "always" ||
+        (policy.snapshots === "on-failure" && stepStatus !== "passed")
+      ) {
+        const rel = `snapshots/${pad(i + 1)}_${stepId}.txt`;
+        const snap = await safe(() => opts.backend.snapshot());
+        if (snap && snap.ok) {
+          await Bun_writeFile(writer.resolve(rel), redactor.text(snap.text));
+          latestSnapshot = rel;
+          stepArtifacts.push(rel);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.snapshot",
+            stepId,
+            path: rel,
+          });
+        }
+      }
+      const shouldShoot =
+        policy.screenshots === "always" ||
+        (policy.screenshots === "on-failure" && stepStatus !== "passed");
+      if (shouldShoot) {
+        const rel = `screenshots/${pad(i + 1)}_${stepId}.png`;
+        const shot = await safe(() =>
+          opts.backend.screenshot({ path: writer.resolve(rel) }),
+        );
+        if (shot && shot.ok) {
+          latestScreenshot = rel;
+          stepArtifacts.push(rel);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.screenshot",
+            stepId,
+            path: rel,
+          });
+        }
+      }
+      if (stepStatus !== "passed") {
+        const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
+        const captured = await captureDiagnostics(
+          opts.backend,
+          step,
+          stepError,
+        );
+        await Bun_writeFile(
+          writer.resolve(rel),
+          redactor.text(renderDiagnostics(captured)),
+          true,
+        );
+        latestDiagnostics = rel;
+        diagnostics.push(rel);
+        stepArtifacts.push(rel);
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "artifact.diagnostics",
+          stepId,
+          path: rel,
+        });
+      }
     }
 
     const durationMs = Date.now() - stepStart;

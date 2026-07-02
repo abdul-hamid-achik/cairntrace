@@ -250,7 +250,8 @@ describe("strict semantic interaction resolution", () => {
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!) // get box (post-scroll check)
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!) // eval viewport metrics
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // click
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // post-click settle (wait --load networkidle)
     const adapter = new AgentBrowserAdapter({ session: "click-test" });
 
     const result = await adapter.runStep({
@@ -263,18 +264,8 @@ describe("strict semantic interaction resolution", () => {
       name: "Cobrar plan",
       ref: "e5",
     });
-    expect(execaMock).toHaveBeenNthCalledWith(
-      1,
-      "agent-browser",
-      ["--session", "click-test", "snapshot", "-i"],
-      expect.objectContaining({ reject: false }),
-    );
-    expect(execaMock).toHaveBeenNthCalledWith(
-      2,
-      "agent-browser",
-      ["--session", "click-test", "scrollintoview", "@e5"],
-      expect.objectContaining({ reject: false }),
-    );
+    // 1 snapshot + 1 scrollintoview + 1 get box + 1 eval metrics + 1 click + 1 wait (settle) = 6
+    expect(execaMock).toHaveBeenCalledTimes(6);
     expect(execaMock).toHaveBeenNthCalledWith(
       5,
       "agent-browser",
@@ -332,7 +323,6 @@ describe("strict semantic interaction resolution", () => {
       expect(call[1] as string[]).not.toContain("click");
     }
   });
-
   it("fails AT the click step when nothing matches (no silent find no-op)", async () => {
     execaMock.mockResolvedValue({
       exitCode: 0,
@@ -368,7 +358,10 @@ describe("strict semantic interaction resolution", () => {
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "/x", stderr: "" }) // pre-settle get url
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // wait
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "/x", stderr: "" }); // post-settle get url
     const adapter = new AgentBrowserAdapter({ session: "case-test" });
 
     const result = await adapter.runStep({
@@ -455,7 +448,10 @@ describe("strict semantic interaction resolution", () => {
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "/y", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "/y", stderr: "" });
     const adapter = new AgentBrowserAdapter({ session: "nth-test" });
 
     const result = await adapter.runStep({
@@ -769,6 +765,150 @@ describe("daemon teardown", () => {
     adapter.terminateSync();
 
     expect(execaMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("isWedged signal", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("is false on a fresh adapter and flips to true after a child timeout", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "wedged-signal" });
+
+    expect(adapter.isWedged()).toBe(false);
+    await adapter.runStep({ open: "/x" });
+    expect(adapter.isWedged()).toBe(false);
+
+    execaMock.mockResolvedValueOnce({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    await adapter.runStep({ wait: { text: "x", timeoutMs: 1_000 } });
+    expect(adapter.isWedged()).toBe(true);
+  });
+});
+
+describe("verify-after-click + post-nav settle", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("passes when the URL is already stable across pre/post (no nav)", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Toggle" [ref=e1]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // post-click settle
+    const adapter = new AgentBrowserAdapter({ session: "stable-url" });
+
+    const r = await adapter.runStep({
+      click: { by: "role", role: "button", name: "Toggle" },
+    });
+    expect(r.ok).toBe(true);
+    // The settle fold is the only thing that distinguishes this from the
+    // non-verify case — it issues a `wait --load networkidle` after the
+    // click. Call #6 is that wait (1 snapshot + 1 scrollintoview + 1 get
+    // box + 1 eval metrics + 1 click + 1 wait = 6).
+    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    expect(settleCall).toContain("wait");
+    expect(settleCall).toContain("--load");
+    expect(settleCall).toContain("networkidle");
+  });
+
+  it("fails the click at the click step when the post-click settle times out", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "ELEGIR PLAN" [ref=e22]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
+      .mockResolvedValueOnce({
+        timedOut: true,
+        exitCode: undefined,
+        stdout: "",
+        stderr: "",
+      }); // post-click settle times out
+    const adapter = new AgentBrowserAdapter({ session: "wedged-click" });
+
+    const r = await adapter.runStep({
+      click: { by: "role", role: "button", name: "ELEGIR PLAN" },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toContain("post-click settle");
+    // sawChildTimeout flipped — close() will now escalate to a daemon kill.
+    expect(adapter.isWedged()).toBe(true);
+  });
+
+  it("does not run the settle fold when verifyAfterClick is false", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Cancel" [ref=e1]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({
+      session: "verify-off",
+      verifyAfterClick: false,
+    });
+
+    await adapter.runStep({
+      click: { by: "role", role: "button", name: "Cancel" },
+    });
+    // No settle, no extra get url.
+    expect(execaMock).toHaveBeenCalledTimes(5);
+  });
+
+  it("retries the adapter's own 'daemon may be unresponsive' timeout message", async () => {
+    // Mirrors the liftclub pattern: a click that doesn't land produces
+    // a 30s agent-browser --timeout hit, surfacing the adapter's own
+    // generated stderr. The fixed regex now matches it for one retry.
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Submit" [ref=e1]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
+      .mockResolvedValueOnce({
+        timedOut: true,
+        exitCode: undefined,
+        stdout: "",
+        stderr: "",
+      }) // settle times out — invoke retries once on the transient-daemon regex
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // settle retry succeeds
+    const adapter = new AgentBrowserAdapter({ session: "retry-unresponsive" });
+
+    await adapter.runStep({
+      click: { by: "role", role: "button", name: "Submit" },
+    });
+    // 1 snapshot + 1 scrollintoview + 1 get box + 1 metrics + 1 click + 1 settle
+    // (the retry short-circuits because sawChildTimeout is now true). The
+    // retry guard breaks the backoff loop after one attempt — but with
+    // sawChildTimeout set BEFORE the retry the guard's `if (this.sawChildTimeout)
+    // break` fires, so we get one settle invocation total here. = 6.
+    expect(adapter.isWedged()).toBe(true);
+    expect(execaMock).toHaveBeenCalledTimes(6);
   });
 });
 
