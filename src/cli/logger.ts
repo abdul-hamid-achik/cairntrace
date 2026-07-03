@@ -51,6 +51,15 @@ const LEVEL_TAG: Record<LogLevel, string> = {
   silent: "",
 };
 
+// Scannable level indicators (rendered before the tag in human format).
+const LEVEL_ICON: Record<LogLevel, string> = {
+  debug: "·",
+  info: "›",
+  warn: "⚠",
+  error: "✗",
+  silent: "",
+};
+
 /* ----- ANSI color theme (centralized; replaces scattered escape literals) ----- */
 
 const C = {
@@ -58,6 +67,7 @@ const C = {
   dim: "\x1b[2m",
   bold: "\x1b[1m",
   red: "\x1b[31m",
+  green: "\x1b[32m",
   yellow: "\x1b[33m",
   cyan: "\x1b[36m",
 };
@@ -73,6 +83,34 @@ function levelColor(level: LogLevel): string {
     default:
       return "";
   }
+}
+
+/**
+ * Heuristic colorization for live subprocess output (docker/seed/tmux panes):
+ * error-ish lines red, warning-ish lines yellow, success-ish lines green.
+ * Conservative keyword match — only obvious signals are colored. When color
+ * is off, the line is returned unchanged.
+ */
+function colorizeRaw(line: string, color: boolean): string {
+  if (!color || line === "") return line;
+  if (
+    /\b(error|failed|failure|fatal|cannot|undefined|exception|throw)\b/i.test(
+      line,
+    )
+  ) {
+    return `${C.red}${line}${C.reset}`;
+  }
+  if (/\b(warn(ing)?|deprecated)\b/i.test(line)) {
+    return `${C.yellow}${line}${C.reset}`;
+  }
+  if (
+    /\b(listening|ready|connected|started|compiled|done in|✓|success)\b/i.test(
+      line,
+    )
+  ) {
+    return `${C.green}${line}${C.reset}`;
+  }
+  return line;
 }
 
 /** Render structured fields as ` dim key=value` pairs, JSON-stringified values. */
@@ -148,13 +186,24 @@ class Logger {
   }
 
   /**
-   * Unformatted passthrough for live subprocess output (docker/seed streaming).
-   * Written as-is to stderr when level <= info; suppressed by `--quiet`/warn+.
-   * Never rendered with level tags or timestamps — it is the child's own output.
+   * Passthrough for live subprocess output (docker/seed/tmux pane streaming).
+   * Shown when level <= info; suppressed by `--quiet`/warn+. When color is on,
+   * lines are heuristically colorized (errors red, warnings yellow, success
+   * green) so a streaming build/startup tail is scannable at a glance. The
+   * content is otherwise the child's own output — no level tags/timestamps.
    */
   raw(chunk: string): void {
     if (LEVEL_WEIGHT[this.opts.level] > LEVEL_WEIGHT.info) return;
-    process.stderr.write(chunk);
+    if (!this.opts.color) {
+      process.stderr.write(chunk);
+      return;
+    }
+    process.stderr.write(
+      chunk
+        .split("\n")
+        .map((l) => colorizeRaw(l, this.opts.color))
+        .join("\n"),
+    );
   }
 
   private write(
@@ -176,14 +225,16 @@ class Logger {
     fields: Record<string, unknown> | undefined,
   ): void {
     const color = this.opts.color;
+    const icon = LEVEL_ICON[level];
     const tag = LEVEL_TAG[level];
+    const iconStr = color ? `${levelColor(level)}${icon}${C.reset}` : icon;
     const tagStr = color ? `${levelColor(level)}${tag}${C.reset}` : tag;
     const scopeStr = this.scopeName
       ? color
         ? `${C.dim}${this.scopeName}${C.reset} `
         : `${this.scopeName} `
       : "";
-    const line = `${scopeStr}${tagStr} ${msg}${renderFields(fields, color)}`;
+    const line = `${scopeStr}${iconStr} ${tagStr} ${msg}${renderFields(fields, color)}`;
     process.stderr.write(line + "\n");
   }
 

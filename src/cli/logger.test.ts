@@ -33,6 +33,7 @@ describe("logger levels + format", () => {
 
   beforeEach(() => {
     cap = captureStderr();
+    delete process.env.NO_COLOR;
     configureLoggerFromFlags({ logLevel: "debug", color: false });
   });
 
@@ -97,6 +98,32 @@ describe("logger levels + format", () => {
     cap.lines.length = 0;
     log.raw("should be hidden\n");
     expect(cap.lines.join("")).toBe("");
+  });
+
+  it("raw() colorizes error/warn/success lines when color is on", () => {
+    configureLoggerFromFlags({ logLevel: "info" });
+    reconfigureWithConfig({ color: true }); // config.color forces color on (non-TTY)
+    log.raw("Error: something failed\n");
+    log.raw("Warning: deprecated api\n");
+    log.raw("Listening on port 9003\n");
+    log.raw("plain line\n");
+    const out = cap.lines.join("");
+    expect(out).toContain("\x1b[31mError: something failed"); // red
+    expect(out).toContain("\x1b[33mWarning: deprecated api"); // yellow
+    expect(out).toContain("\x1b[32mListening on port 9003"); // green
+    expect(out).toContain("plain line");
+    expect(out).not.toContain("\x1b[31mplain line");
+  });
+
+  it("human format renders level icons", () => {
+    configureLoggerFromFlags({ logLevel: "debug", color: false });
+    log.warn("watch out");
+    log.error("nope");
+    log.info("hi");
+    const out = cap.lines.join("");
+    expect(out).toContain("⚠");
+    expect(out).toContain("✗");
+    expect(out).toContain("›");
   });
 
   it("scope() prefixes messages and nests scopes", () => {

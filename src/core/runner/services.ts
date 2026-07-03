@@ -659,10 +659,7 @@ async function startTmux(
       cfg.session,
       win,
       deadline,
-      ctx.onOutput
-        ? (tail) =>
-            ctx.onOutput!(`\x1b[2m[tmux/${win.name} pane]\x1b[0m\n${tail}`)
-        : undefined,
+      ctx.onOutput ? (tail) => ctx.onOutput!(tail) : undefined,
     );
     emit("tmux", "ready", `"${win.name}" ready`, { window: win.name });
   }
@@ -783,6 +780,7 @@ async function waitForTmuxWindow(
 ): Promise<void> {
   if (!win.readyOn) return;
   let lastStall = 0;
+  let lastCapture = "";
   for (;;) {
     // Check URL readiness.
     if (win.readyOn.url) {
@@ -800,13 +798,23 @@ async function waitForTmuxWindow(
           (win.readyOn.text ? ` (text: "${win.readyOn.text}")` : ""),
       );
     }
-    // Periodically stream the pane tail so an indefinite wait isn't blind —
-    // the user sees the window's last lines (startup logs, errors) every few
-    // seconds instead of staring at a frozen "waiting for ready" line.
+    // Stream the pane as a live tail: capture a wide scrollback and emit only
+    // the NEW lines since the last capture, so an indefinite wait shows real
+    // progress (build/startup output) instead of re-printing the same block
+    // every interval. Idle windows (server up, no new output) emit nothing.
     if (onStall && Date.now() - lastStall >= TMUX_STALL_INTERVAL_MS) {
       lastStall = Date.now();
-      const tail = await captureTmuxPane(session, win.name);
-      if (tail) onStall(tailText(tail, 20));
+      const tail = await captureTmuxPane(session, win.name, 500);
+      if (tail && tail !== lastCapture) {
+        const delta =
+          lastCapture && tail.startsWith(lastCapture)
+            ? tail.slice(lastCapture.length)
+            : lastCapture
+              ? tailText(tail, 15)
+              : tailText(tail, 20);
+        if (delta.trim()) onStall(delta);
+        lastCapture = tail;
+      }
     }
     await sleep(POLL_MS);
   }
@@ -815,11 +823,19 @@ async function waitForTmuxWindow(
 export async function captureTmuxPane(
   session: string,
   window: string,
+  scrollbackLines = 100,
 ): Promise<string> {
   try {
     const r = await execa(
       "tmux",
-      ["capture-pane", "-p", "-t", `${session}:${window}`, "-S", "-100"],
+      [
+        "capture-pane",
+        "-p",
+        "-t",
+        `${session}:${window}`,
+        "-S",
+        `-${scrollbackLines}`,
+      ],
       { reject: false, timeout: 3_000 },
     );
     return typeof r.stdout === "string" ? r.stdout : "";
