@@ -620,7 +620,10 @@ async function startTmux(
   // Send pre-commands then the main command for the first window.
   await sendWindowCommands(cfg.session, firstWin, ctx);
 
-  // Create remaining windows.
+  // Create remaining windows. Append to the session by name (no index target)
+  // so window creation is robust to `base-index 1` / `renumber-windows on` in
+  // a user's ~/.tmux.conf — index-based insertion (`-t session:i`) collides
+  // with existing windows under those settings and mis-assigns cwds/commands.
   for (let i = 1; i < cfg.windows.length; i++) {
     const win = cfg.windows[i]!;
     await execa(
@@ -628,7 +631,7 @@ async function startTmux(
       [
         "new-window",
         "-t",
-        `${cfg.session}:${i}`,
+        cfg.session,
         "-n",
         win.name,
         ...(win.cwd ? ["-c", resolveCwd(win.cwd, ctx.configDir)] : []),

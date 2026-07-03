@@ -691,10 +691,16 @@ describe("startServices — tmux phase", () => {
         (c) => c.cmd === "tmux" && c.args.includes("new-session"),
       ),
     ).toBe(true);
-    // Should have created a second window
-    expect(
-      execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("new-window")),
-    ).toBe(true);
+    // Should have created a second window, targeting the session by NAME
+    // (not `session:index`) so creation is robust to base-index/renumber.
+    const newWindowCall = execaCalls.find(
+      (c) => c.cmd === "tmux" && c.args.includes("new-window"),
+    );
+    expect(newWindowCall).toBeDefined();
+    const targetIdx = newWindowCall!.args.indexOf("-t");
+    expect(targetIdx).toBeGreaterThan(-1);
+    expect(newWindowCall!.args[targetIdx + 1]).toBe("test-sess");
+    expect(newWindowCall!.args[targetIdx + 1]).not.toContain(":");
     // Should have sent commands
     expect(
       execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("send-keys")),
