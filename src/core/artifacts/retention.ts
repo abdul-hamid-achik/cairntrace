@@ -13,11 +13,21 @@ import { join } from "node:path";
  * prefix makes lexicographic order chronological.
  */
 
+/** Default keep-count when no `retention.keepRuns` is configured. */
+export const DEFAULT_KEEP_RUNS = 3;
+
 const RUN_DIR_PATTERN = /^\d{4}-\d{2}-\d{2}T[\dT-]+Z?_(.+)_[0-9a-f]{6}$/;
 
 export interface PruneOptions {
   /** Keep the newest N runs per spec. 0 removes everything. */
   keepRuns: number;
+  /**
+   * Best-effort archive of a run dir before deletion (e.g. to fcheap). When
+   * set, called once per pruned run; if it rejects, the run is RETAINED on
+   * disk (not deleted) so no artifacts are lost — the caller should log the
+   * failure. When unset, runs are deleted directly.
+   */
+  onArchive?: (runDir: string, runId: string) => Promise<void>;
 }
 
 export interface PruneResult {
@@ -60,6 +70,16 @@ export async function pruneRuns(
         continue;
       }
       const dir = join(artifactRoot, runId);
+      // Archive before deletion when configured. On archive failure, retain
+      // the run on disk so no artifacts are lost (move, not copy-and-lose).
+      if (opts.onArchive) {
+        try {
+          await opts.onArchive(dir, runId);
+        } catch {
+          // Archive failed — keep the run, skip deletion.
+          continue;
+        }
+      }
       result.freedBytes += await dirSize(dir);
       await rm(dir, { recursive: true, force: true });
       result.removed.push(runId);

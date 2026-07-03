@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { addEnospcHint, pruneRuns, specNameOfRunId } from "./retention";
+import {
+  addEnospcHint,
+  pruneRuns,
+  specNameOfRunId,
+  DEFAULT_KEEP_RUNS,
+} from "./retention";
 
 async function makeRunDir(root: string, runId: string): Promise<void> {
   const dir = join(root, runId);
@@ -68,6 +73,63 @@ describe("pruneRuns", () => {
       keepRuns: 5,
     });
     expect(result).toEqual({ removed: [], freedBytes: 0, kept: 0 });
+  });
+
+  it("archives pruned runs via onArchive before deletion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cairntrace-retention-archive-"));
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa");
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const archived: string[] = [];
+    const result = await pruneRuns(root, {
+      keepRuns: 1,
+      onArchive: async (runDir, runId) => {
+        archived.push(runId);
+        // Sanity: the dir still exists at archive time (move, not delete-first).
+        expect(await readdir(runDir)).toContain("run.json");
+      },
+    });
+
+    // Oldest two runs were archived then removed; newest kept.
+    expect(archived.toSorted()).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+    ]);
+    expect(result.removed.toSorted()).toEqual(archived);
+    expect(result.kept).toBe(1);
+    const remaining = (await readdir(root)).toSorted();
+    expect(remaining).toEqual(["2026-06-03T10-00-00-000Z_spec_a_cccccc"]);
+  });
+
+  it("retains a run on disk when onArchive rejects (no data loss)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cairntrace-retention-keep-"));
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa");
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const result = await pruneRuns(root, {
+      keepRuns: 1,
+      onArchive: async () => {
+        throw new Error("fcheap down");
+      },
+    });
+
+    // Nothing removed — archive failed, runs retained to avoid data loss.
+    expect(result.removed).toEqual([]);
+    expect(result.kept).toBe(1);
+    const remaining = (await readdir(root)).toSorted();
+    expect(remaining).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+  });
+});
+
+describe("DEFAULT_KEEP_RUNS", () => {
+  it("defaults to 3 (keep latest 3 runs per spec unless configured)", () => {
+    expect(DEFAULT_KEEP_RUNS).toBe(3);
   });
 });
 

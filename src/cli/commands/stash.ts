@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
+import { log } from "../logger";
 import type { OutputFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { expandSymbolQuery } from "./codemap.js";
@@ -570,11 +571,11 @@ export async function maybeAutoStash(
 
   if (r.ok) {
     const data = parseJson<StashSaveResult>(r.stdout);
-    process.stderr.write(
-      `cairn: auto-stashed run ${runId} → ${data?.stashId ?? "(unknown)"}\n`,
-    );
+    log.scope("stash").info(`auto-stashed run ${runId}`, {
+      stashId: data?.stashId ?? "(unknown)",
+    });
   } else {
-    process.stderr.write(`cairn: auto-stash failed (non-fatal): ${r.stderr}\n`);
+    log.scope("stash").warn(`auto-stash failed (non-fatal): ${r.stderr}`);
   }
 }
 

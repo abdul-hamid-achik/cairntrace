@@ -9,6 +9,9 @@ import {
 } from "vitest";
 import {
   ConfigSchema,
+  DockerConfigSchema,
+  SeedConfigSchema,
+  RetentionConfigSchema,
   TmuxConfigSchema,
   TmuxWindowSchema,
   ServicesConfigSchema,
@@ -313,6 +316,80 @@ describe("TmuxConfigSchema validations", () => {
       windows: [{ name: "web", command: "yarn start" }],
       bogus: true,
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("timeout fields accept 0 (indefinite)", () => {
+  it("accepts docker readyTimeoutMs: 0", () => {
+    const result = DockerConfigSchema.safeParse({
+      command: "docker compose up -d",
+      readyTimeoutMs: 0,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects docker readyTimeoutMs: -1", () => {
+    const result = DockerConfigSchema.safeParse({
+      command: "docker compose up -d",
+      readyTimeoutMs: -1,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts seed timeoutMs: 0", () => {
+    const result = SeedConfigSchema.safeParse({
+      command: "yarn seed",
+      timeoutMs: 0,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts tmux readyTimeoutMs: 0", () => {
+    const result = TmuxConfigSchema.safeParse({
+      session: "graphite",
+      readyTimeoutMs: 0,
+      windows: [{ name: "web", command: "yarn start" }],
+    });
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("RetentionConfigSchema defaults", () => {
+  it("applies defaults for an empty retention block", () => {
+    const result = RetentionConfigSchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.enabled).toBe(true);
+      expect(result.data.keepRuns).toBe(3);
+      expect(result.data.archiveToStash).toBe(false);
+    }
+  });
+
+  it("accepts a full retention block with archiving enabled", () => {
+    const result = RetentionConfigSchema.safeParse({
+      keepRuns: 5,
+      archiveToStash: true,
+      archiveTags: ["regression", "graphite"],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.keepRuns).toBe(5);
+      expect(result.data.archiveToStash).toBe(true);
+      expect(result.data.archiveTags).toEqual(["regression", "graphite"]);
+    }
+  });
+
+  it("allows disabling pruning via enabled: false", () => {
+    const result = RetentionConfigSchema.safeParse({ enabled: false });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.enabled).toBe(false);
+    }
+  });
+
+  it("rejects a non-positive keepRuns", () => {
+    const result = RetentionConfigSchema.safeParse({ keepRuns: 0 });
     expect(result.success).toBe(false);
   });
 });

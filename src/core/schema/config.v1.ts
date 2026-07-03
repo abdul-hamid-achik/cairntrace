@@ -78,10 +78,34 @@ export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
 
 export const RetentionConfigSchema = z
   .object({
-    /** Keep only the newest N runs per spec; pruned after every run. */
-    keepRuns: z.number().int().positive(),
+    /** Enable artifact-root pruning after every run (default: true). */
+    enabled: z.boolean().default(true),
+    /** Keep only the newest N runs per spec; pruned after every run. Default 3. */
+    keepRuns: z.number().int().positive().default(3),
+    /** Archive pruned run dirs to fcheap before deletion (default: false). */
+    archiveToStash: z.boolean().default(false),
+    /** Tags applied to every run archived by `archiveToStash`. */
+    archiveTags: z.array(z.string()).optional(),
   })
   .strict();
+
+/**
+ * Logging configuration for the CLI diagnostic/lifecycle output. All logs go
+ * to stderr (stdout is reserved for structured results). Resolved with CLI
+ * flags (--log-level/--log-format/--quiet/--verbose/--no-color) and env
+ * (CAIRN_LOG_LEVEL, CAIRN_LOG_FORMAT, NO_COLOR) overriding this block.
+ */
+export const LoggingConfigSchema = z
+  .object({
+    /** Minimum level to show: debug | info | warn | error | silent. */
+    level: z.enum(["debug", "info", "warn", "error", "silent"]).optional(),
+    /** Line format: human (colored, scoped) | json (one NDJSON object per line). */
+    format: z.enum(["human", "json"]).optional(),
+    /** Enable ANSI colors in human format (default: TTY-aware). */
+    color: z.boolean().optional(),
+  })
+  .strict();
+export type LoggingConfig = z.infer<typeof LoggingConfigSchema>;
 export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
 
 export const ReportThemeNameSchema = z.enum([
@@ -277,8 +301,8 @@ export const DockerConfigSchema = z
     cwd: z.string().optional(),
     /** Extra env merged over process.env. */
     env: z.record(z.string()).optional(),
-    /** Max ms to wait for the command to finish. Default 120000. */
-    readyTimeoutMs: z.number().int().positive().optional(),
+    /** Max ms to wait for the command to finish. Default 120000. 0 = wait indefinitely. */
+    readyTimeoutMs: z.number().int().nonnegative().optional(),
     /**
      * Reuse if containers are already running (default: true, false in CI).
      * When true, cairn checks `docker compose ps` for running containers and
@@ -321,8 +345,8 @@ export const SeedConfigSchema = z
      * Run after the TTL check passes. Exit non-zero triggers a re-seed.
      */
     freshnessCheck: z.string().min(1).optional(),
-    /** Max ms to wait for the seed command. Default 300000 (5 min). */
-    timeoutMs: z.number().int().positive().optional(),
+    /** Max ms to wait for the seed command. Default 300000 (5 min). 0 = wait indefinitely. */
+    timeoutMs: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type SeedConfig = z.infer<typeof SeedConfigSchema>;
@@ -341,8 +365,8 @@ export const TmuxConfigSchema = z
     windows: z.array(TmuxWindowSchema).min(1),
     /** Reuse if the session already exists (default: true, false in CI). */
     reuseExisting: z.boolean().optional(),
-    /** Max ms to wait for all windows to become ready. Default 90000. */
-    readyTimeoutMs: z.number().int().positive().optional(),
+    /** Max ms to wait for all windows to become ready. Default 90000. 0 = wait indefinitely. */
+    readyTimeoutMs: z.number().int().nonnegative().optional(),
     /**
      * Session-level options applied after session creation via
      * `tmux set-option -t <session> <key> <value>`. Common options:
@@ -534,6 +558,8 @@ export const ConfigSchema = z
     secrets: SecretsConfigSchema.optional(),
     /** Artifact-root pruning policy (see `cairn clean`). */
     retention: RetentionConfigSchema.optional(),
+    /** CLI logging (level/format/color); flags + env override this. */
+    logging: LoggingConfigSchema.optional(),
     /** Human-readable report artifact styling. */
     report: ReportConfigSchema.optional(),
     /** Optional server lifecycle for `cairn run` (build/boot/ready/teardown). */

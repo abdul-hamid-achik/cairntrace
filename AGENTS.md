@@ -187,12 +187,44 @@ Key rules:
   tvault provider requires tvault block with either `project` or `group`+`env`).
 - Session artifacts (tmux panes, docker logs, seed output) can be stashed to
   fcheap via `services.stash`.
+- `readyTimeoutMs: 0` (docker/tmux) and `timeoutMs: 0` (seed) wait
+  **indefinitely** instead of timing out — use for slow first-up image builds
+  or many containers. In interactive (TTY, `--format md`) runs, docker/seed
+  command stdout+stderr stream live to the terminal, and each not-yet-ready
+  tmux window's pane tail is streamed every few seconds so a stuck window
+  shows its startup logs/errors instead of a blind wait. Non-interactive/CI
+  runs stay quiet (the logger's default warn level suppresses info).
 - **Per-environment overrides:** `environments.<name>` can carry `services:`
   and `secrets:` blocks. `services: false` disables all services for that env
   (e.g. `dev`/`test` where the app is already deployed remotely). A partial
   `services:` block deep-merges over the top-level one. An env-level `secrets:`
   block replaces the top-level one entirely. This replaces the need for
   `--no-services` or `--services-dry-run` when running against remote envs.
+
+## Logging & output
+
+**Contract:** stdout is reserved for structured results (JSON/YAML/markdown
+via `--format`). All diagnostic/lifecycle logs go to **stderr** — including the
+services lifecycle narration and live subprocess output. `cairn run`/`cairn
+clean` route through the leveled logger (`src/cli/logger.ts`); other commands
+are migrating incrementally.
+
+**Verbosity** (global flags + env + config, highest priority first):
+- `--log-level <debug|info|warn|error|silent>`, `--quiet` (=warn),
+  `--verbose` (=debug). Default: info on a TTY, warn in CI/piped.
+- `--log-format <human|json>` (json = one NDJSON object per log line).
+- `--no-color` / `NO_COLOR`. `CAIRN_LOG_LEVEL` / `CAIRN_LOG_FORMAT` env.
+- `logging: { level, format, color }` in cairntrace.config.yml sets project
+  defaults that flags/env override.
+
+## Retention
+
+`retention: { keepRuns: N }` prunes the artifact root to the newest N runs per
+spec after every run (and via `cairn clean`). **Default is 3** when no
+`retention` block is set; `retention: { enabled: false }` keeps everything.
+`archiveToStash: true` archives pruned run dirs to fcheap before deletion
+(best-effort — if the archive fails the run is retained on disk so no
+artifacts are lost; `archiveTags: [...]` tags them).
 
 ## Discovery sessions
 

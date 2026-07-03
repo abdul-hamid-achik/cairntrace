@@ -33,6 +33,7 @@ import { isTvaultAvailable, getTvaultKeys } from "./commands/secrets";
 import { configValidateCommand } from "./commands/config/validate";
 import { servicesStatusCommand } from "./commands/services/status";
 import { CAIRN_VERSION } from "./version";
+import { configureLoggerFromFlags } from "./logger";
 
 const program = new Command();
 
@@ -41,7 +42,29 @@ program
   .description(
     "Cairntrace — behavioral browser-spec layer for agent-in-session use",
   )
-  .version(CAIRN_VERSION);
+  .version(CAIRN_VERSION)
+  .option(
+    "--log-level <level>",
+    "log verbosity: debug | info | warn | error | silent",
+  )
+  .option("--log-format <format>", "log line format: human | json")
+  .option("--quiet", "quiet logs (warn level); suppresses info + live output")
+  .option("--verbose", "verbose logs (debug level)")
+  .option("--no-color", "disable ANSI colors in log/interactive output");
+
+// Configure the singleton logger once, before any command action runs, from
+// the global flags + env. Commands that load cairntrace.config.yml (run/clean)
+// re-resolve with the config `logging` block so it can set a project default.
+program.hook("preAction", () => {
+  const opts = program.opts();
+  configureLoggerFromFlags({
+    logLevel: opts.logLevel,
+    logFormat: opts.logFormat,
+    quiet: opts.quiet,
+    verbose: opts.verbose,
+    color: opts.color,
+  });
+});
 
 function collectRepeatable(value: string, previous: string[]): string[] {
   return [...previous, value];
@@ -116,8 +139,7 @@ addFormatFlags(
     .option(
       "--since-codemap <ref>",
       "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
-    )
-    .option("--no-color", "disable ANSI colors in interactive output"),
+    ),
 ).action((specs: string[], opts) => runCommand(specs, opts));
 
 addFormatFlags(

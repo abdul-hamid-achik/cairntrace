@@ -173,8 +173,9 @@ function printRerunHint(
   );
 }
 
+// Progress goes to stderr — stdout is reserved for structured results.
 function out(s: string): void {
-  process.stdout.write(s);
+  process.stderr.write(s);
 }
 
 function formatMs(ms: number): string {

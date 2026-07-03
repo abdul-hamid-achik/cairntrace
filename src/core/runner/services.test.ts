@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startServices, ServicesError, type ServicesHandle } from "./services";
 import type { SeedConfig } from "../schema/config.v1";
@@ -21,6 +22,8 @@ const execaCalls: { cmd: string; args: string[] }[] = [];
 // Track shell command calls (runShell from webServer + runShellWithTimeout
 // via execa with shell:true). Keyed by the command string.
 const shellCalls: { command: string; opts: { cwd?: string } }[] = [];
+// Full opts object for shell-style execa calls (to assert timeout presence).
+const shellOptsCalls: { command: string; opts: Record<string, unknown> }[] = [];
 
 // Configurable mock implementations (reset per-test).
 let execaImpl:
@@ -35,11 +38,15 @@ let shellImpl:
       opts: unknown,
     ) => Promise<{ exitCode: number; stdout: string; stderr: string }>)
   | undefined;
+// Returns a thenable-with-streams child for the live-output (onChunk) path.
+let shellChildImpl: ((command: string, opts: unknown) => unknown) | undefined;
 let probeOnceImpl: ((url: string) => Promise<boolean>) | undefined;
 let seedStateReadResult: { shouldRun: boolean; reason: string } | undefined;
 
 vi.mock("execa", () => ({
-  execa: vi.fn(async (cmd: string, argsOrOpts: unknown) => {
+  // Non-async so a streaming child (thenable + .stdout/.stderr streams) can be
+  // returned directly without being re-wrapped in a Promise.
+  execa: vi.fn((cmd: string, argsOrOpts: unknown) => {
     // Two call patterns:
     // 1. execa("tmux", ["kill-session", ...], { opts }) — args is an array
     // 2. execa("docker compose up -d", { shell: true, cwd, env, ... }) — opts is an object
@@ -47,14 +54,22 @@ vi.mock("execa", () => ({
       // tmux/docker call: execa(cmd, argsArray, optsObject)
       const args = argsOrOpts as string[];
       execaCalls.push({ cmd, args });
-      if (execaImpl) return execaImpl(cmd, args);
-      return { exitCode: 0, stdout: "", stderr: "" };
+      return execaImpl
+        ? execaImpl(cmd, args)
+        : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
     }
-    // Shell call: execa(command, { shell: true, cwd, env, ... })
-    const opts = (argsOrOpts as { cwd?: string }) ?? {};
-    shellCalls.push({ command: cmd, opts: { cwd: opts.cwd } });
-    if (shellImpl) return shellImpl(cmd, argsOrOpts);
-    return { exitCode: 0, stdout: "", stderr: "" };
+    // Shell call: execa(command, { shell: true, cwd, env, timeout?, ... })
+    const opts = (argsOrOpts as Record<string, unknown>) ?? {};
+    shellCalls.push({
+      command: cmd,
+      opts: { cwd: opts.cwd as string | undefined },
+    });
+    shellOptsCalls.push({ command: cmd, opts });
+    return shellChildImpl
+      ? shellChildImpl(cmd, argsOrOpts)
+      : shellImpl
+        ? shellImpl(cmd, argsOrOpts)
+        : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
   }),
 }));
 
@@ -156,8 +171,10 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cairntrace-services-test-"));
   execaCalls.length = 0;
   shellCalls.length = 0;
+  shellOptsCalls.length = 0;
   execaImpl = undefined;
   shellImpl = undefined;
+  shellChildImpl = undefined;
   probeOnceImpl = undefined;
   seedStateReadResult = undefined;
   tvaultImpl = undefined;
@@ -265,6 +282,256 @@ describe("startServices — docker phase", () => {
         { configDir: dir, project: "test", coldStart: false },
       ),
     ).rejects.toThrow(/docker command failed/);
+  });
+});
+
+// Builds a thenable child carrying fake .stdout/.stderr streams that emit
+// the given lines as 'data' events on the next microtask, then resolve.
+// Lives at module scope so it isn't recreated per call (unicorn/consistent-
+// function-scoping).
+function streamingChild(
+  lines: string[],
+  exitCode = 0,
+  stderrLines: string[] = [],
+): unknown {
+  const stdout = new EventEmitter();
+  const stderr = new EventEmitter();
+  const result = {
+    exitCode,
+    stdout: lines.join(""),
+    stderr: stderrLines.join(""),
+  };
+  const child = Object.assign(Promise.resolve(result), { stdout, stderr });
+  queueMicrotask(() => {
+    for (const l of lines) stdout.emit("data", l);
+    for (const l of stderrLines) stderr.emit("data", l);
+  });
+  return child;
+}
+
+describe("startServices — indefinite wait + live output", () => {
+  it("omits the execa timeout when docker readyTimeoutMs is 0 (indefinite)", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            readyTimeoutMs: 0,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
+    const dockerCall = shellOptsCalls.find((c) =>
+      c.command.includes("docker compose up"),
+    );
+    expect(dockerCall).toBeDefined();
+    expect(dockerCall!.opts.timeout).toBeUndefined();
+  });
+
+  it("passes the execa timeout when docker readyTimeoutMs is set", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    await track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            readyTimeoutMs: 60_000,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    const dockerCall = shellOptsCalls.find((c) =>
+      c.command.includes("docker compose up"),
+    );
+    expect(dockerCall!.opts.timeout).toBe(60_000);
+  });
+
+  it("omits the execa timeout when seed timeoutMs is 0 (indefinite)", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    await track(
+      await startServices(
+        {
+          seed: { command: "yarn seed", cwd: dir, timeoutMs: 0, ttlSeconds: 0 },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    const seedCall = shellOptsCalls.find((c) => c.command === "yarn seed");
+    expect(seedCall).toBeDefined();
+    expect(seedCall!.opts.timeout).toBeUndefined();
+  });
+
+  it("streams docker command output to ctx.onOutput as it arrives", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const streamed: string[] = [];
+    shellChildImpl = () =>
+      streamingChild(
+        ["Container mongo Started\n", "Container redis Started\n"],
+        0,
+        [],
+      );
+
+    const handle = track(
+      await startServices(
+        { docker: { command: "docker compose up -d", cwd: dir } },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          onOutput: (c) => {
+            streamed.push(c);
+          },
+        },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
+    expect(streamed.join("")).toContain("Container mongo Started");
+    expect(streamed.join("")).toContain("Container redis Started");
+  });
+
+  it("streams seed command output to ctx.onOutput as it arrives", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    const streamed: string[] = [];
+    shellChildImpl = () => streamingChild(["imported 42 records\n"], 0, []);
+
+    await track(
+      await startServices(
+        {
+          seed: { command: "yarn demo-import", cwd: dir, ttlSeconds: 0 },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          onOutput: (c) => {
+            streamed.push(c);
+          },
+        },
+      ),
+    );
+    expect(streamed.join("")).toContain("imported 42 records");
+  });
+
+  it("does not crash when ctx.onOutput is unset (no streaming)", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    const handle = track(
+      await startServices(
+        { docker: { command: "docker compose up -d", cwd: dir } },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
+  });
+
+  it("streams the tmux pane tail while waiting for a window to become ready", async () => {
+    // capture-pane returns a non-ready tail; has-session says it doesn't exist.
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return {
+          exitCode: 0,
+          stdout: "$ yarn serve\nStarting dev server...\n",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    // URL readiness: not ready on the first probe, ready on the second.
+    let probes = 0;
+    probeOnceImpl = async () => {
+      probes++;
+      return probes > 1;
+    };
+    const streamed: string[] = [];
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 0,
+            windows: [
+              {
+                name: "web-app",
+                cwd: "web-app",
+                command: "yarn serve",
+                readyOn: { url: "http://localhost:8080" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          onOutput: (c) => {
+            streamed.push(c);
+          },
+        },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
+    // The pane tail should have been streamed at least once.
+    expect(streamed.join("")).toContain("Starting dev server");
+  });
+
+  it("does not hang on tmux deadline when readyTimeoutMs is 0 (indefinite)", async () => {
+    // With readyTimeoutMs: 0 the deadline is Infinity, so even if the window
+    // is never ready the loop must rely on readiness, not a deadline trip.
+    // Make it ready immediately so the test completes fast.
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    probeOnceImpl = async () => true;
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 0,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { url: "http://localhost:8080" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
   });
 });
 

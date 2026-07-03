@@ -26,8 +26,9 @@ import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
+import { log, reconfigureWithConfig } from "../logger";
 import { getTvaultEnv, tvaultArgs } from "./secrets";
-import { maybeAutoStash } from "./stash";
+import { maybeAutoStash, stashDirectory } from "./stash";
 import { defaultCodemapDeps, maybeAutoAnnotateRun } from "./annotate";
 import type { CodemapDeps } from "./annotate";
 import { codemapReview, codemapSemantic } from "./codemap";
@@ -76,6 +77,26 @@ export interface RunCommandOptions {
 }
 
 /**
+ * Archive a pruned run dir to fcheap before the retention prune deletes it.
+ * Injected into `runSpec` via `onArchiveRun` so the core runner never imports
+ * the stash CLI module directly. Best-effort: failures are caught inside
+ * `pruneRuns` (the run is retained on disk when archiving fails).
+ */
+async function archiveRun(
+  runDir: string,
+  _runId: string,
+  tags: string[],
+): Promise<void> {
+  const r = await stashDirectory(runDir, { tool: "cairntrace", tags });
+  // Throw on archive failure so pruneRuns retains the run on disk (move,
+  // not copy-and-lose). The caller never sees this — pruneRuns catches it.
+  if (!r.ok) throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
+}
+
+/** Scoped logger for the run command's lifecycle/errors. */
+const runLog = log.scope("run");
+
+/**
  * Parse repeatable `--var key=value` flags into a vars bag.
  * Values may contain `=` (split happens on the first one).
  */
@@ -110,12 +131,12 @@ export async function runCommand(
   try {
     expandedSpecs = await expandSpecArgs(specs);
   } catch (e) {
-    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    runLog.error((e as Error).message);
     process.exit(2);
   }
 
   if (expandedSpecs.length === 0) {
-    process.stderr.write("cairn run: at least one spec path is required\n");
+    runLog.error("at least one spec path is required");
     process.exit(2);
   }
 
@@ -128,8 +149,8 @@ export async function runCommand(
       opts.sinceCodemap,
     );
     if (expandedSpecs.length === 0) {
-      process.stderr.write(
-        `cairn run: --since-codemap ${opts.sinceCodemap} selected 0 specs (blast radius matched no spec's coversSymbol); nothing to run\n`,
+      runLog.info(
+        `--since-codemap ${opts.sinceCodemap} selected 0 specs (blast radius matched no spec's coversSymbol); nothing to run`,
       );
       process.exit(0);
     }
@@ -138,7 +159,7 @@ export async function runCommand(
   try {
     parseVarFlags(opts.var);
   } catch (e) {
-    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    runLog.error((e as Error).message);
     process.exit(2);
   }
 
@@ -168,7 +189,7 @@ export async function runCommand(
     );
   } catch (e) {
     untrackServer?.();
-    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    runLog.error((e as Error).message);
     process.exit(2);
   }
 
@@ -189,7 +210,7 @@ export async function runCommand(
     // Tear down the web server too before exiting.
     if (server) await server.stop().catch(() => undefined);
     untrackServer?.();
-    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    runLog.error((e as Error).message);
     process.exit(2);
   }
 
@@ -201,7 +222,7 @@ export async function runCommand(
   try {
     await maybeInjectTvaultSecrets(expandedSpecs[0]!, opts);
   } catch (e) {
-    process.stderr.write(`cairn run: ${(e as Error).message}\n`);
+    runLog.error((e as Error).message);
     process.exit(2);
   }
 
@@ -222,11 +243,13 @@ export async function runCommand(
       if (server.startedByUs && exitCode !== 0) {
         const logTail = server.tailLog(80).trim();
         if (logTail) {
-          process.stderr.write(
-            `\ncairn run: web server log (last 80 lines${
+          runLog.warn(
+            `web server log (last 80 lines${
               server.logPath ? `, full: ${server.logPath}` : ""
-            }):\n${logTail}\n`,
+            }):`,
           );
+          // The tail is server output — stream it raw so it isn't re-leveled.
+          log.raw(`${logTail}\n`);
         }
       }
       await server.stop().catch(() => undefined);
@@ -278,7 +301,8 @@ async function maybeStartWebServer(
     opts.artifactRoot ??
     ctx.config?.artifactRoot ??
     join(homedir(), ".cairntrace", "runs");
-  const interactive = resolveFormat(opts, "md") === "md" && isInteractive();
+  // Apply the config `logging` block as a project default (flags/env still win).
+  reconfigureWithConfig(ctx.config?.logging);
 
   return startWebServer(cfg, {
     configDir,
@@ -286,9 +310,9 @@ async function maybeStartWebServer(
     artifactRoot,
     onSpawn,
     ...(ctx.baseUrl !== undefined ? { baseUrl: ctx.baseUrl } : {}),
-    ...(interactive
-      ? { log: (m: string) => process.stderr.write(`${m}\n`) }
-      : {}),
+    // Lifecycle narration always routes through the logger (leveled, stderr);
+    // on non-interactive/json paths the default warn level suppresses info.
+    log: (m: string) => log.scope("web-server").info(m),
   });
 }
 
@@ -327,7 +351,6 @@ async function maybeStartServices(
   const configDir = ctx.configPath
     ? dirname(ctx.configPath)
     : dirname(firstSpecAbs);
-  const interactive = resolveFormat(opts, "md") === "md" && isInteractive();
   const project = ctx.config?.project ?? "cairntrace";
 
   // --services-dry-run: print the plan, return a no-op handle, don't execute.
@@ -366,9 +389,11 @@ async function maybeStartServices(
     project,
     onSpawn,
     ...(ctx.secrets ? { secrets: ctx.secrets } : {}),
-    ...(interactive
-      ? { log: (m: string) => process.stderr.write(`${m}\n`) }
-      : {}),
+    // Lifecycle narration + live subprocess output route through the logger
+    // (leveled, always stderr). info lines + raw streaming show on an
+    // interactive TTY (default info); --quiet/json suppresses them.
+    log: (m: string) => log.scope("services").info(m),
+    onOutput: (c: string) => log.raw(c),
   });
 }
 
@@ -384,7 +409,7 @@ async function runSingle(
   const untrack = trackBackend(backend);
   const interactive = format === "md" && isInteractive();
   const listener = interactive
-    ? makeInteractiveListener({ color: colorEnabled(opts) })
+    ? makeInteractiveListener({ color: colorEnabled() })
     : undefined;
 
   let exitCode: ExitCode = 2;
@@ -406,6 +431,7 @@ async function runSingle(
       workerIndex: 0,
       ...(opts.monitor ? { monitor: opts.monitor } : {}),
       ...(listener ? { listener } : {}),
+      onArchiveRun: archiveRun,
     });
     exitCode = result.exitCode;
     if (!(await stampIfGreen(opts, [result]))) {
@@ -465,7 +491,7 @@ async function runBatch(
   const tStart = Date.now();
 
   if (interactive) {
-    process.stdout.write(
+    log.raw(
       `\x1b[1mRunning\x1b[0m ${specs.length} spec${
         specs.length === 1 ? "" : "s"
       } (parallel: ${parallel})\n\n`,
@@ -505,6 +531,7 @@ async function runBatch(
             : {}),
           workerIndex,
           ...(opts.monitor ? { monitor: opts.monitor } : {}),
+          onArchiveRun: archiveRun,
         });
         if (interactive) {
           const mark =
@@ -513,7 +540,7 @@ async function runBatch(
               : r.status === "failed"
                 ? "\x1b[31m✗\x1b[0m"
                 : "\x1b[33m·\x1b[0m";
-          process.stdout.write(
+          log.raw(
             `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
               r.outcomes.filter((o) => o.status === "passed").length
             }/${r.outcomes.length} outcomes)\n`,
@@ -536,7 +563,7 @@ async function runBatch(
         // Synthesize an errored RunResult so the batch survives.
         const err = e as Error;
         if (interactive) {
-          process.stdout.write(
+          log.raw(
             `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
           );
         }
@@ -650,8 +677,8 @@ export async function maybeInjectTvaultSecrets(
   }
 
   if (shadowed.length > 0) {
-    process.stderr.write(
-      `cairn run: WARNING - tvault "${target}" secrets shadowed by existing env vars (bun .env auto-load or shell): ${shadowed.join(", ")}. Remove these from .env or unset them to use tvault values.\n`,
+    runLog.warn(
+      `tvault "${target}" secrets shadowed by existing env vars (bun .env auto-load or shell): ${shadowed.join(", ")}. Remove these from .env or unset them to use tvault values.`,
     );
   }
 
@@ -669,9 +696,7 @@ export async function maybeInjectTvaultSecrets(
   }
 
   if (injected > 0) {
-    process.stderr.write(
-      `cairn run: injected ${injected} secrets from tvault "${target}"\n`,
-    );
+    runLog.info(`injected ${injected} secrets from tvault "${target}"`);
   }
 }
 
@@ -684,11 +709,8 @@ function backendOpts(
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
   };
 }
-
-function colorEnabled(opts: RunCommandOptions): boolean {
-  return (
-    opts.color !== false && !process.env.NO_COLOR && process.env.TERM !== "dumb"
-  );
+function colorEnabled(): boolean {
+  return log.color && process.env.TERM !== "dumb";
 }
 
 /**
@@ -734,7 +756,7 @@ function emitErroredResult(result: RunResult, format: string): void {
     process.stdout.write(emit(format, result, renderRunMarkdown));
   } else {
     const failed = result.steps.find((s) => s.status === "failed");
-    process.stderr.write(`cairn run: ${failed?.error ?? "run errored"}\n`);
+    runLog.error(failed?.error ?? "run errored");
   }
 }
 
@@ -861,9 +883,7 @@ async function writeJUnitIfRequested(
     await writeFile(outPath, renderJUnit(results));
     return true;
   } catch (e) {
-    process.stderr.write(
-      `cairn run: could not write JUnit report: ${(e as Error).message}\n`,
-    );
+    runLog.warn(`could not write JUnit report: ${(e as Error).message}`);
     return false;
   }
 }
@@ -879,9 +899,7 @@ async function stampIfGreen(
     for (const specPath of paths) await stampSpecContractHash(specPath);
     return true;
   } catch (e) {
-    process.stderr.write(
-      `cairn run: could not stamp contract hash: ${(e as Error).message}\n`,
-    );
+    runLog.warn(`could not stamp contract hash: ${(e as Error).message}`);
     return false;
   }
 }

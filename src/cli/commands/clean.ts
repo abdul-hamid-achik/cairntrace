@@ -1,6 +1,14 @@
-import { pruneRuns, type PruneResult } from "../../core/artifacts/retention";
+import {
+  pruneRuns,
+  DEFAULT_KEEP_RUNS,
+  type PruneResult,
+} from "../../core/artifacts/retention";
 import { emit, resolveFormat } from "../format";
+import { log, reconfigureWithConfig } from "../logger";
 import { resolveArtifactRootContext } from "../runRefs";
+import { stashDirectory } from "./stash";
+
+const cleanLog = log.scope("clean");
 
 export interface CleanOptions {
   keep?: string;
@@ -18,26 +26,32 @@ interface CleanReport extends PruneResult {
   keepRuns: number;
 }
 
-const DEFAULT_KEEP_RUNS = 10;
-
 /**
  * `cairn clean [--keep N] [--all]` — prune old run directories.
  *
  * Keep-count resolution: --all (0) > --keep N > config retention.keepRuns >
- * 10. Artifact root resolution: --artifact-root > config artifactRoot >
- * ~/.cairntrace/runs. Config discovery walks up from the cwd (same as specs).
+ * DEFAULT_KEEP_RUNS (3). Artifact root resolution: --artifact-root > config
+ * artifactRoot > ~/.cairntrace/runs. Config discovery walks up from the cwd
+ * (same as specs). When config `retention.archiveToStash` is true, pruned
+ * runs are archived to fcheap before deletion (best-effort).
  */
 export async function cleanCommand(opts: CleanOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
 
   let artifactRoot: string;
   let keepRunsFromConfig: number | undefined;
+  let retention:
+    | { archiveToStash?: boolean; archiveTags?: string[] }
+    | undefined;
   try {
     const resolved = await resolveArtifactRootContext(opts);
     artifactRoot = resolved.artifactRoot;
     keepRunsFromConfig = resolved.loaded?.config.retention?.keepRuns;
+    retention = resolved.loaded?.config.retention;
+    // Apply the config `logging` block as a project default (flags/env win).
+    reconfigureWithConfig(resolved.loaded?.config?.logging);
   } catch (e) {
-    process.stderr.write(`cairn clean: ${(e as Error).message}\n`);
+    cleanLog.error((e as Error).message);
     process.exit(2);
   }
 
@@ -47,8 +61,8 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
   } else if (opts.keep !== undefined) {
     keepRuns = Number(opts.keep);
     if (!Number.isInteger(keepRuns) || keepRuns < 0) {
-      process.stderr.write(
-        `cairn clean: --keep expects a non-negative integer, got "${opts.keep}"\n`,
+      cleanLog.error(
+        `--keep expects a non-negative integer, got "${opts.keep}"`,
       );
       process.exit(2);
     }
@@ -56,7 +70,22 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     keepRuns = keepRunsFromConfig ?? DEFAULT_KEEP_RUNS;
   }
 
-  const pruned = await pruneRuns(artifactRoot, { keepRuns });
+  const onArchive =
+    retention?.archiveToStash === true
+      ? async (runDir: string, _runId: string) => {
+          const r = await stashDirectory(runDir, {
+            tool: "cairntrace",
+            tags: [...(retention.archiveTags ?? []), "retention-archived"],
+          });
+          // Throw on archive failure so pruneRuns retains the run on disk.
+          if (!r.ok)
+            throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
+        }
+      : undefined;
+  const pruned = await pruneRuns(artifactRoot, {
+    keepRuns,
+    ...(onArchive ? { onArchive } : {}),
+  });
   const report: CleanReport = { ...pruned, artifactRoot, keepRuns };
 
   process.stdout.write(emit(format, report, toMarkdown));

@@ -44,6 +44,8 @@ export interface StartServicesContext {
   secrets?: SecretsConfig;
   /** Optional narrator for interactive runs (stderr lifecycle lines). */
   log?: (message: string) => void;
+  /** Optional live streamer for service command output (interactive runs). */
+  onOutput?: (chunk: string) => void;
   /** Optional structured lifecycle event collector (for events.ndjson). */
   onEvent?: (event: ServicesEvent) => void;
   /**
@@ -88,6 +90,7 @@ const DEFAULT_DOCKER_TIMEOUT_MS = 120_000;
 const DEFAULT_SEED_TIMEOUT_MS = 300_000;
 const DEFAULT_TMUX_READY_MS = 90_000;
 const POLL_MS = 500;
+const TMUX_STALL_INTERVAL_MS = 5_000;
 const SHELL_TAIL_LINES = 40;
 const DEFAULT_HC_INTERVAL_S = 30;
 const DEFAULT_HC_RETRIES = 3;
@@ -305,7 +308,15 @@ async function startDocker(
 
   ctx.log?.(`services: docker (${cfg.command})`);
   emit("docker", "start", cfg.command);
-  const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
+  const onChunk = ctx.onOutput
+    ? (_s: "stdout" | "stderr", chunk: string) => ctx.onOutput!(chunk)
+    : undefined;
+  const r = await runShellWithTimeout(
+    cfg.command,
+    { cwd, env },
+    timeout,
+    onChunk,
+  );
   if (r.exitCode !== 0) {
     emit("docker", "fail", `exit ${r.exitCode}`, { exitCode: r.exitCode });
     throw new ServicesError(
@@ -466,7 +477,15 @@ async function startSeed(
 
   ctx.log?.(`services: seed — running (${cfg.command})`);
   emit("seed", "start", cfg.command);
-  const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
+  const onChunk = ctx.onOutput
+    ? (_s: "stdout" | "stderr", chunk: string) => ctx.onOutput!(chunk)
+    : undefined;
+  const r = await runShellWithTimeout(
+    cfg.command,
+    { cwd, env },
+    timeout,
+    onChunk,
+  );
 
   // Record the result regardless of exit code (failed seeds are tracked too).
   await store.recordRun(ctx.project, cfg, r.exitCode);
@@ -627,14 +646,24 @@ async function startTmux(
 
   // Wait for readiness on each window that has a readyOn config.
   const readyTimeoutMs = cfg.readyTimeoutMs ?? DEFAULT_TMUX_READY_MS;
-  const deadline = Date.now() + readyTimeoutMs;
+  // 0 = wait indefinitely (no deadline).
+  const deadline =
+    readyTimeoutMs > 0 ? Date.now() + readyTimeoutMs : Number.POSITIVE_INFINITY;
   for (const win of cfg.windows) {
     if (!win.readyOn) continue;
     ctx.log?.(`services: tmux — waiting for "${win.name}" to be ready`);
     emit("tmux", "ready-wait", `waiting for "${win.name}"`, {
       window: win.name,
     });
-    await waitForTmuxWindow(cfg.session, win, deadline);
+    await waitForTmuxWindow(
+      cfg.session,
+      win,
+      deadline,
+      ctx.onOutput
+        ? (tail) =>
+            ctx.onOutput!(`\x1b[2m[tmux/${win.name} pane]\x1b[0m\n${tail}`)
+        : undefined,
+    );
     emit("tmux", "ready", `"${win.name}" ready`, { window: win.name });
   }
 
@@ -750,9 +779,10 @@ async function waitForTmuxWindow(
   session: string,
   win: TmuxWindow,
   deadline: number,
+  onStall?: (paneTail: string) => void,
 ): Promise<void> {
   if (!win.readyOn) return;
-
+  let lastStall = 0;
   for (;;) {
     // Check URL readiness.
     if (win.readyOn.url) {
@@ -769,6 +799,14 @@ async function waitForTmuxWindow(
           (win.readyOn.url ? ` (url: ${win.readyOn.url})` : "") +
           (win.readyOn.text ? ` (text: "${win.readyOn.text}")` : ""),
       );
+    }
+    // Periodically stream the pane tail so an indefinite wait isn't blind —
+    // the user sees the window's last lines (startup logs, errors) every few
+    // seconds instead of staring at a frozen "waiting for ready" line.
+    if (onStall && Date.now() - lastStall >= TMUX_STALL_INTERVAL_MS) {
+      lastStall = Date.now();
+      const tail = await captureTmuxPane(session, win.name);
+      if (tail) onStall(tailText(tail, 20));
     }
     await sleep(POLL_MS);
   }
@@ -982,26 +1020,55 @@ async function runHealthcheck(
 
   return { healthy: false, consecutiveFailures };
 }
-
 /**
  * Run a shell command with a timeout. Unlike `runShell` (which is fire-and-forget
  * for long-running servers), this waits for the command to complete and kills
- * it if it exceeds the timeout.
+ * it if it exceeds the timeout. Pass `timeoutMs <= 0` to wait indefinitely.
+ * When `onChunk` is set, stdout/stderr chunks stream to it live (interactive
+ * runs) instead of being captured silently.
  */
 async function runShellWithTimeout(
   command: string,
   opts: SpawnOpts,
   timeoutMs: number,
+  onChunk?: (stream: "stdout" | "stderr", chunk: string) => void,
 ): Promise<ShellResult> {
   // execa works identically under Bun and node. The `shell: true` option
   // gives us shell semantics (pipes, redirects, &&) for docker/seed commands.
-  const r = await execa(command, {
+  // timeoutMs <= 0 means wait indefinitely (no execa timeout).
+  const child = execa(command, {
     cwd: opts.cwd,
     env: opts.env as Record<string, string | undefined>,
     shell: true,
     reject: false,
-    timeout: timeoutMs,
+    ...(timeoutMs > 0 ? { timeout: timeoutMs } : {}),
   });
+
+  // Stream live output when a callback is provided (interactive runs). We
+  // accumulate ourselves so the returned stdout/stderr match what was streamed
+  // even if execa's own collection behaves differently with extra listeners.
+  if (onChunk && child.stdout && child.stderr) {
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer | string) => {
+      const s = typeof d === "string" ? d : d.toString();
+      stdout += s;
+      onChunk("stdout", s);
+    });
+    child.stderr.on("data", (d: Buffer | string) => {
+      const s = typeof d === "string" ? d : d.toString();
+      stderr += s;
+      onChunk("stderr", s);
+    });
+    const r = await child;
+    return {
+      exitCode: r.exitCode ?? -1,
+      stdout,
+      stderr,
+    };
+  }
+
+  const r = await child;
   return {
     exitCode: r.exitCode ?? -1,
     stdout: typeof r.stdout === "string" ? r.stdout : "",

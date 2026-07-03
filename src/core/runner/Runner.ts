@@ -6,7 +6,11 @@ import type {
   ResolvedElement,
 } from "../../adapters/browserBackend";
 import { ArtifactWriter } from "../artifacts/ArtifactWriter";
-import { addEnospcHint, pruneRuns } from "../artifacts/retention";
+import {
+  addEnospcHint,
+  pruneRuns,
+  DEFAULT_KEEP_RUNS,
+} from "../artifacts/retention";
 import { createArtifactRedactor } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
@@ -125,6 +129,16 @@ export interface RunOptions {
   monitor?: boolean | MonitorConfig;
   /** Inject a MonitorClient for tests. Defaults to the real `monitor` CLI. */
   monitorClient?: MonitorClient;
+  /**
+   * Best-effort archive of a pruned run dir (e.g. to fcheap) before deletion.
+   * Only invoked when config `retention.archiveToStash` is true. Injected by
+   * the CLI so the core runner stays free of the stash (fcheap) dependency.
+   */
+  onArchiveRun?: (
+    runDir: string,
+    runId: string,
+    tags: string[],
+  ) => Promise<void>;
 }
 
 export interface MonitorConfig {
@@ -1099,11 +1113,33 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   });
   opts.listener?.onRunEnd?.(publicResult);
 
-  // Auto-prune the artifact root per config retention policy. Best-effort —
-  // a prune failure must never fail the run that just completed.
-  const keepRuns = runtime.config?.retention?.keepRuns;
+  // Auto-prune the artifact root per the config retention policy. Best-effort
+  // — a prune failure must never fail the run that just completed. Default
+  // keepRuns is 3 (see DEFAULT_KEEP_RUNS) when no retention block is set;
+  // retention.enabled: false disables pruning entirely.
+  const retention = runtime.config?.retention;
+  const keepRuns =
+    retention?.enabled === false
+      ? undefined
+      : (retention?.keepRuns ?? DEFAULT_KEEP_RUNS);
   if (keepRuns !== undefined) {
-    await safe(() => pruneRuns(artifactRoot, { keepRuns }));
+    // Archive pruned runs to fcheap before deletion when configured. The
+    // archive callback is injected via opts so the core runner doesn't depend
+    // on the stash (fcheap) CLI module.
+    const onArchive =
+      retention?.archiveToStash && opts.onArchiveRun
+        ? (dir: string, rid: string) =>
+            opts.onArchiveRun!(dir, rid, [
+              ...(retention.archiveTags ?? []),
+              "retention-archived",
+            ])
+        : undefined;
+    await safe(() =>
+      pruneRuns(artifactRoot, {
+        keepRuns,
+        ...(onArchive ? { onArchive } : {}),
+      }),
+    );
   }
 
   return publicResult;

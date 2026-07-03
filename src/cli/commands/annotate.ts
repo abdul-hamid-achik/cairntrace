@@ -2,6 +2,7 @@ import { execa } from "execa";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { emit, resolveFormat } from "../format";
+import { log } from "../logger";
 import type { OutputFormat } from "../format";
 import type { RunResult } from "../../core/schema/run.v1";
 
@@ -263,9 +264,9 @@ export async function maybeAutoAnnotate(
   }
 
   if (result.annotated > 0) {
-    process.stderr.write(
-      `cairn: auto-annotated ${result.annotated} code match(es) into codemap\n`,
-    );
+    log
+      .scope("annotate")
+      .info(`auto-annotated ${result.annotated} code match(es) into codemap`);
   }
 
   return result;
@@ -345,9 +346,11 @@ export async function maybeAutoAnnotateRun(
     ]);
     if (r.exitCode === 0) {
       out.annotated = 1;
-      process.stderr.write(
-        `cairn: auto-annotated run ${result.runId} (${result.status}) into codemap\n`,
-      );
+      log
+        .scope("annotate")
+        .info(
+          `auto-annotated run ${result.runId} (${result.status}) into codemap`,
+        );
     } else {
       out.errors.push(`${symbol}: ${r.stderr || "codemap annotate failed"}`);
     }
