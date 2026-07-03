@@ -956,6 +956,45 @@ describe("startServices — full lifecycle", () => {
   });
 });
 
+describe("startServices — tmux text readiness is case-insensitive", () => {
+  it("matches readyOn.text regardless of casing (Listening vs listening)", async () => {
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        // Server logs "Listening" (capital L); config says "listening".
+        return {
+          exitCode: 0,
+          stdout: "$ yarn start\nListening on port 9001\nMongoose Connected!\n",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web-api",
+                command: "yarn start",
+                readyOn: { text: "listening" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    // If it returns (didn't throw), the case-insensitive match worked.
+    expect(handle.startedByUs).toBe(true);
+  });
+});
+
 describe("startServices — terminateSync", () => {
   it("terminateSync is a no-op when nothing was started (all reused)", async () => {
     execaImpl = async (cmd, args) => {

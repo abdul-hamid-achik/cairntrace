@@ -792,7 +792,8 @@ async function waitForTmuxWindow(
     // Check text readiness via tmux capture-pane.
     if (win.readyOn.text) {
       const pane = await captureTmuxPane(session, win.name);
-      if (pane.includes(win.readyOn.text)) return;
+      // Case-insensitive: server logs vary in casing ("Listening" vs "listening").
+      if (pane.toLowerCase().includes(win.readyOn.text.toLowerCase())) return;
     }
     if (Date.now() >= deadline) {
       throw new ServicesError(
