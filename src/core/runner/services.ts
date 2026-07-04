@@ -108,6 +108,8 @@ export async function startServices(
   const phases: PhaseState = {
     dockerStarted: false,
     tmuxSession: undefined,
+    tmuxSessionName: undefined,
+    tmuxReuse: false,
     teardownCommands: cfg.teardown ?? [],
     artifactsDir: undefined,
     artifacts: [],
@@ -186,8 +188,21 @@ export async function startServices(
         await captureSessionArtifacts(cfg, phases, ctx);
       }
 
-      // Teardown commands from config first (best-effort).
+      // Teardown commands from config (best-effort). When the tmux session is
+      // in reuse mode, cairn OWNS its lifecycle (leaves it alive for the next
+      // run) — so skip any teardown command that would kill that session, since
+      const managedSession = phases.tmuxSessionName;
       for (const cmd of phases.teardownCommands) {
+        if (
+          phases.tmuxReuse &&
+          managedSession &&
+          killsTmuxSession(cmd, managedSession)
+        ) {
+          ctx.log?.(
+            `services: teardown (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
+          );
+          continue;
+        }
         try {
           ctx.log?.(`services: teardown (${cmd})`);
           await runShell(cmd, { cwd: ctx.configDir, env: process.env });
@@ -195,8 +210,9 @@ export async function startServices(
           // teardown is best-effort, never fatal
         }
       }
-      // Then kill tmux session if we started it.
-      if (phases.tmuxSession) {
+      // Kill the tmux session only when we created it AND we're not reusing
+      // (reuse mode leaves it alive for the next run to reuse — no rebuild).
+      if (phases.tmuxSession && !phases.tmuxReuse) {
         try {
           await execa("tmux", ["kill-session", "-t", phases.tmuxSession], {
             reject: false,
@@ -266,6 +282,10 @@ async function teardownStartedPhases(
 interface PhaseState {
   dockerStarted: boolean;
   tmuxSession: string | undefined;
+  /** The managed tmux session name (set even when reused, for teardown-skip). */
+  tmuxSessionName: string | undefined;
+  /** Whether the tmux session is in reuse mode (leave alive at end-of-run). */
+  tmuxReuse: boolean;
   teardownCommands: string[];
   /** Captured artifacts for fcheap stashing (tmux captures, docker logs, seed output). */
   artifactsDir: string | undefined;
@@ -557,9 +577,9 @@ async function startTmux(
 ): Promise<void> {
   // Reuse by default: a tmux session holds long-running dev servers that are
   // expensive to rebuild; reusing them across runs avoids recompiles. Decoupled
-  // from --cold-start (which is about the BROWSER profile, not the dev servers).
-  // Set `reuseExisting: false` to force a fresh session (kills + recreates).
   const reuse = cfg.reuseExisting ?? true;
+  phases.tmuxReuse = reuse;
+  phases.tmuxSessionName = cfg.session;
 
   // Reuse check: does the session already exist?
   if (reuse) {
@@ -878,18 +898,41 @@ export async function captureTmuxPane(
 }
 
 /**
+ * True if a teardown command would kill the given tmux session (e.g.
+ * `tmux kill-session -t graphite`). Used to skip such teardown when the
+ * session is in reuse mode (cairn owns its lifecycle and leaves it alive).
+ */
+function killsTmuxSession(cmd: string, session: string): boolean {
+  return (
+    /\bkill-session\b/.test(cmd) &&
+    (cmd.includes(`-t ${session}`) ||
+      cmd.includes(`-t=${session}`) ||
+      new RegExp(`\\b${session}\\b`).test(cmd))
+  );
+}
+
+/**
  * Synchronous, signal-safe teardown for SIGINT/SIGTERM, where the async stop()
  * never runs. Kills the tmux session AND runs any user-declared teardown
  * commands (e.g. `docker compose down`) so they aren't silently skipped on
  * Ctrl-C. Each command is time-bounded so a hang can't block process exit.
  */
 function terminateServicesSync(phases: PhaseState, configDir: string): void {
-  terminateTmuxSync(phases.tmuxSession);
+  // Reuse mode: leave the tmux session alive (next run reuses it) and skip
+  // teardown commands that kill it. Only run other teardown (docker down).
+  if (!phases.tmuxReuse) terminateTmuxSync(phases.tmuxSession);
   if (phases.teardownCommands.length === 0) return;
   try {
     const { spawnSync } =
       require("node:child_process") as typeof import("node:child_process");
     for (const cmd of phases.teardownCommands) {
+      if (
+        phases.tmuxReuse &&
+        phases.tmuxSessionName &&
+        killsTmuxSession(cmd, phases.tmuxSessionName)
+      ) {
+        continue;
+      }
       spawnSync(cmd, {
         cwd: configDir,
         shell: true,

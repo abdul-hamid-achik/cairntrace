@@ -861,7 +861,46 @@ describe("startServices — teardown", () => {
     expect(shellCalls.some((c) => c.command === "echo teardown2")).toBe(true);
   });
 
-  it("kills tmux session on stop() when we started it", async () => {
+  it("kills tmux session on stop() when reuseExisting: false", async () => {
+    let killedSession = false;
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "ready", stderr: "" };
+      if (cmd === "tmux" && args[0] === "kill-session") {
+        killedSession = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            reuseExisting: false,
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "ready" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: true },
+      ),
+    );
+
+    expect(handle.startedByUs).toBe(true);
+    await handle.stop();
+    expect(killedSession).toBe(true);
+  });
+
+  it("leaves tmux session alive on stop() when reusing (default)", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "has-session")
@@ -896,7 +935,50 @@ describe("startServices — teardown", () => {
 
     expect(handle.startedByUs).toBe(true);
     await handle.stop();
-    expect(killedSession).toBe(true);
+    expect(killedSession).toBe(false);
+  });
+
+  it("skips a teardown `tmux kill-session` when reusing (leaves session alive)", async () => {
+    let tmuxKilled = false;
+    let dockerDownRan = false;
+    shellImpl = async (command: string) => {
+      if (command.includes("docker compose down")) dockerDownRan = true;
+      // The tmux kill-session teardown command (run via runShell, shell:true).
+      if (command.includes("kill-session")) tmuxKilled = true;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" }; // session doesn't exist → create
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "ready", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "graphite",
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "ready" },
+              },
+            ],
+          },
+          teardown: ["tmux kill-session -t graphite", "docker compose down"],
+        },
+        { configDir: dir, project: "test", coldStart: true },
+      ),
+    );
+    await handle.stop();
+    // Reuse is the default → the tmux kill-session teardown is skipped (cairn
+    // leaves the session alive for the next run), but docker down still runs.
+    expect(tmuxKilled).toBe(false);
+    expect(dockerDownRan).toBe(true);
   });
 
   it("stop() is a no-op when nothing was started (all reused)", async () => {
