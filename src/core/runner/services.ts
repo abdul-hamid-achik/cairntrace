@@ -791,7 +791,9 @@ async function waitForTmuxWindow(
     }
     // Check text readiness via tmux capture-pane.
     if (win.readyOn.text) {
-      const pane = await captureTmuxPane(session, win.name);
+      // Large scrollback: a chatty service may print the readiness line early
+      // then flood errors/warnings that push it past a small capture window.
+      const pane = await captureTmuxPane(session, win.name, 2000);
       // Case-insensitive: server logs vary in casing ("Listening" vs "listening").
       if (pane.toLowerCase().includes(win.readyOn.text.toLowerCase())) return;
     }

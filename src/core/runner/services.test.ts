@@ -993,6 +993,47 @@ describe("startServices — tmux text readiness is case-insensitive", () => {
     // If it returns (didn't throw), the case-insensitive match worked.
     expect(handle.startedByUs).toBe(true);
   });
+
+  it("finds the readiness line even when buried under a flood of later output", async () => {
+    // The service prints "warehouse listening on 9061" early, then floods
+    // hundreds of postgres error lines. A small capture window would miss it.
+    const flood = Array.from(
+      { length: 150 },
+      (_, i) => `error: dial tcp [::1]:5432: connection refused (entity ${i})`,
+    ).join("\n");
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return {
+          exitCode: 0,
+          stdout: `$ go run .\nmain: warehouse listening on 9061\n${flood}\n`,
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "warehouse",
+                command: "go run .",
+                readyOn: { text: "warehouse listening on" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    expect(handle.startedByUs).toBe(true);
+  });
 });
 
 describe("startServices — terminateSync", () => {
