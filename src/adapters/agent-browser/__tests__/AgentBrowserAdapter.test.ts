@@ -275,39 +275,49 @@ describe("strict semantic interaction resolution", () => {
   });
 
   it("fails the click loudly instead of silently no-op'ing when the target stays off-viewport after scrollIntoView", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Save" [ref=e9]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview (reports success but did nothing)
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: JSON.stringify({
-          success: true,
-          data: { x: 100, y: 2358, width: 80, height: 40 },
-          error: null,
-        }),
-        stderr: "",
-      }) // get box — still far below the fold
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: JSON.stringify({
-          success: true,
-          data: {
-            origin: "http://example.test",
-            result: {
-              scrollX: 0,
-              scrollY: 0,
-              innerWidth: 1280,
-              innerHeight: 577,
+    // The off-viewport confirmation polls (smooth-scroll tolerance), so the
+    // mock must answer by command rather than by call order — the box/metrics
+    // pair is re-read every poll tick until the settle budget runs out.
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - button "Save" [ref=e9]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: { x: 100, y: 2358, width: 80, height: 40 },
+            error: null,
+          }),
+          stderr: "",
+        }); // still far below the fold, every read
+      }
+      if (argv.includes("eval")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              origin: "http://example.test",
+              result: {
+                scrollX: 0,
+                scrollY: 0,
+                innerWidth: 1280,
+                innerHeight: 577,
+              },
             },
-          },
-          error: null,
-        }),
-        stderr: "",
-      }); // eval viewport metrics
+            error: null,
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }); // scrollintoview
+    });
     const adapter = new AgentBrowserAdapter({ session: "fixed-footer-test" });
 
     const result = await adapter.runStep({
@@ -318,10 +328,130 @@ describe("strict semantic interaction resolution", () => {
     expect(result.stderr).toContain("stayed off-viewport");
     expect(result.stderr).toContain("position:fixed/sticky");
     // The step never reached a real `click` invocation — no silent no-op.
-    expect(execaMock).toHaveBeenCalledTimes(4);
     for (const call of execaMock.mock.calls) {
       expect(call[1] as string[]).not.toContain("click");
     }
+  });
+
+  it("recovers when a smooth scroll lands the target in-viewport mid-poll", async () => {
+    // First box read races the CSS scroll-behavior:smooth animation
+    // (off-viewport), the poll's second read sees it landed — the click
+    // must proceed instead of failing the step.
+    let boxReads = 0;
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - button "ELEGIR PLAN" [ref=e22]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        boxReads += 1;
+        const y = boxReads === 1 ? 1286 : 420; // travelling → landed
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: { x: 798, y, width: 80, height: 40 },
+            error: null,
+          }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("eval")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              origin: "http://example.test",
+              result: {
+                scrollX: 0,
+                scrollY: 0,
+                innerWidth: 1280,
+                innerHeight: 900,
+              },
+            },
+            error: null,
+          }),
+          stderr: "",
+        });
+      }
+      // scrollintoview, click, post-click settle wait
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "smooth-scroll-test" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "button", name: "ELEGIR PLAN" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(boxReads).toBe(2);
+    const clicked = execaMock.mock.calls.some((call) =>
+      (call[1] as string[]).includes("click"),
+    );
+    expect(clicked).toBe(true);
+  });
+
+  it("does not flag an in-view target on a scrolled page (box is viewport-relative)", async () => {
+    // Regression: `get box` coordinates are viewport-relative, so a target
+    // properly centered after scrolling far down the page (scrollY=816)
+    // must NOT be treated as off-viewport. The old check subtracted
+    // scrollY from an already-viewport-relative y and failed every
+    // legitimately-scrolled click.
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "CREAR CUENTA" [ref=e17]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: { x: 673, y: 266.765625, width: 422, height: 44 },
+            error: null,
+          }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("eval")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              origin: "http://example.test",
+              result: {
+                scrollX: 0,
+                scrollY: 816,
+                innerWidth: 1280,
+                innerHeight: 577,
+              },
+            },
+            error: null,
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "scrolled-in-view" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "CREAR CUENTA" },
+    });
+
+    expect(result.ok).toBe(true);
+    const clicked = execaMock.mock.calls.some((call) =>
+      (call[1] as string[]).includes("click"),
+    );
+    expect(clicked).toBe(true);
   });
   it("fails AT the click step when nothing matches (no silent find no-op)", async () => {
     execaMock.mockResolvedValue({

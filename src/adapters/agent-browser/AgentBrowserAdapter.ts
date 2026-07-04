@@ -674,6 +674,29 @@ export class AgentBrowserAdapter implements BrowserBackend {
   private async detectOffViewportAfterScroll(
     ref: string,
   ): Promise<string | undefined> {
+    // A one-shot box read races two real-world effects (both observed as
+    // intermittent liftclub member_checkout failures):
+    //   1. CSS `scroll-behavior: smooth` animates scrollIntoView over
+    //      several hundred ms — the read fires mid-travel.
+    //   2. Async sections above the target collapse/expand when their data
+    //      lands, yanking an already-centered target back out of view
+    //      (seen as a negative center-y right after a successful scroll).
+    // Poll briefly and RE-SCROLL between reads — re-reading alone can't
+    // recover from (2). The happy path (already visible) returns on the
+    // first read; a genuinely unreachable target (position:fixed taller
+    // than the viewport) pays the budget before failing, since re-scrolling
+    // is a no-op there.
+    const deadline = Date.now() + OFF_VIEWPORT_SETTLE_MS;
+    for (;;) {
+      const reason = await this.checkOffViewportOnce(ref);
+      if (!reason) return undefined;
+      if (Date.now() >= deadline) return reason;
+      await sleep(OFF_VIEWPORT_POLL_INTERVAL_MS);
+      await this.invoke(["scrollintoview", `@${ref}`]);
+    }
+  }
+
+  private async checkOffViewportOnce(ref: string): Promise<string | undefined> {
     const boxResult = await this.invoke(["get", "box", `@${ref}`, "--json"]);
     const box = boxResult.ok ? parseBoxEnvelope(boxResult.stdout) : undefined;
     if (!box) return undefined;
@@ -688,8 +711,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
       : undefined;
     if (!metrics) return undefined;
 
-    const cx = box.x + box.width / 2 - metrics.scrollX;
-    const cy = box.y + box.height / 2 - metrics.scrollY;
+    // `get box` returns VIEWPORT-relative coordinates (verified against
+    // getBoundingClientRect on agent-browser 0.31.1: identical y at
+    // scrollY=816) — do NOT subtract scroll here. The original subtraction
+    // double-counted the scroll and flagged every legitimately-scrolled
+    // click as off-viewport (deterministic liftclub member_checkout
+    // failure: in-view button at viewport y≈460, scrollY≈875 → cy=-415).
+    // It went unnoticed because clicks near the page top ran at scrollY=0,
+    // where subtracting zero is harmless.
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
     if (
       cx >= 0 &&
       cx <= metrics.innerWidth &&
@@ -945,6 +976,14 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
  * so the daemon's own deadline matches the wrapper's hard kill.
  */
 const POST_CLICK_NAV_SETTLE_MS = 5_000;
+
+/**
+ * Budget for the post-scrollIntoView viewport confirmation. Covers a CSS
+ * `scroll-behavior: smooth` animation (typically 300-500ms) with headroom;
+ * a genuinely fixed off-viewport target spends this long before failing.
+ */
+const OFF_VIEWPORT_SETTLE_MS = 1_500;
+const OFF_VIEWPORT_POLL_INTERVAL_MS = 250;
 
 /**
  * Extra time granted to the child past the spec's own `timeoutMs` so

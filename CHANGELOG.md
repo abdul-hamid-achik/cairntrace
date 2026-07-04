@@ -3,6 +3,28 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.29.1]
+
+### Fixed
+- **Off-viewport click guard double-subtracted the page scroll.** `get box`
+  returns viewport-relative coordinates (verified against
+  `getBoundingClientRect` on agent-browser 0.31.1), but 1.28.x's
+  post-scrollIntoView confirmation subtracted `window.scrollY` from the box
+  center anyway — flagging every legitimately-scrolled click as
+  "stayed off-viewport" (deterministic, not flaky: liftclub's
+  member_checkout plans grid sits below the fold, so the in-view button at
+  viewport y≈460 with scrollY≈875 computed to center y=-415). Clicks near
+  the page top ran at scrollY=0 where subtracting zero is harmless, which
+  is why the bug hid in otherwise-green suites. The check now compares the
+  viewport-relative center directly against innerWidth/innerHeight.
+- **The confirmation is now a short poll with re-scroll, not a one-shot
+  read.** CSS `scroll-behavior: smooth` animates scrollIntoView over
+  several hundred ms, and async sections above the target can collapse
+  when their data lands, yanking a centered target back out of view. The
+  guard re-reads (and re-issues scrollIntoView) every 250ms for up to
+  1.5s; the happy path still returns on the first read, and genuinely
+  unreachable position:fixed targets fail after the budget as before.
+
 ## [1.29.0]
 
 ### Added
