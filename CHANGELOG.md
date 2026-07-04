@@ -3,6 +3,30 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.29.0]
+
+### Added
+- **Config `browser:` block — project-level tuning for the verify-after-click
+  guard.** 1.28.1's `verifyAfterClick` (5s networkidle settle folded into every
+  click) shipped adapter-only with no way to configure it from a project:
+  `AgentBrowserOptions.verifyAfterClick` existed but nothing plumbed it through
+  `createBackend`. Dev servers that compile modules on demand (Nuxt/Vite SPA
+  routes) routinely need >5s to go network-quiet after a login click even
+  though the page is fine, which failed every authenticated-page click in such
+  projects (observed: 33/40 liftclub specs dying at `submit_login` while their
+  outcomes passed). `cairntrace.config.yml` now accepts:
+
+  ```yaml
+  browser:
+    verifyAfterClick: true     # default: true
+    postClickSettleMs: 20000   # default: 5000
+  ```
+
+  Resolved once per `cairn run` invocation (same scope as `webServer`/
+  `services`) and applied to every backend the run constructs, including
+  parallel batch workers. Prefer raising `postClickSettleMs` over disabling
+  `verifyAfterClick` — the wedge protection stays.
+
 ## [1.25.1]
 
 Two agent-browser reliability fixes that both manifested as silent no-ops.

@@ -876,6 +876,34 @@ describe("verify-after-click + post-nav settle", () => {
     expect(execaMock).toHaveBeenCalledTimes(5);
   });
 
+  it("widens the settle wait to postClickSettleMs when configured", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "INICIAR SESIÓN" [ref=e3]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // settle
+    const adapter = new AgentBrowserAdapter({
+      session: "wide-settle",
+      postClickSettleMs: 20_000,
+    });
+
+    const r = await adapter.runStep({
+      click: { by: "role", role: "button", name: "INICIAR SESIÓN" },
+    });
+    expect(r.ok).toBe(true);
+    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    expect(settleCall).toContain("wait");
+    expect(settleCall).toContain("networkidle");
+    expect(settleCall).toContain("--timeout");
+    expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("20000");
+  });
+
   it("retries the adapter's own 'daemon may be unresponsive' timeout message", async () => {
     // Mirrors the liftclub pattern: a click that doesn't land produces
     // a 30s agent-browser --timeout hit, surfacing the adapter's own

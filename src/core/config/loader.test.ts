@@ -195,6 +195,70 @@ webServer:
   });
 });
 
+describe("loadConfig browser", () => {
+  async function loadBrowserConfig(body: string) {
+    const projectDir = join(
+      dir,
+      `browser-${Math.random().toString(36).slice(2)}`,
+    );
+    await mkdir(projectDir, { recursive: true });
+    const specPath = join(projectDir, "spec.yml");
+    await writeFile(specPath, "version: 1\nname: x\nintent: x\noutcomes: []\n");
+    await writeFile(join(projectDir, "cairntrace.config.yml"), body);
+    return loadConfig(specPath);
+  }
+
+  it("parses a browser block", async () => {
+    const loaded = await loadBrowserConfig(
+      `version: 1
+environments:
+  local: {}
+browser:
+  verifyAfterClick: true
+  postClickSettleMs: 20000
+`,
+    );
+    expect(loaded?.config.browser?.verifyAfterClick).toBe(true);
+    expect(loaded?.config.browser?.postClickSettleMs).toBe(20000);
+  });
+
+  it("is optional (absent → undefined, adapter defaults apply)", async () => {
+    const loaded = await loadBrowserConfig(
+      `version: 1
+environments:
+  local: {}
+`,
+    );
+    expect(loaded?.config.browser).toBeUndefined();
+  });
+
+  it("rejects unknown keys in browser (.strict())", async () => {
+    await expect(
+      loadBrowserConfig(
+        `version: 1
+environments:
+  local: {}
+browser:
+  settleMs: 20000
+`,
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("rejects a non-positive postClickSettleMs", async () => {
+    await expect(
+      loadBrowserConfig(
+        `version: 1
+environments:
+  local: {}
+browser:
+  postClickSettleMs: 0
+`,
+      ),
+    ).rejects.toThrow();
+  });
+});
+
 describe("loadConfig env substitution", () => {
   it("substitutes ${env.X:-fallback} when the env var is missing", async () => {
     const projectDir = join(dir, "env-fallback-subst");

@@ -45,6 +45,11 @@ report:
   theme: cairn                        # cairn | graphite | midnight | contrast
   colors: { accent: "rgb(94,129,172)", danger: "#c0392b" }   # optional CSS token overrides
 
+browser:                              # browser-backend tuning (agent-browser)
+  verifyAfterClick: true              # fold a networkidle settle into every click (default: true)
+  postClickSettleMs: 20000            # settle budget in ms (default: 5000) — raise for dev servers
+                                      # that compile modules on demand instead of disabling the guard
+
 webServer:                            # optional single-server lifecycle for `cairn run`
   command: "node .output/server/index.mjs"
   build: "bun run build"               # run once before command (skipped when reusing)
@@ -87,7 +92,7 @@ annotate:                             # codemap annotation — see Annotate page
   source: cairntrace
 ```
 
-The schema is `.strict()` at every level, so a misspelled key (e.g. `browser:` or `run:` — neither exists) is a validation error, not a silent no-op.
+The schema is `.strict()` at every level, so a misspelled key (e.g. `runner:` or `run:` — neither exists) is a validation error, not a silent no-op.
 
 ## Environments
 

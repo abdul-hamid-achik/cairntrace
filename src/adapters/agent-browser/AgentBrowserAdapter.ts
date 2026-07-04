@@ -625,12 +625,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ? { ...r, resolvedElement: toResolvedElement(resolved) }
         : r;
     }
+    const settleMs = this.opts.postClickSettleMs ?? POST_CLICK_NAV_SETTLE_MS;
     const settleResult = await this.invoke(
       waitConditionToArgv({
         load: "networkidle",
-        timeoutMs: POST_CLICK_NAV_SETTLE_MS,
+        timeoutMs: settleMs,
       }),
-      { timeoutMs: childDeadline(POST_CLICK_NAV_SETTLE_MS) },
+      { timeoutMs: childDeadline(settleMs) },
     );
     // A click that ran for 700ms+ then a wait that timed out is the exact
     // shape of the liftclub failure; surface a short, honest message at the
@@ -640,7 +641,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // settle ran out of time, since that means the page is still churning.)
     const settleStderr = settleResult.ok
       ? ""
-      : `post-click settle: ${settleResult.stderr.trim() || `timed out after ${POST_CLICK_NAV_SETTLE_MS}ms`}`;
+      : `post-click settle: ${settleResult.stderr.trim() || `timed out after ${settleMs}ms`}`;
     return {
       ok: settleResult.ok,
       stdout: r.stdout,
@@ -932,13 +933,16 @@ const POLL_INTERVAL_MS = 250;
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 
 /**
- * Max time the verify-after-click settle is willing to wait. Tuned short
- * enough to fail fast on the liftclub-style hang (click that never lands →
- * page never settles → wait-step timeout 60s later) and long enough that
- * a real SPA's post-navigation fetch burst can complete without being
- * cut off. The same value is the explicit `--timeout` passed to
- * `agent-browser wait --load networkidle`, so the daemon's own deadline
- * matches the wrapper's hard kill.
+ * Default max time the verify-after-click settle is willing to wait
+ * (override per adapter via `opts.postClickSettleMs`, per project via the
+ * config `browser.postClickSettleMs`). Tuned short enough to fail fast on
+ * the liftclub-style hang (click that never lands → page never settles →
+ * wait-step timeout 60s later) and long enough that a production SPA's
+ * post-navigation fetch burst can complete without being cut off. Dev-mode
+ * servers that compile modules on demand routinely need more — raise the
+ * config knob there instead of disabling the guard. The same value is the
+ * explicit `--timeout` passed to `agent-browser wait --load networkidle`,
+ * so the daemon's own deadline matches the wrapper's hard kill.
  */
 const POST_CLICK_NAV_SETTLE_MS = 5_000;
 

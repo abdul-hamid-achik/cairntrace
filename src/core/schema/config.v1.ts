@@ -516,6 +516,26 @@ export const ClipConfigSchema = z
   .strict();
 export type ClipConfig = z.infer<typeof ClipConfigSchema>;
 
+/**
+ * Browser-backend tuning knobs (agent-browser adapter). Project-level so a
+ * repo whose dev server is slow to go network-quiet (on-demand module
+ * compilation, SPA-mode routes) can widen the post-click settle without
+ * every spec author knowing about it.
+ */
+export const BrowserConfigSchema = z
+  .object({
+    /**
+     * Fold a networkidle settle into every click and fail the click step
+     * when it times out (wedge protection). Default: true. Prefer raising
+     * `postClickSettleMs` over disabling this.
+     */
+    verifyAfterClick: z.boolean().optional(),
+    /** Budget in ms for the post-click settle. Default 5000. */
+    postClickSettleMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;
+
 export const InvestigateConfigSchema = z
   .object({
     /** Default codebase directory for `cairn investigate --connect`. */
@@ -562,6 +582,8 @@ export const ConfigSchema = z
     logging: LoggingConfigSchema.optional(),
     /** Human-readable report artifact styling. */
     report: ReportConfigSchema.optional(),
+    /** Browser-backend tuning (verify-after-click settle). */
+    browser: BrowserConfigSchema.optional(),
     /** Optional server lifecycle for `cairn run` (build/boot/ready/teardown). */
     webServer: WebServerConfigSchema.optional(),
     /** Multi-service environment lifecycle (docker/seed/tmux). */

@@ -12,6 +12,10 @@ export interface BackendOptions {
   session?: string;
   headed?: boolean;
   binary?: string;
+  /** Config `browser.verifyAfterClick` (agent-browser only). Default true. */
+  verifyAfterClick?: boolean;
+  /** Config `browser.postClickSettleMs` (agent-browser only). Default 5000. */
+  postClickSettleMs?: number;
 }
 
 /**
@@ -40,6 +44,12 @@ export function createBackend(opts: BackendOptions): BrowserBackend {
         session: opts.session ?? `cairntrace-${process.pid}`,
         ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
         ...(opts.binary !== undefined ? { binary: opts.binary } : {}),
+        ...(opts.verifyAfterClick !== undefined
+          ? { verifyAfterClick: opts.verifyAfterClick }
+          : {}),
+        ...(opts.postClickSettleMs !== undefined
+          ? { postClickSettleMs: opts.postClickSettleMs }
+          : {}),
       });
   }
 }

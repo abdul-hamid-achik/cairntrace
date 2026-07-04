@@ -50,4 +50,12 @@ export interface AgentBrowserOptions {
    * its own waiting.
    */
   verifyAfterClick?: boolean;
+  /**
+   * Budget in ms for the post-click networkidle settle (default 5000).
+   * Dev-mode SPA apps that load modules on demand can take well over 5s to
+   * go network-quiet after a login/navigation click even though the page is
+   * fine — raise this instead of disabling `verifyAfterClick` to keep the
+   * wedge protection.
+   */
+  postClickSettleMs?: number;
 }

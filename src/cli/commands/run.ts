@@ -20,6 +20,7 @@ import {
   type WebServerHandle,
 } from "../../core/runner/webServer";
 import { startServices, type ServicesHandle } from "../../core/runner/services";
+import type { BrowserConfig } from "../../core/schema/config.v1";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
@@ -226,14 +227,25 @@ export async function runCommand(
     process.exit(2);
   }
 
+  // Project-level browser tuning (config `browser:` block) applied to every
+  // backend this invocation constructs. Resolved once, same scope as
+  // webServer/services. Best-effort: no config → undefined → adapter defaults.
+  const browser = await resolveBrowserConfig(expandedSpecs[0]!, opts);
+
   // Own the single process.exit so the finally can always tear the server down
   // (process.exit inside runSingle/runBatch would skip finally and orphan it).
   let exitCode: ExitCode = 2;
   try {
     exitCode =
       expandedSpecs.length === 1 && parallel === 1
-        ? await runSingle(expandedSpecs[0]!, opts, svcHandle?.events)
-        : await runBatch(expandedSpecs, parallel, opts, svcHandle?.events);
+        ? await runSingle(expandedSpecs[0]!, opts, svcHandle?.events, browser)
+        : await runBatch(
+            expandedSpecs,
+            parallel,
+            opts,
+            svcHandle?.events,
+            browser,
+          );
   } finally {
     if (svcHandle) {
       await svcHandle.stop().catch(() => undefined);
@@ -321,6 +333,29 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 /**
+ * Resolve the config `browser:` block for the invocation (run scope, same
+ * discovery as webServer/services). Returns undefined when there is no
+ * config or no `browser` block — backends then use their built-in defaults.
+ */
+async function resolveBrowserConfig(
+  firstSpec: string,
+  opts: RunCommandOptions,
+): Promise<BrowserConfig | undefined> {
+  const firstSpecAbs = isAbsolutePath(firstSpec)
+    ? firstSpec
+    : resolve(process.cwd(), firstSpec);
+  if (!(await stat(firstSpecAbs).catch(() => undefined))) return undefined;
+
+  const vars = parseVarFlags(opts.var);
+  const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  }).catch(() => undefined);
+  return ctx?.config?.browser;
+}
+
+/**
  * Resolve config for the invocation and, if it declares a `services` block,
  * start the environment (docker/seed/tmux) once. Returns undefined when there
  * is no config, no `services`, or `--no-services` was passed. Throws (fatal)
@@ -403,9 +438,10 @@ async function runSingle(
   specPath: string,
   opts: RunCommandOptions,
   servicesEvents?: ServicesHandle["events"],
+  browser?: BrowserConfig,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
-  const backend = createBackend(backendOpts(opts));
+  const backend = createBackend(backendOpts(opts, browser));
   const untrack = trackBackend(backend);
   const interactive = format === "md" && isInteractive();
   const listener = interactive
@@ -485,6 +521,7 @@ async function runBatch(
   parallel: number,
   opts: RunCommandOptions,
   servicesEvents?: ServicesHandle["events"],
+  browser?: BrowserConfig,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const interactive = format === "md" && isInteractive();
@@ -508,7 +545,7 @@ async function runBatch(
     parallel,
     async (specPath, idx, workerIndex) => {
       const backend = createBackend({
-        ...backendOpts(opts),
+        ...backendOpts(opts, browser),
         session: `${sessionRoot}-w${workerIndex}`,
       });
       const untrack = trackBackend(backend);
@@ -702,11 +739,18 @@ export async function maybeInjectTvaultSecrets(
 
 function backendOpts(
   opts: RunCommandOptions,
+  browser?: BrowserConfig,
 ): Parameters<typeof createBackend>[0] {
   return {
     ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
     ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(browser?.verifyAfterClick !== undefined
+      ? { verifyAfterClick: browser.verifyAfterClick }
+      : {}),
+    ...(browser?.postClickSettleMs !== undefined
+      ? { postClickSettleMs: browser.postClickSettleMs }
+      : {}),
   };
 }
 function colorEnabled(): boolean {
