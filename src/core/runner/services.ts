@@ -555,7 +555,11 @@ async function startTmux(
   phases: PhaseState,
   emit: EmitFn,
 ): Promise<void> {
-  const reuse = cfg.reuseExisting ?? !coldStart;
+  // Reuse by default: a tmux session holds long-running dev servers that are
+  // expensive to rebuild; reusing them across runs avoids recompiles. Decoupled
+  // from --cold-start (which is about the BROWSER profile, not the dev servers).
+  // Set `reuseExisting: false` to force a fresh session (kills + recreates).
+  const reuse = cfg.reuseExisting ?? true;
 
   // Reuse check: does the session already exist?
   if (reuse) {
@@ -567,8 +571,10 @@ async function startTmux(
     }
   }
 
-  // Cold-start: kill any existing session with the same name.
-  if (coldStart) {
+  // Not reusing (reuseExisting: false): kill any existing session first so the
+  // fresh create below doesn't collide with a leftover session and pile up
+  // duplicate windows.
+  if (!reuse) {
     await execa("tmux", ["kill-session", "-t", cfg.session], {
       reject: false,
       timeout: 5_000,
@@ -626,6 +632,9 @@ async function startTmux(
   // with existing windows under those settings and mis-assigns cwds/commands.
   for (let i = 1; i < cfg.windows.length; i++) {
     const win = cfg.windows[i]!;
+    // Idempotent: skip windows that already exist (e.g. a leftover session
+    // that wasn't killed) so re-runs never pile up duplicate panes.
+    if (await tmuxWindowExists(cfg.session, win.name)) continue;
     await execa(
       "tmux",
       [
@@ -770,6 +779,24 @@ export async function tmuxSessionExists(session: string): Promise<boolean> {
       timeout: 3_000,
     });
     return r.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** True if a window named `windowName` exists in the session. */
+async function tmuxWindowExists(
+  session: string,
+  windowName: string,
+): Promise<boolean> {
+  try {
+    const r = await execa(
+      "tmux",
+      ["list-windows", "-t", session, "-F", "#{window_name}"],
+      { reject: false, timeout: 3_000 },
+    );
+    if (r.exitCode !== 0) return false;
+    return r.stdout.split("\n").some((name) => name === windowName);
   } catch {
     return false;
   }

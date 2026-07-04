@@ -187,6 +187,12 @@ Key rules:
   tvault provider requires tvault block with either `project` or `group`+`env`).
 - Session artifacts (tmux panes, docker logs, seed output) can be stashed to
   fcheap via `services.stash`.
+- **tmux session reuse is the default** (decoupled from `--cold-start`, which
+  is about the browser profile, not the dev servers). A running tmux session
+  + its windows are reused across runs so dev servers aren't rebuilt each
+  time; window creation is idempotent (a window that already exists by name is
+  skipped, never duplicated). Set `tmux.reuseExisting: false` to force a fresh
+  session (kills + recreates).
 - `readyTimeoutMs: 0` (docker/tmux) and `timeoutMs: 0` (seed) wait
   **indefinitely** instead of timing out — use for slow first-up image builds
   or many containers. In interactive (TTY, `--format md`) runs, docker/seed

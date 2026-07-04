@@ -738,7 +738,7 @@ describe("startServices — tmux phase", () => {
     ).toBe(false);
   });
 
-  it("kills existing session on cold-start before creating new one", async () => {
+  it("kills existing session before creating a new one when reuseExisting: false", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "kill-session") {
@@ -757,6 +757,7 @@ describe("startServices — tmux phase", () => {
         {
           tmux: {
             session: "test-sess",
+            reuseExisting: false,
             readyTimeoutMs: 5000,
             windows: [{ name: "web", command: "yarn start" }],
           },
@@ -767,6 +768,43 @@ describe("startServices — tmux phase", () => {
 
     expect(killedSession).toBe(true);
     expect(handle.startedByUs).toBe(true);
+  });
+
+  it("reuses (does not kill) the tmux session under cold-start by default", async () => {
+    // cold-start is about the browser profile, not the dev servers — the tmux
+    // session is reused by default so dev servers aren't needlessly rebuilt.
+    let killedSession = false;
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "kill-session") {
+        killedSession = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" }; // session exists → reuse
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 5000,
+            windows: [{ name: "web", command: "yarn start" }],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: true },
+      ),
+    );
+
+    // Reused the existing session — no kill, no new session, startedByUs=false.
+    expect(killedSession).toBe(false);
+    expect(handle.startedByUs).toBe(false);
+    expect(
+      execaCalls.some(
+        (c) => c.cmd === "tmux" && c.args.includes("new-session"),
+      ),
+    ).toBe(false);
   });
 
   it("times out when a window never becomes ready", async () => {
