@@ -25,6 +25,7 @@ import type {
 } from "../browserBackend";
 import {
   batchSubStepToArgv,
+  openReadinessArgv,
   stepToArgv,
   waitConditionToArgv,
 } from "./commandBuilder";
@@ -98,18 +99,29 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
     if ("open" in step && typeof step.open !== "string") {
       // Object form: navigate, then wait for the requested load state so the
-      // first interaction doesn't race SPA hydration.
+      // first interaction doesn't race SPA hydration. `domcontentloaded`/`load`
+      // use a `document.readyState` predicate (`wait --fn`) — agent-browser's
+      // `--load` only observes FUTURE load-state transitions, so after `navigate`
+      // (which blocks on load) the page has already reached the state and
+      // `--load` would burn its full budget (or time out) for nothing.
       const nav = await this.invoke(["navigate", step.open.path]);
       if (!nav.ok) return nav;
-      return this.invoke(
-        waitConditionToArgv({
-          load: step.open.waitUntil,
-          ...(step.open.timeoutMs !== undefined
-            ? { timeoutMs: step.open.timeoutMs }
-            : {}),
-        }),
+      const wait = await this.invoke(
+        openReadinessArgv(step.open.waitUntil, step.open.timeoutMs),
         { timeoutMs: childDeadline(step.open.timeoutMs) },
       );
+      // `networkidle` has no readyState equivalent; a quiet page never re-fires
+      // idle, so agent-browser's `--load networkidle` times out even on a healthy
+      // page. Treat that specific timeout as success — a genuine error (daemon
+      // crash, non-idle polling loop) carries a different stderr and propagates.
+      if (
+        !wait.ok &&
+        step.open.waitUntil === "networkidle" &&
+        /timed out/i.test(wait.stderr)
+      ) {
+        return { ...wait, ok: true, stderr: "" };
+      }
+      return wait;
     }
     if ("wait" in step) {
       // Cairn enforces the wait deadline itself: the child gets the spec's

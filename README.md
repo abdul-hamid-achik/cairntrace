@@ -269,12 +269,13 @@ Sub-steps are selector-only (`click`, `hover`, `fill`, `upload`, `press`,
 Outcome verifier keys:
 
 `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`,
-`xlsx`, `file`, `httpJson`, `script`.
+`xlsx`, `file`, `httpJson`, `process`, `script`.
 
 Use typed verifiers for normal UI, URL, network, console, count, workbook,
 on-disk checks (`file` polls a glob, e.g. a local email driver's capture
-files), and backend JSON state (`httpJson` fetches with browser cookies and
-asserts a simple JSON path). Use `script` when the assertion is
+files), backend JSON state (`httpJson` fetches with browser cookies and
+asserts a simple JSON path), and process metrics (`process` asserts on
+`--monitor` RSS/CPU budgets). Use `script` when the assertion is
 product-specific or needs browser or Node code.
 
 Scope `text` / `notText` checks with nested `region`:
@@ -636,8 +637,7 @@ Common commands:
 | `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
 | `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
-| `cairn context <run\|latest>` | Print the run's `agent_context.md`; add `--path`, `--config`, or `--artifact-root`. |
-| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `services`, `stash`, `investigate`, `annotate`, `mcp`, or `backends`. |
+| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, or `discovery`. |
 | `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
 | `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
 | `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
@@ -713,7 +713,10 @@ The MCP server exposes these tools:
 `cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
 `cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
 `cairn_config_validate`, `cairn_stash_save`, `cairn_stash_list`, `cairn_stash_search`,
-`cairn_investigate`, `cairn_audit`, `cairn_annotate`, `cairn_secrets_status`.
+`cairn_investigate`, `cairn_audit`, `cairn_annotate`, `cairn_secrets_status`,
+and the nine `cairn_discover_*` tools (`open`, `snapshot`, `interact`,
+`navigate`, `inventory`, `suggest`, `export`, `close`, `list`) that drive a
+stateful browser session to explore, record, and export a spec.
 
 Agents should call `cairn_explain` once at session start, then `cairn_docs`
 for the focused topic they need.

@@ -8,7 +8,7 @@ import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { diffCommand } from "./commands/diff";
 import { doctorCommand } from "./commands/doctor";
-import { docsCommand } from "./commands/docs";
+import { docsCommand, DOC_TOPICS } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
 import { importPlaywrightCommand } from "./commands/import";
@@ -172,9 +172,7 @@ addFormatFlags(
 addFormatFlags(
   program
     .command("docs [topic]")
-    .description(
-      "Return focused agent docs; topics: overview, authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends, discovery",
-    ),
+    .description(`Return focused agent docs; topics: ${DOC_TOPICS.join(", ")}`),
 ).action((topic: string | undefined, opts) => docsCommand(topic, opts));
 
 addFormatFlags(

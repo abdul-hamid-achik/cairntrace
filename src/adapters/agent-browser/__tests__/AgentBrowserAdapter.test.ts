@@ -1106,6 +1106,79 @@ describe("open with waitUntil", () => {
     );
   });
 
+  it("domcontentloaded waits via a readyState --fn predicate (not --load)", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "open-dcl" });
+
+    const result = await adapter.runStep({
+      open: { path: "/admin", waitUntil: "domcontentloaded" },
+    });
+
+    expect(result.ok).toBe(true);
+    const waitArgv = (execaMock.mock.calls[1]![1] as string[]).slice(2);
+    expect(waitArgv).toEqual([
+      "wait",
+      "--fn",
+      "() => document.readyState !== 'loading'",
+    ]);
+  });
+
+  it("load waits via a complete-state --fn predicate", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "open-load" });
+
+    await adapter.runStep({
+      open: { path: "/admin", waitUntil: "load", timeoutMs: 5000 },
+    });
+
+    const waitArgv = (execaMock.mock.calls[1]![1] as string[]).slice(2);
+    expect(waitArgv).toEqual([
+      "wait",
+      "--fn",
+      "() => document.readyState === 'complete'",
+      "--timeout",
+      "5000",
+    ]);
+  });
+
+  it("networkidle timeout is treated as success (a quiet page never re-fires idle)", async () => {
+    execaMock
+      // navigate succeeds
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      // the networkidle wait times out — the shape agent-browser emits on a
+      // page that was already idle (idle never re-fires after navigate).
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr: "✗ Operation timed out",
+      });
+    const adapter = new AgentBrowserAdapter({ session: "open-idle-to" });
+
+    const result = await adapter.runStep({
+      open: { path: "/admin", waitUntil: "networkidle", timeoutMs: 2000 },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stderr).toBe("");
+  });
+
+  it("networkidle non-timeout error still propagates", async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr: "navigation failed: net::ERR_CONNECTION_REFUSED",
+      });
+    const adapter = new AgentBrowserAdapter({ session: "open-idle-err" });
+
+    const result = await adapter.runStep({
+      open: { path: "/admin", waitUntil: "networkidle" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("ERR_CONNECTION_REFUSED");
+  });
   it("string form stays a single navigate", async () => {
     execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
     const adapter = new AgentBrowserAdapter({ session: "open-plain" });

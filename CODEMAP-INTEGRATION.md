@@ -1,6 +1,6 @@
 # cairntrace ⇄ codemap integration
 
-> **Status:** design / proposed (2026-06-24). Authored from a codemap-side ecosystem survey.
+> **Status:** partially shipped (B, A, C, F, D landed in v1.25–v1.29; E and G pending). Originally authored 2026-06-24 from a codemap-side ecosystem survey.
 > **One line:** deepen the existing push-only `cairn annotate → codemap` seam into a bidirectional
 > verify / locate / select loop.
 

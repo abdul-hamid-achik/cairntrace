@@ -3,6 +3,7 @@ import type { Step } from "../../../core/schema/spec.v1";
 import {
   batchSubStepToArgv,
   locatorToArgv,
+  openReadinessArgv,
   stepToArgv,
   waitConditionToArgv,
 } from "../commandBuilder";
@@ -144,6 +145,53 @@ describe("waitConditionToArgv", () => {
     expect(argv[2]).toContain("!document.body.innerText.includes");
     // String must be JSON-escaped so it survives shell + JS parsing.
     expect(argv[2]).toContain('"Loading..."');
+  });
+});
+
+describe("openReadinessArgv", () => {
+  it("domcontentloaded → readyState predicate via --fn (resolves immediately on an already-loaded page)", () => {
+    expect(openReadinessArgv("domcontentloaded")).toEqual([
+      "wait",
+      "--fn",
+      "() => document.readyState !== 'loading'",
+    ]);
+  });
+
+  it("load → complete-state predicate via --fn", () => {
+    expect(openReadinessArgv("load")).toEqual([
+      "wait",
+      "--fn",
+      "() => document.readyState === 'complete'",
+    ]);
+  });
+
+  it("networkidle → stays on --load (no readyState equivalent)", () => {
+    expect(openReadinessArgv("networkidle")).toEqual([
+      "wait",
+      "--load",
+      "networkidle",
+    ]);
+  });
+
+  it("appends --timeout when timeoutMs is provided", () => {
+    expect(openReadinessArgv("domcontentloaded", 45000)).toEqual([
+      "wait",
+      "--fn",
+      "() => document.readyState !== 'loading'",
+      "--timeout",
+      "45000",
+    ]);
+    expect(openReadinessArgv("networkidle", 45000)).toEqual([
+      "wait",
+      "--load",
+      "networkidle",
+      "--timeout",
+      "45000",
+    ]);
+  });
+
+  it("omits --timeout when timeoutMs is undefined", () => {
+    expect(openReadinessArgv("load")).not.toContain("--timeout");
   });
 });
 

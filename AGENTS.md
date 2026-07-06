@@ -78,8 +78,9 @@ per-agent code paths.
 
 - Outcomes must use only the typed vocabulary: `text`, `notText`, `url`,
   `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`,
-  `script`. If you need something else, use the `script` escape hatch —
-  don't invent new verifier types.
+  `httpJson`, `process`, `script`. If you need something else, use the `script`
+  escape hatch — don't invent new verifier types. (`process` asserts on
+  `--monitor` metrics; `httpJson` fetches app JSON with browser cookies.)
 - Semantic locators (`by: role|label|text`) are STRICT: accessible-name,
   whole-name, case-insensitive, visible-only matching; zero matches fail the
   step with diagnostics; multiple matches are an error unless the locator

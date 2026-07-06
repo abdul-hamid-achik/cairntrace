@@ -152,6 +152,35 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
   return argv;
 }
 
+/**
+ * Build the readiness-wait argv for an object-form `open` step's `waitUntil`.
+ *
+ * `domcontentloaded`/`load` are checked via a `document.readyState` predicate
+ * (`wait --fn`) instead of `wait --load`, because agent-browser's `--load`
+ * only observes FUTURE load-state transitions — after `navigate` returns the
+ * page has already reached that state, so `--load` never fires and burns its
+ * full budget (or times out). The `--fn` poll resolves immediately on an
+ * already-loaded page and waits properly if the page is still loading.
+ *
+ * `networkidle` has no readyState equivalent, so it stays on `--load`; the
+ * adapter treats a timeout there as success (a quiet page never re-fires
+ * idle, so a timeout is the expected shape, not a failure). Exported so the
+ * adapter can branch on the kind without re-deriving the argv.
+ */
+export function openReadinessArgv(
+  waitUntil: "domcontentloaded" | "load" | "networkidle",
+  timeoutMs?: number,
+): string[] {
+  const argv =
+    waitUntil === "domcontentloaded"
+      ? ["wait", "--fn", "() => document.readyState !== 'loading'"]
+      : waitUntil === "load"
+        ? ["wait", "--fn", "() => document.readyState === 'complete'"]
+        : ["wait", "--load", "networkidle"];
+  if (timeoutMs !== undefined) argv.push("--timeout", String(timeoutMs));
+  return argv;
+}
+
 export function snapshotStepToArgv(step: SnapshotStep): string[] {
   const argv = ["snapshot"];
   if (step.snapshot.interactive) argv.push("-i");
