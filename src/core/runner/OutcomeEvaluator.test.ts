@@ -62,26 +62,6 @@ describe("evaluateOutcomes (dispatcher)", () => {
     return base as BrowserBackend;
   }
 
-  function ctx(overrides: Partial<VerifierContext> = {}): VerifierContext {
-    return { ...overrides };
-  }
-
-  function outcome(id: string, verify: unknown): Outcome {
-    return { id, description: id, verify: verify as Outcome["verify"] };
-  }
-
-  /** Run a single-outcome evaluation and return its (defined) result. */
-  async function eval1(
-    outcomes: Outcome[],
-    backend: BrowserBackend,
-    c: VerifierContext,
-  ): Promise<EvaluatedOutcome> {
-    const results = await evaluateOutcomes(outcomes, backend, c);
-    expect(results).toHaveLength(outcomes.length);
-    // noUncheckedIndexedAccess: assert the first element is present.
-    return results[0] as EvaluatedOutcome;
-  }
-
   it("routes text → evaluateText (passed when the needle is present)", async () => {
     const r = await eval1(
       [outcome("t", { text: { contains: "Ada" } })],
@@ -271,7 +251,26 @@ describe("evaluateOutcomes (dispatcher)", () => {
   });
 });
 
-/* ----- mock helpers ----- */
+/* ----- test helpers (module scope — no describe captures) ----- */
+function ctx(overrides: Partial<VerifierContext> = {}): VerifierContext {
+  return { ...overrides };
+}
+
+function outcome(id: string, verify: unknown): Outcome {
+  return { id, description: id, verify: verify as Outcome["verify"] };
+}
+
+/** Run a single-outcome evaluation and return its (defined) result. */
+async function eval1(
+  outcomes: Outcome[],
+  backend: BrowserBackend,
+  c: VerifierContext,
+): Promise<EvaluatedOutcome> {
+  const results = await evaluateOutcomes(outcomes, backend, c);
+  expect(results).toHaveLength(outcomes.length);
+  // noUncheckedIndexedAccess: assert the first element is present.
+  return results[0] as EvaluatedOutcome;
+}
 
 function ok(): InvocationResult {
   return {
