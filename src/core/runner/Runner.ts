@@ -15,6 +15,7 @@ import { createArtifactRedactor } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
+import { computeContractHash } from "../contractHash";
 import { evaluateWhen } from "./conditions";
 import {
   cutClipsWithVidtrace,
@@ -35,6 +36,7 @@ import {
 import type {
   OutcomeResult,
   RunArtifacts,
+  RunFailure,
   RunResult,
   StepResult,
 } from "../schema/run.v1";
@@ -950,6 +952,48 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const exitCode: ExitCode =
     status === "errored" ? 2 : status === "failed" ? 1 : 0;
 
+  // Canonical failure reason + one-line summary (FEATURES item 1). On a
+  // non-passing run the first failed step wins (it stopped the run and is the
+  // root cause); otherwise the first failed outcome carries the reason. The
+  // summary is always populated so a consumer can surface a single line
+  // without scanning steps[]/outcomes[].
+  const failedStepResult = stepResults.find((s) => s.status === "failed");
+  const failedOutcomeIdx = outcomeResults.findIndex(
+    (o) => o.status === "failed",
+  );
+  let failure: RunFailure | undefined;
+  let summary: string;
+  if (status === "passed") {
+    const passedOutcomes = outcomeResults.filter(
+      (o) => o.status === "passed",
+    ).length;
+    summary = `${passedOutcomes}/${outcomeResults.length} outcomes passed`;
+  } else if (failedStepResult) {
+    const stepMsg =
+      failedStepResult.error ?? `step '${failedStepResult.id}' failed`;
+    failure = { step: failedStepResult.id, message: stepMsg };
+    summary =
+      status === "errored"
+        ? `errored at step '${failedStepResult.id}': ${stepMsg}`
+        : `step '${failedStepResult.id}' failed: ${stepMsg}`;
+  } else if (failedOutcomeIdx >= 0) {
+    const failedOutcome = outcomeResults[failedOutcomeIdx]!;
+    const evalEntry = evaluated[failedOutcomeIdx]?.evaluation;
+    const detail = evalEntry
+      ? `expected ${evalEntry.expected}; actual ${evalEntry.actual}`
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200)
+      : "verifier failed";
+    failure = {
+      outcome: failedOutcome.id,
+      message: `outcome '${failedOutcome.id}' failed: ${detail}`,
+    };
+    summary = `outcome '${failedOutcome.id}' failed`;
+  } else {
+    summary = status;
+  }
+
   // Honor the trace capture policy: with the default "on-failure", a passing
   // run deletes its trace zip (they're the bulk of artifact disk usage).
   if (tracePath && status === "passed" && policy.trace !== "always") {
@@ -1080,12 +1124,17 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     spec: {
       name: spec.name,
       path: specPath,
-      ...(spec.contractHash ? { contractHash: spec.contractHash } : {}),
+      // Always populate contractHash (FEATURES nice-to-have): stamped specs
+      // carry it; unstamped specs get the on-the-fly sha256 over intent +
+      // outcomes, matching what `cairn spec verify --stamp` would write.
+      contractHash: spec.contractHash ?? computeContractHash(spec),
     },
     environment: env,
     backend: backendName as RunResult["backend"],
     coldStart,
     status,
+    summary,
+    ...(failure ? { failure } : {}),
     startedAt,
     endedAt,
     durationMs,

@@ -85,7 +85,17 @@ export const RunSpecRefSchema = z
     contractHash: ContractHashSchema.optional(),
   })
   .strict();
-export type RunSpecRef = z.infer<typeof RunSpecRefSchema>;
+export const RunFailureSchema = z
+  .object({
+    /** Outcome id whose verifier failed (absent when the failure is step-level or a crash). */
+    outcome: z.string().min(1).optional(),
+    /** Step id that failed (absent when the failure is outcome-level or a crash). */
+    step: z.string().min(1).optional(),
+    /** Canonical one-liner reason the run did not pass. Populated on status=failed|errored. */
+    message: z.string().min(1),
+  })
+  .strict();
+export type RunFailure = z.infer<typeof RunFailureSchema>;
 
 export const RunResultSchema = z
   .object({
@@ -100,6 +110,20 @@ export const RunResultSchema = z
     backend: BackendSchema,
     coldStart: z.boolean(),
     status: RunStatusSchema,
+    /**
+     * Canonical one-liner describing the run outcome. Always populated by
+     * `cairn run`; agents can surface it directly without opening per-step or
+     * per-outcome evidence. Concise, not a substitute for the structured
+     * `failure` object on non-passing runs.
+     */
+    summary: z.string().min(1).optional(),
+    /**
+     * Structured failure reason, populated on `status=failed|errored`. Holds
+     * the single canonical "why" — the first failed step (with its id + error)
+     * or the first failed outcome (with its id) — so a consumer doesn't have
+     * to scan steps[]/outcomes[] to synthesize a reason. Absent on `passed`.
+     */
+    failure: RunFailureSchema.optional(),
     startedAt: IsoTimestampSchema,
     endedAt: IsoTimestampSchema,
     durationMs: z.number().int().nonnegative(),

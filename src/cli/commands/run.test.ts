@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunResultSchema } from "../../core/schema/run.v1";
+import { SelectionResultSchema } from "../../core/schema/selection.v1";
 import {
+  buildSelectionResult,
   expandSpecArgs,
   maybeInjectTvaultSecrets,
   selectSpecsByBlastRadius,
@@ -36,6 +38,21 @@ describe("synthesizeErroredResult", () => {
     expect(parsed.runDir.startsWith("/")).toBe(true);
     expect(parsed.steps).toHaveLength(1);
     expect(parsed.steps[0]!.error).toBe("could not load spec");
+  });
+
+  it("populates canonical failure + summary on errored runs (feature 1)", () => {
+    const result = synthesizeErroredResult(
+      "/abs/spec.yml",
+      new Error("Timeout 30000ms exceeded waiting for locator"),
+    );
+    RunResultSchema.parse(result);
+    expect(result.summary).toBe(
+      "errored at step 'parse': Timeout 30000ms exceeded waiting for locator",
+    );
+    expect(result.failure).toEqual({
+      step: "parse",
+      message: "Timeout 30000ms exceeded waiting for locator",
+    });
   });
 
   it("absolutifies a relative spec path", () => {
@@ -586,5 +603,105 @@ describe("selectSpecsByBlastRadius (feature 1)", () => {
     expect(
       await selectSpecsByBlastRadius([], "HEAD~1", unavailableCodemap),
     ).toEqual([]);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * buildSelectionResult — `cairn run --since-codemap <ref> --select-only --json`
+ * (FEATURES item 2): resolves which specs WOULD run and emits a
+ * SelectionResult v1 envelope without launching a browser.
+ * ------------------------------------------------------------------------- */
+
+describe("buildSelectionResult (feature 2)", () => {
+  it("lists all expanded specs as selected when no ref is given", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-select-none-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      uncovered: undefined,
+    });
+    const result = await buildSelectionResult(
+      paths,
+      undefined,
+      unavailableCodemap,
+    );
+    SelectionResultSchema.parse(result);
+    expect(result.codemapAvailable).toBe(false);
+    expect(result.since).toBeUndefined();
+    expect(result.selected).toHaveLength(2);
+    expect(result.selected[0]!.name).toBe("form_submit");
+    expect(result.selected[0]!.coversSymbol).toBe("handleSubmit");
+    expect(result.selected[1]!.coversSymbol).toBeUndefined();
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("degrades to run-all (selected) when codemap is absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-select-absent-"));
+    const paths = await writeSpecs(dir, { form_submit: "handleSubmit" });
+    const result = await buildSelectionResult(
+      paths,
+      "HEAD~1",
+      unavailableCodemap,
+    );
+    SelectionResultSchema.parse(result);
+    expect(result.since).toBe("HEAD~1");
+    expect(result.codemapAvailable).toBe(false);
+    expect(result.selected).toHaveLength(1);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("selects blast-radius specs and skips the rest with reasons", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-select-blast-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      unrelated: "apiPost",
+      uncovered: undefined,
+    });
+    const result = await buildSelectionResult(
+      paths,
+      "HEAD~1",
+      fakeReviewCodemap({ handleSubmit: "src/forms/handler.ts" }),
+    );
+    SelectionResultSchema.parse(result);
+    expect(result.codemapAvailable).toBe(true);
+    expect(result.since).toBe("HEAD~1");
+    expect(result.selected.map((s) => s.name).toSorted()).toEqual([
+      "form_submit",
+    ]);
+    expect(result.selected[0]!.coversSymbol).toBe("handleSubmit");
+    const skippedByName = Object.fromEntries(
+      result.skipped.map((s) => [s.name, s.reason]),
+    );
+    expect(skippedByName["uncovered"]).toBe("no coversSymbol binding");
+    expect(skippedByName["unrelated"]).toContain("outside blast radius");
+  });
+
+  it("skips every spec for an empty blast radius (CSS edit)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-select-css-"));
+    const paths = await writeSpecs(dir, {
+      form_submit: "handleSubmit",
+      email_check: "validateEmail",
+    });
+    const cssEditReview = {
+      indexed: true,
+      stale: false,
+      changed_files: [{ path: "src/styles/main.css" }],
+      blast_radius: [],
+    };
+    const deps: CodemapDeps = {
+      isAvailable: async () => true,
+      exec: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify(cssEditReview),
+        stderr: "",
+      }),
+    };
+    const result = await buildSelectionResult(paths, "HEAD~1", deps);
+    SelectionResultSchema.parse(result);
+    expect(result.codemapAvailable).toBe(true);
+    expect(result.selected).toEqual([]);
+    expect(result.skipped).toHaveLength(2);
+    expect(result.skipped.every((s) => s.reason.includes("no symbols"))).toBe(
+      true,
+    );
   });
 });

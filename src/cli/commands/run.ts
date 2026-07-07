@@ -22,6 +22,11 @@ import {
 import { startServices, type ServicesHandle } from "../../core/runner/services";
 import type { BrowserConfig } from "../../core/schema/config.v1";
 import type { RunResult } from "../../core/schema/run.v1";
+import type {
+  SelectionResult,
+  SelectedSpec,
+  SkippedSpec,
+} from "../../core/schema/selection.v1";
 import type { ExitCode } from "../../core/schema/shared";
 import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup";
@@ -74,6 +79,13 @@ export interface RunCommandOptions {
    * `codemap review --since <ref>`. Degrades to "run all" when codemap is
    * absent (best-effort, never fails the run).
    */
+  /**
+   * `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
+   * change and exit 0 without launching a browser. Emits a SelectionResult
+   * v1 envelope. Pairs with `--since-codemap <ref>` for blast-radius scoping;
+   * without it, lists all expanded specs as selected.
+   */
+  selectOnly?: boolean;
   sinceCodemap?: string;
 }
 
@@ -143,8 +155,9 @@ export async function runCommand(
 
   // `--since-codemap <ref>` (FEATURES item 1): narrow to the specs a change can
   // actually hit via `codemap review` blast-radius intersection. Best-effort —
-  // degrades to the full set when codemap is absent.
-  if (opts.sinceCodemap) {
+  // degrades to the full set when codemap is absent. Skipped under
+  // `--select-only`, which resolves its own selection below.
+  if (opts.sinceCodemap && !opts.selectOnly) {
     expandedSpecs = await selectSpecsByBlastRadius(
       expandedSpecs,
       opts.sinceCodemap,
@@ -162,6 +175,21 @@ export async function runCommand(
   } catch (e) {
     runLog.error((e as Error).message);
     process.exit(2);
+  }
+
+  // `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
+  // change and exit 0 WITHOUT launching a browser, services, or webServer.
+  // Emits a SelectionResult v1 envelope. With `--since-codemap <ref>` it
+  // blast-radius-scopes; without it, lists every expanded spec as selected.
+  if (opts.selectOnly) {
+    const selection = await buildSelectionResult(
+      expandedSpecs,
+      opts.sinceCodemap,
+    );
+    const format = resolveFormat(opts, "md");
+    process.stdout.write(emit(format, selection, renderSelectionMarkdown));
+    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+    process.exit(0);
   }
 
   // Propagate --env to CAIRN_TVAULT_ENV as early as possible — before the
@@ -914,6 +942,153 @@ export async function selectSpecsByBlastRadius(
   return selected;
 }
 
+/** Spec name from a path: the basename minus .yml/.yaml. */
+function specNameFromPath(specPath: string): string {
+  return (
+    specPath
+      .split("/")
+      .pop()
+      ?.replace(/\.ya?ml$/, "") ?? specPath
+  );
+}
+
+/** Absolutify a spec path (expandSpecArgs may pass explicit relative files through). */
+function absolutifySpec(specPath: string): string {
+  return isAbsolutePath(specPath) ? specPath : resolve(process.cwd(), specPath);
+}
+
+/**
+ * `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
+ * change and return a SelectionResult v1 envelope, WITHOUT launching a
+ * browser. Mirrors `selectSpecsByBlastRadius` logic but also reports the
+ * skipped set with reasons and each selected spec's coversSymbol.
+ *
+ * - No `since`: all expanded specs are selected; codemapAvailable=false.
+ * - `since` + codemap absent: degrade to run-all; codemapAvailable=false.
+ * - `since` + codemap present but review empty/failed: run-all; codemapAvailable=false.
+ * - `since` + codemap present + indexed empty radius: all skipped (CSS-edit case).
+ * - `since` + codemap present + non-empty radius: blast-radius intersection.
+ */
+export async function buildSelectionResult(
+  specs: string[],
+  since: string | undefined,
+  deps: CodemapDeps = defaultCodemapDeps,
+): Promise<SelectionResult> {
+  const selected: SelectedSpec[] = [];
+  const skipped: SkippedSpec[] = [];
+  const enter = (p: string): { name: string; path: string } => ({
+    name: specNameFromPath(p),
+    path: absolutifySpec(p),
+  });
+  const base = {
+    $schema: "urn:cairntrace.dev:selection:v1" as const,
+    version: "1" as const,
+  };
+
+  if (!since) {
+    for (const p of specs) {
+      const sym = await readCoversSymbol(p);
+      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+    }
+    return {
+      ...base,
+      codemapAvailable: false,
+      selected,
+      skipped,
+    };
+  }
+
+  if (!(await deps.isAvailable())) {
+    for (const p of specs) {
+      const sym = await readCoversSymbol(p);
+      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+    }
+    return { ...base, since, codemapAvailable: false, selected, skipped };
+  }
+
+  const review = await codemapReview(since, deps);
+  // codemap failed / returned nothing → run-all so a broken codemap never
+  // silently skips a run.
+  if (!review.indexed && review.blastRadiusFiles.length === 0) {
+    for (const p of specs) {
+      const sym = await readCoversSymbol(p);
+      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+    }
+    return { ...base, since, codemapAvailable: false, selected, skipped };
+  }
+
+  const blastFiles = new Set(review.blastRadiusFiles);
+  const blastSymbols = new Set(review.blastRadiusSymbols);
+  const emptyRadius =
+    review.blastRadiusFiles.length === 0 &&
+    review.blastRadiusSymbols.length === 0;
+  // Indexed but empty radius → genuinely nothing impacted (CSS edit case).
+  if (emptyRadius) {
+    for (const p of specs) {
+      skipped.push({
+        ...enter(p),
+        reason: `blast radius of '${since}' matched no symbols`,
+      });
+    }
+    return { ...base, since, codemapAvailable: true, selected, skipped };
+  }
+
+  for (const p of specs) {
+    const sym = await readCoversSymbol(p);
+    if (!sym) {
+      skipped.push({ ...enter(p), reason: "no coversSymbol binding" });
+      continue;
+    }
+    if (blastSymbols.has(sym)) {
+      selected.push({ ...enter(p), coversSymbol: sym });
+      continue;
+    }
+    const files = (await codemapSemantic(sym, deps))
+      .map((s) => s.file)
+      .filter((f): f is string => !!f);
+    if (files.some((f) => blastFiles.has(f))) {
+      selected.push({ ...enter(p), coversSymbol: sym });
+    } else {
+      skipped.push({
+        ...enter(p),
+        reason: `coversSymbol '${sym}' outside blast radius of '${since}'`,
+      });
+    }
+  }
+  return { ...base, since, codemapAvailable: true, selected, skipped };
+}
+
+function renderSelectionMarkdown(s: SelectionResult): string {
+  const lines: string[] = [
+    "",
+    `\x1b[1mSelection\x1b[0m ${s.selected.length} selected, ${s.skipped.length} skipped` +
+      (s.since ? `  (--since-codemap ${s.since})` : ""),
+  ];
+  if (s.selected.length > 0) {
+    lines.push("", "Selected:");
+    for (const x of s.selected) {
+      lines.push(
+        `  \x1b[32m✓\x1b[0m ${x.name}  ${
+          x.coversSymbol ? `(${x.coversSymbol})` : ""
+        }`,
+      );
+    }
+  }
+  if (s.skipped.length > 0) {
+    lines.push("", "Skipped:");
+    for (const x of s.skipped) {
+      lines.push(`  \x1b[33m·\x1b[0m ${x.name}  — ${x.reason}`);
+    }
+  }
+  if (!s.codemapAvailable) {
+    lines.push(
+      "",
+      "\x1b[2m(codemap unavailable or no ref — selection degraded to run-all)\x1b[0m",
+    );
+  }
+  return lines.join("\n");
+}
+
 async function writeJUnitIfRequested(
   opts: RunCommandOptions,
   results: RunResult[],
@@ -957,6 +1132,7 @@ export function synthesizeErroredResult(
   const absoluteSpecPath = isAbsolutePath(specPath)
     ? specPath
     : `${process.cwd()}/${specPath}`;
+  const message = addEnospcHint(err.message);
   return {
     $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
@@ -977,6 +1153,8 @@ export function synthesizeErroredResult(
     backend: "agent-browser",
     coldStart: false,
     status: "errored",
+    summary: `errored at step 'parse': ${message}`,
+    failure: { step: "parse", message },
     startedAt: now,
     endedAt: now,
     durationMs: 0,
@@ -986,7 +1164,7 @@ export function synthesizeErroredResult(
         id: "parse",
         status: "failed",
         durationMs: 0,
-        error: addEnospcHint(err.message),
+        error: message,
       },
     ],
     artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },

@@ -1,10 +1,13 @@
 import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import type { RunResult } from "../schema/run.v1";
+import { SpecSchema } from "../schema/spec.v1";
+import { computeContractHash } from "../contractHash";
 import { DEFAULT_REQUEST_TIMEOUT_MS, runSpec } from "./Runner";
 import {
   cutClipsWithVidtrace,
@@ -2007,6 +2010,85 @@ steps:
       slowMo: undefined,
       speed: undefined,
     });
+  });
+});
+
+describe("runSpec failure reason + contractHash (features 1 + nice-to-have)", () => {
+  it("populates summary and omits failure on a passing run", async () => {
+    const specPath = await writeSpec(
+      "passes",
+      `version: 1
+name: passes
+intent: happy path
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      url: { endsWith: "/dashboard" }
+steps:
+  - id: nav
+    open: /dashboard
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/dashboard");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(result.summary).toBe("1/1 outcomes passed");
+    expect(result.failure).toBeUndefined();
+  });
+
+  it("populates failure.outcome + summary when an outcome fails", async () => {
+    const specPath = await writeSpec(
+      "fails_outcome",
+      `version: 1
+name: fails_outcome
+intent: ensure a failed outcome surfaces a canonical reason
+outcomes:
+  - id: url_mismatch
+    description: url must be the dashboard
+    verify:
+      url: { equals: "https://example.com/never" }
+steps:
+  - id: nav
+    open: /somewhere-else
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/somewhere-else");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("failed");
+    expect(result.failure).toBeDefined();
+    expect(result.failure!.outcome).toBe("url_mismatch");
+    expect(result.failure!.message).toContain("url_mismatch");
+    expect(result.summary).toBe("outcome 'url_mismatch' failed");
+  });
+
+  it("always populates spec.contractHash, computing on the fly when unstamped", async () => {
+    const specPath = await writeSpec(
+      "unstamped",
+      `version: 1
+name: unstamped
+intent: contract hash is computed on the fly
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      url: { endsWith: "/dashboard" }
+steps:
+  - id: nav
+    open: /dashboard
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/dashboard");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.spec.contractHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    // The on-the-fly hash must match what `cairn spec verify --stamp` writes:
+    // both hash the zod-parsed Spec's intent + outcomes.
+    const raw = parseYaml(await readFile(specPath, "utf8"));
+    const spec = SpecSchema.parse(raw);
+    expect(result.spec.contractHash).toBe(computeContractHash(spec));
   });
 });
 

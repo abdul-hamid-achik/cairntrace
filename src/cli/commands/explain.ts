@@ -35,7 +35,7 @@ export function buildExplain(): ExplainResult {
         name: "run",
         summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--no-web-server] [--no-services] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--since-codemap <ref>] [--select-only] [--stash-on-failure] [--no-web-server] [--no-services] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -131,6 +131,26 @@ export function buildExplain(): ExplainResult {
             values: ["on-run", "never"],
             description:
               "Auto-annotate each run (pass+fail) into codemap with run context (specName, contractHash, runId, status, outcomes, failedVerifier). Best-effort: skipped if codemap isn't installed. Overrides config annotate.autoAnnotate.",
+          },
+          {
+            name: "--stash-on-failure",
+            type: "boolean",
+            default: false,
+            description:
+              "Auto-stash failed run directories to fcheap (non-fatal if fcheap is missing).",
+          },
+          {
+            name: "--since-codemap",
+            type: "string",
+            description:
+              "Run only specs whose `coversSymbol` intersects `codemap review --since <ref>` blast radius; degrades to run-all when codemap is absent.",
+          },
+          {
+            name: "--select-only",
+            type: "boolean",
+            default: false,
+            description:
+              "Resolve which specs WOULD run and exit 0 without launching a browser (emits SelectionResult v1: selected/skipped with reasons). Pair with --since-codemap <ref> for blast-radius scoping; without a ref, lists all expanded specs as selected.",
           },
           {
             name: "--monitor",
