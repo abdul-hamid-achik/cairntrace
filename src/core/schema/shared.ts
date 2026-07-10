@@ -45,6 +45,7 @@ export const BackendSchema = z.enum([
   "playwright",
   "playwright-cli",
   "chrome-devtools-mcp",
+  "mock",
 ]);
 export type Backend = z.infer<typeof BackendSchema>;
 

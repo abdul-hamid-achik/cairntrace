@@ -97,6 +97,58 @@ export const RunFailureSchema = z
   .strict();
 export type RunFailure = z.infer<typeof RunFailureSchema>;
 
+/**
+ * One actionable next step an agent can take after a non-passing run, derived
+ * from the run's failure so a weak model gets a concrete command instead of
+ * treating the error as ambiguous (SPEC §7.1 verification contracts — mirrors
+ * glyphrun's nextActions convention). safeToAutoRun is always false: no
+ * repair is safe without the operator.
+ */
+export const NextActionSchema = z
+  .object({
+    tool: z.string().optional(),
+    command: z.string().optional(),
+    arguments: z.record(z.string(), z.unknown()).optional(),
+    reason: z.string().min(1),
+    safeToAutoRun: z.boolean(),
+  })
+  .strict();
+export type NextAction = z.infer<typeof NextActionSchema>;
+
+/** Build the nextActions for a run result from its status + failure. */
+export const buildRunNextActions = (
+  result: Pick<RunResult, "status" | "failure" | "spec">,
+): NextAction[] => {
+  if (result.status === "passed") return [];
+  const rerun = `cairn run ${result.spec.path} --json`;
+  const f = result.failure;
+  if (f?.step) {
+    return [
+      {
+        command: rerun,
+        reason: `step "${f.step}" failed: ${f.message} — inspect the step evidence and run artifacts, fix the spec or app, then rerun`,
+        safeToAutoRun: false,
+      },
+    ];
+  }
+  if (f?.outcome) {
+    return [
+      {
+        command: rerun,
+        reason: `outcome "${f.outcome}" verifier failed: ${f.message} — inspect the outcome evidence, fix the spec or app, then rerun`,
+        safeToAutoRun: false,
+      },
+    ];
+  }
+  return [
+    {
+      command: rerun,
+      reason: `run ${result.status}: ${f?.message ?? result.status} — inspect the run artifacts, then rerun`,
+      safeToAutoRun: false,
+    },
+  ];
+};
+
 export const RunResultSchema = z
   .object({
     $schema: z
@@ -131,6 +183,7 @@ export const RunResultSchema = z
     steps: z.array(StepResultSchema),
     artifacts: RunArtifactsSchema,
     exitCode: ExitCodeSchema,
+    nextActions: z.array(NextActionSchema).optional(),
   })
   .strict();
 export type RunResult = z.infer<typeof RunResultSchema>;

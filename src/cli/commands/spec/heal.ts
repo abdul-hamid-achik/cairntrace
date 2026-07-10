@@ -72,7 +72,7 @@ export async function healCommand(
   process.exit(exitCode);
 }
 
-function toHealResult(o: HealOutput): HealResult {
+export function toHealResult(o: HealOutput): HealResult {
   const patch =
     o.ops.length > 0
       ? { format: "json-pointer-ops" as const, ops: o.ops }

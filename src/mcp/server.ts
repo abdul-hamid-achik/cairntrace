@@ -35,13 +35,31 @@ import {
   type SessionRegistry,
 } from "../core/discovery/DiscoverySession";
 import { buildSpecYaml, deriveSpecName } from "../core/discovery/specExporter";
+import { toHealResult } from "../cli/commands/spec/heal";
 import { healSpec } from "../core/healer/Healer";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
-import { DocsTopicSchema } from "../core/schema/docs.v1";
+import { DocsResultSchema, DocsTopicSchema } from "../core/schema/docs.v1";
+import { ExplainResultSchema } from "../core/schema/explain.v1";
+import { HealResultSchema } from "../core/schema/heal.v1";
+import {
+  ConfigValidateResultSchema,
+  DiscoveryActionResultSchema,
+  DiscoveryExportResultSchema,
+  DiscoveryInventoryResultSchema,
+  DiscoveryListResultSchema,
+  DiscoveryOpenResultSchema,
+  DiscoverySnapshotResultSchema,
+  DiscoverySuggestResultSchema,
+  ServicesStatusResultSchema,
+} from "../core/schema/mcp.v1";
+import {
+  buildRunNextActions,
+  RunResultSchema,
+  type RunResult,
+} from "../core/schema/run.v1";
 import { LocatorSchema, SpecSchema } from "../core/schema/spec.v1";
 import { VerifierSchema } from "../core/schema/verifier.v1";
-import type { RunResult } from "../core/schema/run.v1";
 import { CAIRN_VERSION as VERSION } from "../cli/version";
 
 /**
@@ -81,7 +99,10 @@ export function buildMcpServer(): McpServer {
               `Verifiers: ${doc.verifiers.map((v) => v.id).join(", ")}`,
           },
         ],
-        structuredContent: doc as unknown as Record<string, unknown>,
+        structuredContent: ExplainResultSchema.parse(doc) as unknown as Record<
+          string,
+          unknown
+        >,
       };
     },
   );
@@ -104,7 +125,10 @@ export function buildMcpServer(): McpServer {
       const doc = buildDocs(topic ?? "overview");
       return {
         content: [{ type: "text", text: docsToMarkdown(doc) }],
-        structuredContent: doc as unknown as Record<string, unknown>,
+        structuredContent: DocsResultSchema.parse(doc) as unknown as Record<
+          string,
+          unknown
+        >,
       };
     },
   );
@@ -205,7 +229,10 @@ export function buildMcpServer(): McpServer {
         });
         return {
           content: [{ type: "text", text: summarizeRun(result) }],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: RunResultSchema.parse({
+            ...result,
+            nextActions: buildRunNextActions(result),
+          }) as unknown as Record<string, unknown>,
           isError: result.status !== "passed",
         };
       } finally {
@@ -387,7 +414,9 @@ export function buildMcpServer(): McpServer {
                   .join("\n"),
             },
           ],
-          structuredContent: out as unknown as Record<string, unknown>,
+          structuredContent: HealResultSchema.parse(
+            toHealResult(out),
+          ) as unknown as Record<string, unknown>,
           isError: out.status === "no-heal-possible",
         };
       } finally {
@@ -538,7 +567,9 @@ export function buildMcpServer(): McpServer {
                   result.errors.map((e) => `  - ${e}`).join("\n"),
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: ConfigValidateResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
           isError: !result.ok,
         };
       } catch (e) {
@@ -588,7 +619,9 @@ export function buildMcpServer(): McpServer {
                   : "no services configured",
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: ServicesStatusResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
         };
       } catch (e) {
         return {
@@ -1532,7 +1565,9 @@ export function buildMcpServer(): McpServer {
               ].join("\n"),
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: DiscoveryOpenResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
         };
       } catch (e) {
         await backend.close().catch(() => undefined);
@@ -1578,10 +1613,10 @@ export function buildMcpServer(): McpServer {
               text: `Snapshot at ${url}: ${snapshot.length} elements`,
             },
           ],
-          structuredContent: { snapshot, url } as unknown as Record<
-            string,
-            unknown
-          >,
+          structuredContent: DiscoverySnapshotResultSchema.parse({
+            snapshot,
+            url,
+          }) as unknown as Record<string, unknown>,
         };
       } catch (e) {
         return {
@@ -1664,7 +1699,9 @@ export function buildMcpServer(): McpServer {
                 : `${action} failed: ${result.error ?? "unknown"}`,
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: DiscoveryActionResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
           isError: !result.ok,
         };
       } catch (e) {
@@ -1717,7 +1754,9 @@ export function buildMcpServer(): McpServer {
                 : `Navigation failed: ${result.url}`,
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: DiscoveryActionResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
           isError: !result.ok,
         };
       } catch (e) {
@@ -1785,7 +1824,9 @@ export function buildMcpServer(): McpServer {
               ].join("\n"),
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: DiscoveryInventoryResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
         };
       } catch (e) {
         return {
@@ -1825,10 +1866,10 @@ export function buildMcpServer(): McpServer {
       const yaml = yamlStringify(steps);
       return {
         content: [{ type: "text", text: yaml }],
-        structuredContent: {
+        structuredContent: DiscoverySuggestResultSchema.parse({
           steps,
           stepCount: steps.length,
-        } as unknown as Record<string, unknown>,
+        }) as unknown as Record<string, unknown>,
       };
     },
   );
@@ -1917,7 +1958,9 @@ export function buildMcpServer(): McpServer {
                 : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})${skipNote}`,
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: DiscoveryExportResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
           isError: !verifyOk,
         };
       } catch (e) {
@@ -1989,10 +2032,9 @@ export function buildMcpServer(): McpServer {
                     .join("\n"),
           },
         ],
-        structuredContent: { sessions: list } as unknown as Record<
-          string,
-          unknown
-        >,
+        structuredContent: DiscoveryListResultSchema.parse({
+          sessions: list,
+        }) as unknown as Record<string, unknown>,
       };
     },
   );

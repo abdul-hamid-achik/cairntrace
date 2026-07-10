@@ -3,6 +3,27 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+
+## [1.31.0]
+
+### Added
+- **`nextActions` on non-passing RunResults** (SPEC §7.1 verification contracts).
+  The `cairn run` / `cairn_run` MCP result now carries an additive `nextActions`
+  array on failed/errored runs — one actionable next step (command + reason +
+  `safeToAutoRun`, always false) derived from the run's failure, mirroring
+  glyphrun's convention so an agent gets a concrete `cairn run <spec> --json`
+  rerun command instead of an ambiguous error. Passed runs omit it (byte-identical).
+
+### Changed
+- **MCP `structuredContent` is now Zod-validated before sending (SPEC §7.1).**
+  Every tool result that was cast through `as unknown as Record<string, unknown>`
+  now routes through its declared Zod schema's `.parse()` first, so wire-shape
+  drift is caught at the boundary instead of silently sent. `cairn_spec_heal`
+  now routes through the same `toHealResult` converter the CLI uses
+  (`HealResultSchema.parse(toHealResult(out))`) — it was previously sending the
+  raw `HealOutput`. New permissive `mcp.v1` schemas cover the discovery /
+  config / services surfaces that had no declared schema. `BackendSchema` gains
+  `mock` (the mock backend is a real `cairn run --mock` option the schema omitted).
 ## [1.29.1]
 
 ### Fixed

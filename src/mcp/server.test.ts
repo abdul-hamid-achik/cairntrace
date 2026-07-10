@@ -6,6 +6,19 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DocsResultSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
+import { HealResultSchema } from "../core/schema/heal.v1";
+import {
+  ConfigValidateResultSchema,
+  DiscoveryActionResultSchema,
+  DiscoveryOpenResultSchema,
+  DiscoverySnapshotResultSchema,
+  ServicesStatusResultSchema,
+} from "../core/schema/mcp.v1";
+import {
+  buildRunNextActions,
+  RunResultSchema,
+  type RunResult,
+} from "../core/schema/run.v1";
 import { buildMcpServer } from "./server";
 
 let dir: string;
@@ -180,6 +193,11 @@ steps:
       status: "passed",
       backend: "mock",
     });
+    // Contract (SPEC §7.1): structuredContent must validate against the v1
+    // RunResult schema (no blind cast), and carry the additive nextActions
+    // array — read from the parsed, typed value, not an inline cast.
+    const runSc = RunResultSchema.parse(r.structuredContent);
+    expect(Array.isArray(runSc.nextActions)).toBe(true);
     await c.close();
   });
 
@@ -358,6 +376,10 @@ steps:
     expect(sc.ok).toBe(true);
     expect(sc.errors).toEqual([]);
     await c.close();
+    // Contract (SPEC §7.1): structuredContent validates against the declared schema.
+    expect(
+      ConfigValidateResultSchema.safeParse(r.structuredContent).success,
+    ).toBe(true);
   });
 
   it("cairn_config_validate reports errors for invalid config", async () => {
@@ -397,6 +419,10 @@ steps:
     expect(sc).toHaveProperty("seed");
     expect(sc).toHaveProperty("tmux");
     expect(Array.isArray(sc.errors)).toBe(true);
+    // Contract (SPEC §7.1): structuredContent validates against the declared schema.
+    expect(
+      ServicesStatusResultSchema.safeParse(r.structuredContent).success,
+    ).toBe(true);
     await c.close();
   });
 });
@@ -413,6 +439,10 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(sc.sessionId).toBeTruthy();
     expect(sc.url).toBe("/login");
     expect(Array.isArray(sc.snapshot)).toBe(true);
+    // Contract (SPEC §7.1): structuredContent validates against the declared schema.
+    expect(
+      DiscoveryOpenResultSchema.safeParse(r.structuredContent).success,
+    ).toBe(true);
     await c.close();
   });
 
@@ -454,6 +484,19 @@ describe("Cairntrace MCP discovery tools", () => {
     const snapSc = snapResult.structuredContent as Record<string, unknown>;
     expect(Array.isArray(snapSc.snapshot)).toBe(true);
     expect(typeof snapSc.url).toBe("string");
+    // Contract (SPEC §7.1): each discovery structuredContent validates against
+    // its declared schema (no blind cast).
+    expect(
+      DiscoveryOpenResultSchema.safeParse(openResult.structuredContent).success,
+    ).toBe(true);
+    expect(
+      DiscoveryActionResultSchema.safeParse(fillResult.structuredContent)
+        .success,
+    ).toBe(true);
+    expect(
+      DiscoverySnapshotResultSchema.safeParse(snapResult.structuredContent)
+        .success,
+    ).toBe(true);
 
     // 4. List sessions
     const listResult = await c.callTool({
@@ -731,5 +774,70 @@ describe("Cairntrace MCP discovery tools", () => {
       arguments: { sessionId },
     });
     await c.close();
+  });
+});
+
+describe("Cairntrace MCP contract (SPEC §7.1) — heal + nextActions", () => {
+  it("cairn_spec_heal with mock=true returns a HealResult-shaped structuredContent", async () => {
+    // A minimal spec with a text outcome; heal runs it against the mock
+    // backend and returns a HealResult. The structuredContent must validate
+    // against the declared heal.v1 schema (no blind cast).
+    const specPath = join(dir, "heal-demo.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: heal_demo
+intent: heal smoke
+outcomes:
+  - id: ok
+    description: ok
+    verify: { text: { contains: "x" } }
+steps:
+  - open: /
+`,
+    );
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_spec_heal",
+      arguments: { path: specPath, mock: true },
+    });
+    expect(r.structuredContent).toBeDefined();
+    expect(HealResultSchema.safeParse(r.structuredContent).success).toBe(true);
+    await c.close();
+  });
+
+  it("buildRunNextActions: passed → none; failed-with-step → one non-auto action", () => {
+    const specPath = join(dir, "any.yml");
+    const passed: RunResult = {
+      $schema: "urn:cairntrace.dev:run:v1",
+      version: "1",
+      runId: "r1",
+      runDir: dir,
+      spec: { name: "s", path: specPath },
+      environment: "local",
+      backend: "mock",
+      coldStart: false,
+      status: "passed",
+      startedAt: "2026-07-10T00:00:00Z",
+      endedAt: "2026-07-10T00:00:00Z",
+      durationMs: 1,
+      outcomes: [],
+      steps: [],
+      artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
+      exitCode: 0,
+    };
+    expect(buildRunNextActions(passed)).toEqual([]);
+
+    const failed: RunResult = {
+      ...passed,
+      status: "failed",
+      exitCode: 1,
+      failure: { step: "nav", message: "element not found" },
+    };
+    const acts = buildRunNextActions(failed);
+    expect(acts).toHaveLength(1);
+    expect(acts[0]!.safeToAutoRun).toBe(false);
+    expect(acts[0]!.command).toContain("cairn run");
+    expect(acts[0]!.reason).toContain("nav");
   });
 });
