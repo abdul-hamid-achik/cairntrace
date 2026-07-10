@@ -1808,6 +1808,11 @@ export function buildMcpServer(): McpServer {
         const result = {
           ...(inventory.roles ? { roles: inventory.roles } : {}),
           ...(inventory.testids ? { testids: inventory.testids } : {}),
+          ...(inventory.total !== undefined ? { total: inventory.total } : {}),
+          ...(inventory.truncated !== undefined
+            ? { truncated: inventory.truncated }
+            : {}),
+          ...(inventory.limit !== undefined ? { limit: inventory.limit } : {}),
         };
         return {
           content: [

@@ -699,6 +699,9 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(invResult.isError).toBeFalsy();
     const invSc = invResult.structuredContent as Record<string, unknown>;
     expect(Array.isArray(invSc.roles)).toBe(true);
+    // SPEC §7.3: truncation honesty — total + truncated are always present.
+    expect(typeof invSc.total).toBe("number");
+    expect(typeof invSc.truncated).toBe("boolean");
 
     await c.callTool({
       name: "cairn_discover_close",

@@ -21,6 +21,12 @@ export interface TestIdInventoryEntry {
 export interface LocatorInventory {
   roles?: RoleInventoryEntry[];
   testids?: TestIdInventoryEntry[];
+  /** Total entries found before any cap was applied (truncation honesty, SPEC §7.3). */
+  total?: number;
+  /** True when the returned arrays were capped to avoid flooding the model context. */
+  truncated?: boolean;
+  /** The cap applied (default 100 per category). */
+  limit?: number;
 }
 
 export interface LocatorInventoryOptions {
@@ -33,13 +39,23 @@ export async function collectLocatorInventory(
   opts: LocatorInventoryOptions,
 ): Promise<LocatorInventory> {
   const out: LocatorInventory = {};
+  const INVENTORY_LIMIT = 100;
+  let total = 0;
+  let truncated = false;
 
   if (opts.roles) {
     const snapshot = await backend.snapshot({ interactive: true });
     if (!snapshot.ok) {
       throw new Error(`snapshot failed: ${snapshot.text}`);
     }
-    out.roles = extractRoleInventory(snapshot.text);
+    const roles = extractRoleInventory(snapshot.text);
+    total += roles.length;
+    if (roles.length > INVENTORY_LIMIT) {
+      out.roles = roles.slice(0, INVENTORY_LIMIT);
+      truncated = true;
+    } else {
+      out.roles = roles;
+    }
   }
 
   if (opts.testids) {
@@ -49,9 +65,19 @@ export async function collectLocatorInventory(
         `testid inventory failed: ${evaluated.stderr || evaluated.stdout}`,
       );
     }
-    out.testids = parseTestIdInventory(evaluated.stdout);
+    const testids = parseTestIdInventory(evaluated.stdout);
+    total += testids.length;
+    if (testids.length > INVENTORY_LIMIT) {
+      out.testids = testids.slice(0, INVENTORY_LIMIT);
+      truncated = true;
+    } else {
+      out.testids = testids;
+    }
   }
 
+  out.total = total;
+  out.truncated = truncated;
+  out.limit = INVENTORY_LIMIT;
   return out;
 }
 

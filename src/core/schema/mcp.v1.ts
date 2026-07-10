@@ -60,6 +60,9 @@ export const DiscoveryInventoryResultSchema = z
   .object({
     roles: z.array(z.unknown()).optional(),
     testids: z.array(z.unknown()).optional(),
+    total: z.number().int().nonnegative().optional(),
+    truncated: z.boolean().optional(),
+    limit: z.number().int().positive().optional(),
   })
   .passthrough();
 export type DiscoveryInventoryResult = z.infer<
