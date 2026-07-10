@@ -51,6 +51,28 @@ export const StepResultSchema = z
   .strict();
 export type StepResult = z.infer<typeof StepResultSchema>;
 
+export const ArtifactManifestEntrySchema = z
+  .object({
+    /** Portable path relative to runDir. */
+    path: RelativePathSchema,
+    /** Stable semantic category assigned by ArtifactWriter. */
+    kind: z.string().min(1),
+    /** Exact file size used when calculating sha256. */
+    bytes: z.number().int().nonnegative(),
+    /** Lowercase SHA-256 digest of the artifact bytes. */
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+export type ArtifactManifestEntry = z.infer<typeof ArtifactManifestEntrySchema>;
+
+export const ArtifactManifestSchema = z
+  .object({
+    version: z.literal("1"),
+    artifacts: z.array(ArtifactManifestEntrySchema),
+  })
+  .strict();
+export type ArtifactManifest = z.infer<typeof ArtifactManifestSchema>;
+
 export const RunArtifactsSchema = z
   .object({
     report: RelativePathSchema.optional(),
@@ -76,6 +98,8 @@ export const RunArtifactsSchema = z
     clips: z.record(z.string(), RelativePathSchema).optional(),
     /** Exact-replay manifest (SPEC §7.3). */
     replay: RelativePathSchema.optional(),
+    /** Deterministic checksummed inventory of files in this run directory. */
+    manifest: RelativePathSchema.optional(),
   })
   .strict();
 export type RunArtifacts = z.infer<typeof RunArtifactsSchema>;

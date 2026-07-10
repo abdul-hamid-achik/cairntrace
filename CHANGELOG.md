@@ -2,6 +2,14 @@
 
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
+## [Unreleased]
+
+### Changed
+- **Versioned codemap review consumer.** Cairntrace now validates the exact codemap review v1
+  producer golden, accepts legacy unversioned output plus `schema_version: 1`, and maps unknown
+  future versions to codemap unavailable. Impact-driven selection therefore runs all specs on
+  contract drift instead of mistaking an unsupported payload for an empty blast radius.
+
 ## [1.33.0]
 
 ### Added
