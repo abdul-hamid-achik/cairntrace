@@ -4,6 +4,21 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
 
+## [1.32.0]
+
+### Added
+- **`replay.json` exact-replay manifest (SPEC §7.3).** Every run now writes
+  `replay.json` alongside `run.json`: the exact `cairn run <spec> --json`
+  command, backend, environment, base URL, viewport, resolved capture policy,
+  the redacted env/var KEY NAMES (never values), the cairn version, and the run
+  id. An agent can reproduce a run bit-for-bit without re-reading the resolved
+  spec; §7.2's "exact replay action" return can cite it directly. Mirrors
+  glyphrun's `replay.json`. New `src/core/schema/replay.v1.ts`; `RunArtifactsSchema`
+  gains an additive `replay` field; `ArtifactWriter.writeReplay`; wired into
+  the runner (best-effort — a write failure never fails the run). Test asserts
+  the manifest is written, parses against the replay.v1 schema, carries the
+  replay command + backend + cairn version.
+
 ## [1.31.0]
 
 ### Added

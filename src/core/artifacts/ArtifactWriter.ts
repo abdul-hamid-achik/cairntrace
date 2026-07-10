@@ -2,6 +2,7 @@ import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReportConfig } from "../schema/config.v1";
 import type { RunResult } from "../schema/run.v1";
+import type { ReplayManifest } from "../schema/replay.v1";
 import type { Spec } from "../schema/spec.v1";
 import { renderAgentContext } from "./agentContext";
 import { renderEvidenceMarkdown, type EvidenceInput } from "./evidence";
@@ -179,6 +180,18 @@ export class ArtifactWriter {
     await writeFile(
       this.resolve("agent_context.md"),
       this.redactor.text(renderAgentContext(spec, result)),
+    );
+  }
+
+  /**
+   * Write the exact-replay manifest (SPEC §7.3) as replay.json, redacted like
+   * every other artifact. Env values are never present in the manifest (only
+   * key names), but the redactor is still applied as a last-line filter.
+   */
+  async writeReplay(manifest: ReplayManifest): Promise<void> {
+    await writeFile(
+      this.resolve("replay.json"),
+      renderJson(this.redactor.value(manifest)),
     );
   }
 

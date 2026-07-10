@@ -74,6 +74,8 @@ export const RunArtifactsSchema = z
     video: RelativePathSchema.optional(),
     /** Named video clips produced by vidtrace from the run video. */
     clips: z.record(z.string(), RelativePathSchema).optional(),
+    /** Exact-replay manifest (SPEC §7.3). */
+    replay: RelativePathSchema.optional(),
   })
   .strict();
 export type RunArtifacts = z.infer<typeof RunArtifactsSchema>;

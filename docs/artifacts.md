@@ -15,6 +15,7 @@ run/my-spec-2026-06-29T18-22-04-c5a3/
 ├── report.json           # machine-readable, used by dashboards
 ├── agent_context.md      # the post-mortem agent context
 ├── spec.resolved.yml     # the spec after ${baseUrl}/${env.X}/${vars.X} substitution
+├── replay.json           # exact-replay manifest (SPEC §7.3): the `cairn run` command, backend, env, viewport, capture policy, redacted env KEY NAMES, cairn version
 ├── events.ndjson         # full event stream
 ├── outcomes/
 │   ├── <id>.md           # rendered outcome + evidence (every outcome)

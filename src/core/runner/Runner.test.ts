@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import type { RunResult } from "../schema/run.v1";
+import { ReplayManifestSchema } from "../schema/replay.v1";
 import { SpecSchema } from "../schema/spec.v1";
 import { computeContractHash } from "../contractHash";
 import { DEFAULT_REQUEST_TIMEOUT_MS, runSpec } from "./Runner";
@@ -170,6 +171,42 @@ steps:
     // spec.resolved.yml exists
     const resolved = await stat(join(result.runDir, "spec.resolved.yml"));
     expect(resolved.isFile()).toBe(true);
+  });
+
+  it("writes an exact-replay manifest (replay.json)", async () => {
+    const specPath = await writeSpec(
+      "replay",
+      `version: 1
+name: replay_demo
+intent: a run writes an exact-replay manifest
+environment: local
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /dashboard
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/dashboard");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    // The run result advertises the replay artifact.
+    expect(result.artifacts.replay).toBe("replay.json");
+    const raw = await readFile(join(result.runDir, "replay.json"), "utf8");
+    const manifest = JSON.parse(raw) as Record<string, unknown>;
+    // It validates against the declared replay.v1 schema (no blind shape).
+    expect(ReplayManifestSchema.safeParse(manifest).success).toBe(true);
+    expect(manifest["specName"]).toBe("replay_demo");
+    expect(String(manifest["replay"])).toContain("cairn run");
+    expect(String(manifest["replay"])).toContain(specPath);
+    expect(manifest["backend"]).toBe("mock");
+    expect(
+      (manifest["versions"] as Record<string, unknown>).cairn,
+    ).toBeTruthy();
   });
 
   it("returns failed status when an outcome doesn't hold", async () => {

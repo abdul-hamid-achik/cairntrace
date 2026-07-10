@@ -40,7 +40,9 @@ import type {
   RunResult,
   StepResult,
 } from "../schema/run.v1";
+import { buildReplayManifest } from "../schema/replay.v1";
 import type { Outcome } from "../schema/spec.v1";
+import { CAIRN_VERSION } from "../../cli/version";
 import { evaluateOutcomes } from "./OutcomeEvaluator";
 import { runNodeScript } from "./nodeScripts";
 import {
@@ -1114,8 +1116,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       : {}),
     ...(videoPath ? { video: videoPath } : {}),
     ...(Object.keys(clips).length > 0 ? { clips } : {}),
+    replay: "replay.json",
   };
-
   const result: RunResult = {
     $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
@@ -1149,6 +1151,30 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   await writer.writeOutcomesIndex(publicResult);
   await writer.writeAgentContext(spec, publicResult);
 
+  // Exact-replay manifest (SPEC §7.3): replay.json captures everything an
+  // agent needs to reproduce the run without re-reading the resolved spec.
+  // Env/var VALUES are never included — only key names — and the writer
+  // redacts. Best-effort: a write failure must never fail the completed run.
+  await safe(() =>
+    writer.writeReplay(
+      buildReplayManifest({
+        runId,
+        specName: spec.name,
+        specPath,
+        ...(spec.contractHash
+          ? { contractHash: spec.contractHash }
+          : { contractHash: computeContractHash(spec) }),
+        backend: backendName,
+        ...(env ? { environment: env } : {}),
+        ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+        ...(viewport ? { viewport } : {}),
+        capturePolicy: policy,
+        envKeys: Object.keys(runtime.vars),
+        cairnVersion: CAIRN_VERSION,
+        generatedAt: endedAt,
+      }),
+    ),
+  );
   await writer.appendEvent({
     ts: endedAt,
     type:
