@@ -1,4 +1,9 @@
-import { healSpec, type HealOutput } from "../../../core/healer/Healer";
+import {
+  healSpec,
+  healVerify,
+  type HealOutput,
+  type HealVerifyResult,
+} from "../../../core/healer/Healer";
 import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
 import { trackBackend } from "../../cleanup";
@@ -7,6 +12,7 @@ import { isInteractive } from "../../progress";
 
 export interface HealCommandOptions {
   apply?: boolean;
+  verify?: boolean;
   mock?: boolean;
   backend?: BackendChoice;
   headed?: boolean;
@@ -34,21 +40,32 @@ export async function healCommand(
       process.stdout.write(`Healing ${specPath}…\n\n`);
     }
 
-    const output = await healSpec({
-      specPath,
-      backend,
-      ...(opts.apply ? { apply: opts.apply } : {}),
-    });
-
-    exitCode = output.exitCode;
-
-    if (format === "json" || format === "yaml") {
-      const wire = toHealResult(output);
-      process.stdout.write(emit(format, wire, () => ""));
+    if (opts.verify) {
+      const vr = await healVerify({ specPath, backend });
+      exitCode = vr.verified ? 0 : 5;
+      if (format === "json" || format === "yaml") {
+        process.stdout.write(emit(format, vr, () => ""));
+      } else {
+        process.stdout.write(renderVerifyMarkdown(vr));
+      }
+      if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     } else {
-      process.stdout.write(renderMarkdown(output));
+      const output = await healSpec({
+        specPath,
+        backend,
+        ...(opts.apply ? { apply: opts.apply } : {}),
+      });
+
+      exitCode = output.exitCode;
+
+      if (format === "json" || format === "yaml") {
+        const wire = toHealResult(output);
+        process.stdout.write(emit(format, wire, () => ""));
+      } else {
+        process.stdout.write(renderMarkdown(output));
+      }
+      if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     }
-    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
   } catch (e) {
     const err = e as Error;
     if (format === "json") {
@@ -141,4 +158,26 @@ function renderOp(op: PatchOp): string {
     ].join("\n");
   }
   return `${head}\n  - why: ${op.reason}`;
+}
+
+function renderVerifyMarkdown(vr: HealVerifyResult): string {
+  const lines: string[] = [
+    "# Cairntrace Verified Heal",
+    "",
+    "- spec: " + vr.specPath,
+    "- before run: " + vr.beforeRun,
+  ];
+  if (vr.afterRun) lines.push("- after run: " + vr.afterRun);
+  lines.push("- verified: " + (vr.verified ? "yes" : "no"));
+  lines.push("- confidence: " + vr.confidence);
+  if (vr.reason) lines.push("- reason: " + vr.reason);
+  if (vr.evidence) lines.push("- evidence: " + vr.evidence);
+  if (vr.replay) lines.push("- replay: " + vr.replay);
+  lines.push("");
+  for (const op of vr.ops) {
+    lines.push("## " + op.op + " " + op.path);
+    if (op.reason) lines.push("- " + op.reason);
+    lines.push("");
+  }
+  return lines.join("\n") + "\n";
 }

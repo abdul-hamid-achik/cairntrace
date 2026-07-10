@@ -2,6 +2,19 @@
 
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
+## [1.33.0]
+
+### Added
+- **`cairn spec heal --verify` — verified transactional heal (SPEC §7.2).**
+  Proposes selector-drift ops, applies them to the owning file, cold-start reruns
+  the spec, and accepts only if the rerun passes (all outcomes pass). On failure
+  the owning file is restored (rollback). Returns a `HealVerifyResult` with
+  `verified`, `confidence` (high|low), `beforeRun`/`afterRun` run IDs,
+  retained `evidence` (the after run dir), and the exact `replay` command.
+  Mirrors glyphrun's `glyph repair --verify`. New `healVerify` +
+  `HealVerifyResult` in Healer.ts; `HealOutput` gains `owningFile` (always
+  populated when ops > 0); CLI `--verify` flag on `cairn spec heal`.
+
 
 
 ## [1.32.0]

@@ -1,11 +1,11 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Step } from "../schema/spec.v1";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import { parse as parseYaml } from "yaml";
-import { applyPatchOps, healSpec, proposeOps } from "./Healer";
+import { applyPatchOps, healSpec, healVerify, proposeOps } from "./Healer";
 import { parseSnapshot } from "./snapshotParser";
 
 const SNAPSHOT_WITH_RENAMED_LINK = `
@@ -291,5 +291,103 @@ steps:
     expect(result.exitCode).toBe(5);
     expect(result.summary).toContain("eval steps are not healable");
     expect(result.ops).toEqual([]);
+  });
+});
+
+describe("healVerify — transactional heal (SPEC §7.2)", () => {
+  let workDir: string;
+
+  it("verifies and accepts a heal when the rerun passes", async () => {
+    workDir = await mkdtemp(join(tmpdir(), "cairntrace-heal-verify-"));
+    const specPath = join(workDir, "drift.yml");
+    // A spec with a role+name that doesn't match the mock backend's page.
+    // The mock backend returns a snapshot with role=button name="Submit Form"
+    // when the spec says name="Submit" — heal should propose name → "Submit Form".
+    await writeFile(
+      specPath,
+      `version: 1
+name: heal_verify
+intent: verify a heal end-to-end
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: click_submit
+    click:
+      by: role
+      role: button
+      name: Submit
+`,
+    );
+
+    // Configure the mock backend to fail the first step (name mismatch) but
+    // pass after the heal (name corrected to "Submit Form").
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/form");
+    // The mock will fail the click because the name doesn't match, then the
+    // heal proposes the on-page name. After patching, the rerun should pass
+    // because the mock doesn't actually check the name on click — it just
+    // records the step. So the rerun passes (no step failure).
+    //
+    // Actually, MockBrowserBackend.click always succeeds (it records the step
+    // and returns ok). So the first run should ALSO pass. To get a failing
+    // first run, we need to make the step fail. Let's use a failNextStep.
+    backend.failNextStep("click failed: element not found");
+
+    const vr = await healVerify({ specPath, backend });
+
+    // The first run fails (failNextStep), heal proposes ops based on the
+    // snapshot, the rerun (with the patched spec) should pass because
+    // failNextStep only fires once.
+    expect(vr.ops.length).toBeGreaterThan(0);
+    expect(vr.beforeRun).toBeTruthy();
+    expect(vr.afterRun).toBeTruthy();
+    // The rerun should pass (failNextStep was consumed by the first run).
+    expect(vr.verified).toBe(true);
+    expect(vr.confidence).toBe("high");
+    expect(vr.evidence).toBeTruthy();
+    expect(vr.replay).toContain("cairn run");
+  });
+
+  it("rolls back when the rerun still fails", async () => {
+    workDir = await mkdtemp(join(tmpdir(), "cairntrace-heal-verify-rollback-"));
+    const specPath = join(workDir, "drift_rollback.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: heal_verify_rollback
+intent: verify rollback when rerun still fails
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      url: { equals: "https://example.com/never" }
+steps:
+  - id: click_submit
+    click:
+      by: role
+      role: button
+      name: Submit
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setUrl("/form");
+    backend.failNextStep("click failed: element not found");
+
+    const vr = await healVerify({ specPath, backend });
+
+    // The first run fails (failNextStep). Heal proposes ops. The rerun's
+    // step passes (failNextStep consumed), but the outcome (url equals never)
+    // fails → verified=false, rollback.
+    expect(vr.verified).toBe(false);
+    expect(vr.confidence).toBe("low");
+    expect(vr.reason).toBeTruthy();
+
+    // The original spec should still have "Submit" (rolled back).
+    const afterSpec = await readFile(specPath, "utf8");
+    expect(afterSpec).toContain("name: Submit");
   });
 });

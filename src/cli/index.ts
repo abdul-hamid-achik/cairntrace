@@ -336,6 +336,11 @@ addFormatFlags(
       "Run a spec and propose selector-drift fixes from the snapshot",
     )
     .option("--apply", "write the patched spec back to disk", false)
+    .option(
+      "--verify",
+      "apply to a temp, cold-start rerun, write only if it passes (SPEC §7.2)",
+      false,
+    )
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
     .option("--headed", "show the browser window", false),

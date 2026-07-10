@@ -5,6 +5,7 @@ import type { BrowserBackend } from "../../adapters/browserBackend";
 import { parseSpec } from "../parser/parseSpec";
 import { runSpec } from "../runner/Runner";
 import type { PatchOp } from "../schema/heal.v1";
+import type { RunResult } from "../schema/run.v1";
 import type { ExitCode } from "../schema/shared";
 import type { Step } from "../schema/spec.v1";
 import {
@@ -29,6 +30,9 @@ export interface HealOutput {
   ops: PatchOp[];
   /** Present when --apply succeeded. */
   appliedPath?: string;
+  /** The file that owns the failed step (main spec or an imported action).
+   * Always populated when ops.length > 0, so verify can backup/patch/restore. */
+  owningFile?: string;
   /** Human-readable explanation of what changed (or didn't). */
   summary: string;
   exitCode: ExitCode;
@@ -181,6 +185,7 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
       outcomesStillReachable: true,
       ops,
       appliedPath: origin.filePath,
+      owningFile: origin.filePath,
       summary: `applied ${ops.length} op(s) to ${origin.filePath}; re-run the spec to confirm`,
       exitCode: 0,
     };
@@ -192,6 +197,7 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     status: "patch-proposed",
     outcomesStillReachable: true,
     ops,
+    owningFile: origin.filePath,
     summary: `proposed ${ops.length} op(s) on ${origin.filePath}; pass --apply to write`,
     exitCode: 0,
   };
@@ -455,4 +461,86 @@ function stringDistance(a: string, b: string): number {
     if (al[i] !== bl[i]) mismatches++;
   }
   return lenDiff + mismatches;
+}
+
+// --- Verified transactional heal (SPEC §7.2) ---
+
+export interface HealVerifyResult {
+  schemaVersion: 1;
+  specPath: string;
+  beforeRun: string;
+  afterRun?: string;
+  ops: PatchOp[];
+  verified: boolean;
+  confidence: "high" | "low";
+  reason?: string;
+  evidence?: string;
+  replay?: string;
+}
+
+/**
+ * Verify a heal transactionally (SPEC §7.2): propose ops, apply them to the
+ * owning file, cold-start rerun the spec, and accept only if the rerun passes.
+ * On failure the owning file is restored (rollback). The before run is the
+ * heal's diagnostic run; the after run is the verification rerun.
+ */
+export async function healVerify(opts: HealOptions): Promise<HealVerifyResult> {
+  const out = await healSpec({ ...opts, apply: false });
+  const result: HealVerifyResult = {
+    schemaVersion: 1,
+    specPath: out.specPath,
+    beforeRun: out.basedOnRunId,
+    ops: out.ops,
+    verified: false,
+    confidence: "low",
+    replay: `cairn run ${opts.specPath} --json`,
+  };
+
+  if (out.ops.length === 0) {
+    result.reason = out.summary;
+    return result;
+  }
+
+  const owningFile = out.owningFile;
+  if (!owningFile) {
+    result.reason = "owning file not identified — cannot verify";
+    return result;
+  }
+
+  // Backup → patch → rerun → restore-on-failure (transactional).
+  const backup = await readFile(owningFile, "utf8");
+  await writeFile(owningFile, applyPatchOps(backup, out.ops));
+
+  let after: RunResult | undefined;
+  try {
+    after = await runSpec({
+      specPath: opts.specPath,
+      backend: opts.backend,
+      ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
+    });
+  } catch (e) {
+    // Rerun errored — rollback.
+    await writeFile(owningFile, backup);
+    result.reason = `verification rerun errored: ${(e as Error).message}`;
+    return result;
+  }
+
+  result.afterRun = after.runId;
+  result.evidence = after.runDir;
+
+  if (after.status === "passed") {
+    result.verified = true;
+    result.confidence = "high";
+    // Leave the patch in place (accepted).
+  } else {
+    // Rerun failed — rollback.
+    await writeFile(owningFile, backup);
+    result.confidence = "low";
+    const reason = `verification rerun ${after.status}`;
+    result.reason = after.failure
+      ? `${reason}: ${after.failure.message}`
+      : reason;
+  }
+
+  return result;
 }
