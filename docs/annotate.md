@@ -71,7 +71,9 @@ cairn annotate src/auth/login.ts:42 --note "login_flow fails: redirects to /erro
 - `codemap_callers` / `codemap_impact` — structural expansion from a symbol; `impact` powers `cairn run --since-codemap <ref>` (run only specs whose `coversSymbol` intersects the blast radius).
 - `codemap_semantic` — semantic search used by `investigate` re-ranking and `stash search` symbol expansion.
 
-All codemap calls are best-effort and never fail a run when codemap is absent.
+All codemap calls are best-effort and never fail a run when codemap is absent. Review parsing
+accepts legacy unversioned output plus canonical `schema_version: 1`; unknown versions mark codemap
+unavailable so `--since-codemap` safely runs all candidate specs instead of skipping verification.
 
 ## See also
 

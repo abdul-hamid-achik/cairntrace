@@ -5,7 +5,7 @@ import { parse as parseYaml } from "yaml";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
-import type { RunResult } from "../schema/run.v1";
+import { ArtifactManifestSchema, type RunResult } from "../schema/run.v1";
 import { ReplayManifestSchema } from "../schema/replay.v1";
 import { SpecSchema } from "../schema/spec.v1";
 import { computeContractHash } from "../contractHash";
@@ -116,6 +116,7 @@ steps:
     expect(runJson.status).toBe("passed");
     expect(runJson.artifacts.report).toBe("report.html");
     expect(runJson.artifacts.reportJson).toBe("report.json");
+    expect(runJson.artifacts.manifest).toBe("artifact-manifest.json");
 
     const runYaml = await readFile(join(result.runDir, "run.yaml"), "utf8");
     expect(runYaml).toContain("name: happy");
@@ -171,6 +172,21 @@ steps:
     // spec.resolved.yml exists
     const resolved = await stat(join(result.runDir, "spec.resolved.yml"));
     expect(resolved.isFile()).toBe(true);
+
+    const manifest = ArtifactManifestSchema.parse(
+      JSON.parse(
+        await readFile(join(result.runDir, result.artifacts.manifest!), "utf8"),
+      ),
+    );
+    expect(manifest.artifacts.map((entry) => entry.path)).toEqual(
+      manifest.artifacts.map((entry) => entry.path).toSorted(),
+    );
+    expect(manifest.artifacts.some((entry) => entry.path === "run.json")).toBe(
+      true,
+    );
+    expect(
+      manifest.artifacts.some((entry) => entry.path === "events.ndjson"),
+    ).toBe(true);
   });
 
   it("writes an exact-replay manifest (replay.json)", async () => {
@@ -978,7 +994,7 @@ steps:
       method: "POST",
       url: "http://localhost:8080/api/qr-token",
       status: 200,
-      body: { token: "tok-123" },
+      body: { token: "[redacted]" },
     });
     // The fill step received the spliced token value.
     expect(backend.stepLog[0]).toMatchObject({

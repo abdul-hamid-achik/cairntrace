@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   codemapOrphans,
@@ -331,7 +332,7 @@ describe("pickBoolean", () => {
 });
 
 describe("parseReviewReport / codemapReview (feature 1)", () => {
-  it("extracts blast-radius files + symbols from the v0.19.0 shape", () => {
+  it("extracts blast-radius files + symbols from the legacy unversioned shape", () => {
     const r = parseReviewReport(
       JSON.stringify({
         blast_radius: [
@@ -344,6 +345,8 @@ describe("parseReviewReport / codemapReview (feature 1)", () => {
         stale: false,
       }),
     );
+    expect(r).toBeDefined();
+    if (!r) throw new Error("legacy review report was rejected");
     expect(r.blastRadiusFiles).toEqual([
       "src/forms/handler.ts",
       "src/forms/validate.ts",
@@ -355,8 +358,92 @@ describe("parseReviewReport / codemapReview (feature 1)", () => {
     expect(r.stale).toBe(false);
   });
 
+  it("parses the exact producer v1 golden", async () => {
+    const golden = await readFile(
+      new URL("./testdata/codemap.review.v1.json", import.meta.url),
+      "utf8",
+    );
+    const r = parseReviewReport(golden);
+    expect(r).toEqual({
+      blastRadiusFiles: ["a_test.go", "b.go"],
+      blastRadiusSymbols: ["TestRun", "Other"],
+      changedFiles: ["a.go"],
+      changedSymbols: ["Run"],
+      indexed: true,
+      stale: true,
+    });
+  });
+
+  it("preserves camelCase collection and path/name/id aliases", () => {
+    const r = parseReviewReport(
+      JSON.stringify({
+        schemaVersion: 1,
+        blastRadius: [
+          { id: "handleSubmit", path: "src/forms/handler.ts" },
+          { name: "validateEmail", file: "src/forms/validate.ts" },
+        ],
+        changedFiles: [{ path: "src/forms/handler.ts" }, "src/index.css"],
+        changedSymbols: [{ name: "handleSubmit" }, { id: "validateEmail" }],
+        indexed: true,
+      }),
+    );
+    expect(r).toEqual({
+      blastRadiusFiles: ["src/forms/handler.ts", "src/forms/validate.ts"],
+      blastRadiusSymbols: ["handleSubmit", "validateEmail"],
+      changedFiles: ["src/forms/handler.ts", "src/index.css"],
+      changedSymbols: ["handleSubmit", "validateEmail"],
+      indexed: true,
+      stale: false,
+    });
+  });
+
+  it.each([0, 2, -1, "1", null, true, {}])(
+    "rejects unsupported schema_version %j",
+    (schemaVersion) => {
+      expect(
+        parseReviewReport(
+          JSON.stringify({
+            schema_version: schemaVersion,
+            indexed: true,
+            blast_radius: [{ symbol: "unsafe", file: "src/unsafe-version.ts" }],
+          }),
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    { schema_version: 1, indexed: true },
+    {
+      schema_version: 1,
+      project: "x",
+      mode: "working",
+      depth: 3,
+      is_repo: true,
+      indexed: true,
+      changed_files: [],
+      changed_symbols: [{ name: "Run" }],
+      blast_radius: [{ name: "Caller" }],
+      covering_tests: [],
+      untested_symbols: [],
+      stale: false,
+    },
+    {
+      schema_version: 1,
+      schemaVersion: 2,
+      indexed: true,
+      blast_radius: [],
+      changed_files: [],
+      changed_symbols: [],
+    },
+  ])("rejects malformed or conflicting v1 report %#", (report) => {
+    expect(parseReviewReport(JSON.stringify(report))).toBeUndefined();
+  });
+
   it("returns an empty report on non-JSON input", () => {
     const r = parseReviewReport("not json");
+    expect(r).toBeDefined();
+    if (!r) throw new Error("non-JSON input returned an unavailable report");
     expect(r.blastRadiusFiles).toEqual([]);
     expect(r.indexed).toBe(false);
   });
@@ -366,6 +453,30 @@ describe("parseReviewReport / codemapReview (feature 1)", () => {
     expect(r.blastRadiusFiles).toContain("src/forms/handler.ts");
     expect(r.blastRadiusSymbols).toContain("handleSubmit");
     expect(r.indexed).toBe(true);
+  });
+
+  it("codemapReview makes a future schema unavailable", async () => {
+    const futureVersion: CodemapDeps = {
+      isAvailable: async () => true,
+      exec: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schema_version: 2,
+          indexed: true,
+          blast_radius: [{ symbol: "unsafe", file: "src/unsafe-version.ts" }],
+        }),
+        stderr: "",
+      }),
+    };
+    const r = await codemapReview("HEAD~1", futureVersion);
+    expect(r).toEqual({
+      blastRadiusFiles: [],
+      blastRadiusSymbols: [],
+      changedFiles: [],
+      changedSymbols: [],
+      indexed: false,
+      stale: false,
+    });
   });
 
   it("codemapReview degrades to empty when codemap is absent", async () => {

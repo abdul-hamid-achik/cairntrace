@@ -193,7 +193,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     join(homedir(), ".cairntrace", "runs");
   const now = (opts.now ?? (() => new Date()))();
   const runId = generateRunId(spec.name, now);
-  const runDir = join(artifactRoot, runId);
+  const runDir = resolve(artifactRoot, runId);
 
   const redactor = createArtifactRedactor(
     spec.redaction,
@@ -375,17 +375,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // When launched under `monitor run`, surface the target PID so the parent
     // monitor can observe the exact browser process tree.
     if (isTruthyEnv(process.env["MONITOR"])) {
-      void Bun_writeFile(
-        writer.resolve("diagnostics/target.json"),
-        redactor.text(
-          JSON.stringify(
-            { pid, backend: backendName, writtenAt: new Date().toISOString() },
-            null,
-            2,
-          ) + "\n",
-        ),
-        true,
-      ).catch(() => undefined);
+      void writer
+        .writeJson(
+          "diagnostics/target.json",
+          { pid, backend: backendName, writtenAt: new Date().toISOString() },
+          "diagnostic",
+        )
+        .catch(() => undefined);
     }
   };
   maybeStartSampler();
@@ -472,13 +468,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       | undefined;
     if ("download" in stepToRun) {
       const relativePath = downloadRelativePath(stepToRun.download.saveAs);
-      const absolutePath = writer.resolve(relativePath);
+      const absolutePath = await writer.preparePath(relativePath, "download");
       pendingDownload = {
         assign: stepToRun.download.assign ?? artifactNameFromPath(relativePath),
         relativePath,
         absolutePath,
       };
-      await ensureParentDir(absolutePath);
       stepToRun = {
         ...stepToRun,
         download: { ...stepToRun.download, saveAs: absolutePath },
@@ -513,12 +508,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           stepError = requested.error;
         } else {
           const relativePath = `requests/${requested.assign}.json`;
+          await writer.writeJson(relativePath, requested.response, "request");
           const absolutePath = writer.resolve(relativePath);
-          await Bun_writeFile(
-            absolutePath,
-            redactor.text(JSON.stringify(requested.response, null, 2) + "\n"),
-            true,
-          );
           responses[requested.assign] = requested.response;
           requests[requested.assign] = relativePath;
           namedArtifacts[requested.assign] = {
@@ -539,7 +530,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       } else if ("transform" in stepToRun) {
         const transformed = await runTransformStep({
           step: stepToRun,
-          runDir,
+          writer,
           specDir: dirname(specPath),
           artifacts: namedArtifacts,
           vars: resolvedVars,
@@ -569,7 +560,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           backend: opts.backend,
           specDir: dirname(specPath),
           writer,
-          redactor,
         });
         if (!ev.ok) {
           stepStatus = "failed";
@@ -598,7 +588,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           backend: opts.backend,
           client: monitorClient,
           writer,
-          redactor,
           index: i + 1,
         });
         if (!mon.ok) {
@@ -663,22 +652,16 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // kill for the same reason.
     if (opts.backend.isWedged?.()) {
       const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
-      await Bun_writeFile(
-        writer.resolve(rel),
-        redactor.text(
-          JSON.stringify(
-            {
-              stepId,
-              status: stepStatus,
-              stepError,
-              wedged: true,
-              note: "backend reported isWedged() === true after a child-timeout kill; post-failure capture was skipped to avoid hitting the unresponsive daemon. The close path will escalate to a daemon kill.",
-            },
-            null,
-            2,
-          ) + "\n",
-        ),
-        true,
+      await writer.writeJson(
+        rel,
+        {
+          stepId,
+          status: stepStatus,
+          stepError,
+          wedged: true,
+          note: "backend reported isWedged() === true after a child-timeout kill; post-failure capture was skipped to avoid hitting the unresponsive daemon. The close path will escalate to a daemon kill.",
+        },
+        "diagnostic",
       );
       latestDiagnostics = rel;
       diagnostics.push(rel);
@@ -699,7 +682,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         const rel = `snapshots/${pad(i + 1)}_${stepId}.txt`;
         const snap = await safe(() => opts.backend.snapshot());
         if (snap && snap.ok) {
-          await Bun_writeFile(writer.resolve(rel), redactor.text(snap.text));
+          await writer.writeText(rel, snap.text, "snapshot");
           latestSnapshot = rel;
           stepArtifacts.push(rel);
           await writer.appendEvent({
@@ -715,8 +698,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         (policy.screenshots === "on-failure" && stepStatus !== "passed");
       if (shouldShoot) {
         const rel = `screenshots/${pad(i + 1)}_${stepId}.png`;
+        const screenshotPath = await writer.preparePath(rel, "screenshot");
         const shot = await safe(() =>
-          opts.backend.screenshot({ path: writer.resolve(rel) }),
+          opts.backend.screenshot({ path: screenshotPath }),
         );
         if (shot && shot.ok) {
           latestScreenshot = rel;
@@ -736,11 +720,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           step,
           stepError,
         );
-        await Bun_writeFile(
-          writer.resolve(rel),
-          redactor.text(renderDiagnostics(captured)),
-          true,
-        );
+        await writer.writeJson(rel, captured, "diagnostic");
         latestDiagnostics = rel;
         diagnostics.push(rel);
         stepArtifacts.push(rel);
@@ -793,15 +773,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ) {
       const jsonRel = "diagnostics/process.json";
       const mdRel = "diagnostics/process.md";
-      await Bun_writeFile(
-        writer.resolve(jsonRel),
-        redactor.text(JSON.stringify(processMetricsSummary, null, 2) + "\n"),
-        true,
-      );
-      await Bun_writeFile(
-        writer.resolve(mdRel),
-        redactor.text(renderProcessMarkdown(processMetricsSummary)),
-        true,
+      await writer.writeJson(jsonRel, processMetricsSummary, "process-metrics");
+      await writer.writeText(
+        mdRel,
+        renderProcessMarkdown(processMetricsSummary),
+        "process-metrics",
       );
       processMetricsArtifact = jsonRel;
       diagnostics.push(mdRel);
@@ -825,43 +801,41 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     opts.backend.getNetworkRequests(),
   ).then((x) => x ?? []);
   const consoleErrors = consoleEntries.filter((e) => e.type === "error");
-  await Bun_writeFile(
-    writer.resolve("console/console.ndjson"),
-    redactor.text(consoleEntries.map((e) => JSON.stringify(e)).join("\n")) +
+  await writer.writeText(
+    "console/console.ndjson",
+    consoleEntries.map((entry) => JSON.stringify(entry)).join("\n") +
       (consoleEntries.length ? "\n" : ""),
-    true,
+    "console",
   );
-  await Bun_writeFile(
-    writer.resolve("console/errors.ndjson"),
-    redactor.text(consoleErrors.map((e) => JSON.stringify(e)).join("\n")) +
+  await writer.writeText(
+    "console/errors.ndjson",
+    consoleErrors.map((entry) => JSON.stringify(entry)).join("\n") +
       (consoleErrors.length ? "\n" : ""),
-    true,
+    "console",
   );
   const failedNetwork = networkEntries.filter(
     (e) => e.status !== undefined && e.status >= 400,
   );
-  await Bun_writeFile(
-    writer.resolve("network/requests.ndjson"),
-    redactor.text(networkEntries.map((e) => JSON.stringify(e)).join("\n")) +
+  await writer.writeText(
+    "network/requests.ndjson",
+    networkEntries.map((entry) => JSON.stringify(entry)).join("\n") +
       (networkEntries.length ? "\n" : ""),
-    true,
+    "network",
   );
-  await Bun_writeFile(
-    writer.resolve("network/failed_requests.ndjson"),
-    redactor.text(failedNetwork.map((e) => JSON.stringify(e)).join("\n")) +
+  await writer.writeText(
+    "network/failed_requests.ndjson",
+    failedNetwork.map((entry) => JSON.stringify(entry)).join("\n") +
       (failedNetwork.length ? "\n" : ""),
-    true,
+    "network",
   );
 
   // Stop trace recording and save to traces/<backend>-trace.zip.
   const traceRelPath = `traces/${backendName}-trace.zip`;
   let tracePath: string | undefined;
   if (policy.trace !== "never") {
-    const traceResult = await safe(async () => {
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(writer.resolve("traces"), { recursive: true });
-      return opts.backend.stopTrace?.(writer.resolve(traceRelPath));
-    });
+    const traceResult = await safe(async () =>
+      opts.backend.stopTrace?.(await writer.preparePath(traceRelPath, "trace")),
+    );
     if (traceResult?.ok) {
       tracePath = traceRelPath;
     }
@@ -871,11 +845,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const videoRelPath = `videos/${backendName}-video.webm`;
   let videoPath: string | undefined;
   if (policy.video !== "never") {
-    const videoResult = await safe(async () => {
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(writer.resolve("videos"), { recursive: true });
-      return opts.backend.stopVideo?.(writer.resolve(videoRelPath));
-    });
+    const videoResult = await safe(async () =>
+      opts.backend.stopVideo?.(await writer.preparePath(videoRelPath, "video")),
+    );
     if (videoResult?.ok) {
       videoPath = videoRelPath;
     }
@@ -999,20 +971,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Honor the trace capture policy: with the default "on-failure", a passing
   // run deletes its trace zip (they're the bulk of artifact disk usage).
   if (tracePath && status === "passed" && policy.trace !== "always") {
-    await safe(async () => {
-      const { rm } = await import("node:fs/promises");
-      await rm(writer.resolve(traceRelPath), { force: true });
-    });
+    await safe(() => writer.remove(traceRelPath));
     tracePath = undefined;
   }
 
   // Same policy applies to video: a passing run with `on-failure` deletes
   // the .webm to save disk (videos are larger than traces).
   if (videoPath && status === "passed" && policy.video !== "always") {
-    await safe(async () => {
-      const { rm } = await import("node:fs/promises");
-      await rm(writer.resolve(videoRelPath), { force: true });
-    });
+    await safe(() => writer.remove(videoRelPath));
     videoPath = undefined;
   }
 
@@ -1027,14 +993,18 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         writer.resolve(videoRelPath),
         labels,
         {
-          outputDir: writer.resolve("videos/clips"),
+          outputDir: await writer.ensureDir("videos/clips"),
           name: spec.name,
           tags: runtime.config?.clips?.tags ?? spec.artifacts?.clipTags ?? [],
           reencode: false,
         },
       );
       if (cutResult.ok && cutResult.clips && cutResult.clips.length > 0) {
-        Object.assign(clips, await moveClipsIntoRunDir(runDir, cutResult));
+        const movedClips = await moveClipsIntoRunDir(runDir, cutResult);
+        for (const relativePath of Object.values(movedClips)) {
+          writer.registerExisting(relativePath, "clip");
+        }
+        Object.assign(clips, movedClips);
         if (Object.keys(clips).length > 0) {
           await writer.appendEvent({
             ts: new Date().toISOString(),
@@ -1117,6 +1087,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(videoPath ? { video: videoPath } : {}),
     ...(Object.keys(clips).length > 0 ? { clips } : {}),
     replay: "replay.json",
+    manifest: "artifact-manifest.json",
   };
   const result: RunResult = {
     $schema: "urn:cairntrace.dev:run:v1",
@@ -1186,6 +1157,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     runId,
     durationMs,
   });
+  await writer.writeManifest(artifacts.manifest);
   opts.listener?.onRunEnd?.(publicResult);
 
   // Auto-prune the artifact root per the config retention policy. Best-effort
@@ -1538,7 +1510,7 @@ function buildRequestScript(req: RequestStep["request"]): string {
 
 async function runTransformStep(opts: {
   step: TransformStep;
-  runDir: string;
+  writer: ArtifactWriter;
   specDir: string;
   artifacts: Record<string, ArtifactRef>;
   vars?: Record<string, string | number | boolean>;
@@ -1553,15 +1525,14 @@ async function runTransformStep(opts: {
 > {
   const target = opts.step.transform;
   const relativePath = transformRelativePath(target.saveAs);
-  const absolutePath = resolve(opts.runDir, relativePath);
-  await ensureParentDir(absolutePath);
+  const absolutePath = await opts.writer.preparePath(relativePath, "transform");
 
   const file = isAbsolute(target.file)
     ? target.file
     : resolve(opts.specDir, target.file);
   const input = resolveRuntimeFilePath(target.input, {
     artifacts: opts.artifacts,
-    runDir: opts.runDir,
+    runDir: opts.writer.runDir,
     specDir: opts.specDir,
   });
 
@@ -1577,7 +1548,7 @@ async function runTransformStep(opts: {
       fixtures: resolveFixtureMap(target.fixtures, opts.artifacts),
       artifacts: opts.artifacts,
       vars: opts.vars ?? {},
-      runDir: opts.runDir,
+      runDir: opts.writer.runDir,
       specDir: opts.specDir,
     },
   });
@@ -1626,7 +1597,6 @@ async function runEvalStep(opts: {
   backend: BrowserBackend;
   specDir: string;
   writer: ArtifactWriter;
-  redactor: ReturnType<typeof createArtifactRedactor>;
 }): Promise<
   { ok: true; assign?: string; value: unknown } | { ok: false; error: string }
 > {
@@ -1686,12 +1656,7 @@ async function runEvalStep(opts: {
   // Write the captured value to evals/<assign>.json (after redaction).
   if (target.assign) {
     const relativePath = `evals/${target.assign}.json`;
-    const absolutePath = opts.writer.resolve(relativePath);
-    await Bun_writeFile(
-      absolutePath,
-      opts.redactor.text(JSON.stringify({ value }, null, 2) + "\n"),
-      true,
-    );
+    await opts.writer.writeJson(relativePath, { value }, "eval");
     return { ok: true, assign: target.assign, value };
   }
 
@@ -1712,7 +1677,6 @@ async function runMonitorStep(opts: {
   backend: BrowserBackend;
   client: MonitorClient;
   writer: ArtifactWriter;
-  redactor: ReturnType<typeof createArtifactRedactor>;
   index: number;
 }): Promise<
   | { ok: true; action: string; relativePath: string; assign?: string }
@@ -1751,11 +1715,7 @@ async function runMonitorStep(opts: {
         error: `monitor profile <pid> --type ${target.type ?? "heap"} returned no result (process exited or profile failed)`,
       };
     }
-    await Bun_writeFile(
-      opts.writer.resolve(relativePath),
-      opts.redactor.text(JSON.stringify(profile, null, 2) + "\n"),
-      true,
-    );
+    await opts.writer.writeJson(relativePath, profile, "monitor");
     return {
       ok: true,
       action: `profile:${profile.type}`,
@@ -1771,22 +1731,13 @@ async function runMonitorStep(opts: {
       error: `monitor process ${pid} returned no result (process exited or sample failed)`,
     };
   }
-  await Bun_writeFile(
-    opts.writer.resolve(relativePath),
-    opts.redactor.text(JSON.stringify(sample, null, 2) + "\n"),
-    true,
-  );
+  await opts.writer.writeJson(relativePath, sample, "monitor");
   return {
     ok: true,
     action: "snapshot",
     relativePath,
     ...(target.assign ? { assign: target.assign } : {}),
   };
-}
-
-async function ensureParentDir(absPath: string): Promise<void> {
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir(dirname(absPath), { recursive: true });
 }
 
 async function fileExists(absPath: string): Promise<boolean> {
@@ -1999,22 +1950,7 @@ function locatorNeedle(locator: {
   return locator.name ?? locator.text ?? locator.selector ?? locator.role;
 }
 
-function renderDiagnostics(value: unknown): string {
-  return JSON.stringify(value, null, 2) + "\n";
-}
-
 /**
  * writeFile that ensures parent dir exists. Named with Bun_ prefix to avoid
  * shadowing the global fs.writeFile import; this is just a small helper.
  */
-async function Bun_writeFile(
-  absPath: string,
-  contents: string,
-  createDir = false,
-): Promise<void> {
-  const { mkdir, writeFile } = await import("node:fs/promises");
-  if (createDir) {
-    await mkdir(dirname(absPath), { recursive: true });
-  }
-  await writeFile(absPath, contents);
-}

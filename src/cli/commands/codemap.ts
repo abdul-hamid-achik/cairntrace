@@ -424,15 +424,130 @@ function impactNodes(raw: unknown): CodemapImpactNode[] {
   return raw as CodemapImpactNode[];
 }
 
+function isReviewObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validReviewKind(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    [
+      "file",
+      "function",
+      "method",
+      "type",
+      "class",
+      "module",
+      "variable",
+      "test",
+    ].includes(value)
+  );
+}
+
+function validCanonicalSymbol(value: unknown): boolean {
+  if (!isReviewObject(value)) return false;
+  return (
+    typeof value.symbol === "string" &&
+    value.symbol.length > 0 &&
+    validReviewKind(value.kind) &&
+    typeof value.file === "string" &&
+    value.file.length > 0 &&
+    Number.isInteger(value.start_line) &&
+    (value.start_line as number) >= 1 &&
+    Number.isInteger(value.end_line) &&
+    (value.end_line as number) >= 1
+  );
+}
+
+function validCanonicalImpact(value: unknown): boolean {
+  if (!isReviewObject(value)) return false;
+  return (
+    typeof value.symbol === "string" &&
+    value.symbol.length > 0 &&
+    validReviewKind(value.kind) &&
+    typeof value.file === "string" &&
+    value.file.length > 0 &&
+    Number.isInteger(value.start_line) &&
+    (value.start_line as number) >= 1 &&
+    Number.isInteger(value.depth) &&
+    (value.depth as number) >= 0
+  );
+}
+
+function validCanonicalReviewV1(obj: Record<string, unknown>): boolean {
+  const changedFiles = obj.changed_files;
+  const changedSymbols = obj.changed_symbols;
+  const blastRadius = obj.blast_radius;
+  const coveringTests = obj.covering_tests;
+  const untestedSymbols = obj.untested_symbols;
+  return (
+    typeof obj.project === "string" &&
+    (obj.mode === "working" || obj.mode === "staged" || obj.mode === "since") &&
+    Number.isInteger(obj.depth) &&
+    (obj.depth as number) >= 1 &&
+    typeof obj.is_repo === "boolean" &&
+    typeof obj.indexed === "boolean" &&
+    typeof obj.stale === "boolean" &&
+    Array.isArray(changedFiles) &&
+    changedFiles.every(
+      (row) =>
+        isReviewObject(row) &&
+        typeof row.path === "string" &&
+        row.path.length > 0 &&
+        ["A", "M", "D", "?"].includes(String(row.status)) &&
+        Number.isInteger(row.symbols) &&
+        (row.symbols as number) >= 0,
+    ) &&
+    Array.isArray(changedSymbols) &&
+    changedSymbols.every(validCanonicalSymbol) &&
+    Array.isArray(blastRadius) &&
+    blastRadius.every(validCanonicalImpact) &&
+    Array.isArray(coveringTests) &&
+    coveringTests.every(validCanonicalImpact) &&
+    Array.isArray(untestedSymbols) &&
+    untestedSymbols.every(validCanonicalSymbol)
+  );
+}
+
+function validLegacyVersionedReview(obj: Record<string, unknown>): boolean {
+  return (
+    typeof obj.indexed === "boolean" &&
+    Array.isArray(obj.blast_radius ?? obj.blastRadius) &&
+    Array.isArray(obj.changed_files ?? obj.changedFiles) &&
+    Array.isArray(obj.changed_symbols ?? obj.changedSymbols)
+  );
+}
+
 /**
  * Parse a `codemap review` report object into a CodemapReviewReport. Tolerates
  * `blast_radius` / `blastRadius`, `changed_files` / `changedFiles`, and
- * `changed_symbols` / `changedSymbols` alias pairs. Returns an empty report
- * on non-JSON / non-object input.
+ * `changed_symbols` / `changedSymbols` alias pairs. A missing
+ * `schema_version` / `schemaVersion` is treated as legacy v1; an explicit
+ * version must be the numeric value 1. Returns undefined for unsupported
+ * versions and an empty report on non-JSON / non-object input.
  */
-export function parseReviewReport(stdout: string): CodemapReviewReport {
+export function parseReviewReport(
+  stdout: string,
+): CodemapReviewReport | undefined {
   const obj = parseJsonObject(stdout);
   if (Object.keys(obj).length === 0) return { ...EMPTY_REVIEW };
+
+  const hasSnakeVersion = Object.hasOwn(obj, "schema_version");
+  const hasCamelVersion = Object.hasOwn(obj, "schemaVersion");
+  if (
+    hasSnakeVersion &&
+    hasCamelVersion &&
+    obj.schema_version !== obj.schemaVersion
+  )
+    return undefined;
+  const schemaVersion = hasSnakeVersion
+    ? obj.schema_version
+    : obj.schemaVersion;
+  if ((hasSnakeVersion || hasCamelVersion) && schemaVersion !== 1)
+    return undefined;
+  if (hasSnakeVersion && !validCanonicalReviewV1(obj)) return undefined;
+  if (!hasSnakeVersion && hasCamelVersion && !validLegacyVersionedReview(obj))
+    return undefined;
 
   const blast = impactNodes(obj.blast_radius ?? obj.blastRadius);
   const blastRadiusFiles: string[] = [];
@@ -479,8 +594,10 @@ export async function codemapReview(
   deps: CodemapDeps = defaultCodemapDeps,
 ): Promise<CodemapReviewReport> {
   if (!since || !(await deps.isAvailable())) return { ...EMPTY_REVIEW };
-  return parseReviewReport(
-    await safeCodemapExec(deps, ["review", "--since", since, "--json"]),
+  return (
+    parseReviewReport(
+      await safeCodemapExec(deps, ["review", "--since", since, "--json"]),
+    ) ?? { ...EMPTY_REVIEW }
   );
 }
 
