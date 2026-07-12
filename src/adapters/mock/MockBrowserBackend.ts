@@ -245,6 +245,31 @@ export class MockBrowserBackend implements BrowserBackend {
           url: this.url,
           title: this.title,
           expectedTextExcerpts: [{ needle: "Submit", found: false }],
+          // Streaming-SSR forensics fields (2026-07-12 empty-<main>
+          // investigation) — canned so diagnostics-artifact tests can assert
+          // on their presence without a real page evaluate.
+          readyState: "complete",
+          suspenseBoundaries: { pending: 0, clientRendered: 0 },
+          landmarks: {
+            header: {
+              tag: "header",
+              present: false,
+              childElementCount: 0,
+              visibleTextLength: 0,
+            },
+            main: {
+              tag: "main",
+              present: true,
+              childElementCount: 0,
+              visibleTextLength: 0,
+            },
+            footer: {
+              tag: "footer",
+              present: false,
+              childElementCount: 0,
+              visibleTextLength: 0,
+            },
+          },
         }),
         stderr: "",
         exitCode: 0,

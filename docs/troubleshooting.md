@@ -46,6 +46,31 @@ Step `timeoutMs` ceiling hit. Triage:
 
 A blanket `timeoutMs: 600000` on every step is a code smell. Fix the slow step.
 
+## Wait timed out with an empty `<main>` on a page that "should" have content
+
+The signature: an authenticated header renders, `main` is empty in the failure
+snapshot, and the same spec passes on re-run (or on the other backend). On the
+agent-browser backend, both the `wait` predicate and the snapshot read the LIVE
+document — two independent observers agreeing means the page really showed its
+Suspense/loading fallback for the whole budget. This is streamed SSR failing to
+commit (server-side stream abort, or hydration recovery starved by machine
+load), not a driver misread. Triage in order:
+
+1. Read `diagnostics/*.json` from the failing run: `readyState`,
+   `suspenseBoundaries` (`pending` = server flush never arrived, `clientRendered`
+   = a boundary errored server-side and fell back), and `landmarks` (which
+   region is actually empty, and how empty).
+2. Check machine load — orphaned browser trees from prior sessions are the
+   classic culprit (`ps aux | grep agent-browser`). Kill stale ones.
+3. A/B the backend: `cairn run <spec> --backend playwright` splits
+   driver-vs-app in one command.
+4. The failing run dir survives pruning (`retention.keepFailedRuns`) — attach
+   it to the issue instead of describing it from memory.
+
+Budgeted `text`/`notText`/`selector` waits are re-issued as fresh ≤5s
+live-document slices, so a stale daemon-side wait can never eat the whole
+budget; an exhausted wait's stderr records how many live polls ran.
+
 ## "Contract hash mismatch"
 
 You're trying to run a spec whose `intent + outcomes` changed without re-stamping. Re-stamp:

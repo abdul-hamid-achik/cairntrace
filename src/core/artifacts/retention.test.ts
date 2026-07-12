@@ -7,12 +7,23 @@ import {
   pruneRuns,
   specNameOfRunId,
   DEFAULT_KEEP_RUNS,
+  DEFAULT_KEEP_FAILED_RUNS,
 } from "./retention";
 
-async function makeRunDir(root: string, runId: string): Promise<void> {
+async function makeRunDir(
+  root: string,
+  runId: string,
+  opts: { status?: string; corruptRunJson?: boolean } = {},
+): Promise<void> {
   const dir = join(root, runId);
   await mkdir(join(dir, "snapshots"), { recursive: true });
-  await writeFile(join(dir, "run.json"), JSON.stringify({ runId }));
+  const runJson = opts.corruptRunJson
+    ? "{not valid json"
+    : JSON.stringify({
+        runId,
+        ...(opts.status ? { status: opts.status } : {}),
+      });
+  await writeFile(join(dir, "run.json"), runJson);
   await writeFile(join(dir, "snapshots", "001_step.txt"), "snapshot body");
 }
 
@@ -127,9 +138,125 @@ describe("pruneRuns", () => {
   });
 });
 
+describe("pruneRuns — failed-run carve-out", () => {
+  it("protects the newest failed run beyond the keepRuns cutoff", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-failcarve-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "failed",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const result = await pruneRuns(root, { keepRuns: 1, keepFailedRuns: 1 });
+
+    // aaaaaa is failed and outside the keepRuns=1 cutoff — the carve-out
+    // protects it; bbbbbb (passed, also outside the cutoff) is pruned.
+    expect(result.removed).toEqual(["2026-06-02T10-00-00-000Z_spec_a_bbbbbb"]);
+    expect(result.kept).toBe(2);
+    const remaining = (await readdir(root)).toSorted();
+    expect(remaining).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+  });
+
+  it("counts a failed run already inside the keepRuns window against the quota", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-failquota-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "failed",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
+      status: "failed",
+    });
+    // Newest run is inside the keepRuns=1 window AND failed — it consumes
+    // the keepFailedRuns=1 quota on its own, so the older failed run below
+    // it is NOT protected.
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc", {
+      status: "failed",
+    });
+
+    const result = await pruneRuns(root, { keepRuns: 1, keepFailedRuns: 1 });
+
+    expect(result.removed).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+    ]);
+    expect(result.kept).toBe(1);
+  });
+
+  it("treats errored status as non-passed, same as failed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cairntrace-retention-errored-"));
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "errored",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const result = await pruneRuns(root, { keepRuns: 1, keepFailedRuns: 1 });
+
+    expect(result.removed).toEqual(["2026-06-02T10-00-00-000Z_spec_a_bbbbbb"]);
+    const remaining = (await readdir(root)).toSorted();
+    expect(remaining).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+  });
+
+  it("treats a missing status or corrupt run.json as passed (prunable)", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-statusless-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa"); // no status
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
+      corruptRunJson: true,
+    });
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const result = await pruneRuns(root, { keepRuns: 1, keepFailedRuns: 10 });
+
+    // Nothing is confirmed failed/errored, so the carve-out protects
+    // nothing beyond the ordinary keepRuns cutoff.
+    expect(result.removed).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+    ]);
+    expect(result.kept).toBe(1);
+  });
+
+  it("defaults keepFailedRuns to DEFAULT_KEEP_FAILED_RUNS when omitted", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-faildefault-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "failed",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+
+    const result = await pruneRuns(root, { keepRuns: 1 }); // keepFailedRuns omitted
+
+    expect(result.removed).toEqual(["2026-06-02T10-00-00-000Z_spec_a_bbbbbb"]);
+    const remaining = (await readdir(root)).toSorted();
+    expect(remaining).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+  });
+});
+
 describe("DEFAULT_KEEP_RUNS", () => {
   it("defaults to 3 (keep latest 3 runs per spec unless configured)", () => {
     expect(DEFAULT_KEEP_RUNS).toBe(3);
+  });
+});
+
+describe("DEFAULT_KEEP_FAILED_RUNS", () => {
+  it("defaults to 10 (keep latest 10 failed/errored runs per spec)", () => {
+    expect(DEFAULT_KEEP_FAILED_RUNS).toBe(10);
   });
 });
 

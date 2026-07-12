@@ -50,9 +50,15 @@ Keep-count resolution, in priority order:
 3. `retention.keepRuns` in `cairntrace.config.yml`
 4. `10` (the default)
 
+Failed and errored runs get their own quota on top of the keep-count:
+`retention.keepFailedRuns` (default 10) protects the newest N non-passed runs
+per spec from pruning, so `cairn clean` — and the automatic post-run prune —
+can never destroy the only evidence of a failure that has stopped reproducing.
+`--all` overrides this and wipes failures too.
+
 Artifact-root resolution: `--artifact-root` > `config artifactRoot` > `~/.cairntrace/runs`. The config is discovered by walking up from the cwd, the same lookup specs use.
 
-The report lists what was removed, how much space was freed, and how many runs were kept. `--format json` returns `{ removed: [...], freedBytes, kept, keepRuns }` for dashboards.
+The report lists what was removed, how much space was freed, and how many runs were kept. `--format json` returns `{ removed: [...], freedBytes, kept, keepRuns, keepFailedRuns }` for dashboards.
 
 ## When to run which
 

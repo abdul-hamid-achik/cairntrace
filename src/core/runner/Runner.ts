@@ -10,6 +10,7 @@ import {
   addEnospcHint,
   pruneRuns,
   DEFAULT_KEEP_RUNS,
+  DEFAULT_KEEP_FAILED_RUNS,
 } from "../artifacts/retention";
 import { createArtifactRedactor } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
@@ -1181,9 +1182,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
               "retention-archived",
             ])
         : undefined;
+    const keepFailedRuns =
+      retention?.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS;
     await safe(() =>
       pruneRuns(artifactRoot, {
         keepRuns,
+        keepFailedRuns,
         ...(onArchive ? { onArchive } : {}),
       }),
     );
@@ -1790,12 +1794,42 @@ async function captureDiagnostics(
     `  if (selector) {`,
     `    try { selectorCount = document.querySelectorAll(selector).length; } catch (e) { selectorCount = 'invalid selector: ' + e.message; }`,
     `  }`,
+    // Streaming-SSR forensics (2026-07-12 empty-<main> investigation): a
+    // Suspense boundary still mid-flush leaves `<!--$?-->` comment markers
+    // in the DOM, and one that errored/fell back leaves `<!--$!-->` —
+    // counting them plus readyState and landmark shape turns "the wait
+    // failed" into "the page was still streaming when it failed."
+    `  const suspenseBoundaries = (() => {`,
+    `    let pending = 0, clientRendered = 0;`,
+    `    try {`,
+    `      const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_COMMENT);`,
+    `      let node;`,
+    `      while ((node = walker.nextNode())) {`,
+    `        if (node.nodeValue === '$?') pending++;`,
+    `        else if (node.nodeValue === '$!') clientRendered++;`,
+    `      }`,
+    `    } catch (e) {}`,
+    `    return { pending, clientRendered };`,
+    `  })();`,
+    `  const landmarks = {};`,
+    `  for (const tag of ['header', 'main', 'footer']) {`,
+    `    const el = document.querySelector(tag);`,
+    `    landmarks[tag] = {`,
+    `      tag,`,
+    `      present: Boolean(el),`,
+    `      childElementCount: el ? el.childElementCount : 0,`,
+    `      visibleTextLength: el ? normalize(el.innerText || '').length : 0,`,
+    `    };`,
+    `  }`,
     `  return {`,
     `    url: location.href,`,
     `    title: document.title,`,
     `    step: descriptor,`,
     `    stepError: ${JSON.stringify(stepError ?? "")},`,
     `    selectorCount,`,
+    `    readyState: document.readyState,`,
+    `    suspenseBoundaries,`,
+    `    landmarks,`,
     `    expectedTextExcerpts: excerpts,`,
     `    visibleButtons: sample('button, [role=button], input[type=button], input[type=submit]', (el) => ({ text: textOf(el), disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'), selector: el.tagName.toLowerCase(), className: String(el.className || '').slice(0, 120) })),`,
     `    visibleLinks: sample('a, [role=link]', (el) => ({ text: textOf(el), href: el.href || '', className: String(el.className || '').slice(0, 120) })),`,

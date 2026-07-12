@@ -1,6 +1,7 @@
 import {
   pruneRuns,
   DEFAULT_KEEP_RUNS,
+  DEFAULT_KEEP_FAILED_RUNS,
   type PruneResult,
 } from "../../core/artifacts/retention";
 import { emit, resolveFormat } from "../format";
@@ -24,6 +25,7 @@ export interface CleanOptions {
 interface CleanReport extends PruneResult {
   artifactRoot: string;
   keepRuns: number;
+  keepFailedRuns: number;
 }
 
 /**
@@ -33,13 +35,17 @@ interface CleanReport extends PruneResult {
  * DEFAULT_KEEP_RUNS (3). Artifact root resolution: --artifact-root > config
  * artifactRoot > ~/.cairntrace/runs. Config discovery walks up from the cwd
  * (same as specs). When config `retention.archiveToStash` is true, pruned
- * runs are archived to fcheap before deletion (best-effort).
+ * runs are archived to fcheap before deletion (best-effort). The
+ * `retention.keepFailedRuns` carve-out (config value, default
+ * DEFAULT_KEEP_FAILED_RUNS) also applies here, except `--all` forces it to 0
+ * — a full clean means full, no failed-run exemption.
  */
 export async function cleanCommand(opts: CleanOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
 
   let artifactRoot: string;
   let keepRunsFromConfig: number | undefined;
+  let keepFailedRunsFromConfig: number | undefined;
   let retention:
     | { archiveToStash?: boolean; archiveTags?: string[] }
     | undefined;
@@ -47,6 +53,8 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     const resolved = await resolveArtifactRootContext(opts);
     artifactRoot = resolved.artifactRoot;
     keepRunsFromConfig = resolved.loaded?.config.retention?.keepRuns;
+    keepFailedRunsFromConfig =
+      resolved.loaded?.config.retention?.keepFailedRuns;
     retention = resolved.loaded?.config.retention;
     // Apply the config `logging` block as a project default (flags/env win).
     reconfigureWithConfig(resolved.loaded?.config?.logging);
@@ -70,6 +78,10 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     keepRuns = keepRunsFromConfig ?? DEFAULT_KEEP_RUNS;
   }
 
+  const keepFailedRuns = opts.all
+    ? 0
+    : (keepFailedRunsFromConfig ?? DEFAULT_KEEP_FAILED_RUNS);
+
   const onArchive =
     retention?.archiveToStash === true
       ? async (runDir: string, _runId: string) => {
@@ -84,9 +96,15 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
       : undefined;
   const pruned = await pruneRuns(artifactRoot, {
     keepRuns,
+    keepFailedRuns,
     ...(onArchive ? { onArchive } : {}),
   });
-  const report: CleanReport = { ...pruned, artifactRoot, keepRuns };
+  const report: CleanReport = {
+    ...pruned,
+    artifactRoot,
+    keepRuns,
+    keepFailedRuns,
+  };
 
   process.stdout.write(emit(format, report, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
@@ -96,7 +114,7 @@ function toMarkdown(r: CleanReport): string {
   const lines = [
     `# cairn clean — ${r.artifactRoot}`,
     "",
-    `Removed ${r.removed.length} run dir(s), freed ${formatBytes(r.freedBytes)}, kept ${r.kept} (keepRuns: ${r.keepRuns} per spec).`,
+    `Removed ${r.removed.length} run dir(s), freed ${formatBytes(r.freedBytes)}, kept ${r.kept} (keepRuns: ${r.keepRuns} per spec, keepFailedRuns: ${r.keepFailedRuns} per spec).`,
   ];
   if (r.removed.length > 0) {
     lines.push("", "Removed:");

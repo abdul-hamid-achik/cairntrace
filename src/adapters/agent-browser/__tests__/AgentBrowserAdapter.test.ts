@@ -695,12 +695,14 @@ describe("child timeout enforcement", () => {
     );
   });
 
-  it("gives wait steps the spec timeout plus a kill grace period", async () => {
+  it("gives wait steps the sliced timeout plus a kill grace period", async () => {
     execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
     const adapter = new AgentBrowserAdapter({ session: "wait-deadline" });
 
     await adapter.runStep({ wait: { text: "Done", timeoutMs: 12_000 } });
 
+    // A passing wait finishes in slice #1 — the sliced --timeout (5000, the
+    // WAIT_SLICE_MS floor for a 12000ms budget), not the full spec timeout.
     expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
       [
@@ -710,10 +712,11 @@ describe("child timeout enforcement", () => {
         "--text",
         "Done",
         "--timeout",
-        "12000",
+        "5000",
       ],
-      expect.objectContaining({ timeout: 17_000 }),
+      expect.objectContaining({ timeout: 10_000 }),
     );
+    expect(execaMock).toHaveBeenCalledTimes(1);
   });
 
   it("fails a killed wait with a normal timeout error (no retry)", async () => {
@@ -749,6 +752,146 @@ describe("child timeout enforcement", () => {
       "agent-browser",
       ["--session", "custom-deadline", "get", "url"],
       expect.objectContaining({ timeout: 5_000 }),
+    );
+  });
+});
+
+describe("wait step slicing", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("passes through on the first slice when the budget exceeds one slice", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "wait-first-slice" });
+
+    const result = await adapter.runStep({
+      wait: { text: "Ready", timeoutMs: 30_000 },
+    });
+
+    expect(result.ok).toBe(true);
+    // Happy path costs exactly one invocation, sliced to WAIT_SLICE_MS
+    // (5000ms), not the full 30000ms spec budget.
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    const argv = execaMock.mock.calls[0]![1] as string[];
+    expect(argv).toEqual([
+      "--session",
+      "wait-first-slice",
+      "wait",
+      "--text",
+      "Ready",
+      "--timeout",
+      "5000",
+    ]);
+  });
+
+  it("re-issues a timed-out wait as fresh slices until the budget is spent", async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      const sliceMs = Number(argv[argv.indexOf("--timeout") + 1]);
+      // Each slice consumes its own wall-clock budget before reporting a
+      // (non-killed) agent-browser timeout — the shape a healthy daemon
+      // produces when the state predicate never becomes true.
+      now += sliceMs;
+      return Promise.resolve({
+        exitCode: 1,
+        stdout: "",
+        stderr: "✗ Operation timed out",
+      });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "wait-slice" });
+
+    const result = await adapter.runStep({
+      wait: { text: "Ready", timeoutMs: 12_000 },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(execaMock).toHaveBeenCalledTimes(3);
+    const timeouts = execaMock.mock.calls.map((call) => {
+      const argv = call[1] as string[];
+      return argv[argv.indexOf("--timeout") + 1];
+    });
+    // 12000ms budget → 5000 + 5000 + 2000 (remainder), never exceeding
+    // WAIT_SLICE_MS per slice.
+    expect(timeouts).toEqual(["5000", "5000", "2000"]);
+    expect(result.stderr).toContain(
+      "wait exhausted its 12000ms budget across 3 fresh live-document polls",
+    );
+    nowSpy.mockRestore();
+  });
+
+  it("stops immediately on a non-timeout error instead of retrying", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "no active session",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "wait-error" });
+
+    const result = await adapter.runStep({
+      wait: { text: "Ready", timeoutMs: 12_000 },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toBe("no active session");
+    expect(execaMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after a child-kill (wedged daemon) instead of retrying", async () => {
+    execaMock.mockResolvedValue({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "wait-wedged" });
+
+    const result = await adapter.runStep({
+      wait: { text: "Ready", timeoutMs: 12_000 },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("daemon may be unresponsive");
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(adapter.isWedged()).toBe(true);
+  });
+
+  it("never slices a load-state wait", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "wait-load" });
+
+    await adapter.runStep({
+      wait: { load: "networkidle", timeoutMs: 12_000 },
+    });
+
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      [
+        "--session",
+        "wait-load",
+        "wait",
+        "--load",
+        "networkidle",
+        "--timeout",
+        "12000",
+      ],
+      expect.objectContaining({ timeout: 17_000 }),
+    );
+  });
+
+  it("keeps a budgetless wait a single invocation", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "wait-nobudget" });
+
+    await adapter.runStep({ wait: { text: "Ready" } });
+
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      ["--session", "wait-nobudget", "wait", "--text", "Ready"],
+      expect.objectContaining({ timeout: 60_000 }),
     );
   });
 });

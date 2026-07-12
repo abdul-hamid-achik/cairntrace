@@ -639,6 +639,17 @@ steps:
       "utf8",
     );
     expect(diagnostics).toContain("Submit");
+
+    // Streaming-SSR forensics (2026-07-12 empty-<main> investigation): the
+    // injected diagnostics JS collects readyState, Suspense boundary comment
+    // markers, and landmark shape, and the artifact carries them through.
+    expect(backend.lastEvaluatedScript).toContain("readyState");
+    expect(backend.lastEvaluatedScript).toContain("'$?'");
+    expect(backend.lastEvaluatedScript).toContain("landmarks");
+    const parsedDiagnostics = JSON.parse(diagnostics);
+    expect(parsedDiagnostics).toHaveProperty("readyState");
+    expect(parsedDiagnostics).toHaveProperty("suspenseBoundaries");
+    expect(parsedDiagnostics).toHaveProperty("landmarks.main");
   });
 
   it("marks artifact-dependent outcomes as skipped when the producing step failed", async () => {

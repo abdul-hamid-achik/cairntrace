@@ -12,6 +12,8 @@ import type {
   DownloadStep,
   Locator,
   Step,
+  WaitCondition,
+  WaitStep,
 } from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
@@ -52,6 +54,14 @@ import type { AgentBrowserOptions } from "./types";
  * Lifecycle: agent-browser lazily starts a browser the first time it sees a
  * command for a given --session, so this class has no explicit `start()` —
  * just construct and start sending steps.
+ *
+ * Version note: the daemon-lifecycle, wait-slicing, and viewport-relative
+ * `get box` behavior documented throughout this file were verified against
+ * agent-browser 0.31.1, resolved from `$PATH` and not version-pinned by
+ * cairntrace. If wait/snapshot behavior looks wrong after an agent-browser
+ * update, compare `agent-browser --version` against this note first (origin:
+ * the 2026-07-12 empty-<main> investigation, where a streamed-SSR dashboard
+ * showed the Suspense fallback under heavy machine contention).
  */
 export class AgentBrowserAdapter implements BrowserBackend {
   readonly name = "agent-browser" as const;
@@ -123,16 +133,102 @@ export class AgentBrowserAdapter implements BrowserBackend {
       }
       return wait;
     }
-    if ("wait" in step) {
+    if ("wait" in step) return this.runWaitStep(step);
+    return this.invoke(stepToArgv(step));
+  }
+
+  /**
+   * `wait` step dispatch. State-predicate waits (`text`/`notText`/`selector`)
+   * carrying an explicit spec `timeoutMs` are sliced into fresh
+   * WAIT_SLICE_MS subprocess invocations (see `runSlicedWaitStep`) instead of
+   * trusting a single long-lived agent-browser wait to catch a DOM state
+   * that only exists for part of the wait. Load-state waits and waits
+   * without a spec budget keep the single-invocation path.
+   */
+  private async runWaitStep(step: WaitStep): Promise<InvocationResult> {
+    const w = step.wait;
+    const budgetMs = w.timeoutMs;
+    if ("load" in w || budgetMs === undefined) {
       // Cairn enforces the wait deadline itself: the child gets the spec's
       // timeout plus a grace period, so agent-browser's own (richer) timeout
       // error wins when the daemon is healthy, and a wedged daemon gets the
       // child killed instead of hanging the run forever (dogfood P0).
+      //
+      // `--load` specifically can never be sliced: agent-browser's `--load`
+      // only observes FUTURE load-state transitions, so re-arming it every
+      // slice would risk missing the one transition it's waiting for if that
+      // transition lands inside a slice boundary gap. A budgetless wait has
+      // no spec deadline to divide into slices in the first place — cairn
+      // still enforces the deadline via `childDeadline`, it just doesn't own
+      // a spec-level number to slice.
       return this.invoke(stepToArgv(step), {
-        timeoutMs: childDeadline(step.wait.timeoutMs),
+        timeoutMs: childDeadline(budgetMs),
       });
     }
-    return this.invoke(stepToArgv(step));
+    return this.runSlicedWaitStep(w, budgetMs);
+  }
+
+  /**
+   * Re-issue a state-predicate `wait` (`text`/`notText`/`selector`) as a
+   * sequence of fresh WAIT_SLICE_MS subprocess invocations until the spec's
+   * `timeoutMs` budget is spent. Each slice is a brand-new agent-browser
+   * `wait` command, so it re-queries the *live* document rather than relying
+   * on a single invocation's internal poll loop to notice a DOM state that
+   * only exists for part of the wait window — the root cause of the
+   * 2026-07-12 empty-<main> investigation: a server-streamed /dashboard that
+   * genuinely showed the Suspense fallback for longer than a single `wait`
+   * invocation's own polling, under heavy machine contention (a stream
+   * abort, not a driver misread).
+   *
+   * The first slice succeeding is the happy path and costs nothing extra —
+   * it's the same single invocation as before slicing existed. Slicing only
+   * shows up once a slice times out. Slicing stops immediately on:
+   *   - success (return that slice's result as-is)
+   *   - a child-kill (execa had to SIGTERM a wedged daemon for THIS slice) —
+   *     retrying against a wedged daemon is pointless; `close()` already
+   *     escalates to a daemon kill once `sawChildTimeout` is set
+   *   - any non-timeout error (stderr doesn't match /timed out/i) — a real
+   *     error (e.g. "no active session") won't heal by polling again
+   *
+   * When the budget is exhausted across more than one poll, the final
+   * slice's stderr is prefixed so the failure reads as "the live document
+   * was checked N times fresh and never satisfied the wait," not a single
+   * mysterious timeout.
+   */
+  private async runSlicedWaitStep(
+    w: WaitCondition,
+    budgetMs: number,
+  ): Promise<InvocationResult> {
+    const deadline = Date.now() + budgetMs;
+    let polls = 0;
+    let last: InvocationResult;
+
+    for (;;) {
+      const remaining = deadline - Date.now();
+      const sliceMs = Math.max(
+        WAIT_SLICE_FLOOR_MS,
+        Math.min(WAIT_SLICE_MS, remaining),
+      );
+      polls++;
+      const wedgedBefore = this.sawChildTimeout;
+      last = await this.invoke(
+        waitConditionToArgv({ ...w, timeoutMs: sliceMs }),
+        { timeoutMs: childDeadline(sliceMs) },
+      );
+      if (last.ok) return last;
+      const childKilledThisSlice = !wedgedBefore && this.sawChildTimeout;
+      if (childKilledThisSlice) return last;
+      if (!/timed out/i.test(last.stderr)) return last;
+      if (Date.now() >= deadline) break;
+    }
+
+    if (polls > 1) {
+      return {
+        ...last,
+        stderr: `wait exhausted its ${budgetMs}ms budget across ${polls} fresh live-document polls\n${last.stderr}`,
+      };
+    }
+    return last;
   }
 
   /** `scroll: { to: <locator> }` — semantic locators resolve strictly first. */
@@ -974,6 +1070,23 @@ const POLL_INTERVAL_MS = 250;
  * own command timeouts (and spec-level `timeoutMs`) fire well before it.
  */
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+
+/**
+ * Length of each fresh subprocess slice used to re-issue a state-predicate
+ * `wait` (`text`/`notText`/`selector`) against the live document, instead of
+ * trusting one long-lived agent-browser wait's own internal polling loop for
+ * the whole spec budget (see `runSlicedWaitStep`). Tuned to be long enough
+ * that a passing wait finishes in slice #1 — no overhead on the happy path —
+ * and short enough that a wedged daemon only costs one slice before
+ * `sawChildTimeout` flips and slicing stops.
+ */
+const WAIT_SLICE_MS = 5_000;
+
+/**
+ * Floor for the final slice of a sliced wait, so a nearly-spent budget still
+ * gets one real poll instead of an effectively-zero-timeout invocation.
+ */
+const WAIT_SLICE_FLOOR_MS = 250;
 
 /**
  * Default max time the verify-after-click settle is willing to wait

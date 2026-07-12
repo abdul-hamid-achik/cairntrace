@@ -1,4 +1,4 @@
-import { readdir, rm, stat } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -16,11 +16,30 @@ import { join } from "node:path";
 /** Default keep-count when no `retention.keepRuns` is configured. */
 export const DEFAULT_KEEP_RUNS = 3;
 
+/**
+ * Default keep-count for the failed-run carve-out when no
+ * `retention.keepFailedRuns` is configured. See `PruneOptions.keepFailedRuns`.
+ */
+export const DEFAULT_KEEP_FAILED_RUNS = 10;
+
 const RUN_DIR_PATTERN = /^\d{4}-\d{2}-\d{2}T[\dT-]+Z?_(.+)_[0-9a-f]{6}$/;
 
 export interface PruneOptions {
   /** Keep the newest N runs per spec. 0 removes everything. */
   keepRuns: number;
+  /**
+   * Keep the newest N runs per spec whose run.json `status` is "failed" or
+   * "errored", even past the `keepRuns` cutoff — losing the only evidence of
+   * a genuine failure to routine pruning is worse than a few extra kept dirs
+   * (2026-07-12: forensics for a real streamed-SSR /dashboard failure were
+   * lost to a prune that ran before the run could be inspected). A failed
+   * run that already sits inside the `keepRuns` window still counts against
+   * this quota — it isn't protected AND kept for free. Runs with a missing,
+   * corrupt, or statusless run.json are treated as passed (prunable).
+   * Defaults to DEFAULT_KEEP_FAILED_RUNS (10) when unset; 0 disables the
+   * carve-out entirely.
+   */
+  keepFailedRuns?: number;
   /**
    * Best-effort archive of a run dir before deletion (e.g. to fcheap). When
    * set, called once per pruned run; if it rejects, the run is RETAINED on
@@ -28,6 +47,22 @@ export interface PruneOptions {
    * failure. When unset, runs are deleted directly.
    */
   onArchive?: (runDir: string, runId: string) => Promise<void>;
+}
+
+/**
+ * Whether a run dir's run.json reports a non-passed status ("failed" or
+ * "errored"). A missing file, invalid JSON, or a run.json without a status
+ * field all count as passed (prunable) — the carve-out only protects runs we
+ * can positively confirm failed.
+ */
+async function isNonPassedRun(dir: string): Promise<boolean> {
+  try {
+    const raw = await readFile(join(dir, "run.json"), "utf8");
+    const parsed = JSON.parse(raw) as { status?: unknown };
+    return parsed.status === "failed" || parsed.status === "errored";
+  } catch {
+    return false;
+  }
 }
 
 export interface PruneResult {
@@ -59,13 +94,38 @@ export async function pruneRuns(
     bySpec.set(spec, list);
   }
 
+  const keepFailedRuns = Math.max(
+    0,
+    opts.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS,
+  );
+
   const result: PruneResult = { removed: [], freedBytes: 0, kept: 0 };
   for (const runs of bySpec.values()) {
     runs.sort(); // ISO prefix → chronological
+
+    // Carve-out: protect the newest `keepFailedRuns` failed/errored runs from
+    // pruning even past the `keepRuns` cutoff. Scan newest-first so "newest
+    // N" is honored, and so a failed run already inside the `keepRuns`
+    // window still consumes one slot of the quota instead of being
+    // protected for free.
+    const protectedFailed = new Set<string>();
+    if (keepFailedRuns > 0) {
+      for (
+        let i = runs.length - 1;
+        i >= 0 && protectedFailed.size < keepFailedRuns;
+        i--
+      ) {
+        const runId = runs[i]!;
+        if (await isNonPassedRun(join(artifactRoot, runId))) {
+          protectedFailed.add(runId);
+        }
+      }
+    }
+
     const cutoff = Math.max(0, runs.length - Math.max(0, opts.keepRuns));
     for (let i = 0; i < runs.length; i++) {
       const runId = runs[i]!;
-      if (i >= cutoff) {
+      if (i >= cutoff || protectedFailed.has(runId)) {
         result.kept++;
         continue;
       }

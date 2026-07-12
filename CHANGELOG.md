@@ -10,6 +10,47 @@ All notable changes to cairntrace are documented here. This project adheres to
   future versions to codemap unavailable. Impact-driven selection therefore runs all specs on
   contract drift instead of mistaking an unsupported payload for an empty blast radius.
 
+## [1.36.0]
+
+Hardening from the 2026-07-12 empty-`<main>` incident: an agent-browser text wait
+timed out on a streamed-SSR dashboard whose Suspense content never committed
+(stream abort under machine-wide contention), and the failing run's artifacts were
+destroyed by routine pruning before anyone could read them. The failure never
+reproduced. Verdict: both live observers (in-page `wait --text` predicate and the
+post-failure a11y snapshot) were correct — the page genuinely showed the fallback.
+This release makes the next such incident survivable and self-diagnosing.
+
+### Added
+- **Sliced live-document waits (agent-browser).** Budgeted `text` / `notText` /
+  `selector` waits are re-issued as fresh ≤5s subprocess slices until the spec
+  budget is spent, instead of one daemon-side wait holding the whole budget. Each
+  slice re-queries the live document, so no daemon-side wait state can go stale
+  across a navigation or streaming-SSR commit for more than one slice, and a
+  wedged child burns one slice (+grace) instead of `timeoutMs`+5s. Happy path
+  unchanged: the first slice returns as soon as the condition holds. Load-state
+  waits and waits without a spec budget keep the single invocation (`--load`
+  observes only future transitions; re-arming per slice would miss the one it
+  needs). Exhaustion stderr records the true total: `wait exhausted its <N>ms
+  budget across <k> fresh live-document polls`.
+- **`retention.keepFailedRuns` (default 10).** The newest N `failed`/`errored`
+  runs per spec now survive pruning on their own quota, beyond `keepRuns` —
+  routine pruning can no longer destroy the only evidence of a failure that has
+  stopped reproducing. Failed runs already inside the `keepRuns` window count
+  against the quota; statusless/corrupt `run.json` stays prunable. `cairn clean`
+  honors it; `--all` still removes everything. The clean report gains
+  `keepFailedRuns`.
+- **Streaming-SSR forensics in failure diagnostics.** `captureDiagnostics` now
+  records `readyState`, `suspenseBoundaries` (React streaming comment markers:
+  `$?` pending server flush, `$!` errored → client-rendered fallback), and
+  `landmarks` (header/main/footer presence, child count, visible text length).
+  A wait timeout on a streamed page now distinguishes "stream still pending" /
+  "stream aborted" / "committed but empty" from one JSON artifact.
+
+### Changed
+- The agent-browser adapter header documents the verified CLI version (0.31.1)
+  and that the binary is resolved from `$PATH` unpinned — first thing to check
+  when wait/snapshot behavior changes after an update.
+
 ## [1.33.0]
 
 ### Added

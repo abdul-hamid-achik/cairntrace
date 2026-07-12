@@ -39,7 +39,9 @@ secrets:                              # default secrets block (an env-level secr
     # group: payments                  # inheritance mode (requires env)
     # env: prod
 
-retention: { keepRuns: 10 }           # prune to newest N runs/spec after every run
+retention:
+  keepRuns: 10                        # prune to newest N runs/spec after every run
+  keepFailedRuns: 10                  # newest N failed/errored runs survive pruning anyway (default: 10)
 
 report:
   theme: cairn                        # cairn | graphite | midnight | contrast

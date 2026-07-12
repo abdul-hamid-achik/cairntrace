@@ -82,6 +82,13 @@ export const RetentionConfigSchema = z
     enabled: z.boolean().default(true),
     /** Keep only the newest N runs per spec; pruned after every run. Default 3. */
     keepRuns: z.number().int().positive().default(3),
+    /**
+     * Keep the newest N failed/errored runs per spec even past `keepRuns` —
+     * added after the 2026-07-12 incident where evidence for a genuine
+     * streamed-SSR /dashboard failure was lost to routine pruning before it
+     * could be inspected. Default 10.
+     */
+    keepFailedRuns: z.number().int().nonnegative().default(10),
     /** Archive pruned run dirs to fcheap before deletion (default: false). */
     archiveToStash: z.boolean().default(false),
     /** Tags applied to every run archived by `archiveToStash`. */
