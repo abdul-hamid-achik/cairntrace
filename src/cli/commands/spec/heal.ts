@@ -4,6 +4,7 @@ import {
   type HealOutput,
   type HealVerifyResult,
 } from "../../../core/healer/Healer";
+import { ContractHashMismatchError } from "../../../core/parser/parseSpec";
 import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
 import { trackBackend } from "../../cleanup";
@@ -68,6 +69,7 @@ export async function healCommand(
     }
   } catch (e) {
     const err = e as Error;
+    exitCode = err instanceof ContractHashMismatchError ? 6 : 2;
     if (format === "json") {
       process.stdout.write(
         JSON.stringify({
@@ -75,7 +77,7 @@ export async function healCommand(
           version: "1",
           status: "no-heal-possible",
           error: { name: err.name, message: err.message },
-          exitCode: 2,
+          exitCode,
         }),
       );
     } else {

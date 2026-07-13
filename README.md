@@ -201,6 +201,7 @@ Finished specs must replay from a fresh browser session. Use one of:
   `steps: [{ use: login_admin }]`
 - checkpoint restore: `session: { resume: <checkpoint-name> }`
 - deterministic setup: `preconditions.commands`
+- explicit public/sessionless acknowledgement: `coldStart: guest`
 
 Run `cairn run <spec> --cold-start --json` before declaring a spec done.
 

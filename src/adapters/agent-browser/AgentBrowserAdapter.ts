@@ -1340,12 +1340,15 @@ export class AgentBrowserAdapter implements BrowserBackend {
             ok: false,
             result: this.unresolvedFailure(action, start, [
               `ambiguous ${describeLocator(locator)} for ${action}: ${matchIdx.length} visible matches`,
-              ...matchIdx.map((i) => {
+              ...matchIdx.slice(0, 3).map((i) => {
                 const el = parsed[i]!;
                 return `  - ${el.role} ${
                   el.name ? JSON.stringify(el.name) : "<no name>"
                 } ref=${el.ref}`;
               }),
+              ...(matchIdx.length > 3
+                ? [`  …and ${matchIdx.length - 3} more`]
+                : []),
               "disambiguate with `exact: true`, `nth: <index>`, a more specific name, or `by: selector`",
             ]),
           };

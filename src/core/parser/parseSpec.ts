@@ -96,7 +96,9 @@ export async function parseSpec(
   const baseUrl = opts.baseUrl;
 
   const rawSource = await readFile(absPath, "utf8");
-  const rawSpec = SpecSchema.parse(parseYaml(rawSource));
+  const rawDocument = parseYaml(rawSource);
+  assertBatchSelectorLocators(rawDocument, absPath);
+  const rawSpec = SpecSchema.parse(rawDocument);
   const vars = { ...rawSpec.vars, ...opts.vars };
   const raw = loadAndParseSource(
     rawSource,
@@ -118,6 +120,7 @@ export async function parseSpec(
       baseUrl,
       opts.runtime,
     );
+    assertBatchSelectorLocators(importRaw, resolvedImport);
     const action = ReusableActionSchema.parse(importRaw);
     actionsByName.set(action.name, { action, path: resolvedImport });
   }
@@ -173,7 +176,11 @@ export async function parseSpec(
   if (rawSpec.contractHash) {
     const computed = computeContractHash(rawSpec);
     if (computed !== rawSpec.contractHash) {
-      throw new ContractHashMismatchError(rawSpec.contractHash, computed);
+      throw new ContractHashMismatchError(
+        rawSpec.contractHash,
+        computed,
+        absPath,
+      );
     }
     contractHashValid = true;
   }
@@ -192,12 +199,32 @@ export class ContractHashMismatchError extends Error {
   constructor(
     public readonly expected: string,
     public readonly actual: string,
+    public readonly specPath: string,
   ) {
     super(
-      `contractHash mismatch: spec stamped ${expected}, computed ${actual}. ` +
-        `Intent or outcomes were modified outside review.`,
+      `contract changed since seal in ${specPath} — review the intent/outcomes diff, ` +
+        `then run \`cairn spec verify ${JSON.stringify(specPath)} --stamp\`. ` +
+        `Spec stamped ${expected}, computed ${actual}.`,
     );
     this.name = "ContractHashMismatchError";
+  }
+}
+
+export class BatchSelectorLocatorError extends Error {
+  constructor(
+    public readonly filePath: string,
+    public readonly stepIndex: number,
+    public readonly subStepIndex: number,
+    public readonly action: string,
+    public readonly locatorKind: string,
+  ) {
+    const path = `steps[${stepIndex}].batch[${subStepIndex}]`;
+    super(
+      `batch sub-step #${subStepIndex + 1} (${path}, ${action}) in ${filePath} ` +
+        `uses by: ${locatorKind}; batch supports selector locators only — ` +
+        `use by: selector or move this interaction to a top-level step`,
+    );
+    this.name = "BatchSelectorLocatorError";
   }
 }
 
@@ -282,6 +309,66 @@ function loadAndParseSource(
     },
   });
   return doc.toJS();
+}
+
+/**
+ * Give selector-only batch mistakes one focused diagnostic instead of Zod's
+ * deeply nested StepSchema union dump. This runs for both specs and imported
+ * reusable actions before their respective schemas are parsed.
+ */
+export function assertBatchSelectorLocators(
+  value: unknown,
+  filePath: string,
+): void {
+  if (!isRecord(value) || !Array.isArray(value.steps)) return;
+
+  for (let stepIndex = 0; stepIndex < value.steps.length; stepIndex++) {
+    const step = value.steps[stepIndex];
+    if (!isRecord(step) || !Array.isArray(step.batch)) continue;
+
+    for (
+      let subStepIndex = 0;
+      subStepIndex < step.batch.length;
+      subStepIndex++
+    ) {
+      const subStep = step.batch[subStepIndex];
+      if (!isRecord(subStep)) continue;
+      const semantic = semanticBatchLocator(subStep);
+      if (!semantic) continue;
+      throw new BatchSelectorLocatorError(
+        filePath,
+        stepIndex,
+        subStepIndex,
+        semantic.action,
+        semantic.locatorKind,
+      );
+    }
+  }
+}
+
+function semanticBatchLocator(
+  subStep: Record<string, unknown>,
+): { action: string; locatorKind: string } | undefined {
+  for (const action of ["click", "hover", "fill", "type", "upload"]) {
+    const locator = subStep[action];
+    if (!isRecord(locator)) continue;
+    if (typeof locator.by === "string" && locator.by !== "selector") {
+      return { action, locatorKind: locator.by };
+    }
+  }
+
+  const scroll = subStep.scroll;
+  if (isRecord(scroll) && isRecord(scroll.to)) {
+    const kind = scroll.to.by;
+    if (typeof kind === "string" && kind !== "selector") {
+      return { action: "scroll.to", locatorKind: kind };
+    }
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function resolveImportPath(p: string, baseDir: string): string {

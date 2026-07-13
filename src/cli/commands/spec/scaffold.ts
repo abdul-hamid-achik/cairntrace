@@ -123,6 +123,7 @@ async function writeSpecStub(
     "#     1. imports: [actions/login_admin.yml] + steps: [{ use: login_admin }]",
     "#     2. session: { resume: <checkpoint-name> }",
     "#     3. preconditions: { commands: [{ run: 'pnpm db:seed ...' }] }",
+    "#     4. coldStart: guest  # intentionally public/sessionless flow",
     "#",
     "# Outcomes are the contract. Steps are repairable hints.",
     "# Run `cairn spec verify <file> --stamp` after editing to lock the contractHash.",

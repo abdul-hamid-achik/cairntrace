@@ -131,6 +131,7 @@ per-agent code paths.
   1. `imports: [actions/login_admin.yml]` + `steps: [{ use: login_admin }]`
   2. `session: { resume: <checkpoint-name> }` (capture with `cairn checkpoint capture-from-session` or `cairn login`)
   3. `preconditions: { commands: [{ run: "..." }] }`
+  4. `coldStart: guest` for an intentionally public/sessionless flow
 - Before declaring a spec complete, run `cairn spec verify --json` once (include
   `--config <path>` if the spec uses config-backed `${vars.X}`), then run
   `cairn run --cold-start --json` once. If that fails, the spec isn't done.

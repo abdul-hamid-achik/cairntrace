@@ -136,6 +136,26 @@ describe("logger levels + format", () => {
     const parsed = JSON.parse(cap.lines[0]!);
     expect(parsed.scope).toBe("services:docker");
   });
+
+  it("scoped loggers created before configure observe later options", () => {
+    configureLoggerFromFlags({ logLevel: "info", color: false });
+    const early = log.scope("early");
+
+    configureLoggerFromFlags({
+      logLevel: "error",
+      logFormat: "json",
+      color: false,
+    });
+    early.warn("hidden");
+    early.error("visible");
+
+    expect(cap.lines).toHaveLength(1);
+    expect(JSON.parse(cap.lines[0]!)).toMatchObject({
+      scope: "early",
+      level: "error",
+      msg: "visible",
+    });
+  });
 });
 
 describe("resolveLogConfig", () => {

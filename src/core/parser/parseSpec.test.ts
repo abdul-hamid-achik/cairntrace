@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  BatchSelectorLocatorError,
   ContractHashMismatchError,
   MissingTemplateVariableError,
   parseSpec,
@@ -260,7 +261,69 @@ steps:
       - click: { by: role, role: button, name: Upload }
 `,
     );
-    await expect(parseSpec(path)).rejects.toThrow();
+    await expect(parseSpec(path)).rejects.toThrow(
+      /batch sub-step #2 \(steps\[0\]\.batch\[1\], click\).*uses by: role; batch supports selector locators only/,
+    );
+    await expect(parseSpec(path)).rejects.toBeInstanceOf(
+      BatchSelectorLocatorError,
+    );
+  });
+
+  it("reports semantic scroll.to locators with the batch sub-step index", async () => {
+    const path = join(dir, "batch_semantic_scroll.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: batch_semantic_scroll
+intent: semantic scroll locators are not allowed in batch
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - batch:
+      - press: Escape
+      - scroll:
+          to: { by: text, text: Save }
+`,
+    );
+    await expect(parseSpec(path)).rejects.toThrow(
+      /batch sub-step #2 .*scroll\.to.*uses by: text/,
+    );
+  });
+
+  it("reports selector-only batch mistakes inside imported actions", async () => {
+    const actionPath = join(dir, "batch_action.yml");
+    await writeFile(
+      actionPath,
+      `version: 1
+name: batch_action
+steps:
+  - batch:
+      - hover: { by: selector, selector: "#row" }
+      - click: { by: label, name: Upload }
+`,
+    );
+    const path = join(dir, "batch_import.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: batch_import
+intent: imported batch diagnostics name the action file
+imports: [./batch_action.yml]
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - use: batch_action
+`,
+    );
+    await expect(parseSpec(path)).rejects.toThrow(
+      new RegExp(
+        `batch sub-step #2 .* in ${actionPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} uses by: label`,
+      ),
+    );
   });
 
   it("rejects a batch step with fewer than 2 sub-steps", async () => {
@@ -280,6 +343,76 @@ steps:
 `,
     );
     await expect(parseSpec(path)).rejects.toThrow();
+  });
+
+  it("accepts case sensitivity, guest cold-start, and zero settle overrides", async () => {
+    const path = join(dir, "text_guest_settle.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: text_guest_settle
+intent: optional text and cold-start controls parse without defaults
+coldStart: guest
+settleMs: 0
+outcomes:
+  - id: exact_copy
+    description: exact copy
+    verify:
+      text: { contains: Saved, caseSensitive: true }
+steps:
+  - wait: { text: Ready, caseSensitive: true }
+  - wait: { notText: Loading, caseSensitive: false }
+  - click:
+      by: role
+      role: button
+      name: Save
+    settleMs: 0
+`,
+    );
+    const parsed = await parseSpec(path);
+    expect(parsed.spec.coldStart).toBe("guest");
+    expect(parsed.spec.settleMs).toBe(0);
+    expect(parsed.spec.steps?.[0]).toMatchObject({
+      wait: { text: "Ready", caseSensitive: true },
+    });
+    expect(parsed.spec.steps?.[1]).toMatchObject({
+      wait: { notText: "Loading", caseSensitive: false },
+    });
+    expect(parsed.spec.steps?.[2]).toMatchObject({ settleMs: 0 });
+  });
+
+  it("rejects unsupported cold-start acknowledgements and caseSensitive regex", async () => {
+    const invalidGuest = join(dir, "invalid_guest.yml");
+    await writeFile(
+      invalidGuest,
+      `version: 1
+name: invalid_guest
+intent: only guest is a valid acknowledgement
+coldStart: authenticated
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+`,
+    );
+    await expect(parseSpec(invalidGuest)).rejects.toThrow();
+
+    const invalidRegex = join(dir, "invalid_regex_case.yml");
+    await writeFile(
+      invalidRegex,
+      `version: 1
+name: invalid_regex_case
+intent: regex keeps raw semantics
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { matches: Saved.*, caseSensitive: false }
+`,
+    );
+    await expect(parseSpec(invalidRegex)).rejects.toThrow(
+      /caseSensitive is only valid with equals or contains/,
+    );
   });
 
   it("inlines `use:` steps from imported actions", async () => {
@@ -726,6 +859,11 @@ contractHash: sha256:${"0".repeat(64)}
     );
     await expect(parseSpec(path)).rejects.toBeInstanceOf(
       ContractHashMismatchError,
+    );
+    await expect(parseSpec(path)).rejects.toThrow(
+      new RegExp(
+        `contract changed since seal.*cairn spec verify .*tampered\\.yml.* --stamp`,
+      ),
     );
   });
 });

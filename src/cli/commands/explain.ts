@@ -1487,6 +1487,7 @@ export function buildExplain(): ExplainResult {
           "imports of a setup action",
           "session.resume: <checkpoint>",
           "preconditions.commands",
+          "coldStart: guest for an intentionally public/sessionless flow",
         ],
         authoringGate:
           "Run `cairn run --cold-start --json` once before declaring a spec done",

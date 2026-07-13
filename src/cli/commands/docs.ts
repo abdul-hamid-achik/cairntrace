@@ -130,7 +130,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Cold Start",
-        body: "Every finished spec must replay from a clean browser. Satisfy that with an imported login action, `session.resume`, or deterministic `preconditions.commands`. Before calling a spec done, run `cairn spec verify <spec> --config <path> --json` when using config variables, then run `cairn run <spec> --cold-start --json`.",
+        body: "Every finished spec must replay from a clean browser. Satisfy that with an imported login action, `session.resume`, deterministic `preconditions.commands`, or `coldStart: guest` for an intentionally public/sessionless flow. The guest acknowledgement suppresses setup lint but does not skip replay. Before calling a spec done, run `cairn spec verify <spec> --config <path> --json` when using config variables, then run `cairn run <spec> --cold-start --json`.",
       },
       {
         title: "Small YAML",

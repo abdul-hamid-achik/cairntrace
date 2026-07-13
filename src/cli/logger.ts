@@ -141,7 +141,10 @@ class Logger {
   }
 
   configure(opts: LoggerOptions): void {
-    this.opts = { ...opts };
+    // Scoped loggers share this options object. Mutate it in place so children
+    // created at module-import time (runLog/cleanLog) observe the later CLI and
+    // project-config resolution instead of staying stuck on the defaults.
+    Object.assign(this.opts, opts);
   }
 
   /** Create a scoped child logger (prefixes lines/JSON with the scope name). */

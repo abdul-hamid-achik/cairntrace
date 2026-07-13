@@ -89,7 +89,9 @@ export function makeInteractiveListener(
         status === "skipped" ? ` ${c.dim}(skipped by when:)${c.reset}` : "";
       out(`\r${c.clearEOL}  ${mark} ${stepId} ${dur}${tail}`);
       if (status === "failed" && error) {
-        out(`\n    ${c.red}${truncate(error, 200)}${c.reset}`);
+        for (const line of summarizeStepError(error)) {
+          out(`\n    ${c.red}${line}${c.reset}`);
+        }
       }
       out("\n");
     },
@@ -184,6 +186,33 @@ function formatMs(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.floor((ms - m * 60_000) / 1000);
   return `${m}m ${s}s`;
+}
+
+/**
+ * Keep ordinary step errors to the existing 200-character terminal budget,
+ * but make semantic-locator ambiguity actionable: preserve the header and the
+ * first three matched elements' accessible role/name lines. The full error is
+ * still available in run.json; this is only the bounded TTY rendering.
+ */
+export function summarizeStepError(error: string): string[] {
+  const lines = error.split(/\r?\n/);
+  const header = lines[0] ?? error;
+  const totalMatch = /:\s*(\d+) visible matches\b/i.exec(header);
+  if (!/^ambiguous\b/i.test(header) || !totalMatch) {
+    return [truncate(error, 200)];
+  }
+
+  const candidates = lines.filter((line) => /^\s+-\s+/.test(line)).slice(0, 3);
+  if (candidates.length === 0) return [truncate(error, 200)];
+
+  const rendered = [
+    truncate(header, 200),
+    ...candidates.map((line) => truncate(line, 200)),
+  ];
+  const total = Number(totalMatch[1]);
+  const omitted = Math.max(0, total - candidates.length);
+  if (omitted > 0) rendered.push(`  …and ${omitted} more`);
+  return rendered;
 }
 
 function truncate(s: string, max: number): string {

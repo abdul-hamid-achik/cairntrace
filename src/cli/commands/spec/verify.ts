@@ -3,6 +3,7 @@ import { parse as parseYaml, parseDocument } from "yaml";
 import { computeContractHash } from "../../../core/contractHash";
 import { resolveSpecRuntimeContext } from "../../../core/config/runtimeContext";
 import {
+  assertBatchSelectorLocators,
   ContractHashMismatchError,
   parseSpec,
 } from "../../../core/parser/parseSpec";
@@ -94,6 +95,7 @@ export async function stampSpecContractHash(specPath: string): Promise<string> {
   // the file — quoting, comments, key order — untouched.
   const text = await readFile(specPath, "utf8");
   const raw = parseYaml(text);
+  assertBatchSelectorLocators(raw, specPath);
   const spec = SpecSchema.parse(raw);
   const hash = computeContractHash(spec);
   const doc = parseDocument(text);
@@ -105,6 +107,7 @@ export async function stampSpecContractHash(specPath: string): Promise<string> {
 function coldStartLint(
   spec: Awaited<ReturnType<typeof parseSpec>>["spec"],
 ): string | undefined {
+  if (spec.coldStart === "guest") return undefined;
   const hasImports = (spec.imports?.length ?? 0) > 0;
   const hasResume = !!spec.session?.resume;
   const hasPreCmds = (spec.preconditions?.commands?.length ?? 0) > 0;

@@ -46,6 +46,79 @@ beforeEach(async () => {
 });
 
 describe("verifyCommand", () => {
+  it("warns for unacknowledged sessionless specs", async () => {
+    const specPath = join(dir, "sessionless.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: sessionless
+intent: sessionless specs should acknowledge guest mode
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+`,
+    );
+    const result = await runVerify(specPath, { json: true });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).warnings).toContainEqual(
+      expect.stringContaining("cold-start: no imports"),
+    );
+  });
+
+  it("accepts coldStart: guest as an intentional sessionless acknowledgement", async () => {
+    const specPath = join(dir, "guest.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: guest
+intent: public flow intentionally starts without a session
+coldStart: guest
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+`,
+    );
+    const result = await runVerify(specPath, { json: true });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "valid",
+      warnings: [expect.stringContaining("no contractHash")],
+    });
+    expect(JSON.parse(result.stdout).warnings).not.toContainEqual(
+      expect.stringContaining("cold-start:"),
+    );
+  });
+
+  it("keeps focused selector-only batch diagnostics on the --stamp path", async () => {
+    const specPath = join(dir, "invalid-batch-stamp.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: invalid_batch_stamp
+intent: stamp reports the authored batch locator mistake
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - batch:
+      - hover: { by: selector, selector: "#menu" }
+      - click: { by: role, role: button, name: Save }
+`,
+    );
+
+    const result = await runVerify(specPath, { json: true, stamp: true });
+
+    expect(result.code).toBe(4);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "invalid",
+      errors: [expect.stringContaining("batch sub-step #2")],
+    });
+    expect(await readFile(specPath, "utf8")).not.toContain("contractHash:");
+  });
+
   it("resolves config vars with --config before validating the spec", async () => {
     const configPath = join(dir, "custom.config.yml");
     await writeFile(

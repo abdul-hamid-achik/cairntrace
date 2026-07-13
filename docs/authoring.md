@@ -55,13 +55,14 @@ steps:
 
 ## Cold-start is not optional
 
-Every spec must satisfy the **cold-start contract**: replayable from a fresh browser session. Three supported paths, pick one:
+Every spec must satisfy the **cold-start contract**: replayable from a fresh browser session. Four supported paths, pick one:
 
 1. `imports: [actions/login.yml]` + `steps: [{ use: login }]` — reuse an action file.
 2. `session: { resume: <checkpoint> }` — capture a logged-in state once with `cairn checkpoint capture-from-session` and resume it.
 3. `preconditions: { commands: [{ run: "..." }] }` — set up state from the shell.
+4. `coldStart: guest` — explicitly acknowledge that a public flow intentionally starts without a session.
 
-There is no fourth path that "just works because my dev session is logged in." A spec that only runs in dev is a spec that does not run.
+There is no path that "just works because my dev session is logged in." A spec that only runs in dev is a spec that does not run. The guest acknowledgement suppresses the setup lint; it does not skip the required cold-start replay.
 
 ## The contract hash exists for a reason
 

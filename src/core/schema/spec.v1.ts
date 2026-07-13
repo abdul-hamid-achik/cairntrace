@@ -718,6 +718,8 @@ export const SpecSchema = z
     coversSymbol: z.string().optional(),
     /** Default post-click settling override for this spec. */
     settleMs: z.number().int().min(0).optional(),
+    /** Explicitly acknowledge a public/sessionless cold-start flow. */
+    coldStart: z.literal("guest").optional(),
     imports: z.array(z.string()).optional(),
     preconditions: PreconditionsSchema.optional(),
     session: SessionSchema.optional(),

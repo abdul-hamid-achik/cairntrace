@@ -548,7 +548,7 @@ describe("strict semantic interaction resolution", () => {
     execaMock.mockResolvedValue({
       exitCode: 0,
       stdout:
-        '- main\n  - button "Cobrar" [ref=e5]\n  - button "Cobrar" [ref=e9]\n',
+        '- main\n  - button "Cobrar" [ref=e5]\n  - button "Cobrar" [ref=e9]\n  - button "Cobrar" [ref=e10]\n  - button "Cobrar" [ref=e11]\n',
       stderr: "",
     });
     const adapter = new AgentBrowserAdapter({ session: "ambiguous-test" });
@@ -559,9 +559,12 @@ describe("strict semantic interaction resolution", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("ambiguous");
-    expect(result.stderr).toContain("2 visible matches");
+    expect(result.stderr).toContain("4 visible matches");
     expect(result.stderr).toContain("ref=e5");
     expect(result.stderr).toContain("ref=e9");
+    expect(result.stderr).toContain("ref=e10");
+    expect(result.stderr).not.toContain("ref=e11");
+    expect(result.stderr).toContain("…and 1 more");
     expect(result.stderr).toContain("nth");
     // Failed on the first snapshot — ambiguity doesn't poll until timeout.
     expect(execaMock).toHaveBeenCalledTimes(1);
@@ -684,6 +687,50 @@ describe("daemon-busy retry", () => {
         (call[1] as string[]).includes("click"),
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe("selector failure diagnostics", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("lists the first three accessible names and omitted count", async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scroll
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr: "strict mode violation",
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          data: {
+            result: {
+              count: 70,
+              candidates: [
+                { tag: "button", role: "button", name: "Save member" },
+                { tag: "button", role: "button", name: "Cancel" },
+                { tag: "button", role: "button", name: "Delete" },
+              ],
+            },
+          },
+        }),
+        stderr: "",
+      });
+    const adapter = new AgentBrowserAdapter({ session: "selector-details" });
+
+    const result = await adapter.runStep({
+      hover: { by: "selector", selector: "button" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("selector matched 70 elements");
+    expect(result.stderr).toContain('button "Save member"');
+    expect(result.stderr).toContain('button "Cancel"');
+    expect(result.stderr).toContain('button "Delete"');
+    expect(result.stderr).toContain("67 more omitted");
   });
 });
 

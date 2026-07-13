@@ -13,6 +13,7 @@ import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
+import { ContractHashMismatchError } from "../../core/parser/parseSpec";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
 import {
@@ -172,7 +173,8 @@ export async function runCommand(
       runLog.info(
         `--since-codemap ${opts.sinceCodemap} selected 0 specs (blast radius matched no spec's coversSymbol); nothing to run`,
       );
-      process.exit(0);
+      process.exitCode = 0;
+      return;
     }
   }
 
@@ -193,9 +195,13 @@ export async function runCommand(
       opts.sinceCodemap,
     );
     const format = resolveFormat(opts, "md");
-    process.stdout.write(emit(format, selection, renderSelectionMarkdown));
-    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
-    process.exit(0);
+    await writeStdoutFully(
+      `${emit(format, selection, renderSelectionMarkdown)}${
+        format !== "json" && format !== "yaml" ? "\n" : ""
+      }`,
+    );
+    process.exitCode = 0;
+    return;
   }
 
   // Propagate --env to CAIRN_TVAULT_ENV as early as possible — before the
@@ -266,8 +272,8 @@ export async function runCommand(
   // webServer/services. Best-effort: no config → undefined → adapter defaults.
   const browser = await resolveBrowserConfig(expandedSpecs[0]!, opts);
 
-  // Own the single process.exit so the finally can always tear the server down
-  // (process.exit inside runSingle/runBatch would skip finally and orphan it).
+  // Resolve one final exit status only after lifecycle teardown; forcing an
+  // exit inside runSingle/runBatch would skip finally and orphan resources.
   let exitCode: ExitCode = 2;
   try {
     exitCode =
@@ -302,6 +308,11 @@ export async function runCommand(
       untrackServer?.();
     }
   }
+
+  // runSingle/runBatch return the stable wire exit code so lifecycle teardown
+  // above always completes first. Do not force process.exit here: stdout may
+  // still be draining a large batch JSON/YAML document into a pipe.
+  process.exitCode = exitCode;
 }
 
 /**
@@ -1229,6 +1240,8 @@ export function synthesizeErroredResult(
     ? specPath
     : `${process.cwd()}/${specPath}`;
   const message = addEnospcHint(err.message);
+  const contractChanged = err instanceof ContractHashMismatchError;
+  const exitCode: ExitCode = contractChanged ? 6 : 2;
   return {
     $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
@@ -1264,7 +1277,19 @@ export function synthesizeErroredResult(
       },
     ],
     artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
-    exitCode: 2,
+    exitCode,
+    ...(contractChanged
+      ? {
+          nextActions: [
+            {
+              command: `cairn spec verify ${JSON.stringify(absoluteSpecPath)} --stamp --json`,
+              reason:
+                "the behavior contract changed since it was sealed; review the intent/outcomes diff before resealing",
+              safeToAutoRun: false,
+            },
+          ],
+        }
+      : {}),
   };
 }
 

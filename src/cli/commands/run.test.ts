@@ -73,6 +73,32 @@ describe("synthesizeErroredResult", () => {
       synthesizeErroredResult("/x/foo.yaml", new Error("e")).spec.name,
     ).toBe("foo");
   });
+
+  it("classifies a changed sealed contract with exit code 6 and a reseal action", () => {
+    const path = "/x/changed.yml";
+    const result = synthesizeErroredResult(
+      path,
+      new ContractHashMismatchError(
+        `sha256:${"0".repeat(64)}`,
+        `sha256:${"1".repeat(64)}`,
+        path,
+      ),
+    );
+
+    expect(RunResultSchema.parse(result)).toMatchObject({
+      status: "errored",
+      exitCode: 6,
+      failure: {
+        message: expect.stringContaining("contract changed since seal"),
+      },
+      nextActions: [
+        {
+          command: expect.stringContaining("cairn spec verify"),
+          safeToAutoRun: false,
+        },
+      ],
+    });
+  });
 });
 
 describe("parseVarFlags", () => {
@@ -147,6 +173,8 @@ describe("services dry-run (end-to-end via CLI)", () => {
       "--mock",
       "--services-dry-run",
       "--no-web-server",
+      "--artifact-root",
+      join(dir, "runs"),
       "--format",
       "json",
       ...extraArgs,
@@ -191,8 +219,8 @@ name: test_spec
 intent: Test dry-run.
 outcomes:
   - id: out1
-    description: A text appears
-    verify: { text: "smoke" }
+    description: The mock console stays clean
+    verify: { console: { errorsMax: 0 } }
 steps:
   - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
   - wait: { text: smoke }
@@ -227,8 +255,8 @@ name: test_spec
 intent: Test dry-run.
 outcomes:
   - id: out1
-    description: A text appears
-    verify: { text: "smoke" }
+    description: The mock console stays clean
+    verify: { console: { errorsMax: 0 } }
 steps:
   - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
   - wait: { text: smoke }
@@ -261,8 +289,8 @@ name: test_spec
 intent: Test dry-run.
 outcomes:
   - id: out1
-    description: A text appears
-    verify: { text: "smoke" }
+    description: The mock console stays clean
+    verify: { console: { errorsMax: 0 } }
 steps:
   - open: { path: "data:text/html,<h1>smoke</h1>", waitUntil: load }
   - wait: { text: smoke }
@@ -275,7 +303,178 @@ steps:
   });
 });
 
+describe("run JSON stdout routing (end-to-end via CLI)", () => {
+  it("keeps web-server warning and log tail on stderr", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-json-stderr-"));
+    const artifactRoot = join(dir, "runs");
+    const configPath = join(dir, "cairntrace.config.yml");
+    const specPath = join(dir, "failing.yml");
+    const marker = "CAIRN_JSON_STDERR_WEB_SERVER_MARKER";
+    const serverScript = `console.error(${JSON.stringify(marker)}); setInterval(() => {}, 1000);`;
+    const serverCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(serverScript)}`;
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: test
+environments:
+  test: {}
+artifactRoot: ${JSON.stringify(artifactRoot)}
+webServer:
+  command: ${JSON.stringify(serverCommand)}
+  waitForText: ${JSON.stringify(marker)}
+  reuseExisting: false
+  readyTimeoutMs: 5000
+`,
+    );
+    await writeFile(
+      specPath,
+      `version: 1
+name: json_stderr_failure
+intent: A deliberately failing mock run exercises web-server diagnostics.
+outcomes:
+  - id: missing_text
+    description: Deliberately absent text is visible.
+    verify: { text: { contains: "definitely-not-present" } }
+steps: []
+`,
+    );
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "--log-level",
+        "info",
+        "run",
+        specPath,
+        "--config",
+        configPath,
+        "--mock",
+        "--json",
+      ],
+      { cwd: dir, reject: false, timeout: 15_000 },
+    );
+
+    expect(() => JSON.parse(result.stdout)).not.toThrow();
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "failed",
+      exitCode: 1,
+    });
+    expect(result.stdout).not.toContain("web server log");
+    expect(result.stdout).not.toContain(marker);
+    expect(result.stderr).toContain("web server log (last 80 lines");
+    expect(result.stderr).toContain(marker);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("flushes a large batch JSON document before exiting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-json-flush-"));
+    const configPath = join(dir, "cairntrace.config.yml");
+    const specPath = join(dir, "large_batch.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local: {}
+retention: { enabled: false }
+`,
+    );
+    await writeFile(
+      specPath,
+      `version: 1
+name: json_flush_${"long_name_segment_".repeat(4)}
+intent: A large batch result must drain fully before the CLI exits.
+outcomes:
+  - id: clean_console_${"long_outcome_segment_".repeat(3)}
+    description: The mock console stays clean while producing a large result envelope.
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+    const repeatedSpecs = Array.from({ length: 96 }, () => specPath);
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        ...repeatedSpecs,
+        "--parallel",
+        "16",
+        "--mock",
+        "--no-web-server",
+        "--config",
+        configPath,
+        "--artifact-root",
+        join(dir, "runs"),
+        "--json",
+      ],
+      { reject: false, timeout: 15_000 },
+    );
+
+    expect(result.stdout.length).toBeGreaterThan(64 * 1024);
+    const parsed = BatchRunResultSchema.parse(JSON.parse(result.stdout));
+    expect(parsed.summary).toEqual({
+      total: repeatedSpecs.length,
+      passed: repeatedSpecs.length,
+      failed: 0,
+      errored: 0,
+    });
+    expect(parsed.results).toHaveLength(repeatedSpecs.length);
+    expect(result.exitCode).toBe(0);
+  });
+});
+
 describe("run stable exit codes (end-to-end via CLI)", () => {
+  it("returns 6 for a contract mismatch in both single and batch JSON runs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-contract-exit-"));
+    const makeSpec = async (name: string): Promise<string> => {
+      const path = join(dir, `${name}.yml`);
+      await writeFile(
+        path,
+        `version: 1
+name: ${name}
+intent: The stamped contract no longer matches.
+contractHash: sha256:${"0".repeat(64)}
+outcomes:
+  - id: ok
+    description: no console errors
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+      );
+      return path;
+    };
+    const first = await makeSpec("contract_one");
+    const second = await makeSpec("contract_two");
+    const bin = join(process.cwd(), "bin", "cairn");
+
+    const single = await execa(
+      bin,
+      ["run", first, "--mock", "--no-web-server", "--json"],
+      { reject: false },
+    );
+    expect(single.exitCode).toBe(6);
+    expect(JSON.parse(single.stdout)).toMatchObject({
+      status: "errored",
+      exitCode: 6,
+      failure: {
+        message: expect.stringContaining("contract changed since seal"),
+      },
+    });
+
+    const batch = await execa(
+      bin,
+      ["run", first, second, "--mock", "--no-web-server", "--json"],
+      { reject: false },
+    );
+    expect(batch.exitCode).toBe(6);
+    expect(JSON.parse(batch.stdout)).toMatchObject({
+      exitCode: 6,
+      summary: { total: 2, errored: 2 },
+      results: [{ exitCode: 6 }, { exitCode: 6 }],
+    });
+  });
+
   it("writes an aborted batch summary and preserves completed reports on SIGTERM", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-abort-"));
     const artifactRoot = join(dir, "runs");

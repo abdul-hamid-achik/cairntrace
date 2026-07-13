@@ -138,7 +138,7 @@ Each placeholder is resolved exactly once and emitted verbatim — a value that 
 
 Several settings that look like config actually live on the **spec**, not `cairntrace.config.yml`:
 
-- `backend`, `mode`, `viewport`, `vars`, `environment`, `settleMs`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
+- `backend`, `mode`, `viewport`, `vars`, `environment`, `settleMs`, `coldStart`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
 - `redaction:` on a spec is `{ headers?, queryParams?, storageKeys?, values? }` (arrays of strings to scrub), not a regex list.
 
 Backend choice and capture policies are per-spec because they describe *what this flow observes*, not project plumbing. Project plumbing (environments, services, secrets, retention, integrations) is what goes in config.
