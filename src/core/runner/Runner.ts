@@ -460,6 +460,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       baseUrl: runtime.baseUrl,
       artifacts: namedArtifacts,
     });
+    stepToRun = applySpecClickSettle(stepToRun, resolved.settleMs);
     let pendingDownload:
       | {
           assign: string;
@@ -1297,6 +1298,18 @@ function resolveOpenStep(
   return typeof step.open === "string"
     ? { ...step, open: resolvedPath }
     : { ...step, open: { ...step.open, path: resolvedPath } };
+}
+
+/** Apply a spec-wide click settle only when the click has no local override. */
+function applySpecClickSettle(step: Step, settleMs: number | undefined): Step {
+  if (
+    settleMs === undefined ||
+    !("click" in step) ||
+    step.settleMs !== undefined
+  ) {
+    return step;
+  }
+  return { ...step, settleMs };
 }
 
 /** The captured envelope a request step produces. */

@@ -1064,9 +1064,9 @@ export function buildExplain(): ExplainResult {
         id: "click",
         kind: "interaction",
         summary:
-          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several)",
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Optional sibling settleMs overrides post-click network-idle settling. Agent-browser precedence is click > spec > browser.postClickSettleMs > 5000; Playwright honors explicit click/spec values; 0 skips the extra settle",
         yamlExample:
-          "steps:\n  - click: { by: role, role: button, name: Save }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }",
+          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }\n    settleMs: 0",
       },
       {
         id: "hover",

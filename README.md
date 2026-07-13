@@ -400,6 +400,9 @@ report:
   colors:
     accent: "#0f766e"
     surface: "#fbfdf9"
+browser:
+  verifyAfterClick: true
+  postClickSettleMs: 20000
 environments:
   local:
     baseUrl: http://localhost:${env.APP_PORT} # ${env.X} works in config text
@@ -411,6 +414,12 @@ environments:
 
 Specs can also set a top-level `viewport: { width, height }`, which wins over
 the environment's.
+
+On agent-browser, post-click network-idle settling uses the narrowest override:
+the click step's sibling `settleMs`, top-level spec `settleMs`, config
+`browser.postClickSettleMs`, then 5000 ms. Playwright honors explicit click/spec
+values and otherwise keeps its native action/navigation waits. Use `settleMs: 0`
+to skip the extra settle without disabling click verification for every flow.
 
 **Per-environment services & secrets.** The `services` and `secrets` blocks
 can be overridden per-environment inside `environments.<name>`. This lets you

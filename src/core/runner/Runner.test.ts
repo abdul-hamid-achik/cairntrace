@@ -756,6 +756,73 @@ steps:
     expect(diagnostics).toContain('"wedged": true');
   });
 
+  it("degrades a screenshot hard-timeout to best-effort without voiding outcomes", async () => {
+    const specPath = await writeSpec(
+      "screenshot_timeout",
+      `version: 1
+name: screenshot_timeout
+intent: a screenshot capture timeout must not fail the step, spec, or outcomes
+artifacts:
+  capture:
+    screenshots: always
+    snapshots: never
+outcomes:
+  - id: page_ready
+    description: the page is still asserted against, capture timeout or not
+    verify:
+      text: { contains: Ready }
+steps:
+  - id: render
+    open: /ready
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.setPageText("Ready");
+    let wedged = false;
+    vi.spyOn(backend, "screenshot").mockImplementation(async ({ path }) => {
+      wedged = true;
+      return {
+        ok: false,
+        path,
+        durationMs: 15_000,
+        error:
+          "screenshot capture timed out after 15000ms — no rendering surface; is the display asleep or headless?",
+      };
+    });
+    (
+      backend as unknown as BrowserBackend & { isWedged: () => boolean }
+    ).isWedged = () => wedged;
+    const consoleSpy = vi.spyOn(backend, "getConsole");
+    const networkSpy = vi.spyOn(backend, "getNetworkRequests");
+    const textSpy = vi.spyOn(backend, "getText");
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    // Best-effort: the timeout does not fail the step or the spec.
+    expect(result.status).toBe("passed");
+    expect(result.exitCode).toBe(0);
+    expect(result.steps[0]).toMatchObject({ id: "render", status: "passed" });
+    // The contract is still evaluated against the (responsive) page.
+    expect(result.outcomes[0]?.status).toBe("passed");
+    expect(textSpy).toHaveBeenCalled();
+    // The wedged flag skips only the optional follow-up captures.
+    expect(consoleSpy).not.toHaveBeenCalled();
+    expect(networkSpy).not.toHaveBeenCalled();
+    // The truncated PNG is never published; a missing-artifact note is written.
+    expect(result.artifacts.screenshots).toBeUndefined();
+    const diagnostic = result.artifacts.diagnostics?.find((path) =>
+      path.endsWith("_screenshot.json"),
+    );
+    expect(diagnostic).toBeDefined();
+    await expect(
+      stat(join(result.runDir, "screenshots", "001_render.png")),
+    ).rejects.toThrow();
+    expect(await readFile(join(result.runDir, diagnostic!), "utf8")).toContain(
+      "display asleep",
+    );
+  });
+
   it("marks artifact-dependent outcomes as skipped when the producing step failed", async () => {
     const specPath = await writeSpec(
       "blocked_outcomes",

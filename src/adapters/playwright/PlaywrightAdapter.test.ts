@@ -619,6 +619,34 @@ describe("PlaywrightAdapter type", () => {
       "keyboard.press",
     ]);
   });
+
+  it("honors explicit click settleMs and lets zero skip it", async () => {
+    const click = vi.fn().mockResolvedValue(undefined);
+    const waitForLoadState = vi.fn().mockResolvedValue(undefined);
+    const adapter = new PlaywrightAdapter();
+    installPage(adapter, {
+      locator: () => ({ click }),
+      waitForLoadState,
+    });
+
+    await expect(
+      adapter.runStep({
+        click: { by: "selector", selector: "#slow" },
+        settleMs: 1_200,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      adapter.runStep({
+        click: { by: "selector", selector: "#instant" },
+        settleMs: 0,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    expect(waitForLoadState).toHaveBeenCalledTimes(1);
+    expect(waitForLoadState).toHaveBeenCalledWith("networkidle", {
+      timeout: 1_200,
+    });
+  });
 });
 
 describe("PlaywrightAdapter launch", () => {

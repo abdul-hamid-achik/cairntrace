@@ -228,6 +228,44 @@ describe("exportPlaywright", () => {
     );
   });
 
+  it("exports normalized text waits and preserves the case-sensitive opt-out", () => {
+    const src = exportPlaywright(
+      baseSpec({
+        steps: [
+          { wait: { text: "Order Saved" } },
+          {
+            wait: {
+              notText: "Loading",
+              caseSensitive: true,
+            },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(`trim().toLowerCase().includes(\\"order saved\\")`);
+    expect(src).toContain(`trim().includes(\\"Loading\\")`);
+  });
+
+  it("exports step and spec click settle overrides", () => {
+    const src = exportPlaywright(
+      baseSpec({
+        settleMs: 1_200,
+        steps: [
+          { click: { by: "selector", selector: "#inherits" } },
+          {
+            click: { by: "selector", selector: "#skips" },
+            settleMs: 0,
+          },
+        ],
+      }),
+    );
+
+    expect(src).toContain(
+      `page.waitForLoadState("networkidle", { timeout: 1200 })`,
+    );
+    expect(src.match(/waitForLoadState/g)).toHaveLength(1);
+  });
+
   it("includes the spec intent + source as a header comment", () => {
     const src = exportPlaywright(baseSpec({ intent: "do the thing" }), {
       sourcePath: "/path/to/spec.yml",

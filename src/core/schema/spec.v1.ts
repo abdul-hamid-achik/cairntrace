@@ -252,7 +252,12 @@ export function openPath(step: OpenStep): string {
 }
 
 export const ClickStepSchema = z
-  .object({ ...stepCommon, click: LocatorSchema })
+  .object({
+    ...stepCommon,
+    click: LocatorSchema,
+    /** Override post-click settling for this interaction. */
+    settleMs: z.number().int().min(0).optional(),
+  })
   .strict();
 export type ClickStep = z.infer<typeof ClickStepSchema>;
 
@@ -711,6 +716,8 @@ export const SpecSchema = z
     metadata: SpecMetadataSchema.optional(),
     /** Symbol this spec covers (FEATURES item 6): bound by `cairn spec scaffold --from-codemap`. */
     coversSymbol: z.string().optional(),
+    /** Default post-click settling override for this spec. */
+    settleMs: z.number().int().min(0).optional(),
     imports: z.array(z.string()).optional(),
     preconditions: PreconditionsSchema.optional(),
     session: SessionSchema.optional(),

@@ -229,6 +229,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), or a more specific name. Targets are scrolled into view automatically before the action.",
       },
       {
+        title: "Click Settling",
+        body: "Agent-browser clicks fold in a network-idle settle by default, with click-step `settleMs` → top-level spec `settleMs` → config `browser.postClickSettleMs` → 5000ms precedence. Playwright honors explicit click/spec values and otherwise keeps its native action/navigation waits. Set `settleMs: 0` to skip the extra settle; `browser.verifyAfterClick: false` disables the agent-browser guard globally.",
+      },
+      {
         title: "Request Steps",
         body: "`request` uses the browser session's cookies but is timeout-bounded. On the Playwright backend it runs out of page through a browser-context cookie transport (`APIRequestContext` when safe; an isolated Bun cookie bridge under Bun), which sends existing context cookies and persists `Set-Cookie` responses back into the browser context. The Bun bridge runs in a subprocess so the parent can kill it at `timeoutMs` even if native fetch stalls. Backends without a native request primitive use a bounded page-fetch fallback. Relative URLs resolve against config `baseUrl` when present, otherwise against the current page origin; request-first relative URLs therefore need `baseUrl`. The default request timeout is 30000ms, and `timeoutMs` overrides it per step. `assign: name` writes the `{url, method, status, ok, headers, body}` envelope to `requests/<name>.json` and lets later steps and fixtures splice fields via `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` fails the step on unexpected statuses; omit it for negative-path flows. Request-step calls are also mirrored into network evidence so `network` and `noFailedRequests` verifiers can match them.",
       },
@@ -525,6 +529,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       {
         title: "Timeouts And Cleanup",
         body: "Cairn enforces a hard deadline on browser-backend invocations. agent-browser uses a 60s default with step-level `timeoutMs` + 5s grace; a wedged daemon gets killed and the step fails with a normal timeout error instead of hanging the run. Playwright `wait` and browser `evaluate` paths also have Cairntrace-side deadlines (30000ms default, or `timeoutMs` when supplied). Real Chromium runs start an external watchdog process that kills the browser at the deadline, so page navigation churn cannot leave the suite waiting on Playwright forever. Ctrl-C / SIGTERM tears down the run's own browser session before exiting; other sessions are untouched.",
+      },
+      {
+        title: "Post-click Settling",
+        body: "On agent-browser, `browser.verifyAfterClick` defaults to true and folds a network-idle settle into clicks. Its budget is click-step `settleMs` → spec-root `settleMs` → `browser.postClickSettleMs` → 5000ms. Playwright honors explicit click/spec values and otherwise keeps native waits. A resolved `settleMs: 0` skips the extra settle without turning the agent-browser delivery guard off.",
       },
       {
         title: "Playwright",

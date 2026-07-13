@@ -60,7 +60,17 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 - click: { by: role, role: button, name: Save }
 - click: { by: role, role: button, name: Cobrar, nth: 1 }
 - click: { by: selector, selector: "button.primary" }
+- click: { by: role, role: link, name: Reports }
+  settleMs: 15000
 ```
+
+Agent-browser clicks wait for network-idle settling by default. Their budget
+resolves as click-step `settleMs` → top-level spec `settleMs` → config
+`browser.postClickSettleMs` → 5000 ms. Playwright honors explicit click/spec
+values and otherwise keeps its native action/navigation waits. A resolved
+`settleMs: 0` skips the extra settle at that scope AND the agent-browser
+link-delivery probe (you are declaring that the next step waits on the
+destination itself).
 
 ### `hover`
 

@@ -305,6 +305,15 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   success on zero matches. The adapter resolves semantic locators against
   `snapshot -i`, scrolls the `@ref` into view, acts on the ref, and records
   the resolved element as step evidence.
+- Link clicks are classified first: only a same-tab http(s)/relative nav link
+  installs the short URL/DOM-mutation delivery probe. If such a link reports
+  success without either signal and remains enabled, Cairntrace retries once
+  with low-level mouse input at its live center. External-effect links —
+  `target="_blank"`, a `download` attribute, or a `mailto:`/`tel:`/`javascript:`
+  scheme — legitimately never mutate the current document, so they are clicked
+  exactly once and pass with a diagnostic note (no verification, no retry).
+  Ordinary buttons never receive this retry, and the whole probe is skipped
+  when the click resolves to `settleMs: 0` or `verifyAfterClick: false`.
 - `batch` steps are the exception that runs through agent-browser's native
   `batch --bail`: each selector sub-step maps to one command via
   `batchSubStepToArgv`, joined and quoted with `quoteIfNeeded`. This is the

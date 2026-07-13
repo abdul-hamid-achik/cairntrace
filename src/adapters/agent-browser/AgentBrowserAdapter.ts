@@ -53,6 +53,35 @@ interface BatchCommandPlanEntry {
   originalArgv: string[];
 }
 
+interface LinkClickProbe {
+  target: string;
+  beforeUrl: string;
+  beforeTimeOrigin?: number;
+  stateKey: string;
+}
+
+/**
+ * A link whose click cannot change THIS document — `target="_blank"`, a
+ * `download` attribute, or a non-http(s) scheme (`mailto:`/`tel:`/`javascript:`
+ * …). Such a link is clicked exactly once and passes with a diagnostic note;
+ * the same-document delivery probe + physical retry (which would double-fire
+ * the click and then hard-fail on a link that legitimately never mutates the
+ * page) is skipped for it.
+ */
+interface ExternalLinkClick {
+  externalReason: string;
+}
+
+/**
+ * Outcome of the pre-click link classification: a same-tab nav link to verify,
+ * an external-effect link to pass with a note, or an `InvocationResult` to
+ * return immediately (the classification eval itself hard-timed-out).
+ */
+type LinkClickPreparation =
+  | LinkClickProbe
+  | ExternalLinkClick
+  | InvocationResult;
+
 /**
  * Adapter over the `agent-browser` Rust CLI (https://agent-browser.dev).
  *
@@ -102,7 +131,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
   async runStep(step: Step): Promise<InvocationResult> {
     if ("batch" in step) return this.runBatchStep(step);
     if ("download" in step) return this.runDownloadStep(step);
-    if ("click" in step) return this.runInteractiveStep(step.click, "click");
+    if ("click" in step)
+      return this.runInteractiveStep(
+        step.click,
+        "click",
+        undefined,
+        step.settleMs,
+      );
     if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
     if ("fill" in step) {
       const { value, ...locator } = step.fill;
@@ -686,17 +721,42 @@ export class AgentBrowserAdapter implements BrowserBackend {
     locator: Locator,
     action: "click" | "hover" | "fill" | "type" | "upload",
     value?: string,
+    settleMsOverride?: number,
   ): Promise<InvocationResult> {
     const start = Date.now();
     if (locator.by === "selector") {
       // Selector locators skip snapshot resolution (agent-browser errors on
       // missing selectors already) but still get the scroll-into-view guard.
-      await this.scrollSelectorIntoView(locator.selector);
+      // For a click with the probe enabled, the scroll AND the link-kind
+      // classification (and observer install for same-tab links) run in the
+      // SAME eval — a non-link click (e.g. a button) therefore pays no extra
+      // invocation over the scroll it already needs. When the probe is
+      // disabled (verifyAfterClick:false or a resolved settleMs of 0) we fall
+      // back to the plain scroll-only eval.
+      const probeEnabled =
+        action === "click" && this.clickProbeEnabled(settleMsOverride);
+      let prepared: LinkClickProbe | ExternalLinkClick | undefined;
+      if (probeEnabled) {
+        const p = await this.prepareLinkClickProbe(locator, locator.selector);
+        if (p && "ok" in p) return p;
+        prepared = p;
+      } else {
+        await this.scrollSelectorIntoView(locator.selector);
+      }
       const argv = [action, locator.selector];
       if (value !== undefined) argv.push(value);
       const r = await this.invoke(argv);
+      if (!r.ok) {
+        return await this.appendSelectorMatchDiagnostics(r, locator.selector);
+      }
       if (action === "click") {
-        return await this.verifyAndSettleAfterClick(r, locator);
+        const delivered = await this.verifyLinkClickDelivery(r, prepared);
+        return await this.verifyAndSettleAfterClick(
+          delivered,
+          locator,
+          undefined,
+          settleMsOverride,
+        );
       }
       return r;
     }
@@ -730,11 +790,324 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
     const argv = [action, `@${resolved.element.ref}`];
     if (value !== undefined) argv.push(value);
+    const prepared =
+      action === "click" && this.clickProbeEnabled(settleMsOverride)
+        ? await this.prepareLinkClickProbe(
+            locator,
+            `@${resolved.element.ref}`,
+            resolved.element,
+          )
+        : undefined;
+    if (prepared && "ok" in prepared) {
+      return {
+        ...prepared,
+        resolvedElement: toResolvedElement(resolved.element),
+      };
+    }
     const r = await this.invoke(argv);
     if (action === "click") {
-      return await this.verifyAndSettleAfterClick(r, locator, resolved.element);
+      const delivered = await this.verifyLinkClickDelivery(r, prepared);
+      return await this.verifyAndSettleAfterClick(
+        delivered,
+        locator,
+        resolved.element,
+        settleMsOverride,
+      );
     }
     return { ...r, resolvedElement: toResolvedElement(resolved.element) };
+  }
+
+  /** The resolved post-click settle budget (click override → config → default). */
+  private resolveClickSettleMs(settleMsOverride?: number): number {
+    return (
+      settleMsOverride ??
+      this.opts.postClickSettleMs ??
+      POST_CLICK_NAV_SETTLE_MS
+    );
+  }
+
+  /**
+   * Whether a click should run the link-delivery probe at all. Disabled by
+   * `verifyAfterClick:false` and by a resolved `settleMs: 0` — both are the
+   * author saying "don't do post-click waiting; the next step waits on the
+   * destination", which the probe's own `wait --fn` would otherwise violate.
+   */
+  private clickProbeEnabled(settleMsOverride?: number): boolean {
+    if (this.opts.verifyAfterClick === false) return false;
+    return this.resolveClickSettleMs(settleMsOverride) !== 0;
+  }
+
+  /**
+   * Classify a click target and, for a same-tab nav link, install a
+   * before-click URL + MutationObserver delivery probe. On the selector path
+   * the scroll-into-view is folded into this same eval (so a non-link click
+   * pays no extra invocation); on the semantic path the ref was already
+   * scrolled and the element is located by its accessible name. Returns a
+   * `LinkClickProbe` (verify same-tab delivery), an `ExternalLinkClick` (click
+   * once + note, no verification), an `InvocationResult` (the eval hard-timed
+   * out — return it immediately), or `undefined` (not a link → plain click).
+   */
+  private async prepareLinkClickProbe(
+    locator: Locator,
+    target: string,
+    resolved?: SnapshotElement,
+  ): Promise<LinkClickPreparation | undefined> {
+    const isSelector = locator.by === "selector";
+    if (!isSelector && resolved?.role.toLowerCase() !== "link") {
+      return undefined;
+    }
+
+    const script = linkClickProbeScript(
+      isSelector
+        ? { selector: locator.selector, scroll: true, assumeLink: false }
+        : { name: resolved?.name, scroll: false, assumeLink: true },
+    );
+    const result = await this.invoke(["eval", script, "--json"]);
+    if (!result.ok) return this.sawChildTimeout ? result : undefined;
+    const metadata = parseEvalResult<{
+      linkLike?: boolean;
+      externalReason?: string | null;
+      beforeUrl?: string;
+      beforeTimeOrigin?: number;
+    }>(result.stdout);
+    if (
+      !metadata ||
+      metadata.linkLike !== true ||
+      typeof metadata.beforeUrl !== "string"
+    ) {
+      return undefined;
+    }
+    if (
+      typeof metadata.externalReason === "string" &&
+      metadata.externalReason
+    ) {
+      return { externalReason: metadata.externalReason };
+    }
+    return {
+      target,
+      beforeUrl: metadata.beforeUrl,
+      ...(typeof metadata.beforeTimeOrigin === "number"
+        ? { beforeTimeOrigin: metadata.beforeTimeOrigin }
+        : {}),
+      stateKey: LINK_CLICK_PROBE_KEY,
+    };
+  }
+
+  /**
+   * A successful CDP click is not proof that a framework link handler ran.
+   * Give URL/DOM delivery a short window; when neither changes and the target
+   * is still actionable, retry once with low-level mouse input at its center.
+   *
+   * `prepared` is `undefined` for non-link clicks (nothing to verify), an
+   * `ExternalLinkClick` for `_blank`/download/mailto/tel/js links (which pass
+   * with a note — they legitimately never mutate this document), or a
+   * `LinkClickProbe` for same-tab nav links (the only kind that runs the
+   * delivery-verification + single physical retry + failure path).
+   */
+  private async verifyLinkClickDelivery(
+    clicked: InvocationResult,
+    prepared: LinkClickProbe | ExternalLinkClick | undefined,
+  ): Promise<InvocationResult> {
+    if (!clicked.ok || !prepared) return clicked;
+    if ("externalReason" in prepared) {
+      return {
+        ...clicked,
+        stderr: [
+          clicked.stderr,
+          `link click delivery probe skipped: ${prepared.externalReason} opens/handles outside this document; clicked once without same-document verification`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      };
+    }
+    const probe = prepared;
+    const startedAt = Date.now();
+    const first = await this.waitForLinkDelivery(probe);
+    if (first.ok) {
+      return {
+        ...clicked,
+        durationMs: clicked.durationMs + (Date.now() - startedAt),
+      };
+    }
+    if (!/timed out/i.test(first.stderr)) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click delivery check failed: ${first.stderr.trim() || `exit ${first.exitCode}`}`,
+        startedAt,
+      );
+    }
+    if (this.sawChildTimeout) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click delivery check timed out and the browser backend became unresponsive; low-level retry skipped: ${first.stderr.trim()}`,
+        startedAt,
+      );
+    }
+
+    const point = await this.linkRetryPoint(probe.target);
+    if (!point.ok) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click produced neither a URL change nor a DOM mutation; physical retry skipped because ${point.reason}`,
+        startedAt,
+      );
+    }
+
+    const retry = await this.batch(
+      [
+        ["mouse", "move", String(point.x), String(point.y)],
+        ["mouse", "down", "left"],
+        ["mouse", "up", "left"],
+      ],
+      { bail: true },
+    );
+    if (!retry.ok) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click physical retry failed: ${retry.raw.stderr.trim() || `exit ${retry.raw.exitCode}`}`,
+        startedAt,
+      );
+    }
+
+    const second = await this.waitForLinkDelivery(probe);
+    if (!second.ok) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click produced neither a URL change nor a DOM mutation after one low-level mouse retry: ${second.stderr.trim() || `exit ${second.exitCode}`}`,
+        startedAt,
+      );
+    }
+    return {
+      ...clicked,
+      stderr: [
+        clicked.stderr,
+        "link click delivered after one low-level mouse retry",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      durationMs: clicked.durationMs + (Date.now() - startedAt),
+    };
+  }
+
+  private waitForLinkDelivery(
+    probe: LinkClickProbe,
+  ): Promise<InvocationResult> {
+    const expression = `(() => {
+      const state = globalThis[Symbol.for(${JSON.stringify(probe.stateKey)})];
+      const delivered = location.href !== ${JSON.stringify(probe.beforeUrl)} ||
+        ${
+          probe.beforeTimeOrigin === undefined
+            ? "false"
+            : `performance.timeOrigin !== ${probe.beforeTimeOrigin}`
+        } ||
+        Boolean(state && state.mutated);
+      if (delivered && state && state.observer) state.observer.disconnect();
+      return delivered;
+    })()`;
+    return this.invoke(
+      [
+        "wait",
+        "--fn",
+        expression,
+        "--timeout",
+        String(LINK_CLICK_DELIVERY_TIMEOUT_MS),
+      ],
+      { timeoutMs: childDeadline(LINK_CLICK_DELIVERY_TIMEOUT_MS) },
+    );
+  }
+
+  private async linkRetryPoint(
+    target: string,
+  ): Promise<
+    { ok: true; x: number; y: number } | { ok: false; reason: string }
+  > {
+    if (!target.startsWith("@")) {
+      const result = await this.invoke([
+        "eval",
+        selectorRetryPointScript(target),
+        "--json",
+      ]);
+      const point = result.ok
+        ? parseEvalResult<{
+            present?: boolean;
+            enabled?: boolean;
+            x?: number;
+            y?: number;
+          }>(result.stdout)
+        : undefined;
+      if (!point?.present)
+        return { ok: false, reason: "the target disappeared" };
+      if (!point.enabled)
+        return { ok: false, reason: "the target is disabled" };
+      if (typeof point.x !== "number" || typeof point.y !== "number") {
+        return { ok: false, reason: "its center point could not be resolved" };
+      }
+      return { ok: true, x: point.x, y: point.y };
+    }
+
+    const enabledResult = await this.invoke([
+      "is",
+      "enabled",
+      target,
+      "--json",
+    ]);
+    const enabled = enabledResult.ok
+      ? parseBooleanResult(enabledResult.stdout)
+      : undefined;
+    if (enabled !== true) {
+      return {
+        ok: false,
+        reason:
+          enabled === false
+            ? "the target is disabled"
+            : "the target disappeared",
+      };
+    }
+    const boxResult = await this.invoke(["get", "box", target, "--json"]);
+    const box = boxResult.ok ? parseBoxEnvelope(boxResult.stdout) : undefined;
+    if (!box)
+      return { ok: false, reason: "its center point could not be resolved" };
+    return {
+      ok: true,
+      x: Math.round(box.x + box.width / 2),
+      y: Math.round(box.y + box.height / 2),
+    };
+  }
+
+  /** Add strict-selector context only on failure, keeping the happy path cheap. */
+  private async appendSelectorMatchDiagnostics(
+    result: InvocationResult,
+    selector: string,
+  ): Promise<InvocationResult> {
+    const diagnostic = await this.invoke([
+      "eval",
+      selectorMatchDiagnosticsScript(selector),
+      "--json",
+    ]);
+    const detail = diagnostic.ok
+      ? parseEvalResult<{
+          count?: number;
+          candidates?: Array<{ tag?: string; role?: string; name?: string }>;
+        }>(diagnostic.stdout)
+      : undefined;
+    if (!detail || typeof detail.count !== "number" || detail.count <= 1) {
+      return result;
+    }
+    const candidates = (detail.candidates ?? [])
+      .slice(0, 3)
+      .map((candidate) => {
+        const kind = candidate.role || candidate.tag || "element";
+        return `${kind} ${JSON.stringify(candidate.name || "<no accessible name>")}`;
+      });
+    const omitted = Math.max(0, detail.count - candidates.length);
+    const message = [
+      `selector matched ${detail.count} elements; first ${candidates.length}: ${candidates.join(", ")}`,
+      ...(omitted > 0 ? [`${omitted} more omitted`] : []),
+    ].join("; ");
+    return {
+      ...result,
+      stderr: [result.stderr.trim(), message].filter(Boolean).join("\n"),
+    };
   }
 
   /**
@@ -756,15 +1129,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
    *      handoff (no in-process page handle). Folding a short networkidle
    *      wait into the click step's own invocation bridges that race.
    *
-   * opts.verifyAfterClick=false disables both effects (selector steps can
-   * turn it off per-call if a spec explicitly needs an unverified click —
-   * e.g. ones where the spec author knows the next step will wait on the
-   * destination anyway).
+   * Both `opts.verifyAfterClick=false` and a resolved click-level `settleMs: 0`
+   * disable BOTH effects — the networkidle fold here AND the link-delivery
+   * probe upstream (see `clickProbeEnabled`) — because each is the author
+   * declaring they handle post-click waiting themselves.
    */
   private async verifyAndSettleAfterClick(
     r: InvocationResult,
     locator: Locator,
     resolved?: SnapshotElement,
+    settleMsOverride?: number,
   ): Promise<InvocationResult> {
     if (!r.ok) return r;
     if (this.opts.verifyAfterClick === false) {
@@ -772,7 +1146,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ? { ...r, resolvedElement: toResolvedElement(resolved) }
         : r;
     }
-    const settleMs = this.opts.postClickSettleMs ?? POST_CLICK_NAV_SETTLE_MS;
+    const settleMs = this.resolveClickSettleMs(settleMsOverride);
+    if (settleMs === 0) {
+      return resolved
+        ? { ...r, resolvedElement: toResolvedElement(resolved) }
+        : r;
+    }
     const settleResult = await this.invoke(
       waitConditionToArgv({
         load: "networkidle",
@@ -1141,6 +1520,10 @@ const WAIT_SLICE_FLOOR_MS = 250;
  */
 const POST_CLICK_NAV_SETTLE_MS = 5_000;
 
+/** Link clicks should synchronously schedule SPA navigation; keep retry cheap. */
+const LINK_CLICK_DELIVERY_TIMEOUT_MS = 750;
+const LINK_CLICK_PROBE_KEY = "cairntrace.link-click-delivery";
+
 /**
  * Budget for the post-scrollIntoView viewport confirmation. Covers a CSS
  * `scroll-behavior: smooth` animation (typically 300-500ms) with headroom;
@@ -1454,6 +1837,173 @@ export function describeBatchFailure(
     return `batch failed at sub-step #${entry.sourceIndex + 1} (${cmd}) during ${phase}: ${inner}`;
   }
   return stderr || `batch failed (exit ${raw.exitCode})`;
+}
+
+/**
+ * Build the pre-click classification eval. `scroll` folds scrollIntoView into
+ * the same invocation (selector path). The element is located by CSS selector
+ * or, on the semantic path, by matching a link's accessible name. `assumeLink`
+ * (semantic path, where the snapshot already resolved a role=link) treats an
+ * un-locatable target as a same-tab link so its delivery is still verified —
+ * only a POSITIVELY-classified external-effect link skips verification.
+ */
+function linkClickProbeScript(opts: {
+  selector?: string;
+  name?: string;
+  scroll: boolean;
+  assumeLink: boolean;
+}): string {
+  const findExpr =
+    opts.selector !== undefined
+      ? `document.querySelector(${JSON.stringify(opts.selector)})`
+      : opts.name !== undefined
+        ? `__findLinkByName(${JSON.stringify(opts.name)})`
+        : "null";
+  return `(() => {
+    const __norm = (s) => String(s == null ? "" : s).replace(/\\s+/g, " ").trim().toLowerCase();
+    const __findLinkByName = (want) => {
+      const target = __norm(want);
+      const links = Array.from(document.querySelectorAll('a[href], [role=link]'));
+      const matches = links.filter((el) => __norm(el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "") === target);
+      return matches.length === 1 ? matches[0] : null;
+    };
+    const raw = ${findExpr};
+    ${
+      opts.scroll
+        ? 'if (raw) { try { raw.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {} }'
+        : ""
+    }
+    const base = { beforeUrl: location.href, beforeTimeOrigin: performance.timeOrigin };
+    const anchor = raw && (raw.matches && raw.matches('a[href], [role=link]')
+      ? raw
+      : (raw.closest ? raw.closest('a[href], [role=link]') : null));
+    if (!anchor) {
+      // Selector path: a non-link target (button, div…) → no probe. Semantic
+      // path (assumeLink): the snapshot resolved a role=link but we could not
+      // re-locate it by name, so verify same-tab delivery to be safe.
+      if (!${opts.assumeLink}) return { ...base, linkLike: false };
+      __installLinkObserver();
+      return { ...base, linkLike: true, externalReason: null };
+    }
+    // External-effect: click cannot change THIS document.
+    const __external = (() => {
+      if (anchor.hasAttribute && anchor.hasAttribute("download")) return "a download attribute";
+      const t = (anchor.getAttribute && anchor.getAttribute("target")) || "";
+      if (t && t !== "_self") return 'target="' + t + '"';
+      const href = (anchor.getAttribute && anchor.getAttribute("href")) || "";
+      const scheme = /^\\s*([a-z][a-z0-9+.-]*):/i.exec(href);
+      if (scheme && !/^https?$/i.test(scheme[1])) return "a " + scheme[1].toLowerCase() + ": href";
+      return null;
+    })();
+    if (__external) return { ...base, linkLike: true, externalReason: __external };
+    __installLinkObserver();
+    return { ...base, linkLike: true, externalReason: null };
+    function __installLinkObserver() {
+      const key = Symbol.for(${JSON.stringify(LINK_CLICK_PROBE_KEY)});
+      const previous = globalThis[key];
+      if (previous && previous.observer) previous.observer.disconnect();
+      const state = { mutated: false, observer: null };
+      state.observer = new MutationObserver(() => { state.mutated = true; });
+      state.observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        characterData: true,
+      });
+      globalThis[key] = state;
+    }
+  })()`;
+}
+
+function selectorRetryPointScript(selector: string): string {
+  return `(() => {
+    const raw = document.querySelector(${JSON.stringify(selector)});
+    if (!raw) return { present: false, enabled: false };
+    const disabled = raw.matches(':disabled') || raw.getAttribute('aria-disabled') === 'true' || Boolean(raw.disabled);
+    const rect = raw.getBoundingClientRect();
+    return {
+      present: true,
+      enabled: !disabled && rect.width > 0 && rect.height > 0,
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
+    };
+  })()`;
+}
+
+function selectorMatchDiagnosticsScript(selector: string): string {
+  return `(() => {
+    const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+    const nodes = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
+    return {
+      count: nodes.length,
+      candidates: nodes.slice(0, 3).map((node) => ({
+        tag: node.tagName.toLowerCase(),
+        role: node.getAttribute('role') || '',
+        name: normalize(node.getAttribute('aria-label') || node.getAttribute('title') || node.innerText || node.textContent || node.value),
+      })),
+    };
+  })()`;
+}
+
+function parseEvalResult<T>(stdout: string): T | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      data?: { result?: unknown };
+      result?: unknown;
+    };
+    return (parsed.data?.result ?? parsed.result ?? parsed) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseBooleanResult(stdout: string): boolean | undefined {
+  const trimmed = stdout.trim();
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      data?: { enabled?: unknown; result?: unknown; value?: unknown };
+      enabled?: unknown;
+      result?: unknown;
+      value?: unknown;
+    };
+    for (const candidate of [
+      parsed.data?.enabled,
+      parsed.data?.result,
+      parsed.data?.value,
+      parsed.enabled,
+      parsed.result,
+      parsed.value,
+    ]) {
+      if (typeof candidate === "boolean") return candidate;
+    }
+  } catch {
+    return undefined;
+  }
+  const result = parseEvalResult<unknown>(stdout);
+  if (typeof result === "boolean") return result;
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    if (typeof record["value"] === "boolean") return record["value"];
+  }
+  return undefined;
+}
+
+function linkDeliveryFailure(
+  clicked: InvocationResult,
+  message: string,
+  startedAt: number,
+): InvocationResult {
+  return {
+    ...clicked,
+    ok: false,
+    stderr: [clicked.stderr.trim(), message].filter(Boolean).join("\n"),
+    exitCode: clicked.exitCode === 0 ? 1 : clicked.exitCode,
+    durationMs: clicked.durationMs + (Date.now() - startedAt),
+  };
 }
 
 export function isTransientDaemonError(stderr: string): boolean {

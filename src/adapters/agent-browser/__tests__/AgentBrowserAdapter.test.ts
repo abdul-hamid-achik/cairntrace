@@ -628,12 +628,16 @@ describe("strict semantic interaction resolution", () => {
     const evalArgv = execaMock.mock.calls[0]![1] as string[];
     expect(evalArgv[2]).toBe("eval");
     expect(evalArgv[3]).toContain("scrollIntoView");
-    expect(execaMock).toHaveBeenNthCalledWith(
-      2,
+    expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
       ["--session", "sel-click", "click", "#submit"],
       expect.objectContaining({ reject: false }),
     );
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
   });
 });
 
@@ -672,8 +676,14 @@ describe("daemon-busy retry", () => {
     });
 
     expect(r.ok).toBe(false);
-    // 1 eval (scroll) + 1 click — no extra retry invocations.
-    expect(execaMock).toHaveBeenCalledTimes(2);
+    // Folded scroll+link-kind probe (one eval) + click + failure diagnostics
+    // each run once; none is retried as a transient daemon error.
+    expect(execaMock).toHaveBeenCalledTimes(3);
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
   });
 });
 
@@ -1338,6 +1348,68 @@ describe("verify-after-click + post-nav settle", () => {
     expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("20000");
   });
 
+  it("prefers the click settleMs override over the adapter config", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Save" [ref=e3]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({
+      session: "step-settle",
+      postClickSettleMs: 20_000,
+    });
+
+    await adapter.runStep({
+      click: { by: "role", role: "button", name: "Save" },
+      settleMs: 1_234,
+    });
+
+    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("1234");
+  });
+
+  it("settleMs: 0 skips the networkidle fold AND the link-delivery probe", async () => {
+    // A resolved settleMs of 0 is the author declaring they handle post-click
+    // waiting; even a role=link click then runs no delivery `wait --fn` probe
+    // and no networkidle settle.
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - link "Ver agenda" [ref=e3]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "zero-settle" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Ver agenda" },
+      settleMs: 0,
+    });
+
+    expect(result.ok).toBe(true);
+    // snapshot + scrollintoview + box + metrics + click — no probe, no settle.
+    expect(execaMock).toHaveBeenCalledTimes(5);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("--fn"),
+      ),
+    ).toBe(false);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("networkidle"),
+      ),
+    ).toBe(false);
+  });
+
   it("retries the adapter's own 'daemon may be unresponsive' timeout message", async () => {
     // Mirrors the liftclub pattern: a click that doesn't land produces
     // a 30s agent-browser --timeout hit, surfacing the adapter's own
@@ -1371,6 +1443,459 @@ describe("verify-after-click + post-nav settle", () => {
     // break` fires, so we get one settle invocation total here. = 6.
     expect(adapter.isWedged()).toBe(true);
     expect(execaMock).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe("link click delivery recovery", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("retries a dropped semantic link click once with low-level mouse input", async () => {
+    let deliveryChecks = 0;
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "Ver agenda" [ref=e7]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+      }
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        if (script.includes("innerWidth")) {
+          return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[1]!);
+        }
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              result: {
+                linkLike: true,
+                beforeUrl: "http://app.test/admin",
+                beforeTimeOrigin: 123,
+              },
+            },
+          }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("--fn")) {
+        deliveryChecks += 1;
+        return Promise.resolve(
+          deliveryChecks === 1
+            ? { exitCode: 1, stdout: "", stderr: "Operation timed out" }
+            : { exitCode: 0, stdout: "", stderr: "" },
+        );
+      }
+      if (argv.includes("is") && argv.includes("enabled")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({ data: { enabled: true } }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("batch")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { success: true },
+            { success: true },
+            { success: true },
+          ]),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "link-retry-role" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Ver agenda" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stderr).toContain("one low-level mouse retry");
+    expect(deliveryChecks).toBe(2);
+    const deliveryWait = execaMock.mock.calls.find((call) =>
+      (call[1] as string[]).includes("--fn"),
+    );
+    expect(JSON.stringify(deliveryWait?.[1])).toContain(
+      "performance.timeOrigin !== 123",
+    );
+    const mouseBatches = execaMock.mock.calls.filter((call) =>
+      (call[1] as string[]).includes("batch"),
+    );
+    expect(mouseBatches).toHaveLength(1);
+    const mouseArgv = mouseBatches[0]![1] as string[];
+    expect(mouseArgv).toContain("mouse move 140 220");
+    expect(mouseArgv).toContain("mouse down left");
+    expect(mouseArgv).toContain("mouse up left");
+    // Delivery succeeded, so the default post-click networkidle settle runs.
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("networkidle"),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not queue a recovery command after the delivery child hard-times out", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "Ver agenda" [ref=e7]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+      }
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        if (script.includes("innerWidth")) {
+          return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[1]!);
+        }
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            success: true,
+            data: {
+              result: {
+                linkLike: true,
+                beforeUrl: "http://app.test/admin",
+              },
+            },
+          }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("--fn")) {
+        return Promise.resolve({
+          timedOut: true,
+          exitCode: undefined,
+          stdout: "",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "link-hard-timeout" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Ver agenda" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("browser backend became unresponsive");
+    expect(result.stderr).toContain("low-level retry skipped");
+    expect(adapter.isWedged()).toBe(true);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("enabled"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not click after the before-click delivery probe hard-times out", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "Ver agenda" [ref=e7]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+      }
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        if (script.includes("innerWidth")) {
+          return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[1]!);
+        }
+        if (script.includes("MutationObserver")) {
+          return Promise.resolve({
+            timedOut: true,
+            exitCode: undefined,
+            stdout: "",
+            stderr: "",
+          });
+        }
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "link-probe-timeout" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Ver agenda" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("timed out after");
+    expect(adapter.isWedged()).toBe(true);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fails a selector anchor loudly when its one retry is also dropped", async () => {
+    let deliveryChecks = 0;
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        // The folded selector-click probe scrolls AND classifies in one eval;
+        // the low-level retry point is resolved by a separate box read.
+        const result = script.includes("getBoundingClientRect")
+          ? { present: true, enabled: true, x: 320, y: 180 }
+          : {
+              linkLike: true,
+              beforeUrl: "http://app.test/guest",
+            };
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({ data: { result } }),
+          stderr: "",
+        });
+      }
+      if (argv.includes("--fn")) {
+        deliveryChecks += 1;
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr: "Operation timed out",
+        });
+      }
+      if (argv.includes("batch")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { success: true },
+            { success: true },
+            { success: true },
+          ]),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "link-retry-selector" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: "a.continue-as-guest" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("after one low-level mouse retry");
+    expect(deliveryChecks).toBe(2);
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toHaveLength(1);
+    // Delivery failed, so no post-click networkidle settle is attempted.
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("networkidle"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not retry a link whose first click changes URL or DOM", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "Dashboard" [ref=e4]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+      }
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        return Promise.resolve(
+          script.includes("innerWidth")
+            ? IN_VIEWPORT_BOX_AND_METRICS[1]!
+            : {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  data: {
+                    result: {
+                      linkLike: true,
+                      beforeUrl: "http://app.test/start",
+                    },
+                  },
+                }),
+                stderr: "",
+              },
+        );
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "link-first-try" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Dashboard" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
+  });
+
+  it("never applies the low-level retry to ordinary buttons", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - button "Save" [ref=e1]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "button-no-retry" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "button", name: "Save" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
+  });
+
+  it("clicks a target=_blank link once and passes without the delivery probe", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("snapshot")) {
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: '- main\n  - link "Abrir factura" [ref=e7]\n',
+          stderr: "",
+        });
+      }
+      if (argv.includes("box")) {
+        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+      }
+      if (argv.includes("eval")) {
+        const script = argv[argv.indexOf("eval") + 1] ?? "";
+        if (script.includes("innerWidth")) {
+          return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[1]!);
+        }
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            data: {
+              result: {
+                linkLike: true,
+                externalReason: 'target="_blank"',
+                beforeUrl: "http://app.test/invoices",
+              },
+            },
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "external-blank" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "link", name: "Abrir factura" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stderr).toContain("opens/handles outside this document");
+    // Exactly one click; no same-document delivery wait and no physical retry.
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("--fn"),
+      ),
+    ).toBe(false);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
+    // The classification eval really does inspect download/target/scheme.
+    const classifyEval = execaMock.mock.calls.find((call) => {
+      const a = call[1] as string[];
+      return a.includes("eval") && !JSON.stringify(a).includes("innerWidth");
+    });
+    const classifySrc = JSON.stringify(classifyEval?.[1]);
+    expect(classifySrc).toContain("download");
+    expect(classifySrc).toContain("_self");
+    expect(classifySrc).toContain("externalReason");
+  });
+
+  it("clicks a download-attribute selector anchor once with a diagnostic note", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("eval")) {
+        // The folded scroll+classify eval reports an external-effect link.
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: JSON.stringify({
+            data: {
+              result: {
+                linkLike: true,
+                externalReason: "a download attribute",
+                beforeUrl: "http://app.test/report",
+              },
+            },
+          }),
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "external-download" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: "a[download]" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.stderr).toContain("a download attribute");
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("--fn"),
+      ),
+    ).toBe(false);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
   });
 });
 

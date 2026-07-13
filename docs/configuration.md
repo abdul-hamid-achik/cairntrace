@@ -56,6 +56,7 @@ browser:                              # browser-backend tuning (agent-browser)
   verifyAfterClick: true              # fold a networkidle settle into every click (default: true)
   postClickSettleMs: 20000            # settle budget in ms (default: 5000) — raise for dev servers
                                       # that compile modules on demand instead of disabling the guard
+                                      # click settleMs > spec settleMs > this value > 5000
 
 webServer:                            # optional single-server lifecycle for `cairn run`
   command: "node .output/server/index.mjs"
@@ -101,6 +102,13 @@ annotate:                             # codemap annotation — see Annotate page
 
 The schema is `.strict()` at every level, so a misspelled key (e.g. `runner:` or `run:` — neither exists) is a validation error, not a silent no-op.
 
+Agent-browser click settling can be narrowed without slowing every flow. Its
+effective network-idle budget is a click step's sibling `settleMs`, the
+spec-root `settleMs`, `browser.postClickSettleMs`, then the 5000 ms default.
+Playwright honors explicit click/spec values and otherwise keeps its native
+waits. A resolved value of `0` skips the extra settle.
+`browser.verifyAfterClick: false` disables the agent-browser guard globally.
+
 ## Environments
 
 `environments` is a required record of `name → EnvironmentConfig`. Each environment can carry:
@@ -130,7 +138,7 @@ Each placeholder is resolved exactly once and emitted verbatim — a value that 
 
 Several settings that look like config actually live on the **spec**, not `cairntrace.config.yml`:
 
-- `backend`, `mode`, `viewport`, `vars`, `environment`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
+- `backend`, `mode`, `viewport`, `vars`, `environment`, `settleMs`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
 - `redaction:` on a spec is `{ headers?, queryParams?, storageKeys?, values? }` (arrays of strings to scrub), not a regex list.
 
 Backend choice and capture policies are per-spec because they describe *what this flow observes*, not project plumbing. Project plumbing (environments, services, secrets, retention, integrations) is what goes in config.

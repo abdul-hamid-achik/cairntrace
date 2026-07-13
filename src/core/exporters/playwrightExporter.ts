@@ -86,7 +86,7 @@ export function exportPlaywright(
   if (steps.length > 0) {
     lines.push(`  // --- steps ---`);
     for (const step of steps) {
-      lines.push(...renderStep(step).map((l) => `  ${l}`));
+      lines.push(...renderStep(step, spec.settleMs).map((l) => `  ${l}`));
     }
     lines.push("");
   }
@@ -107,13 +107,13 @@ export function exportPlaywright(
 
 /* ----- step rendering ----- */
 
-function renderStep(step: Step): string[] {
+function renderStep(step: Step, specSettleMs?: number): string[] {
   // `id`/`when` are unconstrained strings, so flatten newlines via oneLine —
   // otherwise a multi-line value would break out of the `//` comment and
   // inject arbitrary lines into the generated test.
   const idComment = step.id ? `// step: ${oneLine(step.id)}` : "";
   const whenWrap = "when" in step && step.when ? step.when : undefined;
-  const body = renderStepBody(step);
+  const body = renderStepBody(step, specSettleMs);
   const withComment = idComment ? [idComment, ...body] : body;
   if (!whenWrap) return withComment;
   // Wrap in an if-block for the when predicate. We comment the predicate since
@@ -125,7 +125,7 @@ function renderStep(step: Step): string[] {
   ];
 }
 
-function renderStepBody(step: Step): string[] {
+function renderStepBody(step: Step, specSettleMs?: number): string[] {
   if ("open" in step) {
     if (typeof step.open === "string") {
       return [`await page.goto(${JSON.stringify(step.open)});`];
@@ -141,7 +141,15 @@ function renderStepBody(step: Step): string[] {
     ];
   }
   if ("click" in step) {
-    return [`await ${locator(step.click)}.click();`];
+    const settleMs = step.settleMs ?? specSettleMs;
+    return [
+      `await ${locator(step.click)}.click();`,
+      ...(settleMs !== undefined && settleMs > 0
+        ? [
+            `await page.waitForLoadState("networkidle", { timeout: ${settleMs} });`,
+          ]
+        : []),
+    ];
   }
   if ("hover" in step) {
     return [`await ${locator(step.hover)}.hover();`];

@@ -131,6 +131,11 @@ export class PlaywrightAdapter implements BrowserBackend {
         await this.resolveLocator(step.click).click({
           timeout: this.opts.defaultTimeoutMs,
         });
+        if (step.settleMs !== undefined && step.settleMs > 0) {
+          await page.waitForLoadState("networkidle", {
+            timeout: step.settleMs,
+          });
+        }
       } else if ("hover" in step) {
         await this.resolveLocator(step.hover).hover({
           timeout: this.opts.defaultTimeoutMs,
