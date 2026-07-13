@@ -4,11 +4,79 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.37.0]
+
+Liftclub field hardening: silent framework click drops now recover or fail at
+the authored interaction, text contracts tolerate rendered CSS casing, aborted
+suites retain their completed evidence, and browser artifact capture is bounded.
+
+### Added
+
+- **Per-click and per-spec `settleMs`.** Agent-browser post-click network-idle
+  settling now resolves click override → spec override → project
+  `browser.postClickSettleMs` → 5000ms; a resolved `0` skips the settle AND the
+  link-delivery probe (the author is opting out of post-click waiting).
+  Playwright and Playwright exports honor explicit click/spec values while
+  retaining native waits when neither is set.
+- **Intentional guest cold starts.** `coldStart: guest` acknowledges a public,
+  sessionless spec while preserving the required `--cold-start` replay gate.
+- **Interrupted-batch summaries.** SIGINT/SIGTERM writes a strict
+  `run-batch-aborted:v1` summary at the artifact root before teardown, with
+  completed `RunResult` objects in input order and pending counts.
+- **Text matcher case control.** `caseSensitive` is available for text/notText
+  equals/contains outcomes and text waits. Regex matchers remain raw and
+  case-sensitive.
+
 ### Changed
-- **Versioned codemap review consumer.** Cairntrace now validates the exact codemap review v1
-  producer golden, accepts legacy unversioned output plus `schema_version: 1`, and maps unknown
-  future versions to codemap unavailable. Impact-driven selection therefore runs all specs on
-  contract drift instead of mistaking an unsupported payload for an empty blast radius.
+
+- **Framework-safe batch clicks.** A batch remains one native invocation, but
+  click sub-steps are paced by 100ms. Checkbox/radio/switch state is re-queried
+  across framework rerenders (including mixed state) and verified in two stages:
+  a ~500ms grace lets a slow async commit land before a single live-element
+  recovery click, then a ~500ms settle confirms the result. A double-toggle
+  (late authored commit plus the recovery both applying and flipping the
+  control back) fails loudly instead of passing a flipped-back state, and the
+  failure names the authored sub-step + phase. Missing or implicit batch
+  command results are failures, never silent success.
+- **Rendered text defaults.** Human-facing text waits and equals/contains
+  outcomes now collapse whitespace and compare
+  case-insensitively by default across both backends and Playwright exports.
+- **Link delivery verification.** Link clicks are classified first: only a
+  same-tab http(s)/relative nav link briefly watches for a URL or DOM mutation,
+  and a still-present enabled one gets a single low-level mouse retry at its
+  live center. External-effect links (`target="_blank"`, a `download`
+  attribute, or a `mailto:`/`tel:`/`javascript:` scheme) never mutate the
+  current document, so they are clicked exactly once and pass with a diagnostic
+  note — no double-fired retry, no false failure. Ordinary buttons are never
+  retried this way.
+- **Retention counts interrupted runs.** Failed/errored runs keep their
+  `keepFailedRuns` carve-out, but interrupted runs (missing/corrupt/statusless
+  `run.json` left by a signal) now count toward the `keepRuns` window instead
+  of being retained forever — the newest interrupted run is preserved up to the
+  cap and older ones age out. `pruneRuns`/`cairn clean` also sweep stale
+  `aborted-<ts>-<pid>.json` batch summaries under the same cap; `cairn clean
+  --all` remains authoritative.
+- **Documentation site refresh.** The landing page, navigation, metadata,
+  social preview, manifest, and responsive theme were overhauled.
+
+### Fixed
+
+- Screenshot capture now has a 15-second hard deadline on agent-browser and
+  Playwright, reports the likely missing-rendering-surface/display cause, and
+  never publishes a partial PNG. A capture timeout is best-effort — it records a
+  warning + missing-artifact note but does not fail the step, spec, or
+  outcomes; it only marks the backend wedged so the remaining optional captures
+  (console/network/trace/video) are skipped while outcome verifiers still run.
+- `cairn run` now returns its documented shell exit status after lifecycle
+  teardown. Contract mismatches are actionable and return 6 in single, batch,
+  and heal paths; ordinary parse/runtime errors remain 2.
+- JSON run output stays pure JSON; web-server diagnostics and tails remain on
+  stderr even when scoped loggers were created before final logger config.
+- Batch semantic-locator schema mistakes name the offending sub-step, and
+  ambiguity diagnostics retain only the first three accessible candidates plus
+  an omitted count.
+- TinyVault key listing no longer requires unlocking secret values; CLI and MCP
+  status paths expose key names only.
 
 ## [1.36.0]
 

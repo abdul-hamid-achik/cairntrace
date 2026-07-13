@@ -762,7 +762,6 @@ describe("screenshot timeout", () => {
   });
 });
 
-
 describe("child timeout enforcement", () => {
   beforeEach(() => {
     execaMock.mockReset();
