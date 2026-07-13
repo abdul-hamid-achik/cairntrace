@@ -71,7 +71,7 @@ export async function getTvaultKeys(
     if (cfg.project) {
       const r = await execa(
         "tvault",
-        ["list", ...tvaultArgs(cfg).args, "--json"],
+        ["list", ...tvaultArgs(cfg).args, "--json", "--names-only"],
         {
           reject: false,
           timeout: 10_000,

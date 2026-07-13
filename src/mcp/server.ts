@@ -1333,7 +1333,7 @@ export function buildMcpServer(): McpServer {
         try {
           const r = await execa(
             "tvault",
-            ["list", "--project", project, "--json"],
+            ["list", "--project", project, "--json", "--names-only"],
             { reject: false, timeout: 10_000 },
           );
           if (r.exitCode === 0) {
