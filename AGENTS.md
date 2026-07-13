@@ -106,10 +106,22 @@ per-agent code paths.
   sub-steps run in one backend invocation (agent-browser `batch --bail`) so
   the state isn't lost between them. Semantic locators are not allowed inside
   `batch` — they need a snapshot round-trip that would defeat the single
-  invocation; use `by: selector` there, or separate top-level steps.
+  invocation; use `by: selector` there, or separate top-level steps. Batch
+  clicks are paced by 100ms; checkboxes/radios/switches are re-queried across
+  framework rerenders and verified in two stages: a ~500ms grace lets a slow
+  async commit land before a single live-element recovery click, then a ~500ms
+  settle confirms the result — if the control flipped back to its original
+  value (a double-toggle from a late authored commit plus the recovery) the
+  step fails loudly rather than passing a flipped-back state
+  (`aria-checked="mixed"` is supported).
 - Hydration-sensitive first interactions: prefer
   `open: { path, waitUntil: networkidle }` over a separate
   `wait: { load: … }` step.
+- On agent-browser, post-click network-idle settling uses click-step `settleMs`,
+  then spec-root `settleMs`, config `browser.postClickSettleMs`, then 5000ms.
+  Playwright honors explicit click/spec values and otherwise keeps its native
+  action/navigation waits. A resolved `settleMs: 0` skips the extra settle AND
+  the link-delivery probe (the author is opting out of post-click waiting).
 - Playwright `wait` steps and browser `evaluate` calls are hard-bounded
   (30000ms default, or the step/verifier timeout when supplied). Real Chromium
   runs use an external watchdog process that kills the browser at the deadline,

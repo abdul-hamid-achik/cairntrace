@@ -257,8 +257,11 @@ Request-step calls are mirrored into run network evidence, so `network` and
 `batch` runs a chain of selector interactions in **one** backend invocation
 (agent-browser `batch --bail`), so transient UI state survives — e.g. a hover
 that reveals a popover stays open long enough to click the button inside it.
-Sub-steps are selector-only (`click`, `hover`, `fill`, `upload`, `press`,
-`scroll`, `wait`); the first failing sub-step fails the step:
+Sub-steps are selector-only (`click`, `hover`, `fill`, `type`, `upload`,
+`press`, `scroll`, `wait`); the first failing sub-step fails the step. Clicks
+are paced by 100 ms, and checkbox/radio/switch clicks are state-verified with
+a 300 ms post-action grace and one live-element recovery attempt (including
+`aria-checked="mixed"`) so a dropped gesture cannot silently pass:
 
 ```yaml
 - batch:

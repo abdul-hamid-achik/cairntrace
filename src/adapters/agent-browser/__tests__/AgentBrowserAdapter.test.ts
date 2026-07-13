@@ -910,7 +910,13 @@ describe("batch step", () => {
   it("runs the whole chain as one `batch --json --bail` invocation", async () => {
     execaMock.mockResolvedValue({
       exitCode: 0,
-      stdout: "[]",
+      stdout: JSON.stringify([
+        { success: true },
+        { success: true },
+        { success: true },
+        { success: true },
+        { success: true },
+      ]),
       stderr: "",
     });
     const adapter = new AgentBrowserAdapter({ session: "batch-test" });
@@ -931,16 +937,78 @@ describe("batch step", () => {
     // Exactly one CLI invocation — that's the whole point of batch.
     expect(execaMock).toHaveBeenCalledTimes(1);
     const argv = execaMock.mock.calls[0]![1] as string[];
-    expect(argv).toEqual([
+    expect(argv.slice(0, 6)).toEqual([
       "--session",
       "batch-test",
       "batch",
       "--json",
       "--bail",
       "hover #subcontractor-table",
-      // selector has spaces + quotes → quoted and escaped for the batch parser
-      'click ".hover-actions button[aria-label=\\"Upload data\\"]"',
     ]);
+    expect(argv).toHaveLength(10);
+    expect(argv[6]).toMatch(/^eval -b [A-Za-z0-9+/=]+$/);
+    expect(argv[7]).toBe(
+      'click ".hover-actions button[aria-label=\\"Upload data\\"]"',
+    );
+    expect(argv[8]).toBe("wait 100");
+    expect(argv[9]).toContain("wait --fn");
+    expect(argv[9]).toContain("recoveryAttempted");
+    expect(argv[9]).toContain("recoveryAfter");
+    expect(argv[9]).toContain("aria === 'mixed'");
+    // The verifier re-queries after a framework rerender and uses native click
+    // at most once if the original CDP gesture was silently dropped.
+    expect(argv[9]).toContain("document.querySelector");
+    expect(argv[9]!.match(/\.click\(\)/g)).toHaveLength(1);
+    // Two-stage verification: a stage-2 settle window (settleAfter) and a loud
+    // double-toggle failure guard against a late authored commit + the
+    // recovery click both landing and flipping the control back.
+    expect(argv[9]).toContain("settleAfter");
+    expect(argv[9]).toContain("double-toggled");
+    expect(argv[9]).toContain("throw new Error");
+  });
+
+  it("fails loudly when exit-zero batch output omits command results", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify([{ success: true }]),
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-short-output" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#check" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      "batch returned 1 result(s) for 5 command(s)",
+    );
+  });
+
+  it("requires every exit-zero batch result to explicitly report success", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify([{}, {}, {}, {}, {}]),
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({
+      session: "batch-implicit-success",
+    });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#check" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("batch failed at sub-step #1");
   });
 
   it("fails the step and names the bailing sub-step", async () => {
@@ -948,9 +1016,10 @@ describe("batch step", () => {
       exitCode: 1,
       stdout: JSON.stringify([
         { success: true },
+        { success: true },
         { success: false, error: "element not found: #missing" },
       ]),
-      stderr: "batch stopped at command 2",
+      stderr: "batch stopped at command 3",
     });
     const adapter = new AgentBrowserAdapter({ session: "batch-fail" });
 
@@ -966,6 +1035,92 @@ describe("batch step", () => {
     expect(result.stderr).toContain("click #missing");
     expect(result.stderr).toContain("element not found");
     expect(execaMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps an expanded verification failure back to the authored click", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: JSON.stringify([
+        { success: true }, // authored hover
+        { success: true }, // click state probe
+        { success: true }, // authored click
+        { success: true }, // 100ms pace
+        { success: false, error: "Operation timed out" }, // state verify
+      ]),
+      stderr: "batch stopped at command 5",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-verify-fail" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#parq-smokes-no" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("sub-step #2");
+    expect(result.stderr).toContain("click #parq-smokes-no");
+    expect(result.stderr).toContain("post-click state verification");
+  });
+
+  it("surfaces a double-toggle failure thrown by the in-batch verifier", async () => {
+    // The in-browser verify expression throws when a recovery click landed a
+    // second toggle and flipped the control back; that error must propagate
+    // (never be swallowed into a silent pass) with the authored click named.
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: JSON.stringify([
+        { success: true }, // authored hover
+        { success: true }, // click state probe
+        { success: true }, // authored click
+        { success: true }, // 100ms pace
+        {
+          success: false,
+          error:
+            "batch click double-toggled: recovery click landed a second toggle and the control returned to its original state",
+        }, // state verify throw
+      ]),
+      stderr: "batch stopped at command 5",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-double-toggle" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#parq-smokes-no" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("sub-step #2");
+    expect(result.stderr).toContain("post-click state verification");
+    expect(result.stderr).toContain("double-toggled");
+  });
+
+  it("fails on an embedded batch error even when the process exits zero", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify([
+        { success: true },
+        { success: true },
+        { success: false, error: "click was rejected" },
+      ]),
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "batch-embedded-fail" });
+
+    const result = await adapter.runStep({
+      batch: [
+        { hover: { by: "selector", selector: "#ok" } },
+        { click: { by: "selector", selector: "#bad" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("sub-step #2");
+    expect(result.stderr).toContain("click was rejected");
   });
 });
 

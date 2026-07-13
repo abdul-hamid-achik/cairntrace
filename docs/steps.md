@@ -210,6 +210,16 @@ Run a chain of selector interactions in ONE backend invocation so transient UI s
 
 Sub-steps are selector-only — semantic locators are not allowed inside `batch`, because they need a snapshot round-trip that would defeat the single invocation. Allowed sub-steps: `click`, `hover`, `fill`, `type`, `upload`, `press`, `scroll`, `wait` (all selector-locator form). A batch needs at least 2 sub-steps; for one, use a normal step.
 
+Agent-browser paces click sub-steps by 100 ms. Checkbox, radio, and switch
+clicks also record their pre-state (including `aria-checked="mixed"`) and
+re-query after framework rerenders. Verification runs in two stages: a ~500 ms
+grace lets a slow async commit land before Cairntrace calls the live element's
+`.click()` once, then a ~500 ms settle confirms the result. If the control
+flips back to its original value (a double-toggle from a late authored commit
+plus the recovery both applying) or state never changes at all, the batch fails
+at the authored sub-step and names the failed probe/action/verification phase —
+it never passes a flipped-back state.
+
 ## Process
 
 ### `monitor`

@@ -1149,7 +1149,7 @@ export function buildExplain(): ExplainResult {
         id: "batch",
         kind: "interaction",
         summary:
-          "Run a chain of selector interactions in ONE backend invocation (agent-browser `batch --bail`), so transient UI state (a hover popover, focus) survives long enough to act on it. Sub-steps are selector-only (no semantic locators); the first failing sub-step fails the step",
+          "Run a chain of selector interactions in ONE backend invocation (agent-browser `batch --bail`), so transient UI state (a hover popover, focus) survives long enough to act on it. Sub-steps are selector-only (no semantic locators); clicks are paced, checkable state is verified with one recovery attempt, and the first failing sub-step fails the step",
         yamlExample:
           'steps:\n  - batch:\n      - hover: { by: selector, selector: "#row-actions" }\n      - click: { by: selector, selector: \'button[aria-label="Upload data"]\' }',
       },

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -40,6 +41,17 @@ import {
   quoteIfNeeded,
 } from "./parseOutput";
 import type { AgentBrowserOptions } from "./types";
+
+type BatchCommandPhase = "probe" | "action" | "pace" | "verify";
+
+interface BatchCommandPlanEntry {
+  argv: string[];
+  /** Zero-based index in the authored `batch:` array. */
+  sourceIndex: number;
+  phase: BatchCommandPhase;
+  /** Authored command, used in diagnostics for expanded helper commands. */
+  originalArgv: string[];
+}
 
 /**
  * Adapter over the `agent-browser` Rust CLI (https://agent-browser.dev).
@@ -467,7 +479,31 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const r = await this.invoke(argv);
     if (!r.ok) return { ok: false, results: [], raw: r };
     const results = parseJsonArray<unknown>(r.stdout);
-    return { ok: true, results, raw: r };
+    const embeddedFailure = results.some(isFailedBatchResult);
+    const resultCountMismatch = results.length !== commands.length;
+    const failed = embeddedFailure || resultCountMismatch;
+    const raw = failed
+      ? {
+          ...r,
+          ok: false,
+          exitCode: r.exitCode === 0 ? 1 : r.exitCode,
+          stderr: [
+            r.stderr.trim(),
+            ...(resultCountMismatch
+              ? [
+                  `batch returned ${results.length} result(s) for ${commands.length} command(s)`,
+                ]
+              : []),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        }
+      : r;
+    return {
+      ok: !failed,
+      results,
+      raw,
+    };
   }
 
   /* ----- lifecycle ----- */
@@ -589,13 +625,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * whole batch. On failure, name the sub-step that bailed.
    */
   private async runBatchStep(step: BatchStep): Promise<InvocationResult> {
-    const commands = step.batch.map((sub) => batchSubStepToArgv(sub));
-    const r = await this.batch(commands, { bail: true });
+    const plan = buildBatchCommandPlan(step);
+    const r = await this.batch(
+      plan.map((entry) => entry.argv),
+      { bail: true },
+    );
     if (r.ok) return r.raw;
     return {
       ...r.raw,
       ok: false,
-      stderr: describeBatchFailure(commands, r.raw),
+      stderr: describeBatchFailure(plan, r.raw),
     };
   }
 
@@ -1161,6 +1200,208 @@ function childPidsSync(pid: number): number[] {
 /** Backoff schedule for transient daemon-busy retries (dogfood P2 #14). */
 const DAEMON_BUSY_BACKOFF_MS = [300, 1200];
 
+/** Give Vue/React one macrotask window to commit a click-triggered rerender. */
+const BATCH_CLICK_PACE_MS = 100;
+/**
+ * Stage 1 grace: how long the verifier keeps re-polling a still-unchanged
+ * control before deciding the authored CDP click was actually dropped and
+ * firing the one recovery `.click()`. Long enough to cover an async framework
+ * commit (Vue/React effects, ~400ms+ observed) so a merely-slow click is not
+ * mistaken for a dropped one and double-toggled.
+ */
+const BATCH_CLICK_RECOVERY_GRACE_MS = 500;
+/**
+ * Stage 2 settle: after the recovery `.click()`, wait this long before judging
+ * so BOTH a late authored commit AND the recovery commit have landed. If the
+ * control then reads back at its ORIGINAL value, both toggles applied (a
+ * double-toggle) and the verifier fails loudly instead of silently passing a
+ * flipped-back state.
+ */
+const BATCH_CLICK_SETTLE_MS = 500;
+/** Bound the whole two-stage in-batch state poll (grace + recovery + settle). */
+const BATCH_CLICK_VERIFY_TIMEOUT_MS = 2_500;
+
+/**
+ * Expand checkable clicks while keeping the entire authored batch inside one
+ * native `agent-browser batch` invocation. The pre-click probe records only a
+ * primitive state — never a DOM node — and the verifier re-queries the
+ * selector on every poll, so a framework replacing the control does not make
+ * the check stale. If the CDP click was silently dropped, the verifier invokes
+ * the authored element's native `.click()` once, then keeps polling until the
+ * state changes (or fails loudly at the deadline).
+ */
+function buildBatchCommandPlan(step: BatchStep): BatchCommandPlanEntry[] {
+  const plan: BatchCommandPlanEntry[] = [];
+  step.batch.forEach((sub, sourceIndex) => {
+    const originalArgv = batchSubStepToArgv(sub);
+    if (!("click" in sub)) {
+      plan.push({
+        argv: originalArgv,
+        sourceIndex,
+        phase: "action",
+        originalArgv,
+      });
+      return;
+    }
+
+    const selector = sub.click.selector;
+    const stateKey = `cairntrace.batch-click.${sourceIndex}`;
+    plan.push(
+      {
+        argv: [
+          "eval",
+          "-b",
+          Buffer.from(batchClickProbeScript(selector, stateKey)).toString(
+            "base64",
+          ),
+        ],
+        sourceIndex,
+        phase: "probe",
+        originalArgv,
+      },
+      {
+        argv: originalArgv,
+        sourceIndex,
+        phase: "action",
+        originalArgv,
+      },
+      {
+        argv: ["wait", String(BATCH_CLICK_PACE_MS)],
+        sourceIndex,
+        phase: "pace",
+        originalArgv,
+      },
+      {
+        argv: [
+          "wait",
+          "--fn",
+          batchClickVerifyExpression(selector, stateKey),
+          "--timeout",
+          String(BATCH_CLICK_VERIFY_TIMEOUT_MS),
+        ],
+        sourceIndex,
+        phase: "verify",
+        originalArgv,
+      },
+    );
+  });
+  return plan;
+}
+
+function batchClickProbeScript(selector: string, stateKey: string): string {
+  return `(() => {
+    const raw = document.querySelector(${JSON.stringify(selector)});
+    const stateTarget = (() => {
+      if (!raw) return null;
+      const checkable = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked]';
+      if (raw.matches(checkable)) return raw;
+      if (raw.tagName === 'LABEL' && raw.control) return raw.control;
+      const label = raw.closest('label');
+      if (label && label.control) return label.control;
+      return raw.querySelector(checkable) || raw.closest('[role="checkbox"], [role="radio"], [role="switch"], [aria-checked]');
+    })();
+    const read = (el) => {
+      if (!el) return null;
+      if (el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')) {
+        return { kind: el.type === 'radio' ? 'radio' : 'toggle', value: Boolean(el.checked) };
+      }
+      const aria = el.getAttribute('aria-checked');
+      if (aria === 'true' || aria === 'false' || aria === 'mixed') {
+        return { kind: el.getAttribute('role') === 'radio' ? 'radio' : 'toggle', value: aria };
+      }
+      return null;
+    };
+    const before = read(stateTarget);
+    globalThis[Symbol.for(${JSON.stringify(stateKey)})] = before
+      ? { ...before, recoveryAttempted: false, recoveryAfter: null, settleAfter: null }
+      : { kind: null, value: null, recoveryAttempted: false, recoveryAfter: 0, settleAfter: null };
+    return before;
+  })()`;
+}
+
+function batchClickVerifyExpression(
+  selector: string,
+  stateKey: string,
+): string {
+  return `(() => {
+    const state = globalThis[Symbol.for(${JSON.stringify(stateKey)})];
+    if (!state || state.kind === null) return true;
+    const raw = document.querySelector(${JSON.stringify(selector)});
+    if (!raw) return false;
+    const checkable = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"], [aria-checked]';
+    const stateTarget = raw.matches(checkable)
+      ? raw
+      : (raw.tagName === 'LABEL' && raw.control)
+        ? raw.control
+        : (raw.closest('label') && raw.closest('label').control)
+          ? raw.closest('label').control
+          : raw.querySelector(checkable) || raw.closest('[role="checkbox"], [role="radio"], [role="switch"], [aria-checked]');
+    let current = null;
+    if (stateTarget instanceof HTMLInputElement && (stateTarget.type === 'checkbox' || stateTarget.type === 'radio')) {
+      current = Boolean(stateTarget.checked);
+    } else if (stateTarget) {
+      const aria = stateTarget.getAttribute('aria-checked');
+      if (aria === 'true' || aria === 'false' || aria === 'mixed') current = aria;
+    }
+    const changed = state.kind === 'radio'
+      ? current === true || current === 'true'
+      : current !== null && current !== state.value;
+    const now = Date.now();
+    if (!state.recoveryAttempted) {
+      // Stage 1: the authored CDP click may just be slow to commit. Return
+      // success the moment it lands; otherwise re-poll for the full grace
+      // before concluding it was dropped, so a late commit is never mistaken
+      // for a drop and then double-toggled by the recovery click.
+      if (changed) {
+        delete globalThis[Symbol.for(${JSON.stringify(stateKey)})];
+        return true;
+      }
+      // Start the grace at the first post-action poll (a slow authored click
+      // must not consume the grace and trigger an immediate duplicate).
+      if (state.recoveryAfter === null) {
+        state.recoveryAfter = now + ${BATCH_CLICK_RECOVERY_GRACE_MS};
+        return false;
+      }
+      if (now < state.recoveryAfter) return false;
+      // Grace elapsed and still unchanged: recover once, then hold for the
+      // settle window before judging so both potential commits can land.
+      state.recoveryAttempted = true;
+      state.settleAfter = now + ${BATCH_CLICK_SETTLE_MS};
+      const disabled = raw.matches(':disabled') || raw.getAttribute('aria-disabled') === 'true' || Boolean(raw.disabled);
+      if (!disabled && typeof raw.click === 'function') raw.click();
+      return false;
+    }
+    // Stage 2: after the recovery click, wait out the settle before judging.
+    if (now < state.settleAfter) return false;
+    if (changed) {
+      delete globalThis[Symbol.for(${JSON.stringify(stateKey)})];
+      return true;
+    }
+    // Settled back at the ORIGINAL value: a late authored commit AND the
+    // recovery both applied → double-toggle. Fail loudly rather than pass a
+    // flipped-back state. Deliberately DO NOT clear the state before throwing:
+    // if agent-browser's wait --fn swallows the throw and re-polls, the next
+    // poll re-enters this branch and throws again (eventually timing out as a
+    // failure) instead of finding a cleared state and silently passing.
+    throw new Error('batch click double-toggled: recovery click landed a second toggle and the control returned to its original state (framework commit slower than the recovery grace) — split this into a top-level click step or raise settle timing');
+  })()`;
+}
+
+function isFailedBatchResult(result: unknown): boolean {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) {
+    return true;
+  }
+  const record = result as Record<string, unknown>;
+  const explicitlySucceeded =
+    record["success"] === true ||
+    (record["success"] === undefined && record["ok"] === true);
+  const hasError =
+    record["error"] !== undefined &&
+    record["error"] !== null &&
+    record["error"] !== "";
+  return !explicitlySucceeded || hasError;
+}
+
 /**
  * Build a step error for a failed `batch --bail`. agent-browser emits a JSON
  * array of per-command results on stdout; with --bail the run stops at the
@@ -1168,7 +1409,7 @@ const DAEMON_BUSY_BACKOFF_MS = [300, 1200];
  * to raw stderr when the output can't be parsed.
  */
 export function describeBatchFailure(
-  commands: string[][],
+  plan: BatchCommandPlanEntry[],
   raw: { stdout: string; stderr: string; exitCode: number },
 ): string {
   const stderr = raw.stderr.trim();
@@ -1180,24 +1421,37 @@ export function describeBatchFailure(
   } catch {
     // non-JSON output — fall through to the stderr-only message
   }
-  const failedIdx = results.findIndex(
-    (res) =>
-      res &&
-      (res["success"] === false ||
-        res["ok"] === false ||
-        typeof res["error"] === "string"),
-  );
-  // With --bail the failing command is the last one that produced a result.
-  const idx = failedIdx >= 0 ? failedIdx : results.length;
-  if (idx >= 0 && idx < commands.length) {
-    const cmd = commands[idx]!.join(" ");
+  const failedIdx = results.findIndex(isFailedBatchResult);
+  const stderrCommand = /command\s+(\d+)/i.exec(stderr);
+  let idx = failedIdx;
+  if (idx < 0 && stderrCommand) idx = Number(stderrCommand[1]) - 1;
+  if (idx < 0 && results.length > 0) {
+    const allExplicitlySucceeded = results.every(
+      (res) => res["success"] === true || res["ok"] === true,
+    );
+    idx =
+      allExplicitlySucceeded && results.length < plan.length
+        ? results.length
+        : results.length - 1;
+  }
+  if (idx >= 0 && idx < plan.length) {
+    const entry = plan[idx]!;
+    const cmd = entry.originalArgv.join(" ");
     const inner =
       (failedIdx >= 0 && typeof results[failedIdx]?.["error"] === "string"
         ? (results[failedIdx]!["error"] as string)
         : "") ||
       stderr ||
       `exit ${raw.exitCode}`;
-    return `batch failed at sub-step #${idx + 1} (${cmd}): ${inner}`;
+    const phase =
+      entry.phase === "probe"
+        ? "pre-click state probe"
+        : entry.phase === "pace"
+          ? "post-click pacing"
+          : entry.phase === "verify"
+            ? "post-click state verification"
+            : "action";
+    return `batch failed at sub-step #${entry.sourceIndex + 1} (${cmd}) during ${phase}: ${inner}`;
   }
   return stderr || `batch failed (exit ${raw.exitCode})`;
 }
