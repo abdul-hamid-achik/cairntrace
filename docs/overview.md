@@ -1,3 +1,8 @@
+---
+title: Browser Testing for AI Coding Agents
+description: Learn how Cairntrace turns user intent and typed outcomes into durable browser acceptance specs with repairable steps and local-first evidence.
+---
+
 # Overview
 
 Cairntrace is a local-first behavioral browser-spec layer for coding agents. Specs define `intent + outcomes` as the behavior contract and `steps` as repairable hints for reaching that state. The same spec can run from the CLI, through the MCP server, or be exported to Playwright.

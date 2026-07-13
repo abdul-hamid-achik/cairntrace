@@ -1,3 +1,8 @@
+---
+title: Browser Testing Workflow for AI Coding Agents
+description: Give Codex, Claude Code, Cursor, OpenCode, and other coding agents one Cairntrace CLI and MCP loop for browser verification and repair-ready evidence.
+---
+
 # Agents
 
 Cairn is built for AI coding agents as much as for people. Every CLI command takes `--format json|yaml|md`, and every capability has a thin MCP tool that returns the same shape. The agent loop below is the recommended path for any harness that speaks MCP (Claude Code, Codex, Cursor, OpenCode, …) and the same loop works against the CLI for harnesses that don't.

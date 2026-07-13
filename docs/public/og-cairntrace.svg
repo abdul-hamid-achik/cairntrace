@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Cairntrace — browser specs for coding agents</title>
+  <desc id="desc">A dark green Cairntrace social card with a behavioral browser spec and passing run result.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c1710"/>
+      <stop offset="1" stop-color="#14271b"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#6ee7b7"/>
+    </linearGradient>
+    <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse">
+      <path d="M 42 0 L 0 0 0 42" fill="none" stroke="#d9f6e3" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="30" flood-color="#061009" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" rx="36" fill="url(#bg)"/>
+  <rect width="1200" height="630" rx="36" fill="url(#grid)"/>
+  <circle cx="1050" cy="76" r="250" fill="#10b981" opacity="0.07"/>
+
+  <g transform="translate(72 64)">
+    <g transform="translate(0 4)">
+      <path d="M 0 54 L 8 78 L 66 78 L 74 54 Z" fill="url(#stone)"/>
+      <path d="M 8 34 L 16 56 L 56 56 L 64 34 Z" fill="url(#stone)"/>
+      <path d="M 16 16 L 22 36 L 50 36 L 56 16 Z" fill="url(#stone)"/>
+      <path d="M 25 0 L 30 18 L 45 18 L 50 0 Z" fill="url(#stone)"/>
+    </g>
+    <text x="96" y="59" fill="#e8f7ed" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="42" font-weight="700" letter-spacing="-2">cairntrace</text>
+  </g>
+
+  <g transform="translate(72 205)">
+    <text x="0" y="0" fill="#6ee7b7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700" letter-spacing="1.7">BEHAVIORAL BROWSER SPECS</text>
+    <text x="0" y="70" fill="#f1f8f3" font-family="Avenir Next, Segoe UI, sans-serif" font-size="62" font-weight="750" letter-spacing="-3">Browser proof for</text>
+    <text x="0" y="138" fill="#f1f8f3" font-family="Avenir Next, Segoe UI, sans-serif" font-size="62" font-weight="750" letter-spacing="-3">coding agents.</text>
+    <text x="0" y="192" fill="#9eb3a4" font-family="Avenir Next, Segoe UI, sans-serif" font-size="22">Local-first contracts. Repairable steps. Evidence agents can use.</text>
+  </g>
+
+  <g transform="translate(720 126)" filter="url(#shadow)">
+    <rect width="408" height="388" rx="20" fill="#0b120e" stroke="#d9f6e3" stroke-opacity="0.14"/>
+    <path d="M 0 48 H 408" stroke="#d9f6e3" stroke-opacity="0.12"/>
+    <circle cx="24" cy="24" r="5" fill="#3d4d42"/>
+    <circle cx="42" cy="24" r="5" fill="#607166"/>
+    <circle cx="60" cy="24" r="5" fill="#10b981"/>
+    <text x="204" y="29" text-anchor="middle" fill="#75877b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">checkout.yml</text>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+      <text x="24" y="82" fill="#70d9ac">intent:<tspan fill="#b7c7bc"> checkout completes</tspan></text>
+      <text x="24" y="112" fill="#70d9ac">outcomes:</text>
+      <text x="42" y="138" fill="#b7c7bc">- <tspan fill="#70d9ac">id:</tspan> order_confirmed</text>
+      <text x="58" y="164" fill="#70d9ac">verify:</text>
+      <text x="76" y="190" fill="#70d9ac">text: <tspan fill="#dceea4">"Order confirmed"</tspan></text>
+      <text x="24" y="226" fill="#70d9ac">steps:</text>
+      <text x="42" y="252" fill="#b7c7bc">- <tspan fill="#70d9ac">click:</tspan> Checkout</text>
+    </g>
+
+    <rect x="0" y="280" width="408" height="108" rx="0 0 20 20" fill="#08100b"/>
+    <text x="24" y="312" fill="#6ee7b7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">$ cairn run --cold-start --json</text>
+    <circle cx="35" cy="348" r="11" fill="#5ee2aa"/>
+    <path d="M 30 348 L 34 352 L 41 343" fill="none" stroke="#07100a" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="56" y="353" fill="#6ee7b7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700">passed</text>
+    <text x="330" y="353" text-anchor="end" fill="#718177" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">evidence ready</text>
+  </g>
+
+  <g transform="translate(72 570)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700">
+    <text x="0" y="0" fill="#6ee7b7">LOCAL-FIRST</text>
+    <text x="132" y="0" fill="#52685a">·</text>
+    <text x="156" y="0" fill="#9db1a2">CLI + MCP</text>
+    <text x="252" y="0" fill="#52685a">·</text>
+    <text x="276" y="0" fill="#9db1a2">AGENT-BROWSER + PLAYWRIGHT</text>
+    <text x="518" y="0" fill="#52685a">·</text>
+    <text x="542" y="0" fill="#9db1a2">MIT</text>
+  </g>
+</svg>

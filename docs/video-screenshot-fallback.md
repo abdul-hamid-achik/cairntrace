@@ -1,3 +1,9 @@
+---
+title: Video Recording Fallback Proposal
+description: Internal design proposal for stitching per-step screenshots into a fallback browser-run video.
+noindex: true
+---
+
 # Video recording fallback for backends without native recording (screenshot timelapse)
 
 **Status:** Proposed (not yet implemented). Motivated by recording a demo of an OPG-15061 fix on the graphite SPA, where neither backend could practically produce a video.

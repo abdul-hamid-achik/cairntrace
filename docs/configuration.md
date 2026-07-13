@@ -1,3 +1,8 @@
+---
+title: Configure Cairntrace Browser Testing
+description: Configure projects, environments, browser backends, artifacts, services, secrets, logging, retention, and reports for Cairntrace behavioral specs.
+---
+
 # Configuration
 
 Every cairntrace surface reads from a single config source: `cairntrace.config.yml`. The file is **optional** — a spec with absolute URLs runs without one — but anything project-specific (environments, services, secrets, retention, integrations) lives there. The schema is strict: unknown top-level keys are rejected, so a typo fails `cairn config validate` instead of silently being ignored.

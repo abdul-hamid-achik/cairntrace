@@ -1,3 +1,8 @@
+---
+title: Cairntrace CLI Commands for Browser Testing
+description: Reference Cairntrace commands for browser-spec discovery, verification, execution, healing, comparison, evidence, sessions, services, and maintenance.
+---
+
 # Commands
 
 The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page below documents one command family — flags, flow, and when to reach for it. Every command supports `--format json|yaml|md` and has a stable JSON schema; no interactive prompts on `--json`/`--yaml` paths.

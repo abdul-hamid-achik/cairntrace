@@ -1,3 +1,8 @@
+---
+title: Browser Test Evidence for Coding Agents
+description: Explore Cairntrace artifact packs with HTML and JSON reports, agent context, outcome evidence, browser snapshots, screenshots, console, and network logs.
+---
+
 # Artifacts
 
 Every `cairn run` writes a self-contained **artifact pack** to a directory on disk. The pack is the canonical record of the run — the human-readable narrative, the machine-readable JSON, the captured DOM, the network log, the console, and one outcome file per outcome.

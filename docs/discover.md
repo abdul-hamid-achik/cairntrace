@@ -1,3 +1,8 @@
+---
+title: Record Browser Specs with Live Discovery
+description: Explore live pages through stateful Cairntrace discovery sessions, capture accessibility locators, record interactions, and export a browser spec.
+---
+
 # Discover & snapshot
 
 Two page-inspection commands that open a URL in a real backend and return agent-facing locator data. `cairn snapshot` returns the locator inventory; `cairn discover` returns the full accessibility tree *plus* the inventory in one call. Both are the one-shot CLI equivalent of the interactive MCP discovery session.

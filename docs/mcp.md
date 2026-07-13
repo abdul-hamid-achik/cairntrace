@@ -1,3 +1,8 @@
+---
+title: MCP Server for Browser Testing
+description: Connect AI coding agents to Cairntrace MCP tools for browser-spec discovery, authoring, verification, replay, healing, and evidence retrieval.
+---
+
 # MCP server
 
 `cairn mcp` runs the same runner as the CLI as a **stdio MCP server**. Every CLI surface that is reasonable for an agent has a matching `cairn_<name>` tool that returns the same JSON shape as the CLI's `--format json`. There are no per-agent code paths.

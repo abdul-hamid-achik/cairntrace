@@ -6,7 +6,12 @@
   "buildCommand": "bun run docs:build",
   "outputDirectory": "docs/.vitepress/dist",
   "cleanUrls": true,
-  "rewrites": [
-    { "source": "/(.*)?", "destination": "/$1.html" }
+  "trailingSlash": false,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "has": [{ "type": "host", "value": "cairntrace.vercel.app" }],
+      "headers": [{ "key": "X-Robots-Tag", "value": "noindex" }]
+    }
   ]
 }

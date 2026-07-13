@@ -1,6 +1,6 @@
 ---
-title: Troubleshooting
-description: Common failure modes and what they mean.
+title: Troubleshoot Cairntrace Browser Tests
+description: Diagnose Cairntrace cold-start gates, outcome failures, request errors, timeouts, contract mismatches, browser backends, secrets, performance, and flaky runs.
 ---
 
 # Troubleshooting

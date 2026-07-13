@@ -1,3 +1,8 @@
+---
+title: Browser Automation Steps Reference
+description: Reference typed Cairntrace steps for navigation, semantic interaction, uploads, downloads, requests, snapshots, batches, evaluation, and process monitoring.
+---
+
 # Steps
 
 The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 17 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.

@@ -1,3 +1,8 @@
+---
+title: Browser Test Assertions and Verifiers
+description: Reference typed Cairntrace assertions for page text, URLs, network traffic, console errors, counts, files, JSON, workbooks, scripts, and process metrics.
+---
+
 # Verifiers
 
 The verifier vocabulary. Every entry under `outcomes:` is a single typed check the runner evaluates against the page state after the last step ran. The vocabulary is closed — exactly the 12 verifiers the `VerifierSchema` union accepts; do not invent a new verifier, use `script` for anything that does not fit, with a `outcomes/<id>.raw.json` sidecar so the artifact format stays uniform. Run `cairn explain --format json` for the machine-readable surface.

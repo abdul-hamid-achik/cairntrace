@@ -1,3 +1,8 @@
+---
+title: Write Durable Browser Specs for Coding Agents
+description: Author Cairntrace contracts with typed outcomes, semantic locators, repairable steps, contract hashes, and reliable cold-start browser replay.
+---
+
 # Authoring specs that survive
 
 Authoring a cairn spec is closer to authoring a contract than to authoring a test. The contract is the durable thing. Steps are repairable hints. This page is the discipline that makes a spec live across months of code churn instead of weeks.
