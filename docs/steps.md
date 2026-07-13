@@ -33,6 +33,7 @@ An explicit polling step. Hard-bounded at 30000 ms by default; real Chromium run
 ```yaml
 - wait: { text: "Saved", timeoutMs: 10000 }
 - wait: { notText: "Loading…" }
+- wait: { text: "Saved", caseSensitive: true }
 - wait: { load: networkidle }
 - wait: { selector: "[data-testid='hydrated']", state: visible }
 ```
@@ -45,6 +46,9 @@ Four condition shapes, exactly one per step:
 | `notText: <str>` | the page does not contain the text |
 | `load: networkidle\|load\|domcontentloaded` | a load state was reached |
 | `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached` |
+
+`text` and `notText` collapse whitespace and match case-insensitively by
+default. Set `caseSensitive: true` when rendered casing is significant.
 
 ## Interaction
 

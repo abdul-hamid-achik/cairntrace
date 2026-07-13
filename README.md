@@ -204,6 +204,10 @@ Finished specs must replay from a fresh browser session. Use one of:
 
 Run `cairn run <spec> --cold-start --json` before declaring a spec done.
 
+Rendered `text`/`notText` equals and contains checks normalize whitespace and
+match case-insensitively by default. Use `caseSensitive: true` when casing is
+part of the contract; regex `matches` keeps raw, case-sensitive semantics.
+
 **Steps**
 
 Current step keys:

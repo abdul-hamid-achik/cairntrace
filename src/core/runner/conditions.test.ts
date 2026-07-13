@@ -68,4 +68,14 @@ describe("evaluateWhen", () => {
     expect(await evaluateWhen("notText:Loading", b)).toBe(true);
     expect(await evaluateWhen("notText:Welcome", b)).toBe(false);
   });
+
+  it("text / notText normalize case and layout whitespace like the verifiers", async () => {
+    const b = new MockBrowserBackend();
+    // CSS text-transform + wrapped layout: source copy differs by case and
+    // collapses runs of whitespace to a single logical space.
+    b.setPageText("BIENVENIDO\n   DE   NUEVO");
+    expect(await evaluateWhen("text:Bienvenido de nuevo", b)).toBe(true);
+    expect(await evaluateWhen("notText:Bienvenido de nuevo", b)).toBe(false);
+    expect(await evaluateWhen("notText:Cerrar sesión", b)).toBe(true);
+  });
 });

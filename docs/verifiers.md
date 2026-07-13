@@ -25,7 +25,7 @@ outcomes:
     text: { contains: "Welcome", region: "[data-testid='hero']" }
 ```
 
-`matches` takes a regex source string. The legacy sibling `region:` (next to `text:`) is still accepted, but prefer nesting `region` under `text`.
+`equals` and `contains` collapse whitespace and match case-insensitively by default, including text transformed by CSS. Set `caseSensitive: true` to preserve case. `matches` takes a raw, case-sensitive regex source string and does not accept `caseSensitive`. The legacy sibling `region:` (next to `text:`) is still accepted, but prefer nesting `region` under `text`.
 
 ## `notText`
 
@@ -195,7 +195,7 @@ The verifier reports `skipped` (not `failed`) when the run was not monitored, so
 Two patterns across verifiers:
 
 - `equals: N` for exact counts. If you write `count: { atLeast: 1 }` for something that should be exactly one, the spec will silently let bugs through. Be exact when you mean exact.
-- `contains: "foo"` for partial matches. The matcher is case-sensitive; use `matches: { matches: "Foo.+Bar" }` when you mean a case-insensitive pattern. (Inside `text`/`notText`, the matcher key is `matches`; inside `url`, also `matches`.)
+- `contains: "foo"` for human-facing partial text matches. Text/notText contains checks are whitespace-normalized and case-insensitive unless `caseSensitive: true`; regex `matches` stays raw and case-sensitive.
 
 ## Sidecar artifact shape
 

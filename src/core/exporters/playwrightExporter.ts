@@ -19,6 +19,7 @@ import {
   textVerifierRegion,
 } from "../schema/verifier.v1";
 import type { Locator, Outcome, Spec, Step } from "../schema/spec.v1";
+import { bodyTextContainsExpression } from "../textMatching";
 
 export interface ExportPlaywrightOptions {
   /** Path to the source spec; included in the generated file's header comment. */
@@ -194,16 +195,20 @@ function renderStepBody(step: Step): string[] {
     if ("text" in w) {
       return [
         `await page.waitForFunction(`,
-        `  ${JSON.stringify(`document.body.innerText.includes(${JSON.stringify(w.text)})`)},`,
+        `  ${JSON.stringify(bodyTextContainsExpression(w.text, w.caseSensitive ?? false))},`,
         `  undefined,`,
         `  { timeout: ${timeout} },`,
         `);`,
       ];
     }
     if ("notText" in w) {
+      const expression = bodyTextContainsExpression(
+        w.notText,
+        w.caseSensitive ?? false,
+      );
       return [
         `await page.waitForFunction(`,
-        `  ${JSON.stringify(`!document.body.innerText.includes(${JSON.stringify(w.notText)})`)},`,
+        `  ${JSON.stringify(`!(${expression})`)},`,
         `  undefined,`,
         `  { timeout: ${timeout} },`,
         `);`,
@@ -322,14 +327,20 @@ function renderTextOutcome(
       ? `page.locator("body")`
       : `page.locator(${JSON.stringify(region)})`;
   const not = negated ? ".not" : "";
+  // Emit Playwright's native web-first assertions so they auto-retry until the
+  // rendered text settles (the manual one-shot innerText() read raced async
+  // renders). `useInnerText` matches the visible, CSS-transformed text and
+  // `ignoreCase` mirrors cairntrace's default case-insensitive matching; both
+  // assertions also whitespace-normalize on Playwright's side. Regex `matches`
+  // stays raw and case-sensitive.
   if (m.equals !== undefined) {
     return [
-      `await expect(${target})${not}.toHaveText(${JSON.stringify(m.equals)});`,
+      `await expect(${target})${not}.toHaveText(${JSON.stringify(m.equals)}, ${renderTextAssertionOptions(m.caseSensitive ?? false)});`,
     ];
   }
   if (m.contains !== undefined) {
     return [
-      `await expect(${target})${not}.toContainText(${JSON.stringify(m.contains)});`,
+      `await expect(${target})${not}.toContainText(${JSON.stringify(m.contains)}, ${renderTextAssertionOptions(m.caseSensitive ?? false)});`,
     ];
   }
   if (m.matches !== undefined) {
@@ -338,6 +349,11 @@ function renderTextOutcome(
     ];
   }
   return [`// invalid text matcher`];
+}
+
+/** Options object for a retrying text assertion (case + innerText). */
+function renderTextAssertionOptions(caseSensitive: boolean): string {
+  return `{ ignoreCase: ${!caseSensitive}, useInnerText: true }`;
 }
 
 function renderUrlOutcome(m: UrlMatcher): string[] {

@@ -20,6 +20,7 @@ import type {
   Step,
   WaitCondition,
 } from "../../core/schema/spec.v1";
+import { bodyTextContainsExpression } from "../../core/textMatching";
 import type {
   BackendRequest,
   BackendResponse,
@@ -925,16 +926,16 @@ export class PlaywrightAdapter implements BrowserBackend {
     if ("text" in cond) {
       // String form sidesteps needing the DOM lib for tsc.
       await page.waitForFunction(
-        `document.body.innerText.includes(${JSON.stringify(cond.text)})`,
+        bodyTextContainsExpression(cond.text, cond.caseSensitive ?? false),
         undefined,
         { timeout },
       );
     } else if ("notText" in cond) {
-      await page.waitForFunction(
-        `!document.body.innerText.includes(${JSON.stringify(cond.notText)})`,
-        undefined,
-        { timeout },
+      const expression = bodyTextContainsExpression(
+        cond.notText,
+        cond.caseSensitive ?? false,
       );
+      await page.waitForFunction(`!(${expression})`, undefined, { timeout });
     } else if ("selector" in cond) {
       await page.waitForSelector(cond.selector, {
         state: cond.state ?? "visible",

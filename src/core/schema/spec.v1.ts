@@ -185,12 +185,16 @@ export const WaitConditionSchema = z.union([
   z
     .object({
       text: z.string().min(1),
+      /** Default false; rendered text matching also normalizes whitespace. */
+      caseSensitive: z.boolean().optional(),
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
   z
     .object({
       notText: z.string().min(1),
+      /** Default false; rendered text matching also normalizes whitespace. */
+      caseSensitive: z.boolean().optional(),
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),

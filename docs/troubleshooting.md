@@ -25,6 +25,10 @@ The `text` verifier expected a substring that wasn't there. Often the app change
 - Did the page redirect to a different surface? The verifier expects a literal string but the new surface has something else.
 - Are you on the wrong page? The open step landed somewhere different than you assumed.
 
+Equals/contains checks already normalize whitespace and ignore case by default,
+so CSS `text-transform` alone should not cause this failure. If the outcome has
+`caseSensitive: true`, verify that the rendered casing is intentional.
+
 Inspect `screenshots/` (when artifacts are enabled) or run with `--headed` to see what the runner sees.
 
 ## "noFailedRequests = false"

@@ -92,16 +92,16 @@ describe("waitConditionToArgv", () => {
   it("text wait", () => {
     expect(waitConditionToArgv({ text: "Welcome" })).toEqual([
       "wait",
-      "--text",
-      "Welcome",
+      "--fn",
+      expect.stringContaining('includes("welcome")'),
     ]);
   });
 
   it("text wait with timeout", () => {
     expect(waitConditionToArgv({ text: "Welcome", timeoutMs: 5000 })).toEqual([
       "wait",
-      "--text",
-      "Welcome",
+      "--fn",
+      expect.stringContaining('includes("welcome")'),
       "--timeout",
       "5000",
     ]);
@@ -138,13 +138,29 @@ describe("waitConditionToArgv", () => {
     ]);
   });
 
-  it("notText synthesized as --fn predicate (agent-browser has no native --notText)", () => {
+  it("text/notText use normalized case-insensitive --fn predicates", () => {
+    const textArgv = waitConditionToArgv({ text: "Order  Saved" });
+    expect(textArgv[0]).toBe("wait");
+    expect(textArgv[1]).toBe("--fn");
+    expect(textArgv[2]).toContain("replace(/\\s+/g");
+    expect(textArgv[2]).toContain("toLowerCase");
+    expect(textArgv[2]).toContain('includes("order saved")');
+
     const argv = waitConditionToArgv({ notText: "Loading..." });
     expect(argv[0]).toBe("wait");
     expect(argv[1]).toBe("--fn");
-    expect(argv[2]).toContain("!document.body.innerText.includes");
+    expect(argv[2]).toContain("!(String(document.body?.innerText");
     // String must be JSON-escaped so it survives shell + JS parsing.
-    expect(argv[2]).toContain('"Loading..."');
+    expect(argv[2]).toContain('"loading..."');
+  });
+
+  it("caseSensitive text wait opts out of case folding", () => {
+    const argv = waitConditionToArgv({
+      text: "Saved",
+      caseSensitive: true,
+    });
+    expect(argv[2]).not.toContain("toLowerCase");
+    expect(argv[2]).toContain('includes("Saved")');
   });
 });
 
@@ -285,7 +301,13 @@ describe("stepToArgv", () => {
   it("wait with text", () => {
     expect(
       stepToArgv({ wait: { text: "Imported", timeoutMs: 30000 } }),
-    ).toEqual(["wait", "--text", "Imported", "--timeout", "30000"]);
+    ).toEqual([
+      "wait",
+      "--fn",
+      expect.stringContaining('includes("imported")'),
+      "--timeout",
+      "30000",
+    ]);
   });
 
   it("press → press <key>", () => {
@@ -384,6 +406,12 @@ describe("batchSubStepToArgv", () => {
     ).toEqual(["scrollintoview", "#end"]);
     expect(
       batchSubStepToArgv({ wait: { text: "Saved", timeoutMs: 5000 } }),
-    ).toEqual(["wait", "--text", "Saved", "--timeout", "5000"]);
+    ).toEqual([
+      "wait",
+      "--fn",
+      expect.stringContaining('includes("saved")'),
+      "--timeout",
+      "5000",
+    ]);
   });
 });

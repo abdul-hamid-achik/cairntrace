@@ -29,6 +29,47 @@ describe("text", () => {
     expect(r.actual).toContain("not found");
   });
 
+  it("matches CSS-transformed case and layout whitespace by default", async () => {
+    const b = new MockBrowserBackend();
+    b.setPageText("Estado:\n\tDISPONIBLE   AHORA");
+    const r = await evaluateText({ text: { contains: "Disponible ahora" } }, b);
+    expect(r.passed).toBe(true);
+    expect(r.expected).toContain("case-insensitive");
+    expect(r.expected).toContain("whitespace-normalized");
+  });
+
+  it("supports case-sensitive equals/contains as an explicit opt-out", async () => {
+    const b = new MockBrowserBackend();
+    b.setPageText("DISPONIBLE\n AHORA");
+    const contains = await evaluateText(
+      {
+        text: {
+          contains: "Disponible ahora",
+          caseSensitive: true,
+        },
+      },
+      b,
+    );
+    const equals = await evaluateText(
+      { text: { equals: "DISPONIBLE AHORA", caseSensitive: true } },
+      b,
+    );
+    expect(contains.passed).toBe(false);
+    expect(equals.passed).toBe(true);
+  });
+
+  it("keeps regex matching raw and case-sensitive", async () => {
+    const b = new MockBrowserBackend();
+    b.setPageText("DISPONIBLE\nAHORA");
+    expect(
+      (await evaluateText({ text: { matches: "Disponible" } }, b)).passed,
+    ).toBe(false);
+    expect(
+      (await evaluateText({ text: { matches: "DISPONIBLE\\nAHORA" } }, b))
+        .passed,
+    ).toBe(true);
+  });
+
   it("uses nested region and still accepts the legacy sibling region", async () => {
     const b = new MockBrowserBackend();
     b.setRegionText("#ticker", "objective dead");
@@ -60,6 +101,16 @@ describe("notText", () => {
   it("fails when the disallowed text appears", async () => {
     const b = new MockBrowserBackend();
     b.setPageText("Something went wrong");
+    const r = await evaluateNotText(
+      { notText: { contains: "Something went wrong" } },
+      b,
+    );
+    expect(r.passed).toBe(false);
+  });
+
+  it("finds disallowed text across case and whitespace differences", async () => {
+    const b = new MockBrowserBackend();
+    b.setPageText("SOMETHING\n   WENT WRONG");
     const r = await evaluateNotText(
       { notText: { contains: "Something went wrong" } },
       b,

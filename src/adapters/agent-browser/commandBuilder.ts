@@ -16,6 +16,7 @@ import {
   type WaitCondition,
   type WaitStep,
 } from "../../core/schema/spec.v1";
+import { bodyTextContainsExpression } from "../../core/textMatching";
 
 /**
  * Pure functions mapping a behavioral Step → agent-browser argv.
@@ -134,12 +135,19 @@ export function waitStepToArgv(step: WaitStep): string[] {
 export function waitConditionToArgv(w: WaitCondition): string[] {
   const argv = ["wait"];
   if ("text" in w) {
-    argv.push("--text", w.text);
+    const expression = bodyTextContainsExpression(
+      w.text,
+      w.caseSensitive ?? false,
+    );
+    argv.push("--fn", `() => ${expression}`);
   } else if ("notText" in w) {
     // agent-browser has no native --notText. Use --fn with a JS predicate.
     // The function returns truthy when the text is absent from <body>.
-    const escaped = JSON.stringify(w.notText);
-    argv.push("--fn", `() => !document.body.innerText.includes(${escaped})`);
+    const expression = bodyTextContainsExpression(
+      w.notText,
+      w.caseSensitive ?? false,
+    );
+    argv.push("--fn", `() => !(${expression})`);
   } else if ("selector" in w) {
     argv.push(w.selector);
     if (w.state !== undefined) argv.push("--state", w.state);

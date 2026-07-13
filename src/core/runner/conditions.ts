@@ -1,4 +1,5 @@
 import type { BrowserBackend } from "../../adapters/browserBackend";
+import { textContains } from "../textMatching";
 
 /**
  * Tiny DSL for step-level `when:` predicates. Specs use these to skip steps
@@ -11,8 +12,13 @@ import type { BrowserBackend } from "../../adapters/browserBackend";
  *   - urlContains:<substring>
  *   - urlNotContains:<substring>
  *   - urlMatches:<regex>
- *   - text:<substring>          ← matches against body text
- *   - notText:<substring>
+ *   - text:<substring>          ← body text, whitespace-normalized + case-insensitive
+ *   - notText:<substring>       ← same normalization as text:
+ *
+ * `urlContains`/`urlNotContains` stay raw (URLs are case- and
+ * whitespace-significant); `text`/`notText` share the rendered-text
+ * normalization used by the `text`/`notText` verifiers so a `when:` gate and an
+ * outcome assertion on the same copy agree. `urlMatches` regex stays raw.
  */
 
 export type WhenCondition =
@@ -61,11 +67,11 @@ export async function evaluateWhen(
     }
     case "text": {
       const body = await backend.getText("page");
-      return body.includes(cond.arg);
+      return textContains(body, cond.arg);
     }
     case "notText": {
       const body = await backend.getText("page");
-      return !body.includes(cond.arg);
+      return !textContains(body, cond.arg);
     }
   }
 }

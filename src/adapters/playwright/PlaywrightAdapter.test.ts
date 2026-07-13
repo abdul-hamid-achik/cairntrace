@@ -384,7 +384,7 @@ describe("PlaywrightAdapter wait", () => {
     const result = await pending;
 
     expect(waitForFunction).toHaveBeenCalledWith(
-      `document.body.innerText.includes("AWAITING ORDERS")`,
+      `String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().toLowerCase().includes("awaiting orders")`,
       undefined,
       { timeout: 25 },
     );
@@ -408,7 +408,7 @@ describe("PlaywrightAdapter wait", () => {
     const result = await pending;
 
     expect(waitForFunction).toHaveBeenCalledWith(
-      `!document.body.innerText.includes("Loading")`,
+      `!(String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().toLowerCase().includes("loading"))`,
       undefined,
       { timeout: 30_000 },
     );
@@ -416,6 +416,23 @@ describe("PlaywrightAdapter wait", () => {
       ok: false,
       stderr: "wait timed out after 30000ms",
     });
+  });
+
+  it("preserves case for text waits that opt into case sensitivity", async () => {
+    const adapter = new PlaywrightAdapter();
+    const waitForFunction = vi.fn().mockResolvedValue(undefined);
+    installPage(adapter, { waitForFunction });
+
+    const result = await adapter.runStep({
+      wait: { text: "Saved", caseSensitive: true, timeoutMs: 25 },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(waitForFunction).toHaveBeenCalledWith(
+      `String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().includes("Saved")`,
+      undefined,
+      { timeout: 25 },
+    );
   });
 
   it("hard-bounds load-state waits with the step timeout", async () => {

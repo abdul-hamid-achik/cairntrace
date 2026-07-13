@@ -1,4 +1,5 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
+import { textContains, textEquals } from "../../textMatching";
 import {
   textVerifierRegion,
   type TextMatcher,
@@ -28,15 +29,17 @@ export function matchText(
   m: TextMatcher,
 ): { passed: boolean; expected: string } {
   if (m.equals !== undefined) {
+    const caseSensitive = m.caseSensitive ?? false;
     return {
-      passed: haystack === m.equals,
-      expected: `equals ${JSON.stringify(m.equals)}`,
+      passed: textEquals(haystack, m.equals, caseSensitive),
+      expected: `equals ${JSON.stringify(m.equals)} (${matchMode(caseSensitive)})`,
     };
   }
   if (m.contains !== undefined) {
+    const caseSensitive = m.caseSensitive ?? false;
     return {
-      passed: haystack.includes(m.contains),
-      expected: `contains ${JSON.stringify(m.contains)}`,
+      passed: textContains(haystack, m.contains, caseSensitive),
+      expected: `contains ${JSON.stringify(m.contains)} (${matchMode(caseSensitive)})`,
     };
   }
   if (m.matches !== undefined) {
@@ -48,6 +51,12 @@ export function matchText(
   }
   // Unreachable: zod refine guarantees exactly one matcher key.
   return { passed: false, expected: "<invalid matcher>" };
+}
+
+function matchMode(caseSensitive: boolean): string {
+  return `${
+    caseSensitive ? "case-sensitive" : "case-insensitive"
+  }, whitespace-normalized`;
 }
 
 function truncate(s: string, max: number): string {

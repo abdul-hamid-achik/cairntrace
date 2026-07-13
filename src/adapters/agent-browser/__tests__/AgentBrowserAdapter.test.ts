@@ -709,8 +709,8 @@ describe("child timeout enforcement", () => {
         "--session",
         "wait-deadline",
         "wait",
-        "--text",
-        "Done",
+        "--fn",
+        expect.stringContaining('includes("done")'),
         "--timeout",
         "5000",
       ],
@@ -778,8 +778,8 @@ describe("wait step slicing", () => {
       "--session",
       "wait-first-slice",
       "wait",
-      "--text",
-      "Ready",
+      "--fn",
+      expect.stringContaining('includes("ready")'),
       "--timeout",
       "5000",
     ]);
@@ -890,7 +890,13 @@ describe("wait step slicing", () => {
     expect(execaMock).toHaveBeenCalledTimes(1);
     expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
-      ["--session", "wait-nobudget", "wait", "--text", "Ready"],
+      [
+        "--session",
+        "wait-nobudget",
+        "wait",
+        "--fn",
+        expect.stringContaining('includes("ready")'),
+      ],
       expect.objectContaining({ timeout: 60_000 }),
     );
   });

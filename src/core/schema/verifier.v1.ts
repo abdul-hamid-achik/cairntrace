@@ -14,6 +14,8 @@ export const TextMatcherSchema = z
     equals: z.string().optional(),
     contains: z.string().optional(),
     matches: z.string().optional(), // regex source
+    /** Case-sensitive equals/contains (default: case-insensitive). */
+    caseSensitive: z.boolean().optional(),
     /** Optional selector region for text/notText checks. */
     region: z.string().optional(),
   })
@@ -23,7 +25,17 @@ export const TextMatcherSchema = z
       [m.equals, m.contains, m.matches].filter((x) => x !== undefined)
         .length === 1,
     { message: "exactly one of: equals, contains, matches" },
-  );
+  )
+  .superRefine((m, ctx) => {
+    if (m.matches !== undefined && m.caseSensitive !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["caseSensitive"],
+        message:
+          "caseSensitive is only valid with equals or contains; regex matches remain raw and case-sensitive",
+      });
+    }
+  });
 export type TextMatcher = z.infer<typeof TextMatcherSchema>;
 
 export const UrlMatcherSchema = z

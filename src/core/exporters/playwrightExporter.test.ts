@@ -82,11 +82,51 @@ describe("exportPlaywright", () => {
         ],
       }),
     );
+    // Native retrying assertion (auto-waits for async renders) with the
+    // default case-insensitive + innerText matching cairntrace uses at runtime.
     expect(src).toContain(
-      `await expect(page.locator("body")).toContainText("Welcome");`,
+      `await expect(page.locator("body")).toContainText("Welcome", { ignoreCase: true, useInnerText: true });`,
     );
     expect(src).toContain(`await expect(page).toHaveURL(new RegExp(`);
     expect(src).toContain(`await expect(page.locator(".row")).toHaveCount(3);`);
+  });
+
+  it("renders retrying text assertions and honors the case-sensitive opt-out", () => {
+    const src = exportPlaywright(
+      baseSpec({
+        outcomes: [
+          {
+            id: "equals-default",
+            description: "equals-default",
+            verify: { text: { equals: "Order Saved" }, region: ".status" },
+          },
+          {
+            id: "contains-cs",
+            description: "contains-cs",
+            verify: {
+              text: { contains: "SKU-42", caseSensitive: true },
+              region: ".sku",
+            },
+          },
+          {
+            id: "absent",
+            description: "absent",
+            verify: { notText: { contains: "Error" }, region: "page" },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `await expect(page.locator(".status")).toHaveText("Order Saved", { ignoreCase: true, useInnerText: true });`,
+    );
+    expect(src).toContain(
+      `await expect(page.locator(".sku")).toContainText("SKU-42", { ignoreCase: false, useInnerText: true });`,
+    );
+    expect(src).toContain(
+      `await expect(page.locator("body")).not.toContainText("Error", { ignoreCase: true, useInnerText: true });`,
+    );
+    // The one-shot innerText() read is gone — no manual normalize/toBe pattern.
+    expect(src).not.toContain(`.innerText();`);
   });
 
   it("installs network + console listeners only when needed", () => {

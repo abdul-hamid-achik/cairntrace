@@ -86,6 +86,14 @@ per-agent code paths.
   step with diagnostics; multiple matches are an error unless the locator
   carries `nth:`. Use `exact: true` for case-sensitive matching. Targets are
   auto-scrolled into view.
+- `wait` text/notText and outcome `text`/`notText` equals/contains checks
+  normalize whitespace and match case-insensitively by default, so rendered
+  CSS casing does not make source-cased assertions fail. Set
+  `caseSensitive: true` to opt out. Regex `matches` remains raw and
+  case-sensitive. Step `when: "text:…"` / `when: "notText:…"` gates share the
+  same rendered-text normalization (whitespace-collapsed, case-insensitive), so
+  a `when:` gate and an outcome on the same copy agree; `when: "urlContains:…"`
+  / `urlMatches:…` stay raw (URLs are case- and whitespace-significant).
 - For authenticated API calls use the typed `request` step (browser-session
   cookies included, `assign:` + `${requests.<name>.body.X}` splicing) — not a
   node-script verifier full of fetch glue. Playwright executes request steps
@@ -309,7 +317,8 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   `{success, data: {requests|messages: [...]}, error}` — see `parseEnvelope()`.
 - `eval <expr>` auto-stringifies the result as JSON; the `script` verifier
   wrapper returns the object directly (no extra `JSON.stringify`).
-- No native `--notText` wait; we synthesize it as `wait --fn "() => !document.body.innerText.includes(...)"`.
+- No native `--notText` wait; we synthesize it with `wait --fn` using the
+  normalized text predicate and the step's `caseSensitive` setting.
 - The special region token `"page"` translates to `body` for `get text`.
 
 ## Development

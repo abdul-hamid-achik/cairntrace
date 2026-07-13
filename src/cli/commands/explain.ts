@@ -1114,8 +1114,10 @@ export function buildExplain(): ExplainResult {
       {
         id: "wait",
         kind: "wait",
-        summary: "Wait for text, notText, or load state",
-        yamlExample: "steps:\n  - wait: { text: Saved, timeoutMs: 10000 }",
+        summary:
+          "Wait for text, notText, selector, or load state; text is whitespace-normalized and case-insensitive unless caseSensitive is true",
+        yamlExample:
+          "steps:\n  - wait: { text: Saved, timeoutMs: 10000, caseSensitive: false }",
       },
       {
         id: "press",
@@ -1179,20 +1181,27 @@ export function buildExplain(): ExplainResult {
           {
             name: "equals",
             type: "string",
-            description: "exact match",
+            description: "whole whitespace-normalized text",
             oneOfGroup: "matcher",
           },
           {
             name: "contains",
             type: "string",
-            description: "substring",
+            description: "whitespace-normalized substring",
             oneOfGroup: "matcher",
           },
           {
             name: "matches",
             type: "regex",
-            description: "regex source",
+            description: "raw case-sensitive regex source",
             oneOfGroup: "matcher",
+          },
+          {
+            name: "caseSensitive",
+            type: "boolean",
+            default: false,
+            description:
+              "equals/contains only; whitespace is always normalized",
           },
           {
             name: "region",
@@ -1213,20 +1222,27 @@ export function buildExplain(): ExplainResult {
           {
             name: "equals",
             type: "string",
-            description: "exact match",
+            description: "whole whitespace-normalized text",
             oneOfGroup: "matcher",
           },
           {
             name: "contains",
             type: "string",
-            description: "substring",
+            description: "whitespace-normalized substring",
             oneOfGroup: "matcher",
           },
           {
             name: "matches",
             type: "regex",
-            description: "regex source",
+            description: "raw case-sensitive regex source",
             oneOfGroup: "matcher",
+          },
+          {
+            name: "caseSensitive",
+            type: "boolean",
+            default: false,
+            description:
+              "equals/contains only; whitespace is always normalized",
           },
           {
             name: "region",
