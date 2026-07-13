@@ -316,8 +316,18 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if (opts.format) argv.push("--screenshot-format", opts.format);
     if (opts.quality !== undefined)
       argv.push("--screenshot-quality", String(opts.quality));
-    const r = await this.invoke(argv);
-    return { ok: r.ok, path: opts.path, durationMs: r.durationMs };
+    const r = await this.invoke(argv, { timeoutMs: SCREENSHOT_TIMEOUT_MS });
+    const error = !r.ok
+      ? /timed out/i.test(r.stderr)
+        ? `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms — Chromium may have no rendering surface (is the display asleep/headless?)`
+        : r.stderr.trim() || `screenshot capture failed with exit ${r.exitCode}`
+      : undefined;
+    return {
+      ok: r.ok,
+      path: opts.path,
+      durationMs: r.durationMs,
+      ...(error ? { error } : {}),
+    };
   }
 
   /* ----- page info ----- */
@@ -1523,6 +1533,13 @@ const POST_CLICK_NAV_SETTLE_MS = 5_000;
 /** Link clicks should synchronously schedule SPA navigation; keep retry cheap. */
 const LINK_CLICK_DELIVERY_TIMEOUT_MS = 750;
 const LINK_CLICK_PROBE_KEY = "cairntrace.link-click-delivery";
+
+/**
+ * Chromium screenshot capture can wedge when macOS has no compositing surface
+ * (for example, while the display is asleep). Do not spend the generic 60s
+ * command budget on an optional artifact.
+ */
+const SCREENSHOT_TIMEOUT_MS = 15_000;
 
 /**
  * Budget for the post-scrollIntoView viewport confirmation. Covers a CSS

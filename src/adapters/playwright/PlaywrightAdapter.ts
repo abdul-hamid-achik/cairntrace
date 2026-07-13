@@ -109,6 +109,8 @@ export class PlaywrightAdapter implements BrowserBackend {
   private videoSlowMo = 0;
   /** Playback speed multiplier for ffmpeg post-processing (1 = original). */
   private videoSpeed = 1;
+  /** Sticky when an in-process hard deadline had to abandon a page operation. */
+  private pageOperationWedged = false;
 
   constructor(private readonly opts: PlaywrightAdapterOptions = {}) {}
 
@@ -242,14 +244,42 @@ export class PlaywrightAdapter implements BrowserBackend {
     const start = Date.now();
     const page = await this.ensurePage();
     try {
-      await page.screenshot({
-        path: opts.path,
-        fullPage: opts.fullPage ?? false,
-      });
+      await this.hardBoundPageOperation(
+        () =>
+          page.screenshot({
+            path: opts.path,
+            fullPage: opts.fullPage ?? false,
+            timeout: SCREENSHOT_TIMEOUT_MS,
+          }),
+        SCREENSHOT_TIMEOUT_MS,
+        screenshotTimeoutMessage(),
+      );
       return { ok: true, path: opts.path, durationMs: Date.now() - start };
-    } catch {
-      return { ok: false, path: opts.path, durationMs: Date.now() - start };
+    } catch (error) {
+      const message = (error as Error).message;
+      const timedOut = /timed?\s*out|timeout/i.test(message);
+      if (timedOut) {
+        // Playwright can reject with its own TimeoutError just before the
+        // external watchdog marks itself fired. Treat either signal as sticky
+        // wedging so Runner never queues diagnostics behind a dead page. Keep
+        // any still-live browser ref: close() must be able to tear it down.
+        // The watchdog/private-floor branch already reset refs after killing.
+        this.pageOperationWedged = true;
+      }
+      const cause = timedOut
+        ? screenshotTimeoutMessage()
+        : `screenshot capture failed: ${message}`;
+      return {
+        ok: false,
+        path: opts.path,
+        durationMs: Date.now() - start,
+        error: cause,
+      };
     }
+  }
+
+  isWedged(): boolean {
+    return this.pageOperationWedged;
   }
 
   async getUrl(): Promise<string> {
@@ -983,6 +1013,7 @@ export class PlaywrightAdapter implements BrowserBackend {
       if (watchdog.didFire() || e instanceof TimeoutError) {
         // Browser is (or may be) wedged — abandon the refs so the next operation
         // spins up a fresh page instead of reusing a dead/hung one.
+        this.pageOperationWedged = true;
         this.resetBrowserRefs();
         throw new TimeoutError(message);
       }
@@ -1071,6 +1102,7 @@ const DEFAULT_SCROLL_PX = 400;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const SCREENSHOT_TIMEOUT_MS = 15_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
 // Extra slack added to the in-process timeout floor (over the watchdog's kill
@@ -1079,6 +1111,10 @@ const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
 const HARD_TIMEOUT_FLOOR_BUFFER_MS = 1_000;
 
 class TimeoutError extends Error {}
+
+function screenshotTimeoutMessage(): string {
+  return `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms — no rendering surface; is the display asleep or headless?`;
+}
 
 interface HardTimeoutWatchdog {
   enabled: boolean;

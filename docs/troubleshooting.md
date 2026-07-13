@@ -121,6 +121,18 @@ Vault (tvault) secrets are registered automatically and scrubbed regardless of k
 - It passes only when you're watching. Likely a screenshot-vs-DOM-state race. Read the contract; tighten the verifier to the DOM state, not the screenshot.
 - It passes only when a dev server is running. Stop testing the dev server — test the staging environment.
 
+## Screenshot capture reports no rendering surface
+
+Screenshot commands have a 15-second hard deadline. On a headed macOS run,
+`no rendering surface` commonly means the display is asleep or the desktop
+session cannot composite a frame; wake the display and rerun. On a headless
+runner, confirm Chromium can create a compositing surface. The run records the
+failure under `diagnostics/` instead of waiting indefinitely or publishing a
+partial PNG. A capture timeout is best-effort: it does not fail the step, spec,
+or outcomes — it only marks the backend wedged so the remaining optional
+captures (console/network/trace/video) are skipped while the outcome verifiers
+still run. If the page is genuinely wedged it fails on its next interaction.
+
 ## Common misconfigurations
 
 - Forgot to set `artifactRoot`. Artifacts land in `~/.cairntrace/runs` by default, not your project's test output dir.

@@ -823,6 +823,37 @@ steps:
     );
   });
 
+  it("applies spec click settle defaults while preserving step overrides", async () => {
+    const specPath = await writeSpec(
+      "click_settle_overrides",
+      `version: 1
+name: click_settle_overrides
+intent: click settling can be tuned without slowing the whole project
+settleMs: 12000
+outcomes:
+  - id: no_errors
+    description: the interaction completes
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: inherits_spec
+    click: { by: selector, selector: "#slow-link" }
+  - id: skips_settle
+    click: { by: selector, selector: "#instant-button" }
+    settleMs: 0
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog).toMatchObject([
+      { id: "inherits_spec", settleMs: 12_000 },
+      { id: "skips_settle", settleMs: 0 },
+    ]);
+  });
+
   it("marks artifact-dependent outcomes as skipped when the producing step failed", async () => {
     const specPath = await writeSpec(
       "blocked_outcomes",

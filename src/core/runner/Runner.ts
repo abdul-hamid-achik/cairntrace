@@ -701,9 +701,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       if (shouldShoot) {
         const rel = `screenshots/${pad(i + 1)}_${stepId}.png`;
         const screenshotPath = await writer.preparePath(rel, "screenshot");
-        const shot = await safe(() =>
-          opts.backend.screenshot({ path: screenshotPath }),
-        );
+        const shot = await opts.backend
+          .screenshot({ path: screenshotPath })
+          .catch((e: unknown) => ({
+            ok: false as const,
+            path: screenshotPath,
+            durationMs: 0,
+            error: `screenshot failed: ${(e as Error).message}`,
+          }));
         if (shot && shot.ok) {
           latestScreenshot = rel;
           stepArtifacts.push(rel);
@@ -713,9 +718,48 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
             stepId,
             path: rel,
           });
+        } else if (shot) {
+          // A producer may have left a truncated PNG behind before reporting
+          // failure. Never publish that file as usable evidence.
+          await writer.remove(rel);
+          const error =
+            shot.error ??
+            "screenshot capture failed without backend diagnostics";
+          const diagnosticRel = `diagnostics/${pad(i + 1)}_${stepId}_screenshot.json`;
+          await writer.writeJson(
+            diagnosticRel,
+            {
+              stepId,
+              path: rel,
+              error,
+              note: /timed out|rendering surface/i.test(error)
+                ? "The browser did not provide a composited frame before the hard deadline. On a headed or desktop-backed run, confirm the display is awake; on a headless runner, confirm Chromium has a rendering surface."
+                : "Screenshot capture is best-effort; the backend returned a concrete failure instead of silently dropping the artifact.",
+            },
+            "diagnostic",
+          );
+          latestDiagnostics = diagnosticRel;
+          diagnostics.push(diagnosticRel);
+          stepArtifacts.push(diagnosticRel);
+          await writer.appendEvent({
+            ts: new Date().toISOString(),
+            type: "artifact.screenshot",
+            action: "failed",
+            stepId,
+            path: rel,
+            error,
+          });
+
+          // Screenshots are best-effort evidence, never part of the contract.
+          // A capture timeout is recorded as a warning + missing-artifact note
+          // (the diagnostic above, with action:"failed" on the event) but must
+          // NOT fail the step or spec. A timeout does set the backend's wedged
+          // flag (see AgentBrowserAdapter); that flag only skips further
+          // OPTIONAL captures (console/network/trace/video). A genuinely wedged
+          // page fails naturally on its next real interaction.
         }
       }
-      if (stepStatus !== "passed") {
+      if (stepStatus !== "passed" && !opts.backend.isWedged?.()) {
         const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
         const captured = await captureDiagnostics(
           opts.backend,
@@ -763,6 +807,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
   }
 
+  // A child-timeout kill leaves the adapter's command channel untrustworthy.
+  // Keep the artifacts already written and skip only the OPTIONAL follow-up
+  // captures (console/network, trace/video) that would queue behind the same
+  // wedged daemon and turn one bounded failure into several more timeouts.
+  // Outcome evaluation is NOT gated on this — the contract always runs (see
+  // the evaluateOutcomes call below).
+  const backendWedgedAfterSteps = opts.backend.isWedged?.() === true;
+
   // Stop the process sampler (if it ever started) and reduce its samples into
   // diagnostics/process.{json,md}. Zero-cost when monitoring was disabled or
   // no browser PID ever became available.
@@ -796,12 +848,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   // Persist console + network even on full pass, so agents have evidence to skim.
-  const consoleEntries = await safe(() => opts.backend.getConsole()).then(
-    (x) => x ?? [],
-  );
-  const networkEntries = await safe(() =>
-    opts.backend.getNetworkRequests(),
-  ).then((x) => x ?? []);
+  const consoleEntries = backendWedgedAfterSteps
+    ? []
+    : await safe(() => opts.backend.getConsole()).then((x) => x ?? []);
+  const networkEntries = backendWedgedAfterSteps
+    ? []
+    : await safe(() => opts.backend.getNetworkRequests()).then((x) => x ?? []);
   const consoleErrors = consoleEntries.filter((e) => e.type === "error");
   await writer.writeText(
     "console/console.ndjson",
@@ -834,7 +886,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Stop trace recording and save to traces/<backend>-trace.zip.
   const traceRelPath = `traces/${backendName}-trace.zip`;
   let tracePath: string | undefined;
-  if (policy.trace !== "never") {
+  if (!backendWedgedAfterSteps && policy.trace !== "never") {
     const traceResult = await safe(async () =>
       opts.backend.stopTrace?.(await writer.preparePath(traceRelPath, "trace")),
     );
@@ -846,7 +898,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Stop video recording and save to videos/<backend>-video.webm.
   const videoRelPath = `videos/${backendName}-video.webm`;
   let videoPath: string | undefined;
-  if (policy.video !== "never") {
+  if (!backendWedgedAfterSteps && policy.video !== "never") {
     const videoResult = await safe(async () =>
       opts.backend.stopVideo?.(await writer.preparePath(videoRelPath, "video")),
     );
@@ -882,6 +934,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(processMetricsSummary ? { processMetrics: processMetricsSummary } : {}),
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
+  // Outcomes are the contract and are ALWAYS evaluated, even when the backend
+  // marked itself wedged after a screenshot/child timeout. The verifiers carry
+  // their own bounded deadlines, so a genuinely unresponsive page fails each
+  // check naturally instead of every outcome being silently voided; a page
+  // that merely lost its compositing surface (e.g. a slept display) still
+  // reports real pass/fail. The wedged flag only skips the optional artifact
+  // captures above (console/network/trace/video).
   const evaluated = await evaluateOutcomes(
     resolved.outcomes,
     opts.backend,

@@ -687,6 +687,35 @@ describe("daemon-busy retry", () => {
   });
 });
 
+describe("screenshot timeout", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("hard-bounds capture at 15s and retains a rendering-surface hint", async () => {
+    execaMock.mockResolvedValueOnce({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "screenshot-hang" });
+
+    const result = await adapter.screenshot({ path: "/tmp/hung.png" });
+
+    expect(result.ok).toBe(false);
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      ["--session", "screenshot-hang", "screenshot", "/tmp/hung.png"],
+      expect.objectContaining({ timeout: 15_000 }),
+    );
+    expect(result.error).toContain("no rendering surface");
+    expect(result.error).toContain("display asleep/headless");
+    expect(adapter.isWedged()).toBe(true);
+  });
+});
+
+
 describe("child timeout enforcement", () => {
   beforeEach(() => {
     execaMock.mockReset();

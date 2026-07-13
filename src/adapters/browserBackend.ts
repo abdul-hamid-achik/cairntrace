@@ -39,6 +39,8 @@ export interface ScreenshotResult {
   ok: boolean;
   path: string;
   durationMs: number;
+  /** Actionable capture failure. Backends should retain timeout/root-cause text. */
+  error?: string;
 }
 
 export interface NetworkEntry {
@@ -219,11 +221,12 @@ export interface BrowserBackend {
    * diagnostics, even the next step) should be skipped or shortcut — the agent's
    * sub-process has already been killed and the daemon is suspect, so another
    * invocation would either hang or just add wall time without yielding useful
-   * evidence. Backends that don't track this (Playwright, mock) return false.
+   * evidence. Backends that don't track this (for example, mock) return false.
    *
-   * Cairn flips this on after a child-timeout kill in the agent-browser adapter;
-   * the Runner's post-failure diagnostics phase checks it before issuing more
-   * commands, and the close path escalates to a daemon kill when it's set.
+   * Cairn flips this on after a child-timeout kill in agent-browser or a hard
+   * page-operation timeout in Playwright; the Runner's post-failure diagnostics
+   * phase checks it before issuing more commands, and agent-browser close
+   * escalates to a daemon kill when it is set.
    */
   isWedged?(): boolean;
 

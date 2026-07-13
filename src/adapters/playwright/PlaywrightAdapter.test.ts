@@ -366,6 +366,78 @@ describe("PlaywrightAdapter evaluate", () => {
   });
 });
 
+describe("PlaywrightAdapter screenshot", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("hard-bounds capture and reports the missing-rendering-surface cause", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    const screenshot = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { screenshot });
+
+    const pending = adapter.screenshot({ path: "/tmp/hung.png" });
+    await vi.advanceTimersByTimeAsync(15_000);
+    const result = await pending;
+
+    expect(screenshot).toHaveBeenCalledWith({
+      path: "/tmp/hung.png",
+      fullPage: false,
+      timeout: 15_000,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      path: "/tmp/hung.png",
+      error: expect.stringContaining("no rendering surface"),
+    });
+    expect(result.error).toContain("display asleep");
+    expect(adapter.isWedged()).toBe(true);
+  });
+
+  it("returns concrete non-timeout capture failures", async () => {
+    const adapter = new PlaywrightAdapter();
+    installPage(adapter, {
+      screenshot: vi.fn().mockRejectedValue(new Error("permission denied")),
+    });
+
+    await expect(
+      adapter.screenshot({ path: "/tmp/nope.png" }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: "screenshot capture failed: permission denied",
+    });
+    expect(adapter.isWedged()).toBe(false);
+  });
+
+  it("marks Playwright-native screenshot timeouts as wedged", async () => {
+    const adapter = new PlaywrightAdapter();
+    const close = vi.fn().mockResolvedValue(undefined);
+    (
+      adapter as unknown as {
+        browser: { close: typeof close };
+      }
+    ).browser = { close };
+    installPage(adapter, {
+      screenshot: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("page.screenshot: Timeout 15000ms exceeded"),
+        ),
+    });
+
+    await expect(
+      adapter.screenshot({ path: "/tmp/native-timeout.png" }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringContaining("no rendering surface"),
+    });
+    expect(adapter.isWedged()).toBe(true);
+    await adapter.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+});
+
 describe("PlaywrightAdapter wait", () => {
   afterEach(() => {
     vi.useRealTimers();

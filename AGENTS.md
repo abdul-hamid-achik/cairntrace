@@ -332,7 +332,13 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   backoff inside `invoke()`.
 - Every invocation carries a hard execa `timeout` (60s default; step-level
   `timeoutMs` + 5s grace when present) so a wedged daemon can never hang a
-  run — the child is killed and the step fails with a timeout error.
+  run — the child is killed and the step fails with a timeout error. Screenshot
+  capture uses a tighter 15s deadline and reports a rendering-surface/display
+  hint instead of publishing a partial PNG. A screenshot timeout is
+  best-effort: it records a warning + missing-artifact note but never fails the
+  step, spec, or outcomes; it only marks the backend wedged so the remaining
+  OPTIONAL captures (console/network/trace/video) are skipped — outcome
+  verifiers still run and a truly wedged page fails on its next interaction.
 - The session daemon's command queue is serial: a `close` issued mid-`wait`
   queues behind it, and a SIGTERM delivered while the daemon is busy is
   dropped (verified on 0.26–0.27). Signal-time cleanup therefore goes through
