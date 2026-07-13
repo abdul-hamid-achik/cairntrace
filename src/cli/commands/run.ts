@@ -28,8 +28,14 @@ import type {
   SkippedSpec,
 } from "../../core/schema/selection.v1";
 import type { ExitCode } from "../../core/schema/shared";
+import { writeAbortedBatchSummary } from "../abortedBatch";
 import { type BackendChoice, createBackend } from "../backendFactory";
-import { trackBackend, trackServices, trackWebServer } from "../cleanup";
+import {
+  trackAbortReporter,
+  trackBackend,
+  trackServices,
+  trackWebServer,
+} from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { log, reconfigureWithConfig } from "../logger";
@@ -554,6 +560,32 @@ async function runBatch(
   const format = resolveFormat(opts, "md");
   const interactive = format === "md" && isInteractive();
   const tStart = Date.now();
+  const startedAt = new Date(tStart).toISOString();
+  const artifactRoot = await resolveBatchArtifactRoot(specs[0]!, opts);
+  const completedByIndex: Array<RunResult | undefined> = Array.from({
+    length: specs.length,
+  });
+  const untrackAbortReporter = trackAbortReporter((signal) => {
+    const completed = completedByIndex.filter(
+      (result): result is RunResult => result !== undefined,
+    );
+    try {
+      const written = writeAbortedBatchSummary(artifactRoot, {
+        signal,
+        startedAt,
+        parallel,
+        requestedTotal: specs.length,
+        completed,
+      });
+      process.stderr.write(
+        `cairn: wrote aborted batch summary to ${written.path}\n`,
+      );
+    } catch (error) {
+      process.stderr.write(
+        `cairn: could not write aborted batch summary: ${(error as Error).message}\n`,
+      );
+    }
+  });
 
   if (interactive) {
     log.raw(
@@ -568,116 +600,180 @@ async function runBatch(
   // and network logs across specs). Playwright/Mock ignore the field but
   // it's harmless for them.
   const sessionRoot = `cairntrace-${process.pid}`;
-  const results = await runPool(
-    specs,
-    parallel,
-    async (specPath, idx, workerIndex) => {
-      const backend = createBackend({
-        ...backendOpts(opts, browser),
-        session: `${sessionRoot}-w${workerIndex}`,
-      });
-      const untrack = trackBackend(backend);
-      try {
-        const vars = parseVarFlags(opts.var);
-        const r = await runSpec({
-          specPath,
-          backend,
-          ...(opts.artifactRoot !== undefined
-            ? { artifactRoot: opts.artifactRoot }
-            : {}),
-          ...(opts.coldStart !== undefined
-            ? { coldStart: opts.coldStart }
-            : {}),
-          ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
-          ...(opts.config !== undefined ? { configPath: opts.config } : {}),
-          ...(Object.keys(vars).length > 0 ? { vars } : {}),
-          ...(servicesEvents !== undefined && servicesEvents.length > 0
-            ? { servicesEvents }
-            : {}),
-          workerIndex,
-          ...(opts.monitor ? { monitor: opts.monitor } : {}),
-          onArchiveRun: archiveRun,
+  let results: RunResult[];
+  try {
+    results = await runPool(
+      specs,
+      parallel,
+      async (specPath, idx, workerIndex) => {
+        const backend = createBackend({
+          ...backendOpts(opts, browser),
+          session: `${sessionRoot}-w${workerIndex}`,
         });
-        if (interactive) {
-          const mark =
-            r.status === "passed"
-              ? "\x1b[32m✓\x1b[0m"
-              : r.status === "failed"
-                ? "\x1b[31m✗\x1b[0m"
-                : "\x1b[33m·\x1b[0m";
-          log.raw(
-            `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
-              r.outcomes.filter((o) => o.status === "passed").length
-            }/${r.outcomes.length} outcomes)\n`,
-          );
-        }
-        // Auto-stash failed runs to fcheap (best-effort, never fatal).
-        if (r.status !== "passed") {
-          await maybeAutoStash(r.runDir, r.runId, r.spec.name, {
-            stashOnFailure: opts.stashOnFailure ?? false,
+        const untrack = trackBackend(backend);
+        try {
+          const vars = parseVarFlags(opts.var);
+          const r = await runSpec({
+            specPath,
+            backend,
+            ...(opts.artifactRoot !== undefined
+              ? { artifactRoot: opts.artifactRoot }
+              : {}),
+            ...(opts.coldStart !== undefined
+              ? { coldStart: opts.coldStart }
+              : {}),
+            ...(opts.env !== undefined
+              ? { environmentOverride: opts.env }
+              : {}),
+            ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+            ...(Object.keys(vars).length > 0 ? { vars } : {}),
+            ...(servicesEvents !== undefined && servicesEvents.length > 0
+              ? { servicesEvents }
+              : {}),
+            workerIndex,
+            ...(opts.monitor ? { monitor: opts.monitor } : {}),
+            onArchiveRun: archiveRun,
           });
-        }
-        // Auto-annotate runs into codemap (best-effort, never fatal).
-        // Pass + fail: emits one annotation per run with run context.
-        await maybeAutoAnnotateRun(
-          r,
-          await resolveAnnotateOpts(specPath, opts),
-        );
-        return r;
-      } catch (e) {
-        // Synthesize an errored RunResult so the batch survives.
-        const err = e as Error;
-        if (interactive) {
-          log.raw(
-            `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+          // runSpec returns only after run.json/report.json/manifest are durable.
+          // Record immediately, before best-effort annotation/stash work, so a
+          // signal can index every completed per-spec artifact directory.
+          completedByIndex[idx] = r;
+          if (interactive) {
+            const mark =
+              r.status === "passed"
+                ? "\x1b[32m✓\x1b[0m"
+                : r.status === "failed"
+                  ? "\x1b[31m✗\x1b[0m"
+                  : "\x1b[33m·\x1b[0m";
+            log.raw(
+              `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
+                r.outcomes.filter((o) => o.status === "passed").length
+              }/${r.outcomes.length} outcomes)\n`,
+            );
+          }
+          // Auto-stash failed runs to fcheap (best-effort, never fatal).
+          if (r.status !== "passed") {
+            await maybeAutoStash(r.runDir, r.runId, r.spec.name, {
+              stashOnFailure: opts.stashOnFailure ?? false,
+            });
+          }
+          // Auto-annotate runs into codemap (best-effort, never fatal).
+          // Pass + fail: emits one annotation per run with run context.
+          await maybeAutoAnnotateRun(
+            r,
+            await resolveAnnotateOpts(specPath, opts),
           );
+          return r;
+        } catch (e) {
+          // Synthesize an errored RunResult so the batch survives.
+          const err = e as Error;
+          if (interactive) {
+            log.raw(
+              `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+            );
+          }
+          const errored = synthesizeErroredResult(specPath, err);
+          completedByIndex[idx] = errored;
+          return errored;
+        } finally {
+          untrack();
+          await backend.close().catch(() => undefined);
         }
-        return synthesizeErroredResult(specPath, err);
-      } finally {
-        untrack();
-        await backend.close().catch(() => undefined);
-      }
-    },
-  );
-
-  const totalDurationMs = Date.now() - tStart;
-  const summary = {
-    total: results.length,
-    passed: results.filter((r) => r.status === "passed").length,
-    failed: results.filter((r) => r.status === "failed").length,
-    errored: results.filter((r) => r.status === "errored").length,
-  };
-  const exitCode: ExitCode =
-    summary.failed > 0 ? 1 : summary.errored > 0 ? 2 : 0;
-
-  const batch: BatchRunResult = {
-    $schema: "urn:cairntrace.dev:run-batch:v1",
-    version: "1",
-    parallel,
-    totalDurationMs,
-    summary,
-    results,
-    exitCode,
-  };
-
-  if (!(await stampIfGreen(opts, results))) {
-    return 2;
-  }
-  if (!(await writeJUnitIfRequested(opts, results))) {
-    return 2;
+      },
+    );
+  } catch (error) {
+    untrackAbortReporter();
+    throw error;
   }
 
-  if (format === "json" || format === "yaml") {
-    process.stdout.write(emit(format, batch, () => ""));
-  } else {
-    process.stdout.write(renderBatchMarkdown(batch));
-    process.stdout.write("\n");
-  }
+  // Keep the signal-time reporter registered through stamping, JUnit, and
+  // stdout drain. A signal in this final window must still preserve a durable
+  // batch summary instead of truncating the only aggregate result.
+  try {
+    const totalDurationMs = Date.now() - tStart;
+    const summary = {
+      total: results.length,
+      passed: results.filter((r) => r.status === "passed").length,
+      failed: results.filter((r) => r.status === "failed").length,
+      errored: results.filter((r) => r.status === "errored").length,
+    };
+    const exitCode: ExitCode = results.some((result) => result.exitCode === 6)
+      ? 6
+      : summary.failed > 0
+        ? 1
+        : summary.errored > 0
+          ? 2
+          : 0;
 
-  return exitCode;
+    const batch: BatchRunResult = {
+      $schema: "urn:cairntrace.dev:run-batch:v1",
+      version: "1",
+      parallel,
+      totalDurationMs,
+      summary,
+      results,
+      exitCode,
+    };
+
+    if (!(await stampIfGreen(opts, results))) {
+      return 2;
+    }
+    if (!(await writeJUnitIfRequested(opts, results))) {
+      return 2;
+    }
+
+    const output =
+      format === "json" || format === "yaml"
+        ? emit(format, batch, () => "")
+        : `${renderBatchMarkdown(batch)}\n`;
+    await writeStdoutFully(output);
+    return exitCode;
+  } finally {
+    untrackAbortReporter();
+  }
 }
 
 /* ----- helpers ----- */
+
+/** Wait for a piped stdout buffer to drain without forcing process exit. */
+async function writeStdoutFully(output: string): Promise<void> {
+  if (process.stdout.write(output)) return;
+  await new Promise<void>((resolveDrain, rejectDrain) => {
+    const onDrain = (): void => {
+      process.stdout.off("error", onError);
+      resolveDrain();
+    };
+    const onError = (error: Error): void => {
+      process.stdout.off("drain", onDrain);
+      rejectDrain(error);
+    };
+    process.stdout.once("drain", onDrain);
+    process.stdout.once("error", onError);
+  });
+}
+
+/** Resolve the same artifact root runSpec will use, without making parse errors fatal. */
+async function resolveBatchArtifactRoot(
+  firstSpec: string,
+  opts: RunCommandOptions,
+): Promise<string> {
+  if (opts.artifactRoot !== undefined) return resolve(opts.artifactRoot);
+  const fallback = join(homedir(), ".cairntrace", "runs");
+  try {
+    const firstSpecAbs = isAbsolutePath(firstSpec)
+      ? firstSpec
+      : resolve(process.cwd(), firstSpec);
+    const vars = parseVarFlags(opts.var);
+    const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
+      ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+      ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      ...(Object.keys(vars).length > 0 ? { vars } : {}),
+    });
+    return resolve(ctx.config?.artifactRoot ?? fallback);
+  } catch {
+    return resolve(fallback);
+  }
+}
 
 /**
  * When `secrets.provider: tvault` is configured, resolve the tvault project

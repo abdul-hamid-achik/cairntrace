@@ -1,10 +1,12 @@
 import { execa } from "execa";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RunResultSchema } from "../../core/schema/run.v1";
+import { BatchRunResultSchema } from "../../core/schema/runBatch.v1";
 import { SelectionResultSchema } from "../../core/schema/selection.v1";
+import { ContractHashMismatchError } from "../../core/parser/parseSpec";
 import {
   buildSelectionResult,
   expandSpecArgs,
@@ -272,6 +274,130 @@ steps:
     expect(stderr).toContain("...");
   });
 });
+
+describe("run stable exit codes (end-to-end via CLI)", () => {
+  it("writes an aborted batch summary and preserves completed reports on SIGTERM", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-abort-"));
+    const artifactRoot = join(dir, "runs");
+    const first = join(dir, "abort_first.yml");
+    const slow = join(dir, "abort_slow.yml");
+    await writeFile(
+      first,
+      `version: 1
+name: abort_first
+intent: finish before the interrupted spec
+outcomes:
+  - id: ok
+    description: mock console is clean
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+    await writeFile(
+      slow,
+      `version: 1
+name: abort_slow
+intent: remain in flight long enough to receive SIGTERM
+outcomes:
+  - id: never
+    description: wait for a file that is deliberately absent
+    verify:
+      file: { glob: ./never-created.txt, timeoutMs: 30000 }
+steps: []
+`,
+    );
+
+    const running = execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        first,
+        slow,
+        "--parallel",
+        "1",
+        "--mock",
+        "--no-web-server",
+        "--artifact-root",
+        artifactRoot,
+        "--json",
+      ],
+      { reject: false },
+    );
+
+    const completedRunDir = await waitForCompletedRun(
+      artifactRoot,
+      "abort_first",
+    );
+    // The next run directory is created only after runPool observed the
+    // first result, which is the point runBatch records completedByIndex.
+    await waitForRunDir(artifactRoot, "abort_slow");
+    running.kill("SIGTERM");
+    const terminated = await running;
+
+    expect(terminated.exitCode).toBe(143);
+    const entries = await readdir(artifactRoot);
+    const abortedFile = entries.find(
+      (entry) => entry.startsWith("aborted-") && entry.endsWith(".json"),
+    );
+    expect(abortedFile).toBeDefined();
+    const summary = JSON.parse(
+      await readFile(join(artifactRoot, abortedFile!), "utf8"),
+    );
+    expect(summary).toMatchObject({
+      aborted: true,
+      signal: "SIGTERM",
+      requestedTotal: 2,
+      pending: 1,
+      completed: [{ spec: { name: "abort_first" }, status: "passed" }],
+    });
+    expect(
+      JSON.parse(await readFile(join(completedRunDir, "report.json"), "utf8")),
+    ).toMatchObject({ run: { status: "passed" } });
+    expect(terminated.stderr).toContain("wrote aborted batch summary");
+  }, 10_000);
+});
+
+async function waitForCompletedRun(
+  artifactRoot: string,
+  specName: string,
+): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const entries = await readdir(artifactRoot, { withFileTypes: true }).catch(
+      () => [],
+    );
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.includes(`_${specName}_`)) {
+        continue;
+      }
+      const runDir = join(artifactRoot, entry.name);
+      const report = await readFile(join(runDir, "report.json"), "utf8").catch(
+        () => undefined,
+      );
+      if (report) return runDir;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for completed ${specName} run`);
+}
+
+async function waitForRunDir(
+  artifactRoot: string,
+  specName: string,
+): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const entries = await readdir(artifactRoot, { withFileTypes: true }).catch(
+      () => [],
+    );
+    const match = entries.find(
+      (entry) => entry.isDirectory() && entry.name.includes(`_${specName}_`),
+    );
+    if (match) return join(artifactRoot, match.name);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for in-flight ${specName} run`);
+}
 
 describe("tvault secrets injection", () => {
   const dirPromise = mkdtemp(join(tmpdir(), "cairntrace-tvault-run-"));

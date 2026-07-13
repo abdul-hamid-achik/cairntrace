@@ -35,7 +35,11 @@ export interface PruneOptions {
    * lost to a prune that ran before the run could be inspected). A failed
    * run that already sits inside the `keepRuns` window still counts against
    * this quota — it isn't protected AND kept for free. Runs with a missing,
-   * corrupt, or statusless run.json are treated as passed (prunable).
+   * corrupt, or statusless run.json (an aborted/in-flight run interrupted by
+   * SIGINT/SIGTERM before ArtifactWriter finished) are NOT carve-out protected
+   * and count toward the `keepRuns` window like an ordinary run — the newest
+   * interrupted run is preserved up to the cap, but old ones are pruned so
+   * they cannot accumulate unbounded.
    * Defaults to DEFAULT_KEEP_FAILED_RUNS (10) when unset; 0 disables the
    * carve-out entirely.
    */
@@ -53,7 +57,9 @@ export interface PruneOptions {
  * Whether a run dir's run.json reports a non-passed status ("failed" or
  * "errored"). A missing file, invalid JSON, or a run.json without a status
  * field all count as passed (prunable) — the carve-out only protects runs we
- * can positively confirm failed.
+ * can positively confirm failed. An interrupted run left mid-flight by a
+ * signal therefore counts toward the ordinary `keepRuns` window rather than
+ * being preserved forever.
  */
 async function isNonPassedRun(dir: string): Promise<boolean> {
   try {
@@ -65,8 +71,11 @@ async function isNonPassedRun(dir: string): Promise<boolean> {
   }
 }
 
+/** Signal-time partial batch summaries written at the artifact root. */
+const ABORTED_SUMMARY_PATTERN = /^aborted-.*\.json$/;
+
 export interface PruneResult {
-  /** Run ids removed, oldest first. */
+  /** Run ids (and swept aborted-batch summary filenames) removed, oldest first. */
   removed: string[];
   /** Total bytes reclaimed (best-effort walk before deletion). */
   freedBytes: number;
@@ -99,6 +108,7 @@ export async function pruneRuns(
     opts.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS,
   );
 
+  const keepCount = Math.max(0, opts.keepRuns);
   const result: PruneResult = { removed: [], freedBytes: 0, kept: 0 };
   for (const runs of bySpec.values()) {
     runs.sort(); // ISO prefix → chronological
@@ -122,7 +132,11 @@ export async function pruneRuns(
       }
     }
 
-    const cutoff = Math.max(0, runs.length - Math.max(0, opts.keepRuns));
+    // Newest `keepRuns` runs of ANY status (passed, failed, or interrupted)
+    // are kept; everything older is prunable unless the failed-run carve-out
+    // protects it. An interrupted/aborted run therefore counts toward the cap
+    // instead of being retained forever.
+    const cutoff = Math.max(0, runs.length - keepCount);
     for (let i = 0; i < runs.length; i++) {
       const runId = runs[i]!;
       if (i >= cutoff || protectedFailed.has(runId)) {
@@ -145,6 +159,24 @@ export async function pruneRuns(
       result.removed.push(runId);
     }
   }
+
+  // Sweep signal-time partial batch summaries (aborted-<ts>-<pid>.json at the
+  // root) under the same `keepRuns` cap so they cannot accumulate unbounded.
+  // These are small JSON files, not run dirs, so they are deleted directly
+  // (never archived) — the completed run dirs they reference are archived on
+  // their own schedule above.
+  const abortedSummaries = entries
+    .filter((entry) => ABORTED_SUMMARY_PATTERN.test(entry))
+    .toSorted(); // ISO-ish timestamp prefix → chronological
+  const abortedCutoff = Math.max(0, abortedSummaries.length - keepCount);
+  for (let i = 0; i < abortedCutoff; i++) {
+    const name = abortedSummaries[i]!;
+    const path = join(artifactRoot, name);
+    result.freedBytes += (await stat(path).catch(() => undefined))?.size ?? 0;
+    await rm(path, { force: true });
+    result.removed.push(name);
+  }
+
   result.removed.sort();
   return result;
 }

@@ -254,7 +254,15 @@ spec after every run (and via `cairn clean`). **Default is 3** when no
 `retention` block is set; `retention: { enabled: false }` keeps everything.
 `archiveToStash: true` archives pruned run dirs to fcheap before deletion
 (best-effort — if the archive fails the run is retained on disk so no
-artifacts are lost; `archiveTags: [...]` tags them).
+artifacts are lost; `archiveTags: [...]` tags them). Failed/errored runs get a
+`keepFailedRuns` carve-out (default 10) so a real failure's forensics survive
+routine pruning. Interrupted runs — a signal killed the process before
+`run.json` was written, leaving missing/corrupt/statusless metadata — are NOT
+carve-out protected; they count toward the `keepRuns` window like any other
+run, so the newest interrupted run is preserved up to the cap but old ones age
+out. Signal-time `aborted-<ts>-<pid>.json` partial-batch summaries at the
+artifact root are swept under the same `keepRuns` cap. `cairn clean --all`
+(keepRuns 0, keepFailedRuns 0) removes everything.
 
 ## Discovery sessions
 

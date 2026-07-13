@@ -36,3 +36,37 @@ export const BatchRunResultSchema = z
   })
   .strict();
 export type BatchRunResult = z.infer<typeof BatchRunResultSchema>;
+
+/**
+ * Signal-time partial summary for a batch that did not reach its normal
+ * BatchRunResult. This is written synchronously under artifactRoot before
+ * browser/service teardown. `completed` contains only fully-written RunResult
+ * objects and preserves their original input order.
+ */
+export const AbortedBatchRunResultSchema = z
+  .object({
+    $schema: z
+      .literal("urn:cairntrace.dev:run-batch-aborted:v1")
+      .default("urn:cairntrace.dev:run-batch-aborted:v1"),
+    version: z.literal("1"),
+    aborted: z.literal(true),
+    signal: z.enum(["SIGINT", "SIGTERM"]),
+    startedAt: z.string().datetime({ offset: true }),
+    abortedAt: z.string().datetime({ offset: true }),
+    parallel: z.number().int().positive(),
+    requestedTotal: z.number().int().positive(),
+    pending: z.number().int().nonnegative(),
+    completed: z.array(RunResultSchema),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.completed.length + value.pending !== value.requestedTotal) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["pending"],
+        message:
+          "completed.length + pending must equal requestedTotal for an aborted batch",
+      });
+    }
+  });
+export type AbortedBatchRunResult = z.infer<typeof AbortedBatchRunResultSchema>;

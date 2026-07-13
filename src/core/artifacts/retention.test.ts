@@ -13,17 +13,26 @@ import {
 async function makeRunDir(
   root: string,
   runId: string,
-  opts: { status?: string; corruptRunJson?: boolean } = {},
+  opts: {
+    status?: string;
+    corruptRunJson?: boolean;
+    statuslessRunJson?: boolean;
+    missingRunJson?: boolean;
+  } = {},
 ): Promise<void> {
   const dir = join(root, runId);
   await mkdir(join(dir, "snapshots"), { recursive: true });
-  const runJson = opts.corruptRunJson
-    ? "{not valid json"
-    : JSON.stringify({
-        runId,
-        ...(opts.status ? { status: opts.status } : {}),
-      });
-  await writeFile(join(dir, "run.json"), runJson);
+  if (!opts.missingRunJson) {
+    const runJson = opts.corruptRunJson
+      ? "{not valid json"
+      : JSON.stringify({
+          runId,
+          ...(!opts.statuslessRunJson
+            ? { status: opts.status ?? "passed" }
+            : {}),
+        });
+    await writeFile(join(dir, "run.json"), runJson);
+  }
   await writeFile(join(dir, "snapshots", "001_step.txt"), "snapshot body");
 }
 
@@ -206,25 +215,161 @@ describe("pruneRuns — failed-run carve-out", () => {
     ]);
   });
 
-  it("treats a missing status or corrupt run.json as passed (prunable)", async () => {
+  it("does not carve out missing, corrupt, or statusless run metadata", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "cairntrace-retention-statusless-"),
     );
-    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa"); // no status
+    // Three interrupted runs (no positively-confirmed failure) plus a passed
+    // run. Only the newest survives the keepRuns=1 window; the incomplete ones
+    // are NOT carve-out protected and are pruned as they age out.
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      missingRunJson: true,
+    });
     await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
       corruptRunJson: true,
     });
-    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc");
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc", {
+      statuslessRunJson: true,
+    });
+    await makeRunDir(root, "2026-06-04T10-00-00-000Z_spec_a_dddddd", {
+      status: "passed",
+    });
 
     const result = await pruneRuns(root, { keepRuns: 1, keepFailedRuns: 10 });
 
-    // Nothing is confirmed failed/errored, so the carve-out protects
-    // nothing beyond the ordinary keepRuns cutoff.
+    expect(result.removed).toEqual([
+      "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+    expect(result.kept).toBe(1);
+    expect((await readdir(root)).toSorted()).toEqual([
+      "2026-06-04T10-00-00-000Z_spec_a_dddddd",
+    ]);
+  });
+
+  it("preserves the newest interrupted run up to the keepRuns cap", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-incomplete-window-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "passed",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
+      status: "passed",
+    });
+    // Newest run is the SIGINT-interrupted one; keepRuns=2 preserves it plus
+    // one completed report, and prunes the oldest completed run.
+    await makeRunDir(root, "2026-06-03T10-00-00-000Z_spec_a_cccccc", {
+      missingRunJson: true,
+    });
+
+    const result = await pruneRuns(root, { keepRuns: 2, keepFailedRuns: 0 });
+
+    expect(result.removed).toEqual(["2026-06-01T10-00-00-000Z_spec_a_aaaaaa"]);
+    expect((await readdir(root)).toSorted()).toEqual([
+      "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+      "2026-06-03T10-00-00-000Z_spec_a_cccccc",
+    ]);
+  });
+
+  it("still prunes explicit passed runs outside the keep window", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-explicit-pass-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "passed",
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
+      status: "passed",
+    });
+
+    const result = await pruneRuns(root, { keepRuns: 1 });
+
+    expect(result.removed).toEqual(["2026-06-01T10-00-00-000Z_spec_a_aaaaaa"]);
+  });
+
+  it("allows a full clean (keepRuns: 0) to remove incomplete run directories", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-full-clean-"),
+    );
+    await makeRunDir(root, "2026-06-01T10-00-00-000Z_spec_a_aaaaaa", {
+      missingRunJson: true,
+    });
+    await makeRunDir(root, "2026-06-02T10-00-00-000Z_spec_a_bbbbbb", {
+      corruptRunJson: true,
+    });
+
+    const result = await pruneRuns(root, {
+      keepRuns: 0,
+      keepFailedRuns: 0,
+    });
+
     expect(result.removed).toEqual([
       "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
       "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
     ]);
-    expect(result.kept).toBe(1);
+    expect(result.kept).toBe(0);
+  });
+});
+
+describe("pruneRuns — aborted batch summaries", () => {
+  it("keeps the newest keepRuns aborted-*.json summaries and prunes older ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cairntrace-retention-aborted-"));
+    // Three signal-time partial-batch summaries at the artifact root, plus a
+    // run dir that must be left alone by the summary sweep.
+    await writeFile(
+      join(root, "aborted-2026-06-01T10-00-00-000Z-111.json"),
+      "{}",
+    );
+    await writeFile(
+      join(root, "aborted-2026-06-02T10-00-00-000Z-222.json"),
+      "{}",
+    );
+    await writeFile(
+      join(root, "aborted-2026-06-03T10-00-00-000Z-333.json"),
+      "{}",
+    );
+    await makeRunDir(root, "2026-06-04T10-00-00-000Z_spec_a_aaaaaa", {
+      status: "passed",
+    });
+
+    const result = await pruneRuns(root, { keepRuns: 1 });
+
+    // Oldest two summaries swept; newest kept. The passed run dir stays (within
+    // the keepRuns=1 window) and is not confused for a summary.
+    expect(result.removed).toEqual([
+      "aborted-2026-06-01T10-00-00-000Z-111.json",
+      "aborted-2026-06-02T10-00-00-000Z-222.json",
+    ]);
+    expect((await readdir(root)).toSorted()).toEqual([
+      "2026-06-04T10-00-00-000Z_spec_a_aaaaaa",
+      "aborted-2026-06-03T10-00-00-000Z-333.json",
+    ]);
+  });
+
+  it("keepRuns: 0 sweeps every aborted-*.json summary", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "cairntrace-retention-aborted-all-"),
+    );
+    await writeFile(
+      join(root, "aborted-2026-06-01T10-00-00-000Z-111.json"),
+      "{}",
+    );
+    await writeFile(
+      join(root, "aborted-2026-06-02T10-00-00-000Z-222.json"),
+      "{}",
+    );
+    await mkdir(join(root, "checkpoints"));
+
+    const result = await pruneRuns(root, { keepRuns: 0 });
+
+    expect(result.removed).toEqual([
+      "aborted-2026-06-01T10-00-00-000Z-111.json",
+      "aborted-2026-06-02T10-00-00-000Z-222.json",
+    ]);
+    // Foreign entries are still never touched.
+    expect(await readdir(root)).toEqual(["checkpoints"]);
   });
 
   it("defaults keepFailedRuns to DEFAULT_KEEP_FAILED_RUNS when omitted", async () => {

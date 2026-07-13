@@ -102,6 +102,20 @@ Per-step screenshots are off by default (`artifacts.screenshots: 'on-failure'` i
 
 `frames/frames.ndjson` is a per-step marker stream — one entry per step with timing, status, and a pointer to the screenshot. Used by `cairn studio` and any `replay --tui` flow.
 
+## Interrupted batch runs
+
+If a multi-spec `cairn run` receives SIGINT or SIGTERM, Cairntrace keeps every
+completed per-spec run directory and synchronously writes
+`aborted-<timestamp>-<pid>.json` at the artifact root before browser/service
+teardown. The strict `run-batch-aborted:v1` document records the signal,
+requested and pending counts, and the complete `RunResult` for each finished
+spec in input order. An in-flight run directory may be incomplete
+(missing/corrupt/statusless `run.json`); such runs are not carve-out protected
+and count toward the `retention.keepRuns` window like any other run, so the
+newest interrupted run is kept up to the cap but older ones age out. Stale
+`aborted-<timestamp>-<pid>.json` summaries are swept under the same cap. An
+explicit `cairn clean --all` removes everything.
+
 ## What never lands in an artifact pack
 
 The redaction layer catches these on the way out. If you see one anyway, that's a bug — file an issue.

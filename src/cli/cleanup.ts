@@ -18,7 +18,11 @@ import type { BrowserBackend } from "../adapters/browserBackend";
 const active = new Set<BrowserBackend>();
 const activeServers = new Set<WebServerLike>();
 const activeServices = new Set<ServicesLike>();
+const activeAbortReporters = new Set<AbortReporter>();
 let handlersInstalled = false;
+
+export type AbortSignal = "SIGINT" | "SIGTERM";
+export type AbortReporter = (signal: AbortSignal) => void;
 
 /** The slice of a webServer handle the signal path needs (see webServer.ts). */
 export interface WebServerLike {
@@ -72,6 +76,37 @@ export function trackServices(handle: ServicesLike): () => void {
 }
 
 /**
+ * Register a synchronous last-chance artifact reporter for SIGINT/SIGTERM.
+ * Reporters run once, before browser/server/service teardown, so they can
+ * persist already-completed batch results while the in-memory result index is
+ * still intact. They MUST NOT schedule async work: process.exit follows as
+ * soon as the synchronous signal cleanup returns.
+ */
+export function trackAbortReporter(reporter: AbortReporter): () => void {
+  activeAbortReporters.add(reporter);
+  installSignalHandlers();
+  return () => {
+    activeAbortReporters.delete(reporter);
+  };
+}
+
+/** Run abort reporters once, then tear down every tracked runtime resource. */
+export function cleanupAfterSignal(signal: AbortSignal): void {
+  // Clear first so re-entry (or a reporter calling cleanup defensively) cannot
+  // write duplicate summaries.
+  const reporters = [...activeAbortReporters];
+  activeAbortReporters.clear();
+  for (const reporter of reporters) {
+    try {
+      reporter(signal);
+    } catch {
+      // A partial-summary failure must not prevent browser/service cleanup.
+    }
+  }
+  closeTrackedBackends();
+}
+
+/**
  * Synchronously tear down every tracked backend. Backends without
  * `terminateSync` get a fire-and-forget `close()` — it may not finish before
  * exit, which is acceptable for backends whose browser dies with this
@@ -119,7 +154,7 @@ function installSignalHandlers(): void {
       process.stderr.write(
         `\ncairn: received ${signal}, closing browser session…\n`,
       );
-      closeTrackedBackends();
+      cleanupAfterSignal(signal);
       process.exit(code);
     });
   }

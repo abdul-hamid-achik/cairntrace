@@ -449,7 +449,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Core Files",
-        body: "Run directories include `run.{json,yaml,md}`, `report.html`, `report.json`, `agent_context.md`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, network logs, traces, and videos.",
+        body: "Run directories include `run.{json,yaml,md}`, `report.html`, `report.json`, `agent_context.md`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, network logs, traces, and videos. If a multi-spec run receives SIGINT/SIGTERM, completed run directories are retained and a strict `aborted-<timestamp>-<pid>.json` partial batch summary is written at the artifact root before teardown.",
       },
       {
         title: "Traces And Videos",

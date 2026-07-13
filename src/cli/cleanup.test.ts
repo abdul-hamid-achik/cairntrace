@@ -4,7 +4,9 @@ import type {
   InvocationResult,
 } from "../adapters/browserBackend";
 import {
+  cleanupAfterSignal,
   closeTrackedBackends,
+  trackAbortReporter,
   trackBackend,
   trackServices,
   trackWebServer,
@@ -240,5 +242,39 @@ describe("cleanup registry — mixed tracking (backend + webServer + services)",
     expect(backendCalls).toBe(1);
     expect(webServerCalls).toBe(1);
     expect(servicesCalls).toBe(1);
+  });
+});
+
+describe("cleanup registry — abort reporters", () => {
+  it("runs reporters once before backend/server/service teardown", () => {
+    const calls: string[] = [];
+    trackAbortReporter((signal) => calls.push(`report:${signal}`));
+    trackBackend(fakeBackend({ terminateSync: () => calls.push("backend") }));
+    trackWebServer({ terminateSync: () => calls.push("webServer") });
+    trackServices({ terminateSync: () => calls.push("services") });
+
+    cleanupAfterSignal("SIGTERM");
+    cleanupAfterSignal("SIGTERM");
+
+    expect(calls).toEqual([
+      "report:SIGTERM",
+      "backend",
+      "webServer",
+      "services",
+    ]);
+  });
+
+  it("can untrack a reporter and survives a throwing reporter", () => {
+    const calls: string[] = [];
+    const untrack = trackAbortReporter(() => calls.push("untracked"));
+    untrack();
+    trackAbortReporter(() => {
+      calls.push("throwing");
+      throw new Error("disk full");
+    });
+    trackAbortReporter(() => calls.push("after"));
+
+    expect(() => cleanupAfterSignal("SIGINT")).not.toThrow();
+    expect(calls).toEqual(["throwing", "after"]);
   });
 });
