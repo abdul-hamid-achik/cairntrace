@@ -2,7 +2,8 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
     "src/mcp/server.ts",
-    "bin/cairn"
+    "bin/cairn",
+    "docs/.vitepress/theme/index.ts"
   ],
   "project": ["src/**/*.ts", "bin/cairn"],
   "ignore": [

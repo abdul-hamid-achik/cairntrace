@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@vercel/analytics": "^2.0.1",
     "commander": "^12.1.0",
     "execa": "^9.5.1",
     "playwright": "^1.60.0",
