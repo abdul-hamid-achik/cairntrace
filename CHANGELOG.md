@@ -4,6 +4,58 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.38.0]
+
+Read honesty: a backend that could not observe the page used to answer with a
+value that satisfied the assertion. Every absence-shaped outcome — "no console
+errors", "no failed requests", "this text is absent", "zero elements match" —
+could therefore be certified against a page nobody successfully read, and
+because outcomes are evaluated after the steps already passed, no step failure
+flagged it. **This release turns some currently-green specs red. That is the
+fix working**: those specs were passing on an unread page. There is no
+deprecation window, because a deprecation window for "we stopped lying to you"
+is just a longer lie.
+
+Field-verified against a real app (liftclub): `notText` and `noFailedRequests`
+outcomes pass unchanged; the example suite is byte-identical before and after,
+apart from two specs that were already red.
+
+### Fixed
+
+- **Failed reads no longer report a green verdict.** Every backend read that
+  could not observe the page degraded to a falsy value — `""`, `0`, `[]` — and
+  each of those satisfies an absence-shaped assertion. A wedged daemon made
+  `console.errorsMax: 0` and `noFailedRequests` pass over a page whose console
+  and network log were never read; because outcomes are evaluated after the
+  steps already succeeded, no step failure flagged it and the green was the
+  only thing the user saw. `getText`, `getCount`, `getConsole`, `getErrors` and
+  `getNetworkRequests` now throw on a failed read. Verifiers already surfaced
+  throws as failed outcomes (`OutcomeEvaluator`) and step failures
+  (`Runner`'s `when:` guard), and the Runner's `console.ndjson` dump keeps its
+  best-effort `safe()` wrapper — only the verdict paths changed.
+- **Absence assertions see every match in a region, not just the first.**
+  `region:` may legitimately match several elements — `notText`'s guard admits
+  `count > 1` — but agent-browser's `get text` returned only match #1 while
+  Playwright's `innerText()` threw a strict-mode violation on 2+. An absence
+  assertion therefore reported "confirmed absent" for text sitting in match #2.
+  Both backends now read every match and join it the way Playwright's
+  `allInnerTexts()` does, so they hand the text verifiers an identical
+  haystack. The Playwright path waits for the first match explicitly, since
+  `allInnerTexts()` does not auto-wait the way `innerText()` did.
+- **Unreadable agent-browser output is an error, not an empty result.**
+  `parseEnvelope` returned `[]` on unparseable stdout, a missing key, or a
+  non-array value, on the reasoning that "verifiers should never crash" — but
+  every caller feeds an absence-shaped verifier, so `[]` was itself the crash,
+  reported as a pass. A successful `--json` read always emits its key (an empty
+  console is `{"data":{"messages":[]}}`, never blank stdout), so these shapes
+  cannot occur on a read that happened. A genuinely empty result set still
+  returns `[]`.
+- **`examples/flows/02-row-count.yml` and `07-config-driven.yml` were red.**
+  Both counted `role: row` unscoped and expected 3, but `role: row` expands to
+  `[role=row], tr` and the demo table's `<thead>` row is a row by ARIA
+  semantics too — the true count is 4. Both now scope to `in_region: tbody`,
+  which is what "3 inventory rows" always meant.
+
 ## [1.37.0]
 
 Liftclub field hardening: silent framework click drops now recover or fail at
