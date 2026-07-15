@@ -297,11 +297,34 @@ export class PlaywrightAdapter implements BrowserBackend {
     // Cairntrace's `text` verifier passes the sentinel "page" for whole-body text.
     const target = selector === "page" ? "body" : selector;
     try {
-      return await page.locator(target).innerText({
-        timeout: this.opts.defaultTimeoutMs,
-      });
-    } catch {
-      return "";
+      const locator = page.locator(target);
+      // A region may legitimately match several elements — notText's guard
+      // admits count > 1 — but innerText() is strict-mode and throws on 2+,
+      // while agent-browser's `get text` silently returns only the first
+      // match. Read every match so both backends see the same haystack and an
+      // absence assertion can't confirm "absent" over match #1 while the text
+      // sits in match #2.
+      //
+      // allInnerTexts() resolves immediately instead of auto-waiting the way
+      // innerText() does, so wait for the first match explicitly: without it a
+      // region that simply hasn't hydrated yet would read as empty — the same
+      // vacuous pass this method exists to prevent, in a new costume.
+      await locator
+        .first()
+        .waitFor({ state: "attached", timeout: this.opts.defaultTimeoutMs });
+      return (await locator.allInnerTexts()).join("\n");
+    } catch (e) {
+      // Never degrade to "": `notText` reads an empty haystack as "confirmed
+      // absent" and `when: notText:…` reads it as satisfied, so a region that
+      // merely hydrated too slowly would report a green verdict. A region that
+      // exists but holds no text returns "" from innerText without throwing,
+      // so only real failures (timeout, detached node, bad selector) land here.
+      throw new Error(
+        `could not read text from ${JSON.stringify(selector)}: ${
+          (e as Error).message
+        }`,
+        { cause: e },
+      );
     }
   }
 
@@ -309,8 +332,17 @@ export class PlaywrightAdapter implements BrowserBackend {
     const page = await this.ensurePage();
     try {
       return await page.locator(selector).count();
-    } catch {
-      return 0;
+    } catch (e) {
+      // A selector that legitimately matches nothing resolves to 0 without
+      // throwing, so anything landing here is malformed or unsupported — never
+      // 0, which `count: {equals: 0}` and `atMost` read as a satisfied
+      // assertion.
+      throw new Error(
+        `could not count elements matching ${JSON.stringify(selector)}: ${
+          (e as Error).message
+        }`,
+        { cause: e },
+      );
     }
   }
 

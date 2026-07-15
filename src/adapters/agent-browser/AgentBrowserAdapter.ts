@@ -34,6 +34,7 @@ import {
 } from "./commandBuilder";
 import {
   buildGlobalArgs,
+  type ElementBox,
   parseBoxEnvelope,
   parseEnvelope,
   parseJsonArray,
@@ -346,14 +347,73 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // The text verifier passes the special token "page" for whole-page text;
     // translate that to a real selector so agent-browser can resolve it.
     const real = selector === "page" ? "body" : selector;
-    const r = await this.invoke(["get", "text", real]);
-    return r.stdout;
+
+    // `get text` returns only the FIRST match, but a region may legitimately
+    // match several elements (notText's guard admits count > 1). An absence
+    // assertion over match #1 would report "confirmed absent" for text sitting
+    // in match #2, so read every match — the same haystack Playwright's
+    // allInnerTexts() produces. A `@ref` already addresses one resolved
+    // element and is not a CSS selector, so it keeps the direct path.
+    const r = real.startsWith("@")
+      ? await this.invoke(["get", "text", real])
+      : await this.evaluate(allMatchesTextJs(real));
+
+    // A failed read must never degrade to "": `notText` reads an empty
+    // haystack as "confirmed absent" and `when: notText:…` reads it as
+    // satisfied, so both would report a green verdict over text nobody
+    // successfully looked at. An element that exists but holds no text still
+    // exits 0 with empty stdout, so only real failures land here.
+    if (!r.ok) {
+      throw new Error(
+        `could not read text from ${JSON.stringify(selector)}: ${
+          r.stderr.trim() || `exit ${r.exitCode}`
+        }`,
+      );
+    }
+    if (real.startsWith("@")) return r.stdout;
+
+    // `eval` hands back the JSON-encoded return value.
+    try {
+      const parsed: unknown = JSON.parse(r.stdout.trim());
+      if (typeof parsed !== "string") {
+        throw new Error(`expected a string, got ${typeof parsed}`);
+      }
+      return parsed;
+    } catch (e) {
+      throw new Error(
+        `could not read text from ${JSON.stringify(selector)}: unreadable \`eval\` result ${JSON.stringify(
+          r.stdout.trim().slice(0, 120),
+        )}: ${(e as Error).message}`,
+        { cause: e },
+      );
+    }
   }
 
   async getCount(selector: string): Promise<number> {
     const r = await this.invoke(["get", "count", selector]);
-    const n = Number(r.stdout.trim());
-    return Number.isFinite(n) ? n : 0;
+    // A selector that legitimately matches nothing exits 0 with "0", so a
+    // failed invocation is a real error — never 0, which `count: {equals: 0}`
+    // and `atMost` would read as a satisfied assertion.
+    if (!r.ok) {
+      throw new Error(
+        `could not count elements matching ${JSON.stringify(selector)}: ${
+          r.stderr.trim() || `exit ${r.exitCode}`
+        }`,
+      );
+    }
+    // Blank stdout must be rejected before Number(): `Number("")` is 0, which
+    // Number.isFinite accepts, so an exit-0-but-silent invocation would
+    // otherwise slip through as a clean "0 elements".
+    const raw = r.stdout.trim();
+    const n = raw === "" ? Number.NaN : Number(raw);
+    if (!Number.isFinite(n)) {
+      throw new Error(
+        `could not count elements matching ${JSON.stringify(selector)}: expected a number from \`get count\`, got ${JSON.stringify(
+          raw,
+        )}`,
+      );
+    }
+    return n;
   }
 
   /* ----- network ----- */
@@ -365,7 +425,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if (filter?.type) argv.push("--type", filter.type);
     if (filter?.filter) argv.push("--filter", filter.filter);
     const r = await this.invoke(argv);
-    if (!r.ok) return [];
+    // Degrading to [] reports "no matching requests observed" for a page whose
+    // network log was never read — and `noFailedRequests` reads an empty set as
+    // a PASS, so a run in which every request 500'd would certify green.
+    if (!r.ok) {
+      throw new Error(
+        `could not read network requests: ${
+          r.stderr.trim() || `exit ${r.exitCode}`
+        }`,
+      );
+    }
     return parseEnvelope<NetworkEntry>(r.stdout, "requests");
   }
 
@@ -386,7 +455,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   async getConsole(): Promise<ConsoleEntry[]> {
     const r = await this.invoke(["console", "--json"]);
-    if (!r.ok) return [];
+    // Degrading to [] here would report "no console messages" for a page whose
+    // console was never read. The Runner's console.ndjson dump wraps this in
+    // `safe()` and keeps its best-effort behaviour; verdict paths must not.
+    if (!r.ok) {
+      throw new Error(
+        `could not read the console log: ${
+          r.stderr.trim() || `exit ${r.exitCode}`
+        }`,
+      );
+    }
     return parseEnvelope<ConsoleEntry>(r.stdout, "messages");
   }
 
@@ -404,17 +482,38 @@ export class AgentBrowserAdapter implements BrowserBackend {
       this.invoke(["errors", "--json"]),
       this.invoke(["console", "--json"]),
     ]);
-    const pageErrors: ConsoleEntry[] = pageErrorsR.ok
-      ? parseEnvelope<ConsoleEntry>(pageErrorsR.stdout, "errors").map((e) => ({
-          ...e,
-          type: e.type ?? "error",
-        }))
-      : [];
-    const consoleErrors: ConsoleEntry[] = consoleR.ok
-      ? parseEnvelope<ConsoleEntry>(consoleR.stdout, "messages").filter(
-          (e) => e.type === "error",
-        )
-      : [];
+    // Both probes must succeed. Degrading either to [] reports "0 errors" for
+    // a page whose errors were never observed, and `console.errorsMax` reads
+    // that as a PASS — a green verdict that needs no step to fail, because
+    // outcomes are evaluated after the steps already succeeded. Playwright's
+    // getErrors() reads an in-memory log and cannot fail this way, so
+    // swallowing here would also break the very cross-backend agreement this
+    // method exists to guarantee.
+    if (!pageErrorsR.ok) {
+      throw new Error(
+        `could not read page errors: ${
+          pageErrorsR.stderr.trim() || `exit ${pageErrorsR.exitCode}`
+        }`,
+      );
+    }
+    if (!consoleR.ok) {
+      throw new Error(
+        `could not read the console log: ${
+          consoleR.stderr.trim() || `exit ${consoleR.exitCode}`
+        }`,
+      );
+    }
+    const pageErrors: ConsoleEntry[] = parseEnvelope<ConsoleEntry>(
+      pageErrorsR.stdout,
+      "errors",
+    ).map((e) => ({
+      ...e,
+      type: e.type ?? "error",
+    }));
+    const consoleErrors: ConsoleEntry[] = parseEnvelope<ConsoleEntry>(
+      consoleR.stdout,
+      "messages",
+    ).filter((e) => e.type === "error");
     return [...pageErrors, ...consoleErrors];
   }
 
@@ -1232,9 +1331,14 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
   }
 
+  /** `target` is an already-formed `@ref` or a raw CSS selector — `get box` takes either. */
+  private async readBox(target: string): Promise<ElementBox | undefined> {
+    const r = await this.invoke(["get", "box", target, "--json"]);
+    return r.ok ? parseBoxEnvelope(r.stdout) : undefined;
+  }
+
   private async checkOffViewportOnce(ref: string): Promise<string | undefined> {
-    const boxResult = await this.invoke(["get", "box", `@${ref}`, "--json"]);
-    const box = boxResult.ok ? parseBoxEnvelope(boxResult.stdout) : undefined;
+    const box = await this.readBox(`@${ref}`);
     if (!box) return undefined;
 
     const metricsResult = await this.invoke([
@@ -1803,6 +1907,22 @@ function isFailedBatchResult(result: unknown): boolean {
     record["error"] !== null &&
     record["error"] !== "";
   return !explicitlySucceeded || hasError;
+}
+
+/**
+ * JS for reading the text of EVERY element matching `selector`, joined the way
+ * Playwright's allInnerTexts().join("\n") joins them, so the two backends hand
+ * the text verifiers an identical haystack.
+ *
+ * A malformed selector must throw rather than resolve to an empty string:
+ * querySelectorAll raises SyntaxError, which surfaces as a failed `eval` and
+ * therefore a failed read — never a silent "" that `notText` would report as
+ * "confirmed absent".
+ */
+export function allMatchesTextJs(selector: string): string {
+  return `(() => Array.from(document.querySelectorAll(${JSON.stringify(
+    selector,
+  )})).map((el) => el.innerText ?? el.textContent ?? '').join('\\n'))()`;
 }
 
 /**

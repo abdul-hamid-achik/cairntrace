@@ -7,22 +7,47 @@ import type { AgentBrowserOptions } from "./types";
 
 /**
  * agent-browser wraps JSON results in `{ success, data: { <key>: [...] }, error }`.
- * Pull the inner array out by key. Returns `[]` on any parse failure or
- * mismatch — verifiers should never crash because of an unexpected output shape.
+ * Pull the inner array out by key.
+ *
+ * Throws on anything that isn't a well-formed envelope. A successful `--json`
+ * command always emits the envelope with its key present — an empty result is
+ * `{"data":{"messages":[]}}`, never blank stdout — so unreadable output means
+ * the read did not happen. Every caller feeds a verdict, and the verdicts are
+ * absence-shaped: `console.errorsMax` and `noFailedRequests` both read an empty
+ * set as a PASS, so returning [] here would certify a page nobody read as
+ * healthy. Crashing the verifier is the point: the Runner and OutcomeEvaluator
+ * turn a throw into a failed step/outcome with this message attached.
  */
 export function parseEnvelope<T>(stdout: string, key: string): T[] {
   const trimmed = stdout.trim();
-  if (!trimmed) return [];
+  if (!trimmed) {
+    throw new Error(
+      `expected a JSON envelope containing ${JSON.stringify(key)}, got empty output`,
+    );
+  }
+  let parsed: { success?: boolean; data?: Record<string, unknown> };
   try {
-    const parsed = JSON.parse(trimmed) as {
+    parsed = JSON.parse(trimmed) as {
       success?: boolean;
       data?: Record<string, unknown>;
     };
-    const inner = parsed?.data?.[key];
-    return Array.isArray(inner) ? (inner as T[]) : [];
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(
+      `could not parse the JSON envelope for ${JSON.stringify(key)}: ${
+        (e as Error).message
+      } (output: ${JSON.stringify(trimmed.slice(0, 120))})`,
+      { cause: e },
+    );
   }
+  const inner = parsed?.data?.[key];
+  if (!Array.isArray(inner)) {
+    throw new Error(
+      `the JSON envelope has no ${JSON.stringify(key)} array (got ${JSON.stringify(
+        inner === undefined ? "nothing" : inner,
+      ).slice(0, 80)})`,
+    );
+  }
+  return inner as T[];
 }
 
 /**

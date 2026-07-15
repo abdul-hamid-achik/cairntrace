@@ -11,10 +11,14 @@ preconditions:
     - run: "echo demo-app must be running on :8787"
 outcomes:
   - id: three_inventory_rows
-    description: the inventory table has exactly 3 rows
+    description: the inventory table body has exactly 3 data rows
     verify:
       count:
         role: row
+        # Scoped to tbody on purpose: `role: row` expands to `[role=row], tr`,
+        # and the header `<tr>` in <thead> is a row by ARIA semantics too — so
+        # an unscoped count is 4, not 3. Say "data rows" when that's the intent.
+        in_region: tbody
         equals: 3
   - id: no_failed_requests
     description: nothing on this page should 4xx/5xx

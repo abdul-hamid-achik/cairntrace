@@ -91,6 +91,72 @@ describe("evaluateOutcomes (dispatcher)", () => {
     expect(r.evaluation.expected).toContain("endsWith");
   });
 
+  /**
+   * A backend that cannot read the page must never produce a passing outcome.
+   * Every verifier below asserts the ABSENCE of something (no errors, no text,
+   * no matching elements), so a backend that degrades a failed read to a falsy
+   * value ("" / 0 / []) satisfies the assertion vacuously. These outcomes are
+   * evaluated after the steps already succeeded, so nothing else in the run
+   * would flag the lie — the green would be the only thing the user sees.
+   */
+  it("console.errorsMax does not pass when the backend cannot read errors", async () => {
+    const r = await eval1(
+      [outcome("c", { console: { errorsMax: 0 } })],
+      mockBackend({
+        getErrors: async () => {
+          throw new Error("could not read page errors: daemon unreachable");
+        },
+      }),
+      ctx(),
+    );
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).toContain("daemon unreachable");
+  });
+
+  it("notText does not report 'confirmed absent' when the backend cannot read text", async () => {
+    const r = await eval1(
+      [outcome("nt", { notText: { contains: "Error" } })],
+      mockBackend({
+        getText: async () => {
+          throw new Error('could not read text from "page": timeout');
+        },
+      }),
+      ctx(),
+    );
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).not.toContain("confirmed absent");
+  });
+
+  it("count.equals:0 does not pass when the backend cannot count", async () => {
+    const r = await eval1(
+      [outcome("ct", { count: { selector: ".row", equals: 0 } })],
+      mockBackend({
+        getCount: async () => {
+          throw new Error('could not count elements matching ".row": timeout');
+        },
+      }),
+      ctx(),
+    );
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).not.toContain("observed 0 element");
+  });
+
+  it("noFailedRequests does not pass when the backend cannot read the network log", async () => {
+    const r = await eval1(
+      [outcome("nf", { noFailedRequests: { urlContains: "/api/" } })],
+      mockBackend({
+        getNetworkRequests: async () => {
+          throw new Error(
+            "could not read network requests: daemon unreachable",
+          );
+        },
+      }),
+      ctx(),
+    );
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).not.toContain("no matching requests observed");
+  });
+
   it("routes console → evaluateConsole (errorsMax budget)", async () => {
     const good = await eval1(
       [outcome("c", { console: { errorsMax: 0 } })],

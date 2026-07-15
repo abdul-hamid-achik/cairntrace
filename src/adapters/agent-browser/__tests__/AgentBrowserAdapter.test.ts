@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSnapshot } from "../../../core/healer/snapshotParser";
 import {
   AgentBrowserAdapter,
+  allMatchesTextJs,
   buildLocatorDiagnostics,
   collapseNestedMatches,
   matchingSnapshotIndices,
@@ -2215,5 +2216,197 @@ describe("buildLocatorDiagnostics", () => {
         [],
       ),
     ).toEqual(["snapshot was empty"]);
+  });
+});
+
+describe("getText reads every match, not just the first", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("reads all matches so an absence assertion can't miss text in match #2", async () => {
+    // `get text` returns only the first match, so a region matching two nodes
+    // let notText report "confirmed absent" for text sitting in the second.
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify("A\nB"),
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "multimatch" });
+
+    await expect(adapter.getText(".t")).resolves.toBe("A\nB");
+    const argv = execaMock.mock.calls[0]?.[1] as string[];
+    expect(argv).toContain("eval");
+    expect(argv.join(" ")).toContain("querySelectorAll");
+  });
+
+  it("maps the 'page' sentinel onto body", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify("hello"),
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "multimatch" });
+
+    await adapter.getText("page");
+    const argv = execaMock.mock.calls[0]?.[1] as string[] | undefined;
+    expect(argv?.join(" ")).toContain('"body"');
+  });
+
+  it("keeps the direct read for a @ref, which resolves one element and is not a CSS selector", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "just me", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "multimatch" });
+
+    await expect(adapter.getText("@e7")).resolves.toBe("just me");
+    expect(execaMock.mock.calls[0]?.[1] as string[]).toEqual(
+      expect.arrayContaining(["get", "text", "@e7"]),
+    );
+  });
+
+  it("throws rather than returning '' when the eval result is unreadable", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "not json at all",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "multimatch" });
+
+    await expect(adapter.getText(".t")).rejects.toThrow(
+      /unreadable `eval` result/,
+    );
+  });
+
+  it("builds JS that joins every match the way Playwright's allInnerTexts does", () => {
+    const js = allMatchesTextJs(".t");
+    expect(js).toContain('querySelectorAll(".t")');
+    expect(js).toContain("join('\\n')");
+  });
+});
+
+describe("read failures fail loudly instead of reporting a green verdict", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("getText throws instead of degrading to '' — an empty haystack reads as 'confirmed absent'", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "✗ Element not found.",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getText("#toast")).rejects.toThrow(
+      /could not read text from "#toast".*Element not found/s,
+    );
+  });
+
+  it("getCount throws on a failed invocation instead of degrading to 0", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "✗ Invalid selector.",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getCount("::bogus")).rejects.toThrow(
+      /could not count elements matching "::bogus".*Invalid selector/s,
+    );
+  });
+
+  it("getCount still returns 0 for a selector that legitimately matches nothing", async () => {
+    // `get count` exits 0 with "0" — the notText region guard depends on this
+    // staying a value rather than becoming a throw.
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "0\n", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getCount("#absent")).resolves.toBe(0);
+  });
+
+  it("getCount throws when stdout is not a number rather than silently reporting 0", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "not-a-number",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getCount("#weird")).rejects.toThrow(
+      /expected a number from `get count`, got "not-a-number"/,
+    );
+  });
+
+  it("getErrors throws when the page-errors probe fails — [] would report 'no errors' for an unread page", async () => {
+    // `errors` fails, `console` succeeds: the old code returned the console
+    // half and silently dropped the page-error half, so console.errorsMax:0
+    // passed over errors nobody observed.
+    execaMock.mockImplementation((_bin: string, argv: string[]) =>
+      Promise.resolve(
+        argv.includes("errors")
+          ? { exitCode: 1, stdout: "", stderr: "daemon unreachable" }
+          : {
+              exitCode: 0,
+              stdout: JSON.stringify({ messages: [] }),
+              stderr: "",
+            },
+      ),
+    );
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getErrors()).rejects.toThrow(
+      /could not read page errors.*daemon unreachable/s,
+    );
+  });
+
+  it("getErrors throws when the console probe fails", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) =>
+      Promise.resolve(
+        argv.includes("console")
+          ? { exitCode: 1, stdout: "", stderr: "daemon unreachable" }
+          : { exitCode: 0, stdout: JSON.stringify({ errors: [] }), stderr: "" },
+      ),
+    );
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getErrors()).rejects.toThrow(
+      /could not read the console log.*daemon unreachable/s,
+    );
+  });
+
+  it("getConsole throws rather than reporting an empty console it never read", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "daemon unreachable",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getConsole()).rejects.toThrow(
+      /could not read the console log.*daemon unreachable/s,
+    );
+  });
+
+  it("getCount throws on exit-0-with-blank-stdout instead of reporting a clean 0", async () => {
+    // Number("") is 0 and Number.isFinite(0) is true, so a silent invocation
+    // would otherwise satisfy `count: {equals: 0}` without counting anything.
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "  \n", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getCount("#quiet")).rejects.toThrow(
+      /expected a number from `get count`, got ""/,
+    );
+  });
+
+  it("getNetworkRequests throws instead of degrading to [] — noFailedRequests reads an empty set as a PASS", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 1,
+      stdout: "",
+      stderr: "daemon unreachable",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-fail" });
+
+    await expect(adapter.getNetworkRequests()).rejects.toThrow(
+      /could not read network requests.*daemon unreachable/s,
+    );
   });
 });

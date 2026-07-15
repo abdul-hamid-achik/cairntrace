@@ -21,28 +21,50 @@ describe("parseEnvelope", () => {
     ]);
   });
 
-  it("returns [] for empty stdout", () => {
-    expect(parseEnvelope("", "requests")).toEqual([]);
-    expect(parseEnvelope("   \n\t  ", "requests")).toEqual([]);
-  });
-
-  it("returns [] on JSON parse failure (don't crash verifiers)", () => {
-    expect(parseEnvelope("not json", "requests")).toEqual([]);
-    expect(parseEnvelope('{"truncated', "requests")).toEqual([]);
-  });
-
-  it("returns [] when the inner key is missing", () => {
-    expect(parseEnvelope('{"success":true,"data":{}}', "requests")).toEqual([]);
-    expect(
-      parseEnvelope('{"success":true,"data":{"messages":[]}}', "requests"),
-    ).toEqual([]);
-  });
-
-  it("returns [] when the envelope value is not an array (defensive)", () => {
-    expect(parseEnvelope('{"data":{"requests":"oops"}}', "requests")).toEqual(
-      [],
+  // These four previously returned [] "so verifiers never crash". Crashing is
+  // the correct outcome: every caller feeds an absence-shaped verifier
+  // (console.errorsMax, noFailedRequests) that reads an empty set as a PASS, so
+  // [] certified a page nobody read as healthy. A real empty result arrives as
+  // {"data":{"messages":[]}} — the key is always present — so none of the
+  // shapes below can occur on a successful read.
+  it("throws for empty stdout — a successful --json read always emits an envelope", () => {
+    expect(() => parseEnvelope("", "requests")).toThrow(/got empty output/);
+    expect(() => parseEnvelope("   \n\t  ", "requests")).toThrow(
+      /got empty output/,
     );
-    expect(parseEnvelope('{"data":{"requests":null}}', "requests")).toEqual([]);
+  });
+
+  it("throws on JSON parse failure rather than reporting an empty result", () => {
+    expect(() => parseEnvelope("not json", "requests")).toThrow(
+      /could not parse the JSON envelope for "requests"/,
+    );
+    expect(() => parseEnvelope('{"truncated', "requests")).toThrow(
+      /could not parse the JSON envelope for "requests"/,
+    );
+  });
+
+  it("throws when the inner key is missing", () => {
+    expect(() =>
+      parseEnvelope('{"success":true,"data":{}}', "requests"),
+    ).toThrow(/has no "requests" array/);
+    expect(() =>
+      parseEnvelope('{"success":true,"data":{"messages":[]}}', "requests"),
+    ).toThrow(/has no "requests" array/);
+  });
+
+  it("throws when the envelope value is not an array", () => {
+    expect(() =>
+      parseEnvelope('{"data":{"requests":"oops"}}', "requests"),
+    ).toThrow(/has no "requests" array/);
+    expect(() =>
+      parseEnvelope('{"data":{"requests":null}}', "requests"),
+    ).toThrow(/has no "requests" array/);
+  });
+
+  it("still returns [] for a genuinely empty result set", () => {
+    expect(
+      parseEnvelope('{"success":true,"data":{"requests":[]}}', "requests"),
+    ).toEqual([]);
   });
 
   it("works for the console envelope key", () => {

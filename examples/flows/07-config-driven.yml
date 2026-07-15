@@ -17,10 +17,13 @@ outcomes:
       url:
         equals: "${baseUrl}/dashboard.html"
   - id: row_count_matches_var
-    description: dashboard table row count matches ${vars.expectedRows}
+    description: dashboard table body row count matches ${vars.expectedRows}
     verify:
       count:
         role: row
+        # Scoped to tbody: `role: row` expands to `[role=row], tr`, and the
+        # <thead> row is a row by ARIA semantics too, so an unscoped count is 4.
+        in_region: tbody
         equals: 3
 steps:
   - id: open_dashboard
