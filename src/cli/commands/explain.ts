@@ -1083,6 +1083,14 @@ export function buildExplain(): ExplainResult {
           "steps:\n  - fill: { by: label, name: Email, value: user@example.com }",
       },
       {
+        id: "select",
+        kind: "interaction",
+        summary:
+          "Choose an option in a native <select> by option value or visible label (exactly one of value | label). Fires native input/change events; a non-matching choice fails listing the available options",
+        yamlExample:
+          "steps:\n  - select: { by: label, name: Plan, value: pro }\n  - select: { by: selector, selector: '#plan', label: Pro plan }",
+      },
+      {
         id: "upload",
         kind: "file",
         summary: "Set a file input from a local path",

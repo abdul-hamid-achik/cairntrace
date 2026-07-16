@@ -244,6 +244,71 @@ steps:
     });
   });
 
+  it("accepts select steps with exactly one of value | label", async () => {
+    const path = join(dir, "select_ok.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: select_ok
+intent: choose native select options
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - select: { by: label, name: Plan, value: pro }
+  - select: { by: selector, selector: "#plan", label: "Pro plan" }
+  - select: { by: role, role: combobox, name: Plan, value: "" }
+`,
+    );
+    const r = await parseSpec(path);
+    const steps = r.spec.steps!;
+    expect(steps[0]).toMatchObject({
+      select: { by: "label", name: "Plan", value: "pro" },
+    });
+    expect(steps[1]).toMatchObject({
+      select: { by: "selector", selector: "#plan", label: "Pro plan" },
+    });
+    // An empty value is legal — it picks a value-less placeholder option.
+    expect(steps[2]).toMatchObject({
+      select: { by: "role", role: "combobox", name: "Plan", value: "" },
+    });
+  });
+
+  it("rejects select steps carrying both value and label, or neither", async () => {
+    const both = join(dir, "select_both.yml");
+    await writeFile(
+      both,
+      `version: 1
+name: select_both
+intent: both option keys is ambiguous
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - select: { by: label, name: Plan, value: pro, label: "Pro plan" }
+`,
+    );
+    await expect(parseSpec(both)).rejects.toThrow();
+
+    const neither = join(dir, "select_neither.yml");
+    await writeFile(
+      neither,
+      `version: 1
+name: select_neither
+intent: an option choice is required
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - select: { by: label, name: Plan }
+`,
+    );
+    await expect(parseSpec(neither)).rejects.toThrow();
+  });
+
   it("rejects semantic locators inside a batch step", async () => {
     const path = join(dir, "batch_semantic.yml");
     await writeFile(

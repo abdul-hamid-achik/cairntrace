@@ -213,8 +213,15 @@ part of the contract; regex `matches` keeps raw, case-sensitive semantics.
 
 Current step keys:
 
-`open`, `click`, `hover`, `fill`, `upload`, `download`, `transform`,
-`request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`, `eval`.
+`open`, `click`, `hover`, `fill`, `type`, `select`, `upload`, `download`,
+`transform`, `request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`,
+`eval`, `monitor`.
+
+`select` picks a native `<select>` option by option `value` or visible
+`label` (exactly one of the two). `fill` value-sets date-ish inputs
+(`type=date|time|datetime-local`) natively with `input`/`change` events —
+their shadow-DOM pickers swallow simulated keystrokes; on agent-browser reach
+them with `by: selector` (they have no accessibility-snapshot presence).
 
 Interactive steps use locators with `by: role`, `by: label`, `by: text`, or
 `by: selector`. Prefer role and label locators when possible; they are clearer

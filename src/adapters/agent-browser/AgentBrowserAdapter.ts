@@ -90,6 +90,21 @@ interface SelectorRectSettle {
 }
 
 /**
+ * Report from the folded scroll + date-ish-fill eval on the `by: selector`
+ * fill path: whether the target was a date-ish input the eval handled
+ * natively and, when it was, whether the browser accepted the value
+ * (`applied`) — an invalid format is sanitized to `""` by the value setter,
+ * never an exception. A `dateish: false` report (or no report at all) means
+ * the normal `fill` invocation must still run.
+ */
+interface DateishFillReport {
+  dateish: boolean;
+  type?: string;
+  applied?: boolean;
+  value?: string;
+}
+
+/**
  * Outcome of the pre-click link classification eval: a same-tab nav link to
  * verify or an external-effect link to pass with a note (`prepared`), a hard
  * failure to return immediately (`failure`, the classification eval itself
@@ -166,6 +181,22 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if ("type" in step) {
       const { value, delayMs: _delayMs, ...locator } = step.type;
       return this.runInteractiveStep(locator as Locator, "type", value);
+    }
+    if ("select" in step) {
+      // agent-browser's `select` matches the trailing argument against option
+      // values AND visible labels (verified against 0.31.1), so `value` and
+      // `label` both pass as the same positional arg; a non-matching choice
+      // exits non-zero listing the available options (note: 0.31.1 leaves the
+      // select deselected after a failed match — acceptable because the step
+      // fails and the spec stops there). Semantic locators resolve against
+      // the snapshot first — a `<select>` shows up as a combobox with a ref —
+      // exactly like fill/click.
+      const { value, label, ...locator } = step.select;
+      return this.runInteractiveStep(
+        locator as Locator,
+        "select",
+        value ?? label,
+      );
     }
     if ("upload" in step) {
       const { path, ...locator } = step.upload;
@@ -826,7 +857,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
   }
 
   /**
-   * Click / hover / fill / upload, with the P0 dogfood fixes baked in:
+   * Click / hover / fill / type / select / upload, with the P0 dogfood fixes
+   * baked in:
    *
    *   1. Semantic locators resolve against the interactive accessibility
    *      snapshot BEFORE acting — zero matches fail here, at this step, with
@@ -847,7 +879,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private async runInteractiveStep(
     locator: Locator,
-    action: "click" | "hover" | "fill" | "type" | "upload",
+    action: "click" | "hover" | "fill" | "type" | "select" | "upload",
     value?: string,
     settleMsOverride?: number,
   ): Promise<InvocationResult> {
@@ -873,6 +905,21 @@ export class AgentBrowserAdapter implements BrowserBackend {
         settle = p.settle;
       } else if (action === "click") {
         settle = await this.scrollSelectorIntoViewForClick(locator.selector);
+      } else if (action === "fill") {
+        // Date-ish inputs (<input type=date|time|datetime-local>) swallow
+        // agent-browser's keystroke-simulation `fill` — it exits 0 while the
+        // value stays empty, because the shadow-DOM picker owns the keys. The
+        // scroll eval this path already pays detects the input type and, when
+        // date-ish, sets the value natively (value property + input/change
+        // events) in the SAME eval — so a handled date fill returns here and
+        // an ordinary input falls through to the normal `fill` invocation at
+        // the same invocation count as before.
+        const handled = await this.scrollAndFillDateishSelector(
+          locator.selector,
+          value ?? "",
+          start,
+        );
+        if (handled) return handled;
       } else {
         await this.scrollSelectorIntoView(locator.selector);
       }
@@ -1470,6 +1517,51 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const r = await this.invoke(["eval", script, "--json"]);
     if (!r.ok) return undefined;
     return normalizeRectSettle(parseEvalResult<unknown>(r.stdout));
+  }
+
+  /**
+   * Fill-specific scroll variant for the selector path: scroll into view and,
+   * when the target is a date-ish input (`type=date|time|datetime-local`),
+   * set the value natively in the SAME eval — the standard framework-safe
+   * shape (prototype value setter + bubbling input/change events, so
+   * React/Vue value trackers observe the change) — because agent-browser's
+   * keystroke `fill` reports ✓ Done against these inputs while the value
+   * stays empty (verified against agent-browser 0.31.1; liftclub PAR-Q,
+   * round-2 TODO item 4).
+   *
+   * Returns a completed InvocationResult when the fill was handled (or
+   * definitively failed) here, and `undefined` to fall through to the normal
+   * `fill` invocation — ordinary inputs, a missing element (agent-browser's
+   * own error + selector diagnostics are better), or an inconclusive eval.
+   *
+   * Note the semantic-locator path needs no equivalent: date-ish inputs have
+   * NO presence in the interactive accessibility snapshot (only their shadow
+   * spinbutton parts appear), so a semantic fill against one already fails
+   * loudly at resolution with candidate diagnostics — use `by: selector` to
+   * reach them on this backend.
+   */
+  private async scrollAndFillDateishSelector(
+    selector: string,
+    value: string,
+    startedAt: number,
+  ): Promise<InvocationResult | undefined> {
+    const r = await this.invoke([
+      "eval",
+      fillDateishProbeScript(selector, value),
+      "--json",
+    ]);
+    if (!r.ok) {
+      // Mirror prepareLinkClickProbe: a killed child means the daemon is
+      // wedged — surface that instead of queueing another invocation.
+      return this.sawChildTimeout ? r : undefined;
+    }
+    const report = normalizeDateishFill(parseEvalResult<unknown>(r.stdout));
+    if (!report?.dateish || report.applied === undefined) return undefined;
+    if (report.applied) return r;
+    return this.unresolvedFailure("fill", startedAt, [
+      `fill: <input type="${report.type}"> (selector ${JSON.stringify(selector)}) rejected value ${JSON.stringify(value)} — the browser sanitized it to ${JSON.stringify(report.value)}`,
+      `date-ish inputs only accept normalized values: date=YYYY-MM-DD, time=HH:MM, datetime-local=YYYY-MM-DDTHH:MM`,
+    ]);
   }
 
   private async resolveInteractiveRef(
@@ -2212,6 +2304,68 @@ function linkClickProbeScript(opts: {
       globalThis[key] = state;
     }
   })()`;
+}
+
+/**
+ * Scroll a selector target into view and, when it is a date-ish input, set
+ * the value natively inside the same eval (see
+ * `scrollAndFillDateishSelector`). The prototype value setter bypasses
+ * framework-patched instance descriptors (React) and the bubbling
+ * input/change events feed framework value trackers — the exact shape the
+ * liftclub PAR-Q specs carried as an eval workaround before this landed.
+ * Returns `{ dateish: false }` for ordinary targets and `null` when the
+ * element is missing or the probe itself failed (both fall through to the
+ * normal `fill` invocation, whose own diagnostics are better).
+ */
+function fillDateishProbeScript(selector: string, value: string): string {
+  return `(() => {
+    try {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+      const type = el instanceof HTMLInputElement ? el.type : "";
+      if (type !== "date" && type !== "time" && type !== "datetime-local") {
+        return { dateish: false };
+      }
+      const want = ${JSON.stringify(value)};
+      const previous = el.value;
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      const setValue = (v) => {
+        if (descriptor && descriptor.set) { descriptor.set.call(el, v); } else { el.value = v; }
+      };
+      setValue(want);
+      // The value setter sanitizes: an invalid format becomes "" silently. A
+      // valid value may be normalized (e.g. trailing ":00" dropped), so
+      // "accepted" is "non-empty result for a non-empty request".
+      const applied = want === "" ? el.value === "" : el.value !== "";
+      if (!applied) {
+        // A failing step must not leave the field wiped: restore what was
+        // there and fire no events — the app never sees the bad value.
+        setValue(previous);
+        return { dateish: true, type, applied, value: "" };
+      }
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { dateish: true, type, applied, value: el.value };
+    } catch (_) {
+      return null;
+    }
+  })()`;
+}
+
+/** Accept a date-ish fill report only when it carries the decision boolean. */
+function normalizeDateishFill(value: unknown): DateishFillReport | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record["dateish"] !== "boolean") return undefined;
+  return {
+    dateish: record["dateish"],
+    ...(typeof record["type"] === "string" ? { type: record["type"] } : {}),
+    ...(typeof record["applied"] === "boolean"
+      ? { applied: record["applied"] }
+      : {}),
+    ...(typeof record["value"] === "string" ? { value: record["value"] } : {}),
+  };
 }
 
 function selectorRetryPointScript(selector: string): string {

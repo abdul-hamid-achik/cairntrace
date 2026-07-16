@@ -165,6 +165,14 @@ function renderStepBody(step: Step, specSettleMs?: number): string[] {
       `await ${locator(loc as Locator)}.pressSequentially(${JSON.stringify(value)}${opts});`,
     ];
   }
+  if ("select" in step) {
+    const { value, label, ...loc } = step.select;
+    const option =
+      value !== undefined
+        ? `{ value: ${JSON.stringify(value)} }`
+        : `{ label: ${JSON.stringify(label)} }`;
+    return [`await ${locator(loc as Locator)}.selectOption(${option});`];
+  }
   if ("upload" in step) {
     const { path, ...loc } = step.upload;
     return [

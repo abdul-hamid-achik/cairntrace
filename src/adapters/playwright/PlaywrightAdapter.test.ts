@@ -646,6 +646,7 @@ describe("PlaywrightAdapter type", () => {
       click: track("click"),
       hover: track("hover"),
       fill: track("fill"),
+      selectOption: track("selectOption"),
       setInputFiles: track("setInputFiles"),
       pressSequentially: track("pressSequentially"),
       scrollIntoViewIfNeeded: track("scrollIntoViewIfNeeded"),
@@ -662,6 +663,7 @@ describe("PlaywrightAdapter type", () => {
       { click: { by: "selector", selector: "#a" } },
       { hover: { by: "selector", selector: "#a" } },
       { fill: { by: "selector", selector: "#a", value: "x" } },
+      { select: { by: "selector", selector: "#a", value: "x" } },
       { type: { by: "selector", selector: "#a", value: "x" } },
       { upload: { by: "selector", selector: "#a", path: "/tmp/x" } },
       { scroll: { direction: "down", px: 100 } },
@@ -684,6 +686,7 @@ describe("PlaywrightAdapter type", () => {
       "click",
       "hover",
       "fill",
+      "selectOption",
       "pressSequentially",
       "setInputFiles",
       "mouse.wheel",
@@ -718,6 +721,101 @@ describe("PlaywrightAdapter type", () => {
     expect(waitForLoadState).toHaveBeenCalledWith("networkidle", {
       timeout: 1_200,
     });
+  });
+});
+
+describe("PlaywrightAdapter select", () => {
+  it("selects by option value via selectOption", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
+    const selectOption = vi.fn(() => Promise.resolve(["pro"]));
+    const locator = vi.fn(() => ({ selectOption }));
+    installPage(adapter, { locator });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", value: "pro" },
+    });
+
+    expect(locator).toHaveBeenCalledWith("#plan");
+    expect(selectOption).toHaveBeenCalledWith(
+      { value: "pro" },
+      { timeout: 1000 },
+    );
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("selects by visible label via selectOption", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
+    const selectOption = vi.fn(() => Promise.resolve(["pro"]));
+    const locator = vi.fn(() => ({ selectOption }));
+    installPage(adapter, { locator });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", label: "Pro plan" },
+    });
+
+    expect(selectOption).toHaveBeenCalledWith(
+      { label: "Pro plan" },
+      { timeout: 1000 },
+    );
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("returns a failure when no option matches", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 50 });
+    const selectOption = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("locator.selectOption: Timeout 50ms exceeded"),
+      );
+    installPage(adapter, { locator: () => ({ selectOption }) });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", value: "gold" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { stderr: string }).stderr).toContain("selectOption");
+  });
+});
+
+describe("PlaywrightAdapter fill on date-ish inputs", () => {
+  // Playwright's fill() natively value-sets date/time/datetime-local inputs
+  // and fires input/change events (verified live 2026-07-16), so the adapter
+  // must keep routing them through locator.fill — rerouting would lose
+  // fill()'s "Malformed value" format validation. This locks the routing in.
+  it.each([
+    ["date", "#birth-date", "2026-07-16"],
+    ["time", "#alarm", "13:45"],
+    ["datetime-local", "#meeting", "2026-07-16T13:45"],
+  ])(
+    "routes an <input type=%s> fill through locator.fill",
+    async (_type, selector, value) => {
+      const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
+      const fill = vi.fn(() => Promise.resolve());
+      const locator = vi.fn(() => ({ fill }));
+      installPage(adapter, { locator });
+
+      const result = await adapter.runStep({
+        fill: { by: "selector", selector, value },
+      });
+
+      expect(locator).toHaveBeenCalledWith(selector);
+      expect(fill).toHaveBeenCalledWith(value, { timeout: 1000 });
+      expect(result).toMatchObject({ ok: true });
+    },
+  );
+
+  it("keeps plain text fill on the same locator.fill path", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
+    const fill = vi.fn(() => Promise.resolve());
+    installPage(adapter, { locator: () => ({ fill }) });
+
+    const result = await adapter.runStep({
+      fill: { by: "selector", selector: "#name", value: "Ada" },
+    });
+
+    expect(fill).toHaveBeenCalledWith("Ada", { timeout: 1000 });
+    expect(result).toMatchObject({ ok: true });
   });
 });
 

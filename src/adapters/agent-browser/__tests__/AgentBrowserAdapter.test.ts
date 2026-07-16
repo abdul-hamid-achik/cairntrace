@@ -738,6 +738,203 @@ describe("strict semantic interaction resolution", () => {
   });
 });
 
+describe("select step", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("pre-scrolls selector selects and passes the choice as trailing arg", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "select-sel" });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", value: "pro" },
+    });
+
+    expect(result.ok).toBe(true);
+    const evalArgv = execaMock.mock.calls[0]![1] as string[];
+    expect(evalArgv[2]).toBe("eval");
+    expect(evalArgv[3]).toContain("scrollIntoView");
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "select-sel", "select", "#plan", "pro"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("passes label as the same trailing arg (agent-browser matches value OR label)", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "select-label-arg" });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", label: "Pro plan" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "select-label-arg", "select", "#plan", "Pro plan"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("selects via snapshot ref for semantic locators, recording the resolved element", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - combobox "Plan" [ref=e2]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // select
+    const adapter = new AgentBrowserAdapter({ session: "select-semantic" });
+
+    const result = await adapter.runStep({
+      select: { by: "label", name: "Plan", value: "pro" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement).toEqual({
+      role: "combobox",
+      name: "Plan",
+      ref: "e2",
+    });
+    expect(execaMock).toHaveBeenNthCalledWith(
+      3,
+      "agent-browser",
+      ["--session", "select-semantic", "select", "@e2", "pro"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("surfaces agent-browser's option-listing error on a non-matching choice", async () => {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("select")) {
+        return Promise.resolve({
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            '✗ No option matched ["gold"]. Available options: basic ("Basic plan"), pro ("Pro plan")',
+        });
+      }
+      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    });
+    const adapter = new AgentBrowserAdapter({ session: "select-miss" });
+
+    const result = await adapter.runStep({
+      select: { by: "selector", selector: "#plan", value: "gold" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("No option matched");
+    expect(result.stderr).toContain("Available options");
+  });
+});
+
+describe("selector fill drives date-ish inputs natively", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  /** Every argv is answered by kind: the folded scroll+fill eval gets `report`. */
+  function mockFillSequence(report: unknown) {
+    execaMock.mockImplementation((_bin: string, argv: string[]) => {
+      if (argv.includes("eval")) return evalResult(report);
+      return respond();
+    });
+  }
+
+  it.each([
+    ["date", "2026-07-16"],
+    ["time", "13:45"],
+    ["datetime-local", "2026-07-16T13:45"],
+  ])(
+    "sets an <input type=%s> value in the scroll eval — no keystroke fill invocation",
+    async (type, value) => {
+      mockFillSequence({ dateish: true, type, applied: true, value });
+      const adapter = new AgentBrowserAdapter({ session: "fill-dateish" });
+
+      const result = await adapter.runStep({
+        fill: { by: "selector", selector: "#field", value },
+      });
+
+      expect(result.ok).toBe(true);
+      // The scroll eval this path already paid handles the whole fill:
+      // one invocation, and agent-browser's keystroke `fill` (which reports
+      // ✓ Done while a date input's value stays empty) never runs.
+      expect(execaMock).toHaveBeenCalledTimes(1);
+      const evalArgv = execaMock.mock.calls[0]![1] as string[];
+      const script = evalArgv[evalArgv.indexOf("eval") + 1]!;
+      expect(script).toContain("scrollIntoView");
+      expect(script).toContain(JSON.stringify(value));
+      expect(script).toContain("dispatchEvent");
+    },
+  );
+
+  it("fails loudly when the browser sanitizes an invalid value to empty", async () => {
+    mockFillSequence({
+      dateish: true,
+      type: "date",
+      applied: false,
+      value: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "fill-date-bad" });
+
+    const result = await adapter.runStep({
+      fill: { by: "selector", selector: "#birth-date", value: "2026-7-16" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('rejected value "2026-7-16"');
+    expect(result.stderr).toContain("YYYY-MM-DD");
+    // Never fall back to the keystroke fill that would silently no-op.
+    for (const call of execaMock.mock.calls) {
+      expect(call[1] as string[]).not.toContain("fill");
+    }
+  });
+
+  it("keeps ordinary text inputs on the normal fill invocation (unchanged path)", async () => {
+    mockFillSequence({ dateish: false });
+    const adapter = new AgentBrowserAdapter({ session: "fill-text" });
+
+    const result = await adapter.runStep({
+      fill: { by: "selector", selector: "#name", value: "Ada" },
+    });
+
+    expect(result.ok).toBe(true);
+    // Same invocation count as before the date-ish probe existed:
+    // scroll eval + fill.
+    expect(execaMock).toHaveBeenCalledTimes(2);
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "fill-text", "fill", "#name", "Ada"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("falls through to fill when the probe is inconclusive (element missing)", async () => {
+    mockFillSequence(null);
+    const adapter = new AgentBrowserAdapter({ session: "fill-inconclusive" });
+
+    const result = await adapter.runStep({
+      fill: { by: "selector", selector: "#gone", value: "x" },
+    });
+
+    // The normal fill invocation still runs — agent-browser's own
+    // element-not-found error and selector diagnostics are the better signal.
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "fill-inconclusive", "fill", "#gone", "x"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+});
+
 describe("daemon-busy retry", () => {
   beforeEach(() => {
     execaMock.mockReset();

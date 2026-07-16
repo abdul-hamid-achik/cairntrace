@@ -23,6 +23,10 @@ After v1.37.0's fixes were field-verified (liftclub removed its batch-click, lin
 
 3. **No `select` step** — native `<select>` needs an eval workaround (admin_calendar_roster.yml). Add a first-class `select: { by, ..., value|label }` step.
 
+   **FIXED 2026-07-16.** `select: { by, ..., value|label }` (exactly one of value | label) landed in the schema, both adapters, and the Playwright exporter. agent-browser maps to its `select` command (which matches value OR label — verified 0.31.1; a failed match exits non-zero listing options but leaves the select deselected); Playwright maps to `selectOption` strictly by the authored key.
+
 4. **`fill`/`type` can't reach `<input type="date">`** — shadow-DOM date inputs need eval value-setting + input/change event dispatch (PAR-Q specs). Teach fill to set `.value` + dispatch events for date/time/datetime-local inputs.
+
+   **FIXED 2026-07-16** (agent-browser `by: selector` path). The scroll eval the selector fill already pays now detects date/time/datetime-local inputs and sets the value natively (prototype value setter + bubbling input/change events) in the same eval — zero extra invocations; an invalid value fails the step with the field restored. Verified live: agent-browser's keystroke `fill` reported ✓ Done with the value left empty. Playwright's `fill()` already value-sets these natively (verified live) and stays unchanged. Semantic locators still can't reach date inputs on agent-browser — they have no presence in the a11y snapshot (only shadow spinbutton parts), so resolution fails loudly; docs say to use `by: selector`.
 
 5. **`wait: {text}` possible false-positive** (observed once, unreproduced): member_signup_personal_plan.yml — wait_for_schedule_step passed but the app appeared to be back on the parq step several steps later. Hypothesis: the awaited text matched somewhere else in the DOM (hidden/stale node), or matched during a transient state. Consider: visible-only text matching for wait (like locators already do), and/or a diagnostic that records WHERE the text matched.

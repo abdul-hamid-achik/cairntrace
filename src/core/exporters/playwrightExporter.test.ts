@@ -60,6 +60,29 @@ describe("exportPlaywright", () => {
     expect(src).toContain(`await page.getByLabel("Email").fill("a@b.c");`);
   });
 
+  it("translates select steps to selectOption by value or label", () => {
+    const src = exportPlaywright(
+      baseSpec({
+        steps: [
+          {
+            id: "pick_plan",
+            select: { by: "label", name: "Plan", value: "pro" },
+          },
+          {
+            id: "pick_plan_by_label",
+            select: { by: "selector", selector: "#plan", label: "Pro plan" },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `await page.getByLabel("Plan").selectOption({ value: "pro" });`,
+    );
+    expect(src).toContain(
+      `await page.locator("#plan").selectOption({ label: "Pro plan" });`,
+    );
+  });
+
   it("translates text + url + count outcomes", () => {
     const src = exportPlaywright(
       baseSpec({

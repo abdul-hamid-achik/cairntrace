@@ -105,6 +105,24 @@ describe("proposeOps", () => {
     });
   });
 
+  it("heals select locator drift", () => {
+    const snap = parseSnapshot(`
+- main
+  - combobox "Billing plan" [ref=e3]
+`);
+    const step: Step = {
+      select: { by: "label", name: "Plan", value: "pro" },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/select/name",
+      from: "Plan",
+      to: "Billing plan",
+    });
+  });
+
   it("does nothing for selector locators (v0 scope)", () => {
     const snap = parseSnapshot(SNAPSHOT_WITH_RENAMED_LINK);
     expect(

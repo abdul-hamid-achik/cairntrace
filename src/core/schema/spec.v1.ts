@@ -314,6 +314,51 @@ export const TypeStepSchema = z
   .strict();
 export type TypeStep = z.infer<typeof TypeStepSchema>;
 
+/**
+ * `select` — choose an option in a native `<select>` element.
+ *
+ * Exactly one of `value` (the option's `value` attribute; `""` is legal and
+ * picks a value-less placeholder option) or `label` (the option's visible
+ * text) identifies the option. Both backends dispatch native `input`/`change`
+ * events; clicking a `<select>` open and clicking an `<option>` does not work
+ * under automation (the dropdown is browser chrome, not DOM), which is why
+ * this is a first-class step and not a `click` recipe.
+ */
+const selectOptionExtras = {
+  /** Match the option's `value` attribute. Exactly one of value | label. */
+  value: z.string().optional(),
+  /** Match the option's visible text. Exactly one of value | label. */
+  label: z.string().min(1).optional(),
+};
+const exactlyOneSelectChoice = (v: { value?: string; label?: string }) =>
+  (v.value === undefined) !== (v.label === undefined);
+const selectChoiceMessage = {
+  message: "select needs exactly one of value | label",
+};
+
+const selectTargetSchema = z.union([
+  RoleLocatorSchema.extend(selectOptionExtras)
+    .strict()
+    .refine(exactlyOneSelectChoice, selectChoiceMessage),
+  LabelLocatorSchema.extend(selectOptionExtras)
+    .strict()
+    .refine(exactlyOneSelectChoice, selectChoiceMessage),
+  TextLocatorSchema.extend(selectOptionExtras)
+    .strict()
+    .refine(exactlyOneSelectChoice, selectChoiceMessage),
+  SelectorLocatorSchema.extend(selectOptionExtras)
+    .strict()
+    .refine(exactlyOneSelectChoice, selectChoiceMessage),
+]);
+
+export const SelectStepSchema = z
+  .object({
+    ...stepCommon,
+    select: selectTargetSchema,
+  })
+  .strict();
+export type SelectStep = z.infer<typeof SelectStepSchema>;
+
 export const UploadStepSchema = z
   .object({
     ...stepCommon,
@@ -550,6 +595,7 @@ export const StepSchema = z.union([
   HoverStepSchema,
   FillStepSchema,
   TypeStepSchema,
+  SelectStepSchema,
   UploadStepSchema,
   DownloadStepSchema,
   TransformStepSchema,

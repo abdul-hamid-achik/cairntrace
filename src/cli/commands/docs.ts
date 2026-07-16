@@ -218,7 +218,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` types a value, `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated API call and captures the response, `wait` waits for text/notText/selector/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation. Text/notText waits normalize whitespace and are case-insensitive by default; set `caseSensitive: true` to opt out.",
+        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator, `hover` reveals hover-only controls, `fill` sets a field value (date/time/datetime-local inputs are value-set natively with input/change events), `select` chooses a native <select> option by `value` or `label` (exactly one), `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated API call and captures the response, `wait` waits for text/notText/selector/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation. Text/notText waits normalize whitespace and are case-insensitive by default; set `caseSensitive: true` to opt out.",
       },
       {
         title: "Batch Steps",
@@ -260,6 +260,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "  - click: { by: role, role: button, name: Save, nth: 1 }",
           '  - hover: { by: selector, selector: ".question-table-wrap .table-title" }',
           "  - fill: { by: label, name: Display name, value: Example Inc }",
+          "  - select: { by: label, name: Plan, value: pro }",
           "  - press: Enter",
           "  - scroll: { to: { by: role, role: button, name: Submit } }",
           "  - upload: { by: label, name: Logo, path: ./fixtures/logo.png }",

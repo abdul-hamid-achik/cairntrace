@@ -5,7 +5,7 @@ description: Reference typed Cairntrace steps for navigation, semantic interacti
 
 # Steps
 
-The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 17 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
+The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 18 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
 
 Every step also accepts two optional common keys:
 
@@ -89,6 +89,23 @@ Set a field's value in one bulk operation.
 ```
 
 `fill` is a value-set, not keystroke events. SPA frameworks whose validation listens for `keydown`/`keyup`/`input` may not react — the classic symptom is a submit button staying `[disabled]` after `fill`. Use `type` when the framework needs real key events.
+
+Date-ish inputs (`type=date|time|datetime-local`) are value-set natively — value property plus bubbling `input`/`change` events — because their shadow-DOM pickers swallow simulated keystrokes. Values must be normalized (`date=YYYY-MM-DD`, `time=HH:MM`, `datetime-local=YYYY-MM-DDTHH:MM`); a rejected value fails the step with the field left untouched, instead of silently leaving it empty. On the agent-browser backend, reach date-ish inputs with `by: selector` — they have no presence in the accessibility snapshot (only their shadow spinbutton parts appear), so a semantic locator fails at resolution; Playwright resolves semantic locators for them too.
+
+```yaml
+- fill: { by: selector, selector: "#birth-date", value: "1990-04-01" }
+```
+
+### `select`
+
+Choose an option in a native `<select>` element by option `value` or visible `label` — exactly one of the two. Both backends fire native `input`/`change` events, and a non-matching choice fails the step listing the available options. This exists as a first-class step because clicking a `<select>` open and clicking an `<option>` does not work under automation — the dropdown is browser chrome, not DOM.
+
+```yaml
+- select: { by: label, name: Plan, value: pro }
+- select: { by: selector, selector: "#plan", label: "Pro plan" }
+```
+
+An empty `value: ""` is legal and picks a value-less placeholder option. Playwright matches strictly by the key you author (`value` against option values, `label` against visible text); agent-browser's CLI matches the choice against both, so author the key you actually mean to stay portable.
 
 ### `type`
 

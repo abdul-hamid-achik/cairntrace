@@ -255,6 +255,30 @@ describe("stepToArgv", () => {
     ).toEqual(["find", "label", "Email", "fill", "a@b.c"]);
   });
 
+  it("select with selector locator passes the value as trailing arg", () => {
+    expect(
+      stepToArgv({
+        select: { by: "selector", selector: "#plan", value: "pro" },
+      }),
+    ).toEqual(["select", "#plan", "pro"]);
+  });
+
+  it("select passes label as the same trailing arg (agent-browser matches value OR label)", () => {
+    expect(
+      stepToArgv({
+        select: { by: "selector", selector: "#plan", label: "Pro plan" },
+      }),
+    ).toEqual(["select", "#plan", "Pro plan"]);
+  });
+
+  it("select with label locator uses the find family fallback", () => {
+    expect(
+      stepToArgv({
+        select: { by: "label", name: "Plan", value: "pro" },
+      }),
+    ).toEqual(["find", "label", "Plan", "select", "pro"]);
+  });
+
   it("upload with selector locator", () => {
     expect(
       stepToArgv({

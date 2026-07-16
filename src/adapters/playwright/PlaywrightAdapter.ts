@@ -143,10 +143,25 @@ export class PlaywrightAdapter implements BrowserBackend {
           timeout: this.opts.defaultTimeoutMs,
         });
       } else if ("fill" in step) {
+        // Playwright's fill() already sets date-ish inputs
+        // (type=date|time|datetime-local) natively — value assignment plus
+        // input/change events, verified live 2026-07-16 — so unlike the
+        // agent-browser adapter no special date path is needed here. Keep
+        // every fill on this call; rerouting date inputs would lose fill()'s
+        // format validation ("Malformed value" on a bad date string).
         const { value, ...loc } = step.fill;
         await this.resolveLocator(loc as Locator).fill(value, {
           timeout: this.opts.defaultTimeoutMs,
         });
+      } else if ("select" in step) {
+        // selectOption matches strictly by value OR label per the authored
+        // key (agent-browser's CLI matches either; specs should author the
+        // key they mean so both backends agree).
+        const { value, label, ...loc } = step.select;
+        await this.resolveLocator(loc as Locator).selectOption(
+          value !== undefined ? { value } : { label: label! },
+          { timeout: this.opts.defaultTimeoutMs },
+        );
       } else if ("type" in step) {
         const { value, delayMs, ...loc } = step.type;
         await this.resolveLocator(loc as Locator).pressSequentially(value, {

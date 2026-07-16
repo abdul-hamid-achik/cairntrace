@@ -9,6 +9,7 @@ import {
   type OpenStep,
   type PressStep,
   type ScrollStep,
+  type SelectStep,
   type SnapshotStep,
   type Step,
   type TypeStep,
@@ -108,6 +109,19 @@ export function fillStepToArgv(step: FillStep): string[] {
 export function typeStepToArgv(step: TypeStep): string[] {
   const { value, delayMs: _delayMs, ...locator } = step.type;
   return locatorToArgv(locator as Locator, "type", value);
+}
+
+/**
+ * `select` — choose a native `<select>` option.
+ * Maps to agent-browser's `select <sel> <val>` command, which matches the
+ * argument against option values AND visible labels (verified against
+ * agent-browser 0.31.1), so the schema's `value` and `label` both pass as
+ * the single trailing argument. A non-matching argument exits non-zero and
+ * lists the available options.
+ */
+export function selectStepToArgv(step: SelectStep): string[] {
+  const { value, label, ...locator } = step.select;
+  return locatorToArgv(locator as Locator, "select", value ?? label);
 }
 
 export function uploadStepToArgv(step: UploadStep): string[] {
@@ -247,6 +261,7 @@ export function stepToArgv(step: Step): string[] {
   if ("hover" in step) return hoverStepToArgv(step);
   if ("fill" in step) return fillStepToArgv(step);
   if ("type" in step) return typeStepToArgv(step);
+  if ("select" in step) return selectStepToArgv(step);
   if ("upload" in step) return uploadStepToArgv(step);
   if ("download" in step) return downloadStepToArgv(step);
   if ("wait" in step) return waitStepToArgv(step);
