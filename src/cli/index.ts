@@ -551,6 +551,10 @@ addFormatFlags(
   program
     .command("secrets")
     .description("Check TinyVault secrets provider status and available keys")
+    // Commander 12 silently ignores excess positionals by default — without
+    // this, `cairn secrets list-projects` would print the status report and
+    // exit 0 instead of erroring on the nonexistent subcommand.
+    .allowExcessArguments(false)
     .option("--project <name>", "TinyVault project name (direct mode)")
     .option(
       "--group <name>",

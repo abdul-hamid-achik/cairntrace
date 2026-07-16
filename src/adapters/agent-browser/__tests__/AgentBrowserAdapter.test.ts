@@ -236,6 +236,99 @@ const IN_VIEWPORT_BOX_AND_METRICS = [
   },
 ];
 
+type MockExecaResponse = {
+  exitCode?: number | undefined;
+  stdout?: string;
+  stderr?: string;
+  timedOut?: boolean;
+};
+
+const respond = (r: MockExecaResponse = {}) =>
+  Promise.resolve({ exitCode: 0, stdout: "", stderr: "", ...r });
+const evalResult = (result: unknown) =>
+  respond({
+    stdout: JSON.stringify({ success: true, data: { result }, error: null }),
+  });
+
+interface MockClickSequenceOpts {
+  /** Interactive snapshot body for semantic locator resolution. */
+  snapshot?: string;
+  /** `data.result` payload of the link classification / folded probe eval. */
+  probe?: Record<string, unknown>;
+  /** Full response for the probe eval; wins over `probe` when set. */
+  onProbe?: () => MockExecaResponse;
+  /** `data.result` of the scroll-only rect-settle eval (probe disabled). */
+  scrollSettle?: Record<string, unknown> | null;
+  /** `data.result` payload of the selector low-level retry-point eval. */
+  retryPoint?: Record<string, unknown>;
+  /** Response for each delivery `wait --fn` attempt. */
+  onDeliveryWait?: () => MockExecaResponse;
+  /** Response for the click invocation itself. */
+  onClick?: () => MockExecaResponse;
+  /** Response for the post-click networkidle settle wait. */
+  onSettle?: () => MockExecaResponse;
+}
+
+/**
+ * Mock the full click invocation sequence by classifying each argv — snapshot,
+ * box read, classification/probe eval, viewport-metrics eval, retry-point
+ * eval, delivery wait, settle wait, click, low-level retry batch — instead of
+ * hard-coding an ordered response queue or matching exact eval script text.
+ * Folding a new concern into an existing invocation (the exact shape of the
+ * selector rect-settle guard) then changes no test plumbing; ordered queues
+ * broke ten of these tests when a settle gate briefly shipped as extra
+ * subprocess calls.
+ */
+function mockClickSequence(opts: MockClickSequenceOpts = {}) {
+  execaMock.mockImplementation((_bin: string, argv: string[]) => {
+    if (argv.includes("snapshot")) {
+      return respond({ stdout: opts.snapshot ?? "" });
+    }
+    if (argv.includes("box")) return respond(IN_VIEWPORT_BOX_AND_METRICS[0]!);
+    if (argv.includes("--fn")) return respond(opts.onDeliveryWait?.());
+    if (argv.includes("wait")) return respond(opts.onSettle?.());
+    if (argv.includes("click")) return respond(opts.onClick?.());
+    if (argv.includes("is") && argv.includes("enabled")) {
+      return respond({ stdout: JSON.stringify({ data: { enabled: true } }) });
+    }
+    if (argv.includes("batch")) {
+      return respond({
+        stdout: JSON.stringify([
+          { success: true },
+          { success: true },
+          { success: true },
+        ]),
+      });
+    }
+    if (argv.includes("eval")) {
+      const script = argv[argv.indexOf("eval") + 1] ?? "";
+      if (script.includes("scrollX")) {
+        return respond(IN_VIEWPORT_BOX_AND_METRICS[1]!);
+      }
+      if (script.includes("present")) return evalResult(opts.retryPoint ?? {});
+      if (script.includes("linkLike")) {
+        if (opts.onProbe) return respond(opts.onProbe());
+        return evalResult(opts.probe ?? {});
+      }
+      if (script.includes("__rectSettle")) {
+        return evalResult(opts.scrollSettle ?? null);
+      }
+      return respond();
+    }
+    return respond();
+  });
+}
+
+/** A rect-settle report for a target that held still inside the viewport. */
+const SETTLED_IN_VIEWPORT = {
+  stable: true,
+  inViewport: true,
+  cx: 640,
+  cy: 400,
+  innerWidth: 1280,
+  innerHeight: 800,
+};
+
 describe("strict semantic interaction resolution", () => {
   beforeEach(() => {
     execaMock.mockReset();
@@ -1318,17 +1411,7 @@ describe("verify-after-click + post-nav settle", () => {
   });
 
   it("passes when the URL is already stable across pre/post (no nav)", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Toggle" [ref=e1]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // post-click settle
+    mockClickSequence({ snapshot: '- main\n  - button "Toggle" [ref=e1]\n' });
     const adapter = new AgentBrowserAdapter({ session: "stable-url" });
 
     const r = await adapter.runStep({
@@ -1337,31 +1420,26 @@ describe("verify-after-click + post-nav settle", () => {
     expect(r.ok).toBe(true);
     // The settle fold is the only thing that distinguishes this from the
     // non-verify case — it issues a `wait --load networkidle` after the
-    // click. Call #6 is that wait (1 snapshot + 1 scrollintoview + 1 get
-    // box + 1 eval metrics + 1 click + 1 wait = 6).
-    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    // click (1 snapshot + 1 scrollintoview + 1 get box + 1 eval metrics +
+    // 1 click + 1 wait = 6).
+    expect(execaMock).toHaveBeenCalledTimes(6);
+    const settleCall = execaMock.mock.calls.find((call) =>
+      (call[1] as string[]).includes("--load"),
+    )?.[1] as string[];
     expect(settleCall).toContain("wait");
-    expect(settleCall).toContain("--load");
     expect(settleCall).toContain("networkidle");
   });
 
   it("fails the click at the click step when the post-click settle times out", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "ELEGIR PLAN" [ref=e22]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
-      .mockResolvedValueOnce({
+    mockClickSequence({
+      snapshot: '- main\n  - button "ELEGIR PLAN" [ref=e22]\n',
+      onSettle: () => ({
         timedOut: true,
         exitCode: undefined,
         stdout: "",
         stderr: "",
-      }); // post-click settle times out
+      }), // post-click settle times out
+    });
     const adapter = new AgentBrowserAdapter({ session: "wedged-click" });
 
     const r = await adapter.runStep({
@@ -1374,16 +1452,7 @@ describe("verify-after-click + post-nav settle", () => {
   });
 
   it("does not run the settle fold when verifyAfterClick is false", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Cancel" [ref=e1]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    mockClickSequence({ snapshot: '- main\n  - button "Cancel" [ref=e1]\n' });
     const adapter = new AgentBrowserAdapter({
       session: "verify-off",
       verifyAfterClick: false,
@@ -1397,17 +1466,9 @@ describe("verify-after-click + post-nav settle", () => {
   });
 
   it("widens the settle wait to postClickSettleMs when configured", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "INICIAR SESIÓN" [ref=e3]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // settle
+    mockClickSequence({
+      snapshot: '- main\n  - button "INICIAR SESIÓN" [ref=e3]\n',
+    });
     const adapter = new AgentBrowserAdapter({
       session: "wide-settle",
       postClickSettleMs: 20_000,
@@ -1417,25 +1478,16 @@ describe("verify-after-click + post-nav settle", () => {
       click: { by: "role", role: "button", name: "INICIAR SESIÓN" },
     });
     expect(r.ok).toBe(true);
-    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    const settleCall = execaMock.mock.calls.find((call) =>
+      (call[1] as string[]).includes("networkidle"),
+    )?.[1] as string[];
     expect(settleCall).toContain("wait");
-    expect(settleCall).toContain("networkidle");
     expect(settleCall).toContain("--timeout");
     expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("20000");
   });
 
   it("prefers the click settleMs override over the adapter config", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Save" [ref=e3]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    mockClickSequence({ snapshot: '- main\n  - button "Save" [ref=e3]\n' });
     const adapter = new AgentBrowserAdapter({
       session: "step-settle",
       postClickSettleMs: 20_000,
@@ -1446,7 +1498,9 @@ describe("verify-after-click + post-nav settle", () => {
       settleMs: 1_234,
     });
 
-    const settleCall = execaMock.mock.calls[5]![1] as string[];
+    const settleCall = execaMock.mock.calls.find((call) =>
+      (call[1] as string[]).includes("networkidle"),
+    )?.[1] as string[];
     expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("1234");
   });
 
@@ -1454,16 +1508,7 @@ describe("verify-after-click + post-nav settle", () => {
     // A resolved settleMs of 0 is the author declaring they handle post-click
     // waiting; even a role=link click then runs no delivery `wait --fn` probe
     // and no networkidle settle.
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - link "Ver agenda" [ref=e3]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    mockClickSequence({ snapshot: '- main\n  - link "Ver agenda" [ref=e3]\n' });
     const adapter = new AgentBrowserAdapter({ session: "zero-settle" });
 
     const result = await adapter.runStep({
@@ -1490,23 +1535,15 @@ describe("verify-after-click + post-nav settle", () => {
     // Mirrors the liftclub pattern: a click that doesn't land produces
     // a 30s agent-browser --timeout hit, surfacing the adapter's own
     // generated stderr. The fixed regex now matches it for one retry.
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Submit" [ref=e1]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
-      .mockResolvedValueOnce({
+    mockClickSequence({
+      snapshot: '- main\n  - button "Submit" [ref=e1]\n',
+      onSettle: () => ({
         timedOut: true,
         exitCode: undefined,
         stdout: "",
         stderr: "",
-      }) // settle times out — invoke retries once on the transient-daemon regex
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // settle retry succeeds
+      }), // settle times out — invoke retries once on the transient-daemon regex
+    });
     const adapter = new AgentBrowserAdapter({ session: "retry-unresponsive" });
 
     await adapter.runStep({
@@ -1728,43 +1765,19 @@ describe("link click delivery recovery", () => {
 
   it("fails a selector anchor loudly when its one retry is also dropped", async () => {
     let deliveryChecks = 0;
-    execaMock.mockImplementation((_bin: string, argv: string[]) => {
-      if (argv.includes("eval")) {
-        const script = argv[argv.indexOf("eval") + 1] ?? "";
-        // The folded selector-click probe scrolls AND classifies in one eval;
-        // the low-level retry point is resolved by a separate box read.
-        const result = script.includes("getBoundingClientRect")
-          ? { present: true, enabled: true, x: 320, y: 180 }
-          : {
-              linkLike: true,
-              beforeUrl: "http://app.test/guest",
-            };
-        return Promise.resolve({
-          exitCode: 0,
-          stdout: JSON.stringify({ data: { result } }),
-          stderr: "",
-        });
-      }
-      if (argv.includes("--fn")) {
+    // The folded selector-click probe scrolls, rect-settles, AND classifies
+    // in one eval; the low-level retry point is resolved by its own eval.
+    mockClickSequence({
+      probe: {
+        linkLike: true,
+        beforeUrl: "http://app.test/guest",
+        settle: SETTLED_IN_VIEWPORT,
+      },
+      retryPoint: { present: true, enabled: true, x: 320, y: 180 },
+      onDeliveryWait: () => {
         deliveryChecks += 1;
-        return Promise.resolve({
-          exitCode: 1,
-          stdout: "",
-          stderr: "Operation timed out",
-        });
-      }
-      if (argv.includes("batch")) {
-        return Promise.resolve({
-          exitCode: 0,
-          stdout: JSON.stringify([
-            { success: true },
-            { success: true },
-            { success: true },
-          ]),
-          stderr: "",
-        });
-      }
-      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+        return { exitCode: 1, stdout: "", stderr: "Operation timed out" };
+      },
     });
     const adapter = new AgentBrowserAdapter({ session: "link-retry-selector" });
 
@@ -1836,17 +1849,7 @@ describe("link click delivery recovery", () => {
   });
 
   it("never applies the low-level retry to ordinary buttons", async () => {
-    execaMock
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        stdout: '- main\n  - button "Save" [ref=e1]\n',
-        stderr: "",
-      })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
-      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    mockClickSequence({ snapshot: '- main\n  - button "Save" [ref=e1]\n' });
     const adapter = new AgentBrowserAdapter({ session: "button-no-retry" });
 
     const result = await adapter.runStep({
@@ -1862,37 +1865,13 @@ describe("link click delivery recovery", () => {
   });
 
   it("clicks a target=_blank link once and passes without the delivery probe", async () => {
-    execaMock.mockImplementation((_bin: string, argv: string[]) => {
-      if (argv.includes("snapshot")) {
-        return Promise.resolve({
-          exitCode: 0,
-          stdout: '- main\n  - link "Abrir factura" [ref=e7]\n',
-          stderr: "",
-        });
-      }
-      if (argv.includes("box")) {
-        return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[0]!);
-      }
-      if (argv.includes("eval")) {
-        const script = argv[argv.indexOf("eval") + 1] ?? "";
-        if (script.includes("innerWidth")) {
-          return Promise.resolve(IN_VIEWPORT_BOX_AND_METRICS[1]!);
-        }
-        return Promise.resolve({
-          exitCode: 0,
-          stdout: JSON.stringify({
-            data: {
-              result: {
-                linkLike: true,
-                externalReason: 'target="_blank"',
-                beforeUrl: "http://app.test/invoices",
-              },
-            },
-          }),
-          stderr: "",
-        });
-      }
-      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    mockClickSequence({
+      snapshot: '- main\n  - link "Abrir factura" [ref=e7]\n',
+      probe: {
+        linkLike: true,
+        externalReason: 'target="_blank"',
+        beforeUrl: "http://app.test/invoices",
+      },
     });
     const adapter = new AgentBrowserAdapter({ session: "external-blank" });
 
@@ -1930,24 +1909,14 @@ describe("link click delivery recovery", () => {
   });
 
   it("clicks a download-attribute selector anchor once with a diagnostic note", async () => {
-    execaMock.mockImplementation((_bin: string, argv: string[]) => {
-      if (argv.includes("eval")) {
-        // The folded scroll+classify eval reports an external-effect link.
-        return Promise.resolve({
-          exitCode: 0,
-          stdout: JSON.stringify({
-            data: {
-              result: {
-                linkLike: true,
-                externalReason: "a download attribute",
-                beforeUrl: "http://app.test/report",
-              },
-            },
-          }),
-          stderr: "",
-        });
-      }
-      return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    // The folded scroll+settle+classify eval reports an external-effect link.
+    mockClickSequence({
+      probe: {
+        linkLike: true,
+        externalReason: "a download attribute",
+        beforeUrl: "http://app.test/report",
+        settle: SETTLED_IN_VIEWPORT,
+      },
     });
     const adapter = new AgentBrowserAdapter({ session: "external-download" });
 
@@ -1972,6 +1941,152 @@ describe("link click delivery recovery", () => {
         (call[1] as string[]).includes("batch"),
       ),
     ).toBe(false);
+  });
+});
+
+describe("selector click rect-settle guard", () => {
+  beforeEach(() => {
+    execaMock.mockReset();
+  });
+
+  it("fails a selector click loudly when the target settles off-viewport", async () => {
+    // liftclub round-2 item 1b: a `by: selector` click into a transitioning
+    // sheet used to skip the ref path's off-viewport guard entirely —
+    // agent-browser exits 0 and the step reported ✓ while the app's handler
+    // never fired.
+    mockClickSequence({
+      probe: {
+        linkLike: false,
+        beforeUrl: "http://app.test/calendar",
+        settle: {
+          stable: true,
+          inViewport: false,
+          cx: 1384,
+          cy: 400,
+          innerWidth: 1280,
+          innerHeight: 800,
+        },
+      },
+    });
+    const adapter = new AgentBrowserAdapter({ session: "sel-settle-off" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: ".sheet button.save" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("stayed off-viewport after scrollIntoView");
+    expect(result.stderr).toContain("(1384, 400)");
+    expect(result.stderr).toContain("1280x800");
+    expect(result.stderr).toContain("viewport: { width, height }");
+    // The click is never dispatched at a coordinate the target has left.
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fails a selector click when the rect never stops moving (stuck transition)", async () => {
+    mockClickSequence({
+      probe: {
+        linkLike: false,
+        beforeUrl: "http://app.test/calendar",
+        settle: {
+          stable: false,
+          inViewport: true,
+          cx: 900,
+          cy: 400,
+          innerWidth: 1280,
+          innerHeight: 800,
+        },
+      },
+    });
+    const adapter = new AgentBrowserAdapter({ session: "sel-settle-moving" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: ".sheet button.save" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("still moving");
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toBe(false);
+  });
+
+  it("passes a stable in-viewport selector click with no extra invocations", async () => {
+    mockClickSequence({
+      probe: {
+        linkLike: false,
+        beforeUrl: "http://app.test/form",
+        settle: SETTLED_IN_VIEWPORT,
+      },
+    });
+    const adapter = new AgentBrowserAdapter({ session: "sel-settle-ok" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: "#save" },
+    });
+
+    expect(result.ok).toBe(true);
+    // Folded scroll+settle+classify eval + click + networkidle settle = 3 —
+    // the guard rides the eval this path already paid for.
+    expect(execaMock).toHaveBeenCalledTimes(3);
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("guards the selector click even when the probe is disabled (settleMs: 0)", async () => {
+    mockClickSequence({
+      scrollSettle: {
+        stable: true,
+        inViewport: false,
+        cx: 640,
+        cy: 1100,
+        innerWidth: 1280,
+        innerHeight: 800,
+      },
+    });
+    const adapter = new AgentBrowserAdapter({ session: "sel-settle-noprobe" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: "#footer-cta" },
+      settleMs: 0,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("stayed off-viewport after scrollIntoView");
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toBe(false);
+  });
+
+  it("never blocks the click on an inconclusive settle report", async () => {
+    // Parity with detectOffViewportAfterScroll: a report the eval couldn't
+    // produce (old page, agent-browser hiccup) must not fail the step.
+    mockClickSequence({
+      probe: { linkLike: false, beforeUrl: "http://app.test/form" },
+    });
+    const adapter = new AgentBrowserAdapter({ session: "sel-settle-unknown" });
+
+    const result = await adapter.runStep({
+      click: { by: "selector", selector: "#save" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(
+      execaMock.mock.calls.filter((call) =>
+        (call[1] as string[]).includes("click"),
+      ),
+    ).toHaveLength(1);
   });
 });
 

@@ -74,14 +74,33 @@ interface ExternalLinkClick {
 }
 
 /**
- * Outcome of the pre-click link classification: a same-tab nav link to verify,
- * an external-effect link to pass with a note, or an `InvocationResult` to
- * return immediately (the classification eval itself hard-timed-out).
+ * Rect-settle report from the in-page guard on the `by: selector` click path:
+ * whether the target's bounding rect held still across two consecutive
+ * animation frames and whether its center landed inside the viewport. An
+ * `undefined` report (eval failed, old page, target missing) is inconclusive
+ * and never blocks the click — mirroring `detectOffViewportAfterScroll`.
  */
-type LinkClickPreparation =
-  | LinkClickProbe
-  | ExternalLinkClick
-  | InvocationResult;
+interface SelectorRectSettle {
+  stable: boolean;
+  inViewport: boolean;
+  cx?: number;
+  cy?: number;
+  innerWidth?: number;
+  innerHeight?: number;
+}
+
+/**
+ * Outcome of the pre-click link classification eval: a same-tab nav link to
+ * verify or an external-effect link to pass with a note (`prepared`), a hard
+ * failure to return immediately (`failure`, the classification eval itself
+ * hard-timed-out), and — on the selector path, where scrollIntoView is folded
+ * into the same eval — the rect-settle viewport guard report (`settle`).
+ */
+interface LinkClickPreparation {
+  prepared?: LinkClickProbe | ExternalLinkClick;
+  failure?: InvocationResult;
+  settle?: SelectorRectSettle;
+}
 
 /**
  * Adapter over the `agent-browser` Rust CLI (https://agent-browser.dev).
@@ -840,17 +859,38 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // classification (and observer install for same-tab links) run in the
       // SAME eval — a non-link click (e.g. a button) therefore pays no extra
       // invocation over the scroll it already needs. When the probe is
-      // disabled (verifyAfterClick:false or a resolved settleMs of 0) we fall
-      // back to the plain scroll-only eval.
+      // disabled (verifyAfterClick:false or a resolved settleMs of 0) a click
+      // still runs the rect-settle scroll eval; other actions keep the plain
+      // scroll-only eval.
       const probeEnabled =
         action === "click" && this.clickProbeEnabled(settleMsOverride);
       let prepared: LinkClickProbe | ExternalLinkClick | undefined;
+      let settle: SelectorRectSettle | undefined;
       if (probeEnabled) {
         const p = await this.prepareLinkClickProbe(locator, locator.selector);
-        if (p && "ok" in p) return p;
-        prepared = p;
+        if (p.failure) return p.failure;
+        prepared = p.prepared;
+        settle = p.settle;
+      } else if (action === "click") {
+        settle = await this.scrollSelectorIntoViewForClick(locator.selector);
       } else {
         await this.scrollSelectorIntoView(locator.selector);
+      }
+      if (action === "click") {
+        // Same delivery guard the ref path gets from
+        // detectOffViewportAfterScroll: agent-browser dispatches the click at
+        // the resolved coordinate and exits 0 even when the target has left
+        // it (mid-CSS-transition sheet/dialog) or never reached the viewport
+        // — the step would otherwise report ✓ while the app's handler never
+        // fired.
+        const undelivered = rectSettleFailure(settle);
+        if (undelivered) {
+          return this.unresolvedFailure(action, start, [
+            `element found (selector ${JSON.stringify(locator.selector)}) but ${undelivered}`,
+            "agent-browser's click would silently no-op instead of erroring — a transitioning sheet/dialog that never finishes opening, or a position:fixed/sticky container taller than the viewport, both leave the click coordinate stale",
+            "fix: `wait` for the sheet/dialog content to finish appearing before the click, or widen the spec/environment `viewport: { width, height }` to fit the fixed content",
+          ]);
+        }
       }
       const argv = [action, locator.selector];
       if (value !== undefined) argv.push(value);
@@ -899,7 +939,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
     const argv = [action, `@${resolved.element.ref}`];
     if (value !== undefined) argv.push(value);
-    const prepared =
+    const preparation =
       action === "click" && this.clickProbeEnabled(settleMsOverride)
         ? await this.prepareLinkClickProbe(
             locator,
@@ -907,15 +947,18 @@ export class AgentBrowserAdapter implements BrowserBackend {
             resolved.element,
           )
         : undefined;
-    if (prepared && "ok" in prepared) {
+    if (preparation?.failure) {
       return {
-        ...prepared,
+        ...preparation.failure,
         resolvedElement: toResolvedElement(resolved.element),
       };
     }
     const r = await this.invoke(argv);
     if (action === "click") {
-      const delivered = await this.verifyLinkClickDelivery(r, prepared);
+      const delivered = await this.verifyLinkClickDelivery(
+        r,
+        preparation?.prepared,
+      );
       return await this.verifyAndSettleAfterClick(
         delivered,
         locator,
@@ -949,21 +992,23 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /**
    * Classify a click target and, for a same-tab nav link, install a
    * before-click URL + MutationObserver delivery probe. On the selector path
-   * the scroll-into-view is folded into this same eval (so a non-link click
-   * pays no extra invocation); on the semantic path the ref was already
-   * scrolled and the element is located by its accessible name. Returns a
-   * `LinkClickProbe` (verify same-tab delivery), an `ExternalLinkClick` (click
-   * once + note, no verification), an `InvocationResult` (the eval hard-timed
-   * out — return it immediately), or `undefined` (not a link → plain click).
+   * the scroll-into-view AND the rect-settle viewport guard are folded into
+   * this same eval (so a non-link click pays no extra invocation); on the
+   * semantic path the ref was already scrolled and guarded, and the element
+   * is located by its accessible name. The returned `LinkClickPreparation`
+   * carries a `LinkClickProbe` (verify same-tab delivery) or an
+   * `ExternalLinkClick` (click once + note, no verification) in `prepared`
+   * (absent for a plain non-link click), a `failure` to return immediately
+   * (the eval hard-timed out), and the selector path's `settle` report.
    */
   private async prepareLinkClickProbe(
     locator: Locator,
     target: string,
     resolved?: SnapshotElement,
-  ): Promise<LinkClickPreparation | undefined> {
+  ): Promise<LinkClickPreparation> {
     const isSelector = locator.by === "selector";
     if (!isSelector && resolved?.role.toLowerCase() !== "link") {
-      return undefined;
+      return {};
     }
 
     const script = linkClickProbeScript(
@@ -972,33 +1017,44 @@ export class AgentBrowserAdapter implements BrowserBackend {
         : { name: resolved?.name, scroll: false, assumeLink: true },
     );
     const result = await this.invoke(["eval", script, "--json"]);
-    if (!result.ok) return this.sawChildTimeout ? result : undefined;
+    if (!result.ok) {
+      return this.sawChildTimeout ? { failure: result } : {};
+    }
     const metadata = parseEvalResult<{
       linkLike?: boolean;
       externalReason?: string | null;
       beforeUrl?: string;
       beforeTimeOrigin?: number;
+      settle?: unknown;
     }>(result.stdout);
+    const settle = normalizeRectSettle(metadata?.settle);
+    const base: LinkClickPreparation = settle ? { settle } : {};
     if (
       !metadata ||
       metadata.linkLike !== true ||
       typeof metadata.beforeUrl !== "string"
     ) {
-      return undefined;
+      return base;
     }
     if (
       typeof metadata.externalReason === "string" &&
       metadata.externalReason
     ) {
-      return { externalReason: metadata.externalReason };
+      return {
+        ...base,
+        prepared: { externalReason: metadata.externalReason },
+      };
     }
     return {
-      target,
-      beforeUrl: metadata.beforeUrl,
-      ...(typeof metadata.beforeTimeOrigin === "number"
-        ? { beforeTimeOrigin: metadata.beforeTimeOrigin }
-        : {}),
-      stateKey: LINK_CLICK_PROBE_KEY,
+      ...base,
+      prepared: {
+        target,
+        beforeUrl: metadata.beforeUrl,
+        ...(typeof metadata.beforeTimeOrigin === "number"
+          ? { beforeTimeOrigin: metadata.beforeTimeOrigin }
+          : {}),
+        stateKey: LINK_CLICK_PROBE_KEY,
+      },
     };
   }
 
@@ -1390,6 +1446,32 @@ export class AgentBrowserAdapter implements BrowserBackend {
     await this.invoke(["eval", script]);
   }
 
+  /**
+   * Click-specific scroll variant for the selector path when the link-click
+   * probe is disabled (verifyAfterClick:false / settleMs: 0): fold the
+   * rect-settle viewport guard into the scroll eval — still one invocation —
+   * and report the outcome so the click isn't dispatched at a coordinate the
+   * target has left. Returns `undefined` when the check is inconclusive.
+   */
+  private async scrollSelectorIntoViewForClick(
+    selector: string,
+  ): Promise<SelectorRectSettle | undefined> {
+    const script = `(async () => {
+      try {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+        ${rectSettleJs()}
+        return await __rectSettle(el);
+      } catch (_) {
+        return null;
+      }
+    })()`;
+    const r = await this.invoke(["eval", script, "--json"]);
+    if (!r.ok) return undefined;
+    return normalizeRectSettle(parseEvalResult<unknown>(r.stdout));
+  }
+
   private async resolveInteractiveRef(
     locator: Locator,
     timeoutMs: number,
@@ -1652,9 +1734,18 @@ const SCREENSHOT_TIMEOUT_MS = 15_000;
  * Budget for the post-scrollIntoView viewport confirmation. Covers a CSS
  * `scroll-behavior: smooth` animation (typically 300-500ms) with headroom;
  * a genuinely fixed off-viewport target spends this long before failing.
+ * The selector path's in-page rect-settle guard shares the same budget.
  */
 const OFF_VIEWPORT_SETTLE_MS = 1_500;
 const OFF_VIEWPORT_POLL_INTERVAL_MS = 250;
+
+/**
+ * Frame fallback for the in-page rect-settle guard: a throttled/background
+ * tab pauses requestAnimationFrame entirely — exactly the environment where
+ * a stuck CSS transition leaves a sheet's button stably off-viewport — so
+ * each frame wait races rAF against a setTimeout to stay bounded there.
+ */
+const RECT_SETTLE_FRAME_FALLBACK_MS = 250;
 
 /**
  * Extra time granted to the child past the spec's own `timeoutMs` so
@@ -1980,12 +2071,70 @@ export function describeBatchFailure(
 }
 
 /**
- * Build the pre-click classification eval. `scroll` folds scrollIntoView into
- * the same invocation (selector path). The element is located by CSS selector
- * or, on the semantic path, by matching a link's accessible name. `assumeLink`
- * (semantic path, where the snapshot already resolved a role=link) treats an
- * un-locatable target as a same-tab link so its delivery is still verified —
- * only a POSITIVELY-classified external-effect link skips verification.
+ * In-page rect-settle guard for `by: selector` clicks (the ref path gets the
+ * same protection out-of-process via `detectOffViewportAfterScroll`). After
+ * scrollIntoView, sample `getBoundingClientRect()` on consecutive animation
+ * frames until two frames agree AND the center sits inside the viewport,
+ * re-scrolling between stable-but-off-viewport samples (an async section
+ * collapsing above the target can yank a centered target back out). Runs
+ * entirely inside the eval that already exists on this path, so a selector
+ * click pays ZERO extra invocations for the guard — the reverted `get box`
+ * subprocess-polling gate added ~2 invocations per click. Resolves to a
+ * `{ stable, inViewport, cx, cy, innerWidth, innerHeight }` report, or null
+ * when the check couldn't run (inconclusive → never blocks the click).
+ */
+function rectSettleJs(): string {
+  return `const __rectSettle = async (el) => {
+      try {
+        const frame = () => new Promise((resolve) => {
+          let done = false;
+          const finish = () => { if (!done) { done = true; resolve(); } };
+          if (typeof requestAnimationFrame === "function") requestAnimationFrame(finish);
+          setTimeout(finish, ${RECT_SETTLE_FRAME_FALLBACK_MS});
+        });
+        const read = () => {
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        };
+        const same = (a, b) => Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 &&
+          Math.abs(a.w - b.w) < 0.5 && Math.abs(a.h - b.h) < 0.5;
+        const report = (rect, stable) => {
+          const cx = rect.x + rect.w / 2;
+          const cy = rect.y + rect.h / 2;
+          return {
+            stable,
+            inViewport: cx >= 0 && cx <= window.innerWidth && cy >= 0 && cy <= window.innerHeight,
+            cx: Math.round(cx), cy: Math.round(cy),
+            innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+          };
+        };
+        const deadline = Date.now() + ${OFF_VIEWPORT_SETTLE_MS};
+        let prev = read();
+        for (;;) {
+          await frame();
+          const cur = read();
+          const out = report(cur, same(prev, cur));
+          if ((out.stable && out.inViewport) || Date.now() >= deadline) return out;
+          if (out.stable) {
+            try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+          }
+          prev = cur;
+        }
+      } catch (_) {
+        return null;
+      }
+    };`;
+}
+
+/**
+ * Build the pre-click classification eval. `scroll` folds scrollIntoView AND
+ * the rect-settle viewport guard into the same invocation (selector path; the
+ * eval becomes async — agent-browser awaits promise results, verified on
+ * 0.31.2). The element is located by CSS selector or, on the semantic path,
+ * by matching a link's accessible name. `assumeLink` (semantic path, where
+ * the snapshot already resolved a role=link) treats an un-locatable target as
+ * a same-tab link so its delivery is still verified — only a
+ * POSITIVELY-classified external-effect link skips verification.
  */
 function linkClickProbeScript(opts: {
   selector?: string;
@@ -1999,7 +2148,7 @@ function linkClickProbeScript(opts: {
       : opts.name !== undefined
         ? `__findLinkByName(${JSON.stringify(opts.name)})`
         : "null";
-  return `(() => {
+  return `(${opts.scroll ? "async " : ""}() => {
     const __norm = (s) => String(s == null ? "" : s).replace(/\\s+/g, " ").trim().toLowerCase();
     const __findLinkByName = (want) => {
       const target = __norm(want);
@@ -2013,7 +2162,17 @@ function linkClickProbeScript(opts: {
         ? 'if (raw) { try { raw.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {} }'
         : ""
     }
-    const base = { beforeUrl: location.href, beforeTimeOrigin: performance.timeOrigin };
+    ${opts.scroll ? rectSettleJs() : ""}
+    ${
+      // Settle BEFORE capturing beforeUrl — the guard may wait up to its
+      // budget, and a URL captured before it could be stale for delivery.
+      opts.scroll
+        ? "const __settle = raw ? await __rectSettle(raw) : null;"
+        : ""
+    }
+    const base = { beforeUrl: location.href, beforeTimeOrigin: performance.timeOrigin${
+      opts.scroll ? ", settle: __settle" : ""
+    } };
     const anchor = raw && (raw.matches && raw.matches('a[href], [role=link]')
       ? raw
       : (raw.closest ? raw.closest('a[href], [role=link]') : null));
@@ -2083,6 +2242,63 @@ function selectorMatchDiagnosticsScript(selector: string): string {
       })),
     };
   })()`;
+}
+
+/**
+ * Accept a rect-settle report only when it carries the two decision booleans —
+ * anything else (null from a failed in-page check, an envelope object leaked
+ * by `parseEvalResult`'s fallback chain, a mocked eval without the field) is
+ * inconclusive and must never block the click.
+ */
+function normalizeRectSettle(value: unknown): SelectorRectSettle | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record["stable"] !== "boolean" ||
+    typeof record["inViewport"] !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    stable: record["stable"],
+    inViewport: record["inViewport"],
+    ...(typeof record["cx"] === "number" ? { cx: record["cx"] } : {}),
+    ...(typeof record["cy"] === "number" ? { cy: record["cy"] } : {}),
+    ...(typeof record["innerWidth"] === "number"
+      ? { innerWidth: record["innerWidth"] }
+      : {}),
+    ...(typeof record["innerHeight"] === "number"
+      ? { innerHeight: record["innerHeight"] }
+      : {}),
+  };
+}
+
+/**
+ * Short human-readable reason a selector click must not be dispatched, or
+ * `undefined` when the target settled in-viewport (or the check was
+ * inconclusive — parity with `detectOffViewportAfterScroll`, which never
+ * blocks on a check it couldn't complete).
+ */
+function rectSettleFailure(
+  settle: SelectorRectSettle | undefined,
+): string | undefined {
+  if (!settle) return undefined;
+  const center =
+    typeof settle.cx === "number" && typeof settle.cy === "number"
+      ? `: target center (${settle.cx}, ${settle.cy})`
+      : "";
+  const viewport =
+    typeof settle.innerWidth === "number" &&
+    typeof settle.innerHeight === "number"
+      ? ` the ${settle.innerWidth}x${settle.innerHeight} viewport`
+      : " the viewport";
+  if (!settle.stable) {
+    return `its bounding rect was still moving after ${OFF_VIEWPORT_SETTLE_MS}ms (a CSS transition/animation that never settled)${center} vs${viewport}`;
+  }
+  if (!settle.inViewport) {
+    return `it stayed off-viewport after scrollIntoView${center} is outside${viewport}`;
+  }
+  return undefined;
 }
 
 function parseEvalResult<T>(stdout: string): T | undefined {

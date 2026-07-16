@@ -610,20 +610,20 @@ knowledge layer of failure points that persists across reindexes. Requires
 ./bin/cairn run flows/login.yml --auto-annotate on-run
 ```
 
-`cairn secrets` manages [TinyVault](https://github.com/abdul-hamid-achik/tinyvault)
-secrets for authenticated specs — checking projects, listing keys, and
-exporting secrets without exposing values in the conversation. Requires `tvault`
-on `$PATH`.
+`cairn secrets` reports the [TinyVault](https://github.com/abdul-hamid-achik/tinyvault)
+provider status for authenticated specs and lists the secret **key names**
+available to a target — values are never printed. Requires `tvault` on
+`$PATH` (degrades to provider `env` without it).
 
 ```bash
-# List vault projects
-./bin/cairn secrets list-projects
+# Provider status (is tvault installed? which provider is active?)
+./bin/cairn secrets
 
-# List secret keys in a project
-./bin/cairn secrets list-keys --project myapp-test
+# List secret key names in a project (direct mode)
+./bin/cairn secrets --project myapp-test
 
-# Export secrets to a .env file (values never printed)
-./bin/cairn secrets export-env --project myapp-test --output .env.test
+# List secret key names for an environment group (inheritance mode)
+./bin/cairn secrets --group mygroup --env test
 ```
 
 Configure defaults via config:
@@ -639,9 +639,8 @@ secrets:
   project: myapp-test       # default vault project
 ```
 
-The MCP server exposes `cairn_annotate`, `cairn_secrets_list_projects`,
-`cairn_secrets_list_keys`, and `cairn_secrets_export_env` tools that mirror the
-CLI. All degrade gracefully when codemap/tvault aren't installed.
+The MCP server exposes `cairn_annotate` and `cairn_secrets_status` tools that
+mirror the CLI. Both degrade gracefully when codemap/tvault aren't installed.
 
 ## CLI Reference
 
@@ -654,6 +653,7 @@ Common commands:
 | `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
 | `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
 | `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
+| `cairn discover <url>` | Inspect a page and return the full accessibility tree + locator inventory. Supports `--roles`, `--testids`, `--env`, `--headed`, `--mock`, `--backend`, `--config`. |
 | `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, or `discovery`. |
 | `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
 | `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
@@ -669,11 +669,11 @@ Common commands:
 | `cairn stash search <query>` | Search across all stashed runs. Supports `--mode keyword\|semantic\|hybrid` and `--limit`. |
 | `cairn investigate <run-id>` | Stash a run and run `fcheap connect` to find code responsible for failures. Supports `--codebase`, `--mode`, `--limit`, `--keep-stash`. |
 | `cairn audit <spec>` | Run a spec with video, extract vidtrace evidence, and connect to code. Supports `--codebase`, `--speed`, `--slow-mo`, `--mode`, `--limit`. |
+| `cairn clip <run-ref>` | Cut named clips from a run video using vidtrace. Supports repeatable `--label name=start-end`, `--out`, `--name`, `--reencode`, `--stash`, `--tag`. |
 | `cairn annotate <symbol>` | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`. |
-| `cairn secrets list-projects` | List TinyVault projects. |
-| `cairn secrets list-keys` | List secret keys in a TinyVault project (`--project`). |
-| `cairn secrets export-env` | Export TinyVault secrets to a `.env` file without exposing values (`--project`, `--output`). |
+| `cairn secrets` | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed). |
 | `cairn config validate` | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid. |
+| `cairn services status` | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session). Supports `--config`, `--project`. |
 | `cairn mcp` | Start the MCP server on stdio. |
 
 Structured output is available on commands wired with format flags:
@@ -729,11 +729,12 @@ The MCP server exposes these tools:
 `cairn_explain`, `cairn_docs`, `cairn_doctor`, `cairn_run`, `cairn_context`,
 `cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
 `cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
-`cairn_config_validate`, `cairn_stash_save`, `cairn_stash_list`, `cairn_stash_search`,
-`cairn_investigate`, `cairn_audit`, `cairn_annotate`, `cairn_secrets_status`,
-and the nine `cairn_discover_*` tools (`open`, `snapshot`, `interact`,
-`navigate`, `inventory`, `suggest`, `export`, `close`, `list`) that drive a
-stateful browser session to explore, record, and export a spec.
+`cairn_config_validate`, `cairn_services_status`, `cairn_stash_save`,
+`cairn_stash_list`, `cairn_stash_search`, `cairn_investigate`, `cairn_audit`,
+`cairn_clip`, `cairn_annotate`, `cairn_secrets_status`, and the nine
+`cairn_discover_*` tools (`open`, `snapshot`, `interact`, `navigate`,
+`inventory`, `suggest`, `export`, `close`, `list`) that drive a stateful
+browser session to explore, record, and export a spec.
 
 Agents should call `cairn_explain` once at session start, then `cairn_docs`
 for the focused topic they need.

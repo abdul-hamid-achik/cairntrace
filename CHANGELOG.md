@@ -4,6 +4,8 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.39.0] - 2026-07-16
+
 ## [1.38.0]
 
 Read honesty: a backend that could not observe the page used to answer with a
