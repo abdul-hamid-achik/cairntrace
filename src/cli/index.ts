@@ -141,8 +141,14 @@ addFormatFlags(
       "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
     )
     .option(
+      "--tag <tag>",
+      "run only specs whose metadata.tags includes this tag (repeatable = AND, case-insensitive)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
       "--select-only",
-      "with --since-codemap <ref>, resolve which specs WOULD run and exit 0 without launching a browser (emits SelectionResult v1); without a ref, lists all expanded specs",
+      "resolve which specs WOULD run and exit 0 without launching a browser (SelectionResult v1); pairs with --tag and/or --since-codemap",
       false,
     ),
 ).action((specs: string[], opts) => runCommand(specs, opts));

@@ -35,7 +35,7 @@ export function buildExplain(): ExplainResult {
         name: "run",
         summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--since-codemap <ref>] [--select-only] [--stash-on-failure] [--no-web-server] [--no-services] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--tag <tag>] [--since-codemap <ref>] [--select-only] [--stash-on-failure] [--no-web-server] [--no-services] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -140,6 +140,12 @@ export function buildExplain(): ExplainResult {
               "Auto-stash failed run directories to fcheap (non-fatal if fcheap is missing).",
           },
           {
+            name: "--tag",
+            type: "string",
+            description:
+              "Run only specs whose `metadata.tags` includes this tag. Repeatable (AND). Case-insensitive. Pair with --select-only to preview matches.",
+          },
+          {
             name: "--since-codemap",
             type: "string",
             description:
@@ -150,7 +156,7 @@ export function buildExplain(): ExplainResult {
             type: "boolean",
             default: false,
             description:
-              "Resolve which specs WOULD run and exit 0 without launching a browser (emits SelectionResult v1: selected/skipped with reasons). Pair with --since-codemap <ref> for blast-radius scoping; without a ref, lists all expanded specs as selected.",
+              "Resolve which specs WOULD run and exit 0 without launching a browser (emits SelectionResult v1: selected/skipped with reasons). Pair with --tag and/or --since-codemap <ref>; without filters, lists all expanded specs as selected.",
           },
           {
             name: "--monitor",

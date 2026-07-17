@@ -53,6 +53,31 @@ steps:
   - click: { by: { role: button, name: "Yes, rotate" } }
 ```
 
+## Tags for suite selection
+
+Put stable labels on a spec under `metadata.tags`. Agents and humans then run a **subset** of a directory without inventing new folders:
+
+```yaml
+metadata:
+  feature: answer-change-temporal
+  priority: high
+  tags:
+    - OPG-14827
+    - temporal
+    - answer-change
+```
+
+```bash
+# preview which specs match (no browser)
+cairn run flows/ --tag answer-change --select-only --json
+
+# run every matching spec (AND if you pass multiple --tag)
+cairn run flows/ --tag answer-change --cold-start --headed
+cairn run flows/ --tag temporal --tag OPG-14827 --cold-start
+```
+
+Matching is **case-insensitive**. Multiple `--tag` flags mean **AND** (the spec must declare every listed tag). Specs with no `metadata.tags` never match a tag filter.
+
 ## Cold-start is not optional
 
 Every spec must satisfy the **cold-start contract**: replayable from a fresh browser session. Four supported paths, pick one:

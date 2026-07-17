@@ -11,7 +11,10 @@ import {
   buildSelectionResult,
   expandSpecArgs,
   maybeInjectTvaultSecrets,
+  normalizeTagFilters,
   selectSpecsByBlastRadius,
+  selectSpecsByTags,
+  specMatchesTags,
   synthesizeErroredResult,
   type RunCommandOptions,
 } from "./run";
@@ -151,6 +154,116 @@ describe("expandSpecArgs", () => {
     await expect(
       expandSpecArgs(["_explicit.yml", "missing.yml"], dir),
     ).resolves.toEqual(["_explicit.yml", "missing.yml"]);
+  });
+});
+
+describe("tag selection (metadata.tags)", () => {
+  it("normalizeTagFilters trims and drops empties", () => {
+    expect(normalizeTagFilters(["  a ", "", "b"])).toEqual(["a", "b"]);
+    expect(normalizeTagFilters(undefined)).toEqual([]);
+  });
+
+  it("specMatchesTags is case-insensitive AND", () => {
+    expect(specMatchesTags(["OPG-14827", "temporal"], ["temporal"])).toBe(true);
+    expect(specMatchesTags(["OPG-14827", "temporal"], ["TEMPORAL"])).toBe(true);
+    expect(
+      specMatchesTags(["OPG-14827", "temporal"], ["temporal", "buyer-path"]),
+    ).toBe(false);
+    expect(specMatchesTags([], ["temporal"])).toBe(false);
+    expect(specMatchesTags(["x"], [])).toBe(true);
+  });
+
+  it("selectSpecsByTags keeps only matching specs with skip reasons", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-tags-"));
+    const a = join(dir, "a.yml");
+    const b = join(dir, "b.yml");
+    const c = join(dir, "c.yml");
+    await writeFile(
+      a,
+      `version: 1\nname: a\nintent: a\nmetadata:\n  tags: [answer-change, temporal]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+    );
+    await writeFile(
+      b,
+      `version: 1\nname: b\nintent: b\nmetadata:\n  tags: [table-import]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+    );
+    await writeFile(
+      c,
+      `version: 1\nname: c\nintent: c\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+    );
+
+    const r = await selectSpecsByTags([a, b, c], ["answer-change"]);
+    expect(r.selected).toEqual([a]);
+    expect(r.skipped).toHaveLength(2);
+    expect(r.skipped.map((s) => basename(s.path)).sort()).toEqual([
+      "b.yml",
+      "c.yml",
+    ]);
+    expect(r.skipped.find((s) => s.path === c)?.reason).toMatch(
+      /no metadata\.tags/,
+    );
+    expect(r.skipped.find((s) => s.path === b)?.reason).toMatch(/missing tag/);
+  });
+
+  it("buildSelectionResult applies tag filter and lists tags on selected", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-tags-sel-"));
+    const a = join(dir, "hit.yml");
+    const b = join(dir, "miss.yml");
+    await writeFile(
+      a,
+      `version: 1\nname: hit\nintent: hit\nmetadata:\n  tags: [answer-change, OPG-14827]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+    );
+    await writeFile(
+      b,
+      `version: 1\nname: miss\nintent: miss\nmetadata:\n  tags: [other]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+    );
+
+    const result = await buildSelectionResult([a, b], undefined, undefined, [
+      "answer-change",
+    ]);
+    expect(SelectionResultSchema.parse(result)).toMatchObject({
+      tags: ["answer-change"],
+      codemapAvailable: false,
+    });
+    expect(result.selected).toHaveLength(1);
+    expect(result.selected[0]!.name).toBe("hit");
+    expect(result.selected[0]!.tags).toEqual(
+      expect.arrayContaining(["answer-change", "OPG-14827"]),
+    );
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]!.name).toBe("miss");
+  });
+
+  it("CLI --tag --select-only filters without launching a browser", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-tag-cli-"));
+    await writeFile(
+      join(dir, "yes.yml"),
+      `version: 1\nname: yes_spec\nintent: yes\nmetadata:\n  tags: [answer-change]\noutcomes:\n  - id: o\n    verify:\n      text: { contains: x }\n`,
+    );
+    await writeFile(
+      join(dir, "no.yml"),
+      `version: 1\nname: no_spec\nintent: no\nmetadata:\n  tags: [tables]\noutcomes:\n  - id: o\n    verify:\n      text: { contains: x }\n`,
+    );
+    const binCairn = join(process.cwd(), "bin", "cairn");
+    const result = await execa(binCairn, [
+      "run",
+      dir,
+      "--tag",
+      "answer-change",
+      "--select-only",
+      "--format",
+      "json",
+      "--mock",
+    ]);
+    expect(result.exitCode).toBe(0);
+    const body = JSON.parse(result.stdout) as {
+      selected: { name: string }[];
+      skipped: { name: string }[];
+      tags: string[];
+    };
+    expect(body.tags).toEqual(["answer-change"]);
+    // Selection names come from the file basename, not the YAML `name:` field.
+    expect(body.selected.map((s) => s.name)).toEqual(["yes"]);
+    expect(body.skipped.map((s) => s.name)).toEqual(["no"]);
   });
 });
 

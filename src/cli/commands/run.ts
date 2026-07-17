@@ -89,11 +89,17 @@ export interface RunCommandOptions {
   /**
    * `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
    * change and exit 0 without launching a browser. Emits a SelectionResult
-   * v1 envelope. Pairs with `--since-codemap <ref>` for blast-radius scoping;
-   * without it, lists all expanded specs as selected.
+   * v1 envelope. Pairs with `--since-codemap <ref>` for blast-radius scoping
+   * and/or `--tag` for metadata.tags filtering; without either, lists all
+   * expanded specs as selected.
    */
   selectOnly?: boolean;
   sinceCodemap?: string;
+  /**
+   * Repeatable `--tag <tag>`: keep only specs whose `metadata.tags` includes
+   * every requested tag (AND, case-insensitive). Empty / absent = no filter.
+   */
+  tag?: string[];
 }
 
 /**
@@ -160,11 +166,56 @@ export async function runCommand(
     process.exit(2);
   }
 
+  const requiredTags = normalizeTagFilters(opts.tag);
+
+  try {
+    parseVarFlags(opts.var);
+  } catch (e) {
+    runLog.error((e as Error).message);
+    process.exit(2);
+  }
+
+  // `--select-only`: resolve which specs WOULD run and exit 0 WITHOUT launching
+  // a browser, services, or webServer. Emits SelectionResult v1. Applies
+  // `--tag` and/or `--since-codemap` filters with skip reasons.
+  if (opts.selectOnly) {
+    const selection = await buildSelectionResult(
+      expandedSpecs,
+      opts.sinceCodemap,
+      defaultCodemapDeps,
+      requiredTags,
+    );
+    const format = resolveFormat(opts, "md");
+    await writeStdoutFully(
+      `${emit(format, selection, renderSelectionMarkdown)}${
+        format !== "json" && format !== "yaml" ? "\n" : ""
+      }`,
+    );
+    process.exitCode = 0;
+    return;
+  }
+
+  // Tag filter (AND): keep only specs that declare every requested tag in
+  // `metadata.tags`. Applied before blast-radius so codemap sees the narrowed set.
+  if (requiredTags.length > 0) {
+    const tagSel = await selectSpecsByTags(expandedSpecs, requiredTags);
+    expandedSpecs = tagSel.selected;
+    runLog.info(
+      `tag filter [${requiredTags.join(", ")}]: ${expandedSpecs.length} spec(s)`,
+    );
+    if (expandedSpecs.length === 0) {
+      runLog.error(
+        `no specs matched --tag ${requiredTags.map((t) => JSON.stringify(t)).join(" --tag ")} ` +
+          `(need every tag on metadata.tags; case-insensitive)`,
+      );
+      process.exit(2);
+    }
+  }
+
   // `--since-codemap <ref>` (FEATURES item 1): narrow to the specs a change can
   // actually hit via `codemap review` blast-radius intersection. Best-effort —
-  // degrades to the full set when codemap is absent. Skipped under
-  // `--select-only`, which resolves its own selection below.
-  if (opts.sinceCodemap && !opts.selectOnly) {
+  // degrades to the full set when codemap is absent.
+  if (opts.sinceCodemap) {
     expandedSpecs = await selectSpecsByBlastRadius(
       expandedSpecs,
       opts.sinceCodemap,
@@ -176,32 +227,6 @@ export async function runCommand(
       process.exitCode = 0;
       return;
     }
-  }
-
-  try {
-    parseVarFlags(opts.var);
-  } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
-  }
-
-  // `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
-  // change and exit 0 WITHOUT launching a browser, services, or webServer.
-  // Emits a SelectionResult v1 envelope. With `--since-codemap <ref>` it
-  // blast-radius-scopes; without it, lists every expanded spec as selected.
-  if (opts.selectOnly) {
-    const selection = await buildSelectionResult(
-      expandedSpecs,
-      opts.sinceCodemap,
-    );
-    const format = resolveFormat(opts, "md");
-    await writeStdoutFully(
-      `${emit(format, selection, renderSelectionMarkdown)}${
-        format !== "json" && format !== "yaml" ? "\n" : ""
-      }`,
-    );
-    process.exitCode = 0;
-    return;
   }
 
   // Propagate --env to CAIRN_TVAULT_ENV as early as possible — before the
@@ -1000,6 +1025,81 @@ async function readCoversSymbol(specPath: string): Promise<string | undefined> {
 }
 
 /**
+ * Read `metadata.tags` from a spec via a loose YAML parse (selection only).
+ * Returns [] when absent or unreadable.
+ */
+export async function readSpecTags(specPath: string): Promise<string[]> {
+  try {
+    const raw = await readFile(specPath, "utf8");
+    const doc = parseYaml(raw) as {
+      metadata?: { tags?: unknown };
+    } | null;
+    const tags = doc?.metadata?.tags;
+    if (!Array.isArray(tags)) return [];
+    return tags.filter(
+      (t): t is string => typeof t === "string" && t.trim().length > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Trim empty entries from repeatable `--tag` flags. */
+export function normalizeTagFilters(tags: string[] | undefined): string[] {
+  return (tags ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
+}
+
+/**
+ * True when `specTags` includes every entry in `required` (case-insensitive).
+ * Empty `required` always matches.
+ */
+export function specMatchesTags(
+  specTags: string[],
+  required: string[],
+): boolean {
+  if (required.length === 0) return true;
+  const have = new Set(specTags.map((t) => t.toLowerCase()));
+  return required.every((r) => have.has(r.toLowerCase()));
+}
+
+/**
+ * Filter expanded specs by `metadata.tags`. AND semantics: every required tag
+ * must be present. Returns selected paths and skip reasons for the rest.
+ */
+export async function selectSpecsByTags(
+  specs: string[],
+  requiredTags: string[],
+): Promise<{
+  selected: string[];
+  skipped: { path: string; reason: string }[];
+}> {
+  const required = normalizeTagFilters(requiredTags);
+  if (required.length === 0) {
+    return { selected: [...specs], skipped: [] };
+  }
+  const selected: string[] = [];
+  const skipped: { path: string; reason: string }[] = [];
+  const need = required.map((t) => t.toLowerCase());
+  for (const p of specs) {
+    const tags = await readSpecTags(p);
+    const have = new Set(tags.map((t) => t.toLowerCase()));
+    const missing = need.filter((t) => !have.has(t));
+    if (missing.length === 0) {
+      selected.push(p);
+    } else {
+      skipped.push({
+        path: p,
+        reason:
+          tags.length === 0
+            ? `no metadata.tags (need: ${required.join(", ")})`
+            : `missing tag(s): ${missing.join(", ")} (have: ${tags.join(", ")})`,
+      });
+    }
+  }
+  return { selected, skipped };
+}
+
+/**
  * `--since-codemap <ref>` (FEATURES item 1): intersect `codemap review --since
  * <ref>` blast-radius file paths against each spec's `coversSymbol` code-match
  * provenance and return only the minimal set a change can actually hit.
@@ -1065,37 +1165,71 @@ function absolutifySpec(specPath: string): string {
 }
 
 /**
- * `--select-only` (FEATURES item 2): resolve which specs WOULD run for a
- * change and return a SelectionResult v1 envelope, WITHOUT launching a
- * browser. Mirrors `selectSpecsByBlastRadius` logic but also reports the
- * skipped set with reasons and each selected spec's coversSymbol.
+ * `--select-only`: resolve which specs WOULD run and return a SelectionResult
+ * v1 envelope, WITHOUT launching a browser.
  *
- * - No `since`: all expanded specs are selected; codemapAvailable=false.
- * - `since` + codemap absent: degrade to run-all; codemapAvailable=false.
- * - `since` + codemap present but review empty/failed: run-all; codemapAvailable=false.
- * - `since` + codemap present + indexed empty radius: all skipped (CSS-edit case).
- * - `since` + codemap present + non-empty radius: blast-radius intersection.
+ * Filters (applied in order):
+ * 1. `--tag` AND-filter on `metadata.tags` (case-insensitive)
+ * 2. `--since-codemap` blast-radius (when provided)
+ *
+ * - No `since` / no tags: all expanded specs selected; codemapAvailable=false.
+ * - Tags only: non-matching skipped with reason; codemapAvailable=false.
+ * - `since` + codemap absent: degrade to run-all on the tag-filtered set.
+ * - `since` + codemap present + empty radius: all remaining skipped.
+ * - `since` + non-empty radius: blast-radius intersection.
  */
 export async function buildSelectionResult(
   specs: string[],
   since: string | undefined,
   deps: CodemapDeps = defaultCodemapDeps,
+  requiredTags: string[] = [],
 ): Promise<SelectionResult> {
   const selected: SelectedSpec[] = [];
   const skipped: SkippedSpec[] = [];
-  const enter = (p: string): { name: string; path: string } => ({
-    name: specNameFromPath(p),
-    path: absolutifySpec(p),
-  });
+  const tagsFilter = normalizeTagFilters(requiredTags);
+  const enter = async (
+    p: string,
+  ): Promise<{ name: string; path: string; tags?: string[] }> => {
+    const tags = await readSpecTags(p);
+    return {
+      name: specNameFromPath(p),
+      path: absolutifySpec(p),
+      ...(tags.length > 0 ? { tags } : {}),
+    };
+  };
   const base = {
     $schema: "urn:cairntrace.dev:selection:v1" as const,
     version: "1" as const,
+    ...(tagsFilter.length > 0 ? { tags: tagsFilter } : {}),
+  };
+
+  // 1) Tag filter first — skipped specs stay skipped even if codemap would
+  // have selected them.
+  let candidates = specs;
+  if (tagsFilter.length > 0) {
+    const tagSel = await selectSpecsByTags(specs, tagsFilter);
+    candidates = tagSel.selected;
+    for (const s of tagSel.skipped) {
+      skipped.push({
+        name: specNameFromPath(s.path),
+        path: absolutifySpec(s.path),
+        reason: s.reason,
+      });
+    }
+  }
+
+  const pushSelected = async (p: string, coversSymbol?: string) => {
+    const e = await enter(p);
+    selected.push({
+      ...e,
+      ...(coversSymbol ? { coversSymbol } : {}),
+    });
   };
 
   if (!since) {
-    for (const p of specs) {
+    for (const p of candidates) {
       const sym = await readCoversSymbol(p);
-      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+      await pushSelected(p, sym);
     }
     return {
       ...base,
@@ -1106,9 +1240,9 @@ export async function buildSelectionResult(
   }
 
   if (!(await deps.isAvailable())) {
-    for (const p of specs) {
+    for (const p of candidates) {
       const sym = await readCoversSymbol(p);
-      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+      await pushSelected(p, sym);
     }
     return { ...base, since, codemapAvailable: false, selected, skipped };
   }
@@ -1117,9 +1251,9 @@ export async function buildSelectionResult(
   // codemap failed / returned nothing → run-all so a broken codemap never
   // silently skips a run.
   if (!review.indexed && review.blastRadiusFiles.length === 0) {
-    for (const p of specs) {
+    for (const p of candidates) {
       const sym = await readCoversSymbol(p);
-      selected.push({ ...enter(p), ...(sym ? { coversSymbol: sym } : {}) });
+      await pushSelected(p, sym);
     }
     return { ...base, since, codemapAvailable: false, selected, skipped };
   }
@@ -1129,35 +1263,38 @@ export async function buildSelectionResult(
   const emptyRadius =
     review.blastRadiusFiles.length === 0 &&
     review.blastRadiusSymbols.length === 0;
-  // Indexed but empty radius → genuinely nothing impacted (CSS edit case).
+  // Indexed but empty radius → genuinely nothing impacted (CSS-edit case).
   if (emptyRadius) {
-    for (const p of specs) {
+    for (const p of candidates) {
       skipped.push({
-        ...enter(p),
+        ...(await enter(p)),
         reason: `blast radius of '${since}' matched no symbols`,
       });
     }
     return { ...base, since, codemapAvailable: true, selected, skipped };
   }
 
-  for (const p of specs) {
+  for (const p of candidates) {
     const sym = await readCoversSymbol(p);
     if (!sym) {
-      skipped.push({ ...enter(p), reason: "no coversSymbol binding" });
+      skipped.push({
+        ...(await enter(p)),
+        reason: "no coversSymbol binding",
+      });
       continue;
     }
     if (blastSymbols.has(sym)) {
-      selected.push({ ...enter(p), coversSymbol: sym });
+      await pushSelected(p, sym);
       continue;
     }
     const files = (await codemapSemantic(sym, deps))
       .map((s) => s.file)
       .filter((f): f is string => !!f);
     if (files.some((f) => blastFiles.has(f))) {
-      selected.push({ ...enter(p), coversSymbol: sym });
+      await pushSelected(p, sym);
     } else {
       skipped.push({
-        ...enter(p),
+        ...(await enter(p)),
         reason: `coversSymbol '${sym}' outside blast radius of '${since}'`,
       });
     }
@@ -1166,17 +1303,26 @@ export async function buildSelectionResult(
 }
 
 function renderSelectionMarkdown(s: SelectionResult): string {
+  const filterBits: string[] = [];
+  if (s.tags && s.tags.length > 0) {
+    filterBits.push(`--tag ${s.tags.join(" --tag ")}`);
+  }
+  if (s.since) filterBits.push(`--since-codemap ${s.since}`);
   const lines: string[] = [
     "",
     `\x1b[1mSelection\x1b[0m ${s.selected.length} selected, ${s.skipped.length} skipped` +
-      (s.since ? `  (--since-codemap ${s.since})` : ""),
+      (filterBits.length > 0 ? `  (${filterBits.join(", ")})` : ""),
   ];
   if (s.selected.length > 0) {
     lines.push("", "Selected:");
     for (const x of s.selected) {
+      const extras: string[] = [];
+      if (x.coversSymbol) extras.push(x.coversSymbol);
+      if (x.tags && x.tags.length > 0)
+        extras.push(`tags: ${x.tags.join(", ")}`);
       lines.push(
-        `  \x1b[32m✓\x1b[0m ${x.name}  ${
-          x.coversSymbol ? `(${x.coversSymbol})` : ""
+        `  \x1b[32m✓\x1b[0m ${x.name}${
+          extras.length > 0 ? `  (${extras.join(" · ")})` : ""
         }`,
       );
     }
@@ -1187,10 +1333,10 @@ function renderSelectionMarkdown(s: SelectionResult): string {
       lines.push(`  \x1b[33m·\x1b[0m ${x.name}  — ${x.reason}`);
     }
   }
-  if (!s.codemapAvailable) {
+  if (!s.codemapAvailable && s.since) {
     lines.push(
       "",
-      "\x1b[2m(codemap unavailable or no ref — selection degraded to run-all)\x1b[0m",
+      "\x1b[2m(codemap unavailable — selection degraded to run-all on remaining specs)\x1b[0m",
     );
   }
   return lines.join("\n");

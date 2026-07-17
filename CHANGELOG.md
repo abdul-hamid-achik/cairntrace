@@ -4,6 +4,21 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.41.0] - 2026-07-17
+
+### Added
+
+- **`cairn run --tag <tag>`** (repeatable, AND, case-insensitive): run only
+  specs whose `metadata.tags` includes every requested tag. Works with directory
+  expansion, pairs with `--select-only` for a dry selection preview, and combines
+  with `--since-codemap`. SelectionResult v1 gains optional `tags` (the filter)
+  and per-selected `tags` (from the spec) for fancy JSON/markdown output.
+
+  ```bash
+  cairn run flows/ --tag answer-change --select-only --json
+  cairn run flows/ --tag answer-change --headed --cold-start
+  ```
+
 ## [1.40.3] - 2026-07-17
 
 ### Fixed

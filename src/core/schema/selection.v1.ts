@@ -2,13 +2,15 @@ import { z } from "zod";
 import { AbsolutePathSchema } from "./shared";
 
 /**
- * Wire schema for `cairn run --since-codemap <ref> --select-only --json`
- * (FEATURES item 2): resolve which specs WOULD run for a change, without
- * launching a browser. v1 wire contract.
+ * Wire schema for `cairn run --select-only --json` (and friends): resolve
+ * which specs WOULD run without launching a browser. v1 wire contract.
  *
- * `selected` are specs whose `coversSymbol` intersects the codemap review
- * blast radius (or all specs when codemap is absent — best-effort). `skipped`
- * are the rest with a human reason. Exit 0 in both cases.
+ * Selection can be scoped by:
+ * - `--tag <tag>` (repeatable AND): `metadata.tags` must include every tag
+ * - `--since-codemap <ref>`: `coversSymbol` intersects codemap blast radius
+ *
+ * `selected` / `skipped` always cover the full expanded input set when a
+ * filter is applied. Exit 0 for `--select-only` in both cases.
  */
 
 export const SelectedSpecSchema = z
@@ -17,6 +19,8 @@ export const SelectedSpecSchema = z
     path: AbsolutePathSchema,
     /** coversSymbol binding read from the spec, if present. */
     coversSymbol: z.string().min(1).optional(),
+    /** Spec `metadata.tags` when present (for display / tooling). */
+    tags: z.array(z.string().min(1)).optional(),
   })
   .strict();
 export type SelectedSpec = z.infer<typeof SelectedSpecSchema>;
@@ -39,6 +43,11 @@ export const SelectionResultSchema = z
 
     /** The `--since-codemap <ref>` value when selection was blast-radius scoped; absent when --select-only ran without a ref (all expanded specs selected). */
     since: z.string().min(1).optional(),
+    /**
+     * Tag filter applied (`--tag`, AND semantics). Absent when no tag filter
+     * was requested.
+     */
+    tags: z.array(z.string().min(1)).min(1).optional(),
     /** Codemap availability — false means selection degraded to run-all (codemap absent or no ref given). */
     codemapAvailable: z.boolean(),
     selected: z.array(SelectedSpecSchema),
