@@ -15,6 +15,13 @@ import type { SeedConfig } from "../schema/config.v1";
 
 /* ---------- mock setup ---------- */
 
+/**
+ * Virtual clock advanced by the mocked `sleep()`. services.ts wait-loops use
+ * `Date.now()` deadlines; with a pure no-op sleep they busy-spin and OOM.
+ * beforeEach spies `Date.now` onto this clock.
+ */
+const testClock = { now: 1_700_000_000_000 };
+
 // Track execa calls: both `execa(cmd, args[], opts)` (tmux/docker) and
 // `execa(command, optsObject)` (runShellWithTimeout for docker/seed commands).
 const execaCalls: { cmd: string; args: string[] }[] = [];
@@ -85,8 +92,8 @@ vi.mock("./webServer", () => ({
     return true;
   }),
   sleep: vi.fn(async (ms: number) => {
-    // No-op — don't actually sleep in tests.
-    void ms;
+    // Advance the virtual clock so Date.now()-based wait loops terminate.
+    testClock.now += ms;
   }),
 }));
 
@@ -167,6 +174,8 @@ vi.mock("../../cli/commands/stash", () => ({
 let dir: string;
 let startedHandles: ServicesHandle[] = [];
 
+let dateNowSpy: ReturnType<typeof vi.spyOn> | undefined;
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "cairntrace-services-test-"));
   execaCalls.length = 0;
@@ -181,6 +190,8 @@ beforeEach(async () => {
   stashImpl = undefined;
   stashCalls = [];
   startedHandles = [];
+  testClock.now = 1_700_000_000_000;
+  dateNowSpy = vi.spyOn(Date, "now").mockImplementation(() => testClock.now);
 });
 
 afterEach(async () => {
@@ -188,6 +199,8 @@ afterEach(async () => {
     const h = startedHandles.pop();
     await h?.stop().catch(() => undefined);
   }
+  dateNowSpy?.mockRestore();
+  dateNowSpy = undefined;
 });
 
 function track(h: ServicesHandle): ServicesHandle {
@@ -645,10 +658,29 @@ describe("startServices — seed phase", () => {
   });
 });
 
+/**
+ * Default tmux mock bits shared by create/reuse tests. Callers layer
+ * has-session / capture-pane / list-windows on top as needed.
+ */
+function tmuxBaseImpl(
+  cmd: string,
+  args: string[],
+): { exitCode: number; stdout: string; stderr: string } | undefined {
+  if (cmd !== "tmux") return undefined;
+  // Shell settle polls use display-message for #{pane_current_command}.
+  if (args[0] === "display-message")
+    return { exitCode: 0, stdout: "zsh", stderr: "" };
+  if (args[0] === "clear-history")
+    return { exitCode: 0, stdout: "", stderr: "" };
+  return undefined;
+}
+
 describe("startServices — tmux phase", () => {
   it("creates a tmux session with windows and sends commands", async () => {
     // tmux has-session returns 1 (not found), capture-pane returns readyOn text
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "capture-pane") {
         return { exitCode: 0, stdout: "listening on :8080", stderr: "" };
       }
@@ -705,13 +737,23 @@ describe("startServices — tmux phase", () => {
     expect(
       execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("send-keys")),
     ).toBe(true);
+    // Clears residual scrollback before send-keys so readyOn can't match stale text.
+    expect(
+      execaCalls.some((c) => c.cmd === "tmux" && c.args[0] === "clear-history"),
+    ).toBe(true);
   });
 
   it("reuses existing tmux session when reuseExisting is true", async () => {
-    // tmux has-session returns 0 (session exists)
+    // Session exists, window is live (non-shell process) → no re-launch.
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" }; // service running
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "listening", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
 
@@ -736,11 +778,142 @@ describe("startServices — tmux phase", () => {
         (c) => c.cmd === "tmux" && c.args.includes("new-session"),
       ),
     ).toBe(false);
+    // Healthy reuse: no re-send of the service command.
+    expect(
+      execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("send-keys")),
+    ).toBe(false);
+  });
+
+  it("re-launches a dead pane when reusing a session with idle shell", async () => {
+    // Session exists, window exists, but pane is sitting at zsh with stale
+    // ready text in scrollback — the graphite go-services failure mode.
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "warehouse", stderr: "" };
+      // display-message from tmuxBaseImpl returns zsh → idle shell
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return {
+          exitCode: 0,
+          stdout: "main: warehouse listening on 9061\n(old crash)",
+          stderr: "",
+        };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "cairn-graphite",
+            reuseExisting: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "warehouse",
+                command: "go run .",
+                readyOn: { text: "warehouse listening on" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(handle.startedByUs).toBe(false);
+    expect(
+      execaCalls.some(
+        (c) => c.cmd === "tmux" && c.args.includes("new-session"),
+      ),
+    ).toBe(false);
+    // Re-sent go run . into the idle pane.
+    expect(
+      execaCalls.some(
+        (c) =>
+          c.cmd === "tmux" &&
+          c.args.includes("send-keys") &&
+          c.args.includes("go run ."),
+      ),
+    ).toBe(true);
+    expect(
+      handle.events.some((e) => e.phase === "tmux" && e.event === "relaunch"),
+    ).toBe(true);
+  });
+
+  it("creates a missing window when reusing a partial session", async () => {
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      // Only web exists; chronos is missing.
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message") {
+        // web is live; chronos won't be queried until created
+        return { exitCode: 0, stdout: "node", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return {
+          exitCode: 0,
+          stdout: "http health server listening on :9007",
+          stderr: "",
+        };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "cairn-graphite",
+            reuseExisting: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn serve",
+                readyOn: { text: "listening" },
+              },
+              {
+                name: "chronos",
+                command: "go run .",
+                readyOn: { text: "http health server listening on :9007" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(
+      execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("new-window")),
+    ).toBe(true);
+    expect(
+      execaCalls.some(
+        (c) =>
+          c.cmd === "tmux" &&
+          c.args.includes("send-keys") &&
+          c.args.includes("go run ."),
+      ),
+    ).toBe(true);
+    expect(
+      handle.events.some(
+        (e) => e.phase === "tmux" && e.event === "create-window",
+      ),
+    ).toBe(true);
   });
 
   it("kills existing session before creating a new one when reuseExisting: false", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "kill-session") {
         killedSession = true;
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -781,6 +954,10 @@ describe("startServices — tmux phase", () => {
       }
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 0, stdout: "", stderr: "" }; // session exists → reuse
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
 
@@ -809,6 +986,8 @@ describe("startServices — tmux phase", () => {
 
   it("times out when a window never becomes ready", async () => {
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
       // capture-pane never returns the ready text
@@ -864,6 +1043,8 @@ describe("startServices — teardown", () => {
   it("kills tmux session on stop() when reuseExisting: false", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "capture-pane")
@@ -903,6 +1084,8 @@ describe("startServices — teardown", () => {
   it("leaves tmux session alive on stop() when reusing (default)", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "capture-pane")
@@ -938,7 +1121,7 @@ describe("startServices — teardown", () => {
     expect(killedSession).toBe(false);
   });
 
-  it("skips a teardown `tmux kill-session` when reusing (leaves session alive)", async () => {
+  it("skips tmux kill-session AND docker compose down when reusing", async () => {
     let tmuxKilled = false;
     let dockerDownRan = false;
     shellImpl = async (command: string) => {
@@ -948,6 +1131,8 @@ describe("startServices — teardown", () => {
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" }; // session doesn't exist → create
       if (cmd === "tmux" && args[0] === "capture-pane")
@@ -975,9 +1160,49 @@ describe("startServices — teardown", () => {
       ),
     );
     await handle.stop();
-    // Reuse is the default → the tmux kill-session teardown is skipped (cairn
-    // leaves the session alive for the next run), but docker down still runs.
+    // Reuse is the default → leave tmux alive AND keep docker infra up so the
+    // next run can reuse both (Go/Node panes need mongo/rabbit/postgres).
     expect(tmuxKilled).toBe(false);
+    expect(dockerDownRan).toBe(false);
+  });
+
+  it("runs docker compose down on stop when tmux reuseExisting is false", async () => {
+    let dockerDownRan = false;
+    shellImpl = async (command: string) => {
+      if (command.includes("docker compose down")) dockerDownRan = true;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "ready", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "graphite",
+            reuseExisting: false,
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "ready" },
+              },
+            ],
+          },
+          teardown: ["tmux kill-session -t graphite", "docker compose down"],
+        },
+        { configDir: dir, project: "test", coldStart: true },
+      ),
+    );
+    await handle.stop();
     expect(dockerDownRan).toBe(true);
   });
 
@@ -985,6 +1210,10 @@ describe("startServices — teardown", () => {
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" };
       if (cmd === "docker")
         return {
           exitCode: 0,

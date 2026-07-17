@@ -57,9 +57,9 @@ teardown:
 
 - **docker** — `command` runs once; `reuseExisting: true` skips if the readiness check already passes. `readinessCheck` gates startup; `healthcheck` polls until green or `retries` is exhausted.
 - **seed** — runs after docker is healthy. Freshness is tracked at `~/.cairntrace/services/<project>.seed.json` with a three-layer check (fingerprint + TTL + optional data-level command). A fresh-enough seed is reused; otherwise the seed command re-runs.
-- **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`.
+- **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`. On reuse, missing windows are created and idle panes (shell prompt, no running service) are re-launched; busy panes are left alone. Cairn waits for the interactive shell before `send-keys` and clears pane history first so `readyOn` text cannot match stale scrollback.
 - **stash** — optionally stashes session artifacts (tmux panes, docker logs, seed output) to fcheap.
-- **teardown** — runs in reverse order (tmux kill → docker down) after the last spec.
+- **teardown** — after the last spec. When tmux reuse is on (the default), cairn leaves the session alive and also skips `docker compose down` so infra the live panes need is not torn out from under them. With `tmux.reuseExisting: false`, full teardown runs (tmux kill + docker down).
 
 ## Skipping and per-environment overrides
 

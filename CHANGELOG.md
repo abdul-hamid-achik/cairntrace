@@ -4,6 +4,26 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.40.1] - 2026-07-17
+
+### Fixed
+
+- **tmux services boot no longer loses `send-keys` to direnv/zsh startup.**
+  After creating a window, cairn waits for a stable interactive shell, clears
+  residual pane history (so `readyOn` text cannot match stale "listening"
+  lines), then sends pre-commands and the main command. Pre-commands wait for
+  the shell to return before the next `send-keys`, so a long `yarn build` is
+  not stomped by `yarn start`.
+- **tmux session reuse heals dead/missing windows.** A leftover session no
+  longer short-circuits startup: missing windows are created, idle shell panes
+  (command never started or process died) are re-launched, and panes already
+  running a non-shell process are left alone.
+- **teardown no longer runs `docker compose down` while reusing tmux.** Live
+  dev-server panes need mongo/rabbit/postgres; tearing docker down while
+  leaving the session alive was orphaning Go/Node services against dead ports.
+  With `tmux.reuseExisting: false`, full teardown (tmux kill + docker down)
+  still runs.
+
 ## [1.40.0] - 2026-07-16
 
 ## [1.39.0] - 2026-07-16
