@@ -4,6 +4,17 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.40.2] - 2026-07-17
+
+### Fixed
+
+- **Recreate tmux when docker was refreshed this run.** A leftover session with
+  still-running `node`/`go` panes looked "live" after `docker compose up`
+  recreated containers, but those processes held dead rabbit/mongo/temporal
+  connections and spammed reconnect errors. If docker actually started (not
+  reused) this run, cairn kills and recreates the tmux session so app services
+  reconnect cleanly.
+
 ## [1.40.1] - 2026-07-17
 
 ### Fixed

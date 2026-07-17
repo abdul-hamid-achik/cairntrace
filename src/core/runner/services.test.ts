@@ -784,6 +784,69 @@ describe("startServices — tmux phase", () => {
     ).toBe(false);
   });
 
+  it("recreates the tmux session when docker was freshly started this run", async () => {
+    // Docker compose up ran (containers were down). Old pane processes would
+    // still look "live" but hold dead connections — must recreate session.
+    let killedSession = false;
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "docker") {
+        // docker compose ps → no running containers → startDocker runs up
+        return { exitCode: 0, stdout: "[]", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" }; // session exists
+      if (cmd === "tmux" && args[0] === "kill-session") {
+        killedSession = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" }; // looks live
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "listening on", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            reuseExisting: true,
+            readinessCheck: "true",
+          },
+          tmux: {
+            session: "cairn-graphite",
+            reuseExisting: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "listening on" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(killedSession).toBe(true);
+    expect(
+      execaCalls.some(
+        (c) => c.cmd === "tmux" && c.args.includes("new-session"),
+      ),
+    ).toBe(true);
+    expect(
+      handle.events.some((e) => e.phase === "tmux" && e.event === "recreate"),
+    ).toBe(true);
+  });
+
   it("re-launches a dead pane when reusing a session with idle shell", async () => {
     // Session exists, window exists, but pane is sitting at zsh with stale
     // ready text in scrollback — the graphite go-services failure mode.
@@ -3153,10 +3216,20 @@ describe("startServices — ctx.log callback coverage", () => {
   });
 
   it("calls ctx.log for tmux session reuse when log is provided", async () => {
+    // Docker already running → pure tmux reuse (not recreate-after-docker-refresh).
     execaImpl = async (cmd, args) => {
-      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      if (cmd === "docker")
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([{ State: "running" }]),
+          stderr: "",
+        };
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     const logs: string[] = [];
@@ -3164,7 +3237,11 @@ describe("startServices — ctx.log callback coverage", () => {
     const handle = track(
       await startServices(
         {
-          docker: { command: "docker compose up -d", cwd: dir },
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            reuseExisting: true,
+          },
           tmux: {
             session: "existing",
             reuseExisting: true,
@@ -3181,6 +3258,58 @@ describe("startServices — ctx.log callback coverage", () => {
     );
 
     expect(logs.some((l) => l.includes("reusing session"))).toBe(true);
+    expect(handle.startedByUs).toBe(false);
+  });
+
+  it("calls ctx.log when recreating tmux after a docker refresh", async () => {
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "listening", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const logs: string[] = [];
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            readinessCheck: "true",
+          },
+          tmux: {
+            session: "existing",
+            reuseExisting: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "listening" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (msg: string) => logs.push(msg),
+        },
+      ),
+    );
+
+    expect(
+      logs.some(
+        (l) => l.includes("docker was refreshed") && l.includes("recreating"),
+      ),
+    ).toBe(true);
     expect(handle.startedByUs).toBe(true);
   });
 

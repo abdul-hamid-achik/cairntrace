@@ -214,15 +214,17 @@ Key rules:
   + its windows are reused across runs so dev servers aren't rebuilt each
   time. On reuse, cairn heals the session: missing windows are created, and
   panes sitting at an idle shell (command never started, or process died) are
-  re-launched — panes already running a non-shell process are left alone.
-  Commands are sent only after the interactive shell settles (avoids direnv/zsh
-  swallowing `send-keys`), and pane history is cleared first so `readyOn` text
-  cannot match residual scrollback. At end-of-run the session is LEFT ALIVE so
-  the next run reuses it — cairn skips any `teardown` command that kills the
-  managed session **and** skips `docker compose down` / `docker-compose down`
-  (live tmux services still need that infra). Set `tmux.reuseExisting: false`
-  to force a fresh session (kills + recreates; full teardown including docker
-  down runs).
+  re-launched — panes already running a non-shell process are left alone. If
+  docker was freshly started this run (not reused), the whole tmux session is
+  recreated so app processes reconnect to the new containers instead of holding
+  dead rabbit/mongo/temporal connections. Commands are sent only after the
+  interactive shell settles (avoids direnv/zsh swallowing `send-keys`), and pane
+  history is cleared first so `readyOn` text cannot match residual scrollback.
+  At end-of-run the session is LEFT ALIVE so the next run reuses it — cairn
+  skips any `teardown` command that kills the managed session **and** skips
+  `docker compose down` / `docker-compose down` (live tmux services still need
+  that infra). Set `tmux.reuseExisting: false` to force a fresh session (kills
+  + recreates; full teardown including docker down runs).
 - `readyTimeoutMs: 0` (docker/tmux) and `timeoutMs: 0` (seed) wait
   **indefinitely** instead of timing out — use for slow first-up image builds
   or many containers. In interactive (TTY, `--format md`) runs, docker/seed

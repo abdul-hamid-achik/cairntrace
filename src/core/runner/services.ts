@@ -607,9 +607,28 @@ async function startTmux(
   // Reuse path: heal dead/missing windows rather than blindly trusting a
   // leftover session (empty shells after lost send-keys, or services that
   // crashed while scrollback still contains the ready text).
+  //
+  // Exception: if docker was freshly brought up this run (not reused), the
+  // leftover pane processes still hold dead connections to the old
+  // mongo/rabbit/temporal containers. "Already live" is a lie in that case —
+  // kill the session and recreate so app services reconnect cleanly.
   if (reuse) {
     const exists = await tmuxSessionExists(cfg.session);
-    if (exists) {
+    if (exists && phases.dockerStarted) {
+      ctx.log?.(
+        `services: tmux — docker was refreshed this run; recreating session "${cfg.session}" so app processes reconnect`,
+      );
+      emit(
+        "tmux",
+        "recreate",
+        `recreating session after docker refresh: "${cfg.session}"`,
+      );
+      await execa("tmux", ["kill-session", "-t", cfg.session], {
+        reject: false,
+        timeout: 5_000,
+      });
+      // fall through to create path
+    } else if (exists) {
       ctx.log?.(`services: tmux — reusing session "${cfg.session}"`);
       emit("tmux", "reuse", `reusing session "${cfg.session}"`);
       await ensureTmuxWindows(cfg, ctx, emit);
@@ -618,10 +637,9 @@ async function startTmux(
     }
   }
 
-  // Not reusing (reuseExisting: false): kill any existing session first so the
-  // fresh create below doesn't collide with a leftover session and pile up
-  // duplicate windows.
-  if (!reuse) {
+  // Not reusing (reuseExisting: false), or docker-refresh invalidated the
+  // session above: kill any leftover session first so create doesn't collide.
+  if (!reuse || phases.dockerStarted) {
     await execa("tmux", ["kill-session", "-t", cfg.session], {
       reject: false,
       timeout: 5_000,
