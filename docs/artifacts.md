@@ -35,6 +35,8 @@ run/my-spec-2026-06-29T18-22-04-c5a3/
 
 The pack is **self-contained** — moving it elsewhere loses no information. The two files any agent must learn to read are `agent_context.md` (narrative) and `outcomes/<id>.md` (per-outcome evidence). `report.json` is the same data as `run.json` plus per-outcome render metadata.
 
+Optional `labels` on `run.json` (from `cairn run --label key=value`) let `cairn stats --group-by` build A/B cohorts across many packs without inventing a separate benchmark format.
+
 ## What `run.json` looks like
 
 ```jsonc

@@ -345,6 +345,29 @@ describe("timeout fields accept 0 (indefinite)", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts seed postCommands (always-run fixture ensure)", () => {
+    const result = SeedConfigSchema.safeParse({
+      command: "yarn demo-import",
+      ttlSeconds: 21600,
+      postCommands: [
+        "mongosh mongodb://localhost:27017/db --quiet tools/ensure.js",
+        "echo ok",
+      ],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.postCommands).toHaveLength(2);
+    }
+  });
+
+  it("rejects empty postCommands entries", () => {
+    const result = SeedConfigSchema.safeParse({
+      command: "yarn seed",
+      postCommands: [""],
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("accepts tmux readyTimeoutMs: 0", () => {
     const result = TmuxConfigSchema.safeParse({
       session: "graphite",

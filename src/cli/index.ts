@@ -7,6 +7,7 @@ import { listCheckpointsCommand } from "./commands/checkpoint/list";
 import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { diffCommand } from "./commands/diff";
+import { statsCommand } from "./commands/stats";
 import { doctorCommand } from "./commands/doctor";
 import { docsCommand, DOC_TOPICS } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
@@ -147,6 +148,24 @@ addFormatFlags(
       [] as string[],
     )
     .option(
+      "--label <key=value>",
+      "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--before <shell>",
+      "run a shell command after services/secrets and before the first spec (repeatable; e.g. tools/set-answer-change-path.sh temporal). Failures abort the run.",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--after <shell>",
+      "run a shell command after all specs and before services teardown (repeatable). Failures are logged, non-fatal.",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
       "--select-only",
       "resolve which specs WOULD run and exit 0 without launching a browser (SelectionResult v1); pairs with --tag and/or --since-codemap",
       false,
@@ -245,6 +264,43 @@ addFormatFlags(
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
 ).action((a: string, b: string, opts) => diffCommand(a, b, opts));
+
+addFormatFlags(
+  program
+    .command("stats")
+    .description(
+      "Aggregate labeled runs into A/B cohorts (pass rate, duration p50/p95, optional domain metric from outcomes/*.raw.json)",
+    )
+    .option(
+      "--group-by <key>",
+      "label key to cohort by (required; e.g. path for path=rabbit|temporal)",
+    )
+    .option(
+      "--label <key=value>",
+      "only include runs that have this label (repeatable = AND)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--metric <field>",
+      "harvest this numeric field from outcomes/*.raw.json (default: processingDurationMS)",
+    )
+    .option(
+      "--baseline <group>",
+      "baseline cohort key for ratio deltas (default: first sorted group)",
+    )
+    .option("--limit <n>", "max run dirs to scan, newest first (default 500)")
+    .option(
+      "--include-runs",
+      "include per-run rows in the structured payload",
+      false,
+    )
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((opts) => statsCommand(opts));
 
 program
   .command("mcp")

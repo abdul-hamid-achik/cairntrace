@@ -96,7 +96,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Machine-Readable Surfaces",
-        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn snapshot`, `cairn import playwright`, `cairn spec verify`, `cairn spec heal`, and `cairn diff` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing.",
+        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn snapshot`, `cairn import playwright`, `cairn spec verify`, `cairn spec heal`, `cairn diff`, and `cairn stats` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing. Use `cairn run --label path=temporal` then `cairn stats --group-by path` for A/B cohort stats (rabbit vs temporal).",
       },
     ],
     examples: [
@@ -893,7 +893,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Conditional Seed",
-        body: "The `seed` step runs a data-import command conditionally based on three layers of freshness: (1) fingerprint — a SHA-256 of the command + env keys (not values, so secret rotation doesn't trigger re-seed); (2) TTL — re-seed if the last run was more than `ttlSeconds` ago; (3) optional `freshnessCheck` — a shell command whose exit 0 means data is fresh. State is tracked in `~/.cairntrace/services/<project>.seed.json`. Set `ttlSeconds: 0` (default) to always re-seed unless `freshnessCheck` passes. `timeoutMs` bounds the seed command (default 300s); set it to `0` to wait indefinitely. In interactive runs the seed command's stdout/stderr stream live. When `secrets.provider: tvault` is configured, the seed command's env is augmented with tvault secrets — this is where `getTvaultEnv` is actually called from the run path.",
+        body: "The `seed` step runs a data-import command conditionally based on three layers of freshness: (1) fingerprint — a SHA-256 of the command + env keys (not values, so secret rotation doesn't trigger re-seed); (2) TTL — re-seed if the last run was more than `ttlSeconds` ago; (3) optional `freshnessCheck` — a shell command whose exit 0 means data is fresh. State is tracked in `~/.cairntrace/services/<project>.seed.json`. Set `ttlSeconds: 0` (default) to always re-seed unless `freshnessCheck` passes. `timeoutMs` bounds the seed command (default 300s); set it to `0` to wait indefinitely. Optional `postCommands` always run after the seed decision (whether the heavy import ran or was skipped as fresh) — use them for lightweight fixture ensure scripts the bulk import does not ship. In interactive runs the seed command's stdout/stderr stream live. When `secrets.provider: tvault` is configured, the seed command's env is augmented with tvault secrets — this is where `getTvaultEnv` is actually called from the run path.",
       },
       {
         title: "tmux Phase",

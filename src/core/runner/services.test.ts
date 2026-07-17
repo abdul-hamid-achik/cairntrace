@@ -623,6 +623,78 @@ describe("startServices — seed phase", () => {
     void handle;
   });
 
+  it("runs postCommands even when freshnessCheck skips the seed", async () => {
+    seedStateReadResult = {
+      shouldRun: true,
+      reason: "freshness-check-pending",
+    };
+    const cfg: SeedConfig = {
+      command: "yarn seed",
+      ttlSeconds: 3600,
+      freshnessCheck: "echo ok",
+      postCommands: ["echo ensure-fixture", "echo ensure-hammer"],
+    };
+
+    shellImpl = async (command: string) => {
+      if (command === "echo ok") return { exitCode: 0, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+
+    await startServices(
+      { seed: cfg },
+      { configDir: dir, project: "test", coldStart: false },
+    );
+
+    expect(shellCalls.some((c) => c.command === "yarn seed")).toBe(false);
+    expect(shellCalls.some((c) => c.command === "echo ensure-fixture")).toBe(
+      true,
+    );
+    expect(shellCalls.some((c) => c.command === "echo ensure-hammer")).toBe(
+      true,
+    );
+  });
+
+  it("runs postCommands after a successful seed command", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    const cfg: SeedConfig = {
+      command: "yarn seed",
+      postCommands: ["echo ensure-after-seed"],
+    };
+
+    shellImpl = async () => ({ exitCode: 0, stdout: "ok", stderr: "" });
+
+    await startServices(
+      { seed: cfg },
+      { configDir: dir, project: "test", coldStart: false },
+    );
+
+    expect(shellCalls.some((c) => c.command === "yarn seed")).toBe(true);
+    expect(shellCalls.some((c) => c.command === "echo ensure-after-seed")).toBe(
+      true,
+    );
+  });
+
+  it("throws when a postCommand fails", async () => {
+    seedStateReadResult = { shouldRun: false, reason: "ttl-ok" };
+    const cfg: SeedConfig = {
+      command: "yarn seed",
+      postCommands: ["echo boom"],
+    };
+
+    shellImpl = async (command: string) => {
+      if (command === "echo boom")
+        return { exitCode: 3, stdout: "", stderr: "fixture missing" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    await expect(
+      startServices(
+        { seed: cfg },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    ).rejects.toThrow(/seed postCommand failed/);
+  });
+
   it("runs seed when freshnessCheck fails (exit non-zero)", async () => {
     seedStateReadResult = {
       shouldRun: true,

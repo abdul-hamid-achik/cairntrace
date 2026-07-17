@@ -58,6 +58,12 @@ per-agent code paths.
 - Keep headless CLI behavior working even if the TUI changes.
 - Every agent-callable command must support `--format json|yaml|md` and have
   a stable JSON schema. No interactive prompts on `--json`/`--yaml` paths.
+- Cohort A/B work uses `cairn run --label key=value` (stamped on run.json),
+  `cairn run --before/--after <shell>` for domain hooks (path flips, warmers),
+  and `cairn stats --group-by <key>` (pass rate + duration/metric percentiles +
+  ASCII charts in md). Seed fixture ensure scripts belong in
+  `services.seed.postCommands`. Do not invent per-product benchmark commands
+  in the core CLI.
 - Run artifacts include `report.html` and `report.json`. Keep report output
   redacted, self-contained, print-friendly, and themeable through
   `cairntrace.config.yml` `report.theme` / `report.colors`; do not add a
@@ -170,6 +176,9 @@ services:
     command: "yarn demo-import"
     ttlSeconds: 21600
     freshnessCheck: "mongosh --quiet --eval 'db.count()' mongodb://localhost:27017/db"
+    # always run after seed decision (even when skipped as fresh)
+    postCommands:
+      - "mongosh mongodb://localhost:27017/db --quiet tools/ensure-fixture.js"
   tmux:
     session: myapp
     reuseExisting: true

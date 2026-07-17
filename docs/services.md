@@ -29,6 +29,9 @@ services:
     command: "yarn demo-import"
     ttlSeconds: 21600
     freshnessCheck: "mongosh --quiet --eval 'db.count()' mongodb://localhost:27017/db"
+    # Always run after seed (even when skipped as fresh) — lightweight fixture ensure.
+    postCommands:
+      - "mongosh mongodb://localhost:27017/db --quiet tools/ensure-fixture.js"
   tmux:
     session: myapp
     reuseExisting: true
@@ -56,7 +59,7 @@ teardown:
 ```
 
 - **docker** — `command` runs once; `reuseExisting: true` skips if the readiness check already passes. `readinessCheck` gates startup; `healthcheck` polls until green or `retries` is exhausted.
-- **seed** — runs after docker is healthy. Freshness is tracked at `~/.cairntrace/services/<project>.seed.json` with a three-layer check (fingerprint + TTL + optional data-level command). A fresh-enough seed is reused; otherwise the seed command re-runs.
+- **seed** — runs after docker is healthy. Freshness is tracked at `~/.cairntrace/services/<project>.seed.json` with a three-layer check (fingerprint + TTL + optional data-level command). A fresh-enough seed is reused; otherwise the seed command re-runs. Optional `postCommands` always run after that decision (skip or complete) — use them for lightweight fixture ensure scripts the bulk import does not ship.
 - **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`. On reuse, missing windows are created and idle panes (shell prompt, no running service) are re-launched; busy panes are left alone. If docker was freshly started this run, the whole session is recreated so app processes reconnect to new containers. Cairn waits for the interactive shell before `send-keys` and clears pane history first so `readyOn` text cannot match stale scrollback.
 - **stash** — optionally stashes session artifacts (tmux panes, docker logs, seed output) to fcheap.
 - **teardown** — after the last spec. When tmux reuse is on (the default), cairn leaves the session alive and also skips `docker compose down` so infra the live panes need is not torn out from under them. With `tmux.reuseExisting: false`, full teardown runs (tmux kill + docker down).

@@ -35,7 +35,7 @@ export function buildExplain(): ExplainResult {
         name: "run",
         summary: "Run behavioral specs; emit machine-readable result",
         synopsis:
-          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--tag <tag>] [--since-codemap <ref>] [--select-only] [--stash-on-failure] [--no-web-server] [--no-services] [--format json|yaml|md]",
+          "cairn run <spec-path-or-dir...> [--env <name>] [--cold-start] [--headed] [--mock] [--backend agent-browser|playwright|mock] [--parallel N] [--junit <file>] [--stamp-if-green] [--tag <tag>] [--label key=value] [--before <shell>] [--after <shell>] [--since-codemap <ref>] [--select-only] [--stash-on-failure] [--no-web-server] [--no-services] [--format json|yaml|md]",
         flags: [
           {
             name: "--env",
@@ -144,6 +144,24 @@ export function buildExplain(): ExplainResult {
             type: "string",
             description:
               "Run only specs whose `metadata.tags` includes this tag. Repeatable (AND). Case-insensitive. Pair with --select-only to preview matches.",
+          },
+          {
+            name: "--label",
+            type: "string",
+            description:
+              "Stamp free-form cohort labels onto each run.json as key=value (repeatable). Used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit, suite=opg-14827-ab).",
+          },
+          {
+            name: "--before",
+            type: "string",
+            description:
+              "Shell command run once after services/secrets and before the first spec (repeatable). Use for domain setup like flipping Temporal/Rabbit path. Failures abort.",
+          },
+          {
+            name: "--after",
+            type: "string",
+            description:
+              "Shell command run once after all specs and before services teardown (repeatable). Failures are logged, non-fatal.",
           },
           {
             name: "--since-codemap",
@@ -471,6 +489,73 @@ export function buildExplain(): ExplainResult {
         ],
         exitCodes: { "0": "success", "2": "run not found" },
         outputSchema: "urn:cairntrace.dev:diff:v1",
+      },
+      {
+        name: "stats",
+        summary:
+          "Aggregate labeled runs into A/B cohorts (pass rate, duration p50/p95, optional domain metric)",
+        synopsis:
+          "cairn stats --group-by <key> [--label key=value] [--metric <field>] [--baseline <group>] [--limit N] [--include-runs] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--group-by",
+            type: "string",
+            description:
+              "Label key to cohort by (required), e.g. path for path=rabbit|temporal",
+          },
+          {
+            name: "--label",
+            type: "string",
+            description:
+              "Only include runs that have this label (key=value). Repeatable (AND).",
+          },
+          {
+            name: "--metric",
+            type: "string",
+            description:
+              "Harvest this numeric field from outcomes/*.raw.json (default: processingDurationMS)",
+          },
+          {
+            name: "--baseline",
+            type: "string",
+            description:
+              "Baseline cohort key for ratio deltas (default: first sorted group)",
+          },
+          {
+            name: "--limit",
+            type: "number",
+            description: "Max run dirs to scan, newest first (default 500)",
+          },
+          {
+            name: "--include-runs",
+            type: "boolean",
+            default: false,
+            description: "Include per-run rows in the structured payload",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success (empty cohorts still exit 0)",
+          "2": "usage or artifact-root error",
+        },
+        outputSchema: "urn:cairntrace.dev:stats:v1",
       },
       {
         name: "checkpoint list",

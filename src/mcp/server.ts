@@ -179,6 +179,12 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe("Override run artifact root directory"),
+        labels: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe(
+            "Free-form cohort labels stamped into run.json (e.g. { path: 'temporal', suite: 'ab' })",
+          ),
         since: z
           .string()
           .optional()
@@ -190,7 +196,7 @@ export function buildMcpServer(): McpServer {
           ),
       },
     },
-    async ({ path, env, mock, coldStart, artifactRoot, since }) => {
+    async ({ path, env, mock, coldStart, artifactRoot, labels, since }) => {
       // `since` (FEATURES item 1): impact-driven selection. Skip the run unless
       // the spec's coversSymbol intersects `codemap review --since <ref>`
       // blast radius. Degrades to running when codemap is absent.
@@ -226,6 +232,9 @@ export function buildMcpServer(): McpServer {
           ...(env !== undefined ? { environmentOverride: env } : {}),
           ...(coldStart !== undefined ? { coldStart } : {}),
           ...(artifactRoot !== undefined ? { artifactRoot } : {}),
+          ...(labels !== undefined && Object.keys(labels).length > 0
+            ? { labels }
+            : {}),
         });
         return {
           content: [{ type: "text", text: summarizeRun(result) }],

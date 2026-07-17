@@ -144,6 +144,11 @@ export interface RunOptions {
     runId: string,
     tags: string[],
   ) => Promise<void>;
+  /**
+   * Free-form labels stamped into run.json (`cairn run --label key=value`).
+   * Used by `cairn stats --group-by` for A/B cohorts. Optional.
+   */
+  labels?: Record<string, string>;
 }
 
 export interface MonitorConfig {
@@ -1150,6 +1155,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     replay: "replay.json",
     manifest: "artifact-manifest.json",
   };
+  const labels =
+    opts.labels && Object.keys(opts.labels).length > 0
+      ? opts.labels
+      : undefined;
   const result: RunResult = {
     $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
@@ -1166,6 +1175,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     environment: env,
     backend: backendName as RunResult["backend"],
     coldStart,
+    ...(labels ? { labels } : {}),
     status,
     summary,
     ...(failure ? { failure } : {}),

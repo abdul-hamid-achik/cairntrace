@@ -8,6 +8,7 @@ import {
   join,
   resolve,
 } from "node:path";
+import { execa } from "execa";
 import { registerSecretValues } from "../../core/artifacts/redaction";
 import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
@@ -46,6 +47,9 @@ import { defaultCodemapDeps, maybeAutoAnnotateRun } from "./annotate";
 import type { CodemapDeps } from "./annotate";
 import { codemapReview, codemapSemantic } from "./codemap";
 import { stampSpecContractHash } from "./spec/verify";
+import { parseLabelFlags } from "../../core/stats/runStats";
+
+export { parseLabelFlags };
 
 export interface RunCommandOptions {
   env?: string;
@@ -100,6 +104,21 @@ export interface RunCommandOptions {
    * every requested tag (AND, case-insensitive). Empty / absent = no filter.
    */
   tag?: string[];
+  /**
+   * Repeatable `--label key=value`: free-form cohort labels stamped into each
+   * run.json (e.g. path=rabbit, suite=opg-14827-ab). Consumed by `cairn stats`.
+   */
+  label?: string[];
+  /**
+   * Repeatable `--before <shell>`: run once after services/secrets, before the
+   * first spec (e.g. flip Temporal/Rabbit path, warm caches). Failures abort.
+   */
+  before?: string[];
+  /**
+   * Repeatable `--after <shell>`: run once after all specs, before services
+   * teardown. Failures are logged but do not change the run exit code.
+   */
+  after?: string[];
 }
 
 /**
@@ -141,6 +160,47 @@ export function parseVarFlags(
 }
 
 /**
+ * Run repeatable `--before` / `--after` shell hooks.
+ * `before` failures are fatal (default); `after` can be non-fatal.
+ */
+export async function runHookCommands(
+  phase: "before" | "after",
+  commands: string[] | undefined,
+  opts: { fatal?: boolean; cwd?: string } = {},
+): Promise<void> {
+  const list = (commands ?? []).map((c) => c.trim()).filter(Boolean);
+  if (list.length === 0) return;
+  const fatal = opts.fatal ?? true;
+  const cwd = opts.cwd ?? process.cwd();
+  for (const command of list) {
+    runLog.info(`${phase}: ${command}`);
+    try {
+      const r = await execa(command, {
+        shell: true,
+        cwd,
+        env: process.env,
+        // Path-flip + service restart scripts are short; long builds should
+        // use services preCommands instead. 10 min ceiling for slow boots.
+        timeout: 600_000,
+        reject: false,
+        all: true,
+      });
+      if (r.exitCode !== 0) {
+        const tail = (r.all ?? r.stderr ?? "").trim().slice(-2000);
+        const msg = `${phase} hook failed (exit ${r.exitCode}): ${command}${
+          tail ? `\n${tail}` : ""
+        }`;
+        if (fatal) throw new Error(msg);
+        runLog.warn(msg);
+      }
+    } catch (e) {
+      if (fatal) throw e;
+      runLog.warn(`${phase} hook error: ${(e as Error).message}`);
+    }
+  }
+}
+
+/**
  * `cairn run <spec...> [--parallel N]`
  *
  * - Single spec, parallel=1 → rich interactive progress, RunResult output
@@ -170,6 +230,7 @@ export async function runCommand(
 
   try {
     parseVarFlags(opts.var);
+    parseLabelFlags(opts.label);
   } catch (e) {
     runLog.error((e as Error).message);
     process.exit(2);
@@ -297,6 +358,23 @@ export async function runCommand(
   // webServer/services. Best-effort: no config → undefined → adapter defaults.
   const browser = await resolveBrowserConfig(expandedSpecs[0]!, opts);
 
+  // Domain hooks (e.g. tools/set-answer-change-path.sh temporal) run AFTER
+  // services+secrets so they can restart tmux panes, and BEFORE the first spec.
+  try {
+    await runHookCommands("before", opts.before);
+  } catch (e) {
+    runLog.error((e as Error).message);
+    if (svcHandle) {
+      await svcHandle.stop().catch(() => undefined);
+      untrackSvc?.();
+    }
+    if (server) {
+      await server.stop().catch(() => undefined);
+      untrackServer?.();
+    }
+    process.exit(2);
+  }
+
   // Resolve one final exit status only after lifecycle teardown; forcing an
   // exit inside runSingle/runBatch would skip finally and orphan resources.
   let exitCode: ExitCode = 2;
@@ -312,6 +390,13 @@ export async function runCommand(
             browser,
           );
   } finally {
+    // after hooks run while services are still up (can query mongo/tmux).
+    // Best-effort: log failures, keep the suite exit code.
+    try {
+      await runHookCommands("after", opts.after, { fatal: false });
+    } catch (e) {
+      runLog.warn(`after hook: ${(e as Error).message}`);
+    }
     if (svcHandle) {
       await svcHandle.stop().catch(() => undefined);
       untrackSvc?.();
@@ -521,6 +606,7 @@ async function runSingle(
   let exitCode: ExitCode = 2;
   try {
     const vars = parseVarFlags(opts.var);
+    const labels = parseLabelFlags(opts.label);
     const result = await runSpec({
       specPath,
       backend,
@@ -531,6 +617,7 @@ async function runSingle(
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
       ...(Object.keys(vars).length > 0 ? { vars } : {}),
+      ...(Object.keys(labels).length > 0 ? { labels } : {}),
       ...(servicesEvents !== undefined && servicesEvents.length > 0
         ? { servicesEvents }
         : {}),
@@ -566,7 +653,9 @@ async function runSingle(
       if (format !== "json" && format !== "yaml") process.stdout.write("\n");
     }
   } catch (e) {
-    const result = synthesizeErroredResult(specPath, e as Error);
+    const result = synthesizeErroredResult(specPath, e as Error, {
+      labels: parseLabelFlags(opts.label),
+    });
     exitCode = result.exitCode;
     if (!(await writeJUnitIfRequested(opts, [result]))) {
       return 2;
@@ -649,6 +738,7 @@ async function runBatch(
         const untrack = trackBackend(backend);
         try {
           const vars = parseVarFlags(opts.var);
+          const labels = parseLabelFlags(opts.label);
           const r = await runSpec({
             specPath,
             backend,
@@ -663,6 +753,7 @@ async function runBatch(
               : {}),
             ...(opts.config !== undefined ? { configPath: opts.config } : {}),
             ...(Object.keys(vars).length > 0 ? { vars } : {}),
+            ...(Object.keys(labels).length > 0 ? { labels } : {}),
             ...(servicesEvents !== undefined && servicesEvents.length > 0
               ? { servicesEvents }
               : {}),
@@ -708,7 +799,9 @@ async function runBatch(
               `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
             );
           }
-          const errored = synthesizeErroredResult(specPath, err);
+          const errored = synthesizeErroredResult(specPath, err, {
+            labels: parseLabelFlags(opts.label),
+          });
           completedByIndex[idx] = errored;
           return errored;
         } finally {
@@ -1379,6 +1472,7 @@ async function stampIfGreen(
 export function synthesizeErroredResult(
   specPath: string,
   err: Error,
+  extras: { labels?: Record<string, string> } = {},
 ): RunResult {
   const now = new Date().toISOString();
   const runId = `errored_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1388,6 +1482,10 @@ export function synthesizeErroredResult(
   const message = addEnospcHint(err.message);
   const contractChanged = err instanceof ContractHashMismatchError;
   const exitCode: ExitCode = contractChanged ? 6 : 2;
+  const labels =
+    extras.labels && Object.keys(extras.labels).length > 0
+      ? extras.labels
+      : undefined;
   return {
     $schema: "urn:cairntrace.dev:run:v1",
     version: "1",
@@ -1407,6 +1505,7 @@ export function synthesizeErroredResult(
     environment: "local",
     backend: "agent-browser",
     coldStart: false,
+    ...(labels ? { labels } : {}),
     status: "errored",
     summary: `errored at step 'parse': ${message}`,
     failure: { step: "parse", message },

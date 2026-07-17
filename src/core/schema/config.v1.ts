@@ -336,6 +336,11 @@ export type DockerConfig = z.infer<typeof DockerConfigSchema>;
  * Conditional seed step. Runs once per `cairn run` invocation, but only if the
  * data is stale (fingerprint changed, TTL expired, or freshnessCheck failed).
  * State is tracked in `~/.cairntrace/services/<project>.seed.json`.
+ *
+ * `postCommands` always run after the seed decision (whether the heavy seed
+ * command ran or was skipped as fresh). Use them for lightweight fixture
+ * ensure scripts that must re-apply after every demo-import *and* when seed
+ * is skipped (e.g. clone a missing kit document the import does not ship).
  */
 export const SeedConfigSchema = z
   .object({
@@ -352,6 +357,13 @@ export const SeedConfigSchema = z
      * Run after the TTL check passes. Exit non-zero triggers a re-seed.
      */
     freshnessCheck: z.string().min(1).optional(),
+    /**
+     * Shell commands that ALWAYS run after the seed phase, even when the main
+     * seed command was skipped as fresh. Failures are fatal (abort startup).
+     * Ideal for mongosh/ensure scripts that materialize test fixtures the
+     * bulk import does not include.
+     */
+    postCommands: z.array(z.string().min(1)).optional(),
     /** Max ms to wait for the seed command. Default 300000 (5 min). 0 = wait indefinitely. */
     timeoutMs: z.number().int().nonnegative().optional(),
   })

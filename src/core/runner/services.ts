@@ -490,23 +490,25 @@ async function startSeed(
   const store = new SeedStateStore();
   const state = await store.read(ctx.project);
   const check = store.checkFreshness(ctx.project, cfg, state);
+  const cwd = resolveCwd(cfg.cwd, ctx.configDir);
+  const env = await resolveSeedEnv(cfg, ctx);
+  const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
   if (!check.shouldRun) {
     ctx.log?.(`services: seed — skipping (${check.reason})`);
     emit("seed", "skip", check.reason);
+    await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
     return;
   }
 
   // If the fingerprint + TTL pass but freshnessCheck is configured, run it.
   if (check.reason === "freshness-check-pending" && cfg.freshnessCheck) {
-    const cwd = resolveCwd(cfg.cwd, ctx.configDir);
-    const env = await resolveSeedEnv(cfg, ctx);
     ctx.log?.(`services: seed — freshness check (${cfg.freshnessCheck})`);
     emit("seed", "freshness-check", cfg.freshnessCheck);
     const fr = await runShellWithTimeout(
       cfg.freshnessCheck,
       { cwd, env },
-      cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS,
+      timeout,
     );
     if (fr.exitCode === 0) {
       ctx.log?.("services: seed — freshness check passed, skipping");
@@ -514,6 +516,7 @@ async function startSeed(
       // Still record the freshness check as a successful "non-seed" so the
       // timestamp is updated for the next TTL window.
       await store.recordRun(ctx.project, cfg, 0);
+      await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
       return;
     }
     ctx.log?.(
@@ -528,10 +531,6 @@ async function startSeed(
       },
     );
   }
-
-  const cwd = resolveCwd(cfg.cwd, ctx.configDir);
-  const env = await resolveSeedEnv(cfg, ctx);
-  const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
   ctx.log?.(`services: seed — running (${cfg.command})`);
   emit("seed", "start", cfg.command);
@@ -557,6 +556,41 @@ async function startSeed(
   }
   ctx.log?.("services: seed — complete");
   emit("seed", "complete", "seed complete");
+  await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
+}
+
+/**
+ * Always-run fixture ensure steps. Invoked after seed skip *or* successful
+ * seed so lightweight mongosh/scripts re-apply data the bulk import omits.
+ */
+async function runSeedPostCommands(
+  cfg: SeedConfig,
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+  ctx: StartServicesContext,
+  emit: EmitFn,
+): Promise<void> {
+  const commands = cfg.postCommands ?? [];
+  if (commands.length === 0) return;
+
+  for (const command of commands) {
+    ctx.log?.(`services: seed — postCommand (${command})`);
+    emit("seed", "start", `postCommand: ${command}`);
+    const r = await runShellWithTimeout(
+      command,
+      { cwd: opts.cwd, env: opts.env },
+      opts.timeout,
+    );
+    if (r.exitCode !== 0) {
+      emit("seed", "fail", `postCommand exit ${r.exitCode}`, {
+        exitCode: r.exitCode,
+      });
+      throw new ServicesError(
+        `seed postCommand failed (exit ${r.exitCode}): ${command}\n` +
+          tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+      );
+    }
+    emit("seed", "complete", `postCommand ok: ${command}`);
+  }
 }
 
 /**

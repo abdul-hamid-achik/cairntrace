@@ -77,6 +77,17 @@ describe("synthesizeErroredResult", () => {
     ).toBe("foo");
   });
 
+  it("stamps optional labels onto errored results", () => {
+    const result = synthesizeErroredResult("/abs/spec.yml", new Error("x"), {
+      labels: { path: "rabbit", suite: "ab" },
+    });
+    expect(result.labels).toEqual({ path: "rabbit", suite: "ab" });
+    expect(RunResultSchema.parse(result).labels).toEqual({
+      path: "rabbit",
+      suite: "ab",
+    });
+  });
+
   it("classifies a changed sealed contract with exit code 6 and a reseal action", () => {
     const path = "/x/changed.yml";
     const result = synthesizeErroredResult(
@@ -413,6 +424,216 @@ steps:
     expect(stderr).toContain("seed: ");
     // The truncation should add "..." for commands over 80 chars
     expect(stderr).toContain("...");
+  });
+});
+
+describe("runHookCommands", () => {
+  it("runs before hooks and fails fatal on non-zero exit", async () => {
+    const { runHookCommands } = await import("./run");
+    await expect(
+      runHookCommands("before", ["exit 0", "exit 3"]),
+    ).rejects.toThrow(/before hook failed \(exit 3\)/);
+  });
+
+  it("after hooks non-fatal do not throw", async () => {
+    const { runHookCommands } = await import("./run");
+    await expect(
+      runHookCommands("after", ["exit 7"], { fatal: false }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("no-ops on empty/undefined", async () => {
+    const { runHookCommands } = await import("./run");
+    await expect(runHookCommands("before", undefined)).resolves.toBeUndefined();
+    await expect(runHookCommands("before", ["  "])).resolves.toBeUndefined();
+  });
+});
+
+describe("run --before CLI", () => {
+  it("runs --before after services and before the spec (single path)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-before-"));
+    const artifactRoot = join(dir, "runs");
+    const marker = join(dir, "before.ok");
+    const specPath = join(dir, "hook.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: before_hook_smoke
+intent: --before must run once before the mock spec.
+coldStart: guest
+outcomes:
+  - id: ok
+    description: url always matches
+    verify: { url: { matches: ".*" } }
+steps:
+  - open: { path: "data:text/html,<h1>x</h1>", waitUntil: load }
+`,
+    );
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        specPath,
+        "--mock",
+        "--no-services",
+        "--no-web-server",
+        "--artifact-root",
+        artifactRoot,
+        "--before",
+        `touch "${marker}"`,
+        "--json",
+      ],
+      { cwd: dir, reject: false, timeout: 15_000 },
+    );
+    expect(result.exitCode).toBe(0);
+    const { access } = await import("node:fs/promises");
+    await expect(access(marker)).resolves.toBeUndefined();
+  });
+
+  it("aborts when --before exits non-zero", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-before-fail-"));
+    const specPath = join(dir, "hook.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: before_hook_fail
+intent: failing before must not run the spec.
+coldStart: guest
+outcomes:
+  - id: ok
+    description: never reached
+    verify: { url: { matches: ".*" } }
+steps:
+  - open: { path: "data:text/html,<h1>x</h1>", waitUntil: load }
+`,
+    );
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        specPath,
+        "--mock",
+        "--no-services",
+        "--no-web-server",
+        "--artifact-root",
+        join(dir, "runs"),
+        "--before",
+        "exit 9",
+        "--json",
+      ],
+      { cwd: dir, reject: false, timeout: 15_000 },
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toMatch(/before hook failed/);
+  });
+});
+
+describe("run --label (batch path)", () => {
+  it("stamps the same labels on every spec in a multi-spec run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-label-batch-"));
+    const artifactRoot = join(dir, "runs");
+    for (const name of ["a", "b"] as const) {
+      await writeFile(
+        join(dir, `${name}.yml`),
+        `version: 1
+name: label_batch_${name}
+intent: Batch path must stamp labels too.
+coldStart: guest
+outcomes:
+  - id: ok
+    description: url always matches
+    verify: { url: { matches: ".*" } }
+steps:
+  - open: { path: "data:text/html,<h1>x</h1>", waitUntil: load }
+`,
+      );
+    }
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        join(dir, "a.yml"),
+        join(dir, "b.yml"),
+        "--mock",
+        "--no-services",
+        "--no-web-server",
+        "--artifact-root",
+        artifactRoot,
+        "--label",
+        "path=rabbit",
+        "--label",
+        "suite=batch",
+        "--json",
+      ],
+      { cwd: dir, reject: false, timeout: 20_000 },
+    );
+    expect(result.exitCode).toBe(0);
+    const batch = JSON.parse(result.stdout) as {
+      results: Array<{ labels?: Record<string, string>; runDir: string }>;
+    };
+    expect(batch.results).toHaveLength(2);
+    for (const r of batch.results) {
+      expect(r.labels).toEqual({ path: "rabbit", suite: "batch" });
+      const onDisk = JSON.parse(
+        await readFile(join(r.runDir, "run.json"), "utf8"),
+      ) as { labels?: Record<string, string> };
+      expect(onDisk.labels).toEqual({ path: "rabbit", suite: "batch" });
+    }
+  });
+});
+
+describe("run --label (single-spec path)", () => {
+  it("stamps labels into run.json and stdout RunResult", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-label-"));
+    const artifactRoot = join(dir, "runs");
+    const specPath = join(dir, "label.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: label_single
+intent: Stamp cohort labels on a single-spec mock run.
+coldStart: guest
+outcomes:
+  - id: ok
+    description: url always matches
+    verify: { url: { matches: ".*" } }
+steps:
+  - open: { path: "data:text/html,<h1>x</h1>", waitUntil: load }
+`,
+    );
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        specPath,
+        "--mock",
+        "--no-services",
+        "--no-web-server",
+        "--artifact-root",
+        artifactRoot,
+        "--label",
+        "path=temporal",
+        "--label",
+        "suite=ab",
+        "--json",
+      ],
+      { cwd: dir, reject: false, timeout: 15_000 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const body = JSON.parse(result.stdout) as {
+      labels?: Record<string, string>;
+      runDir: string;
+    };
+    expect(body.labels).toEqual({ path: "temporal", suite: "ab" });
+    const onDisk = JSON.parse(
+      await readFile(join(body.runDir, "run.json"), "utf8"),
+    ) as { labels?: Record<string, string> };
+    expect(onDisk.labels).toEqual({ path: "temporal", suite: "ab" });
   });
 });
 

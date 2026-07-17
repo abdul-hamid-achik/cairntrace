@@ -24,6 +24,7 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 - [Stash](/stash) — `cairn stash` persists run packs to fcheap for search and sharing.
 - [Clip](/clip) — `cairn clip` cuts named clips from a run video via vidtrace.
 - [Process monitoring](/monitor) — `--monitor` samples the browser process tree; the `monitor` step and `process` verifier assert on it.
+- **Stats** — `cairn stats --group-by <label-key>` aggregates labeled runs (`cairn run --label key=value`) into A/B cohorts with pass rate, duration percentiles, optional domain metrics from `outcomes/*.raw.json`, and ASCII charts in markdown. Pair with `--before` hooks for domain path flips before a suite.
 
 ## Failure → code
 
@@ -40,6 +41,7 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 The run/spec/authoring surface is documented elsewhere and is not duplicated here:
 
 - [Quickstart](/quickstart) — `cairn run`, first spec.
+- [Authoring](/authoring) — tags, labels, `--before`/`--after` hooks, `cairn stats`.
 - [Steps](/steps) / [Verifiers](/verifiers) — the typed vocabularies.
 - [Snippets](/snippets) — `imports:` / `use:`.
 - [MCP](/mcp) — `cairn mcp serve` and the `cairn_*` tool family.

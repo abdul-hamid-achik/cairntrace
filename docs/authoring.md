@@ -78,6 +78,33 @@ cairn run flows/ --tag temporal --tag OPG-14827 --cold-start
 
 Matching is **case-insensitive**. Multiple `--tag` flags mean **AND** (the spec must declare every listed tag). Specs with no `metadata.tags` never match a tag filter.
 
+## Labels, hooks, and A/B stats
+
+Stamp free-form **cohort labels** on every run in an invocation:
+
+```bash
+cairn run flows/ --tag answer-change \
+  --label path=temporal \
+  --label suite=opg-14827-ab \
+  --before 'tools/set-answer-change-path.sh temporal' \
+  --cold-start
+```
+
+- `--label key=value` (repeatable) is written into each `run.json` as `labels`.
+- `--before <shell>` (repeatable) runs **after** services/secrets and **before** the first spec — use it for domain setup (path flips, warmers). Failures abort the run.
+- `--after <shell>` (repeatable) runs after all specs and before services teardown; failures are logged, non-fatal.
+- `services.seed.postCommands` always run after seed (even when seed is skipped as fresh) — use for fixture ensure scripts.
+
+Aggregate cohorts:
+
+```bash
+cairn stats --group-by path --label suite=opg-14827-ab --baseline rabbit --format md
+```
+
+Markdown output includes a table, ASCII bar charts (pass rate / duration p50 / optional domain metric), and pairwise deltas. JSON/YAML use schema `urn:cairntrace.dev:stats:v1`. Domain latency is harvested from `outcomes/*.raw.json` when fields like `processingDurationMS` are present.
+
+Keep product-specific scripts (path flip, mongosh fixtures) in the automation project; cairn only orchestrates via hooks + postCommands.
+
 ## Cold-start is not optional
 
 Every spec must satisfy the **cold-start contract**: replayable from a fresh browser session. Four supported paths, pick one:
