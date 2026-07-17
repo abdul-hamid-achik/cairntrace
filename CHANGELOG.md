@@ -4,6 +4,20 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.40.3] - 2026-07-17
+
+### Fixed
+
+- **tmux main commands are re-sent if the pane stays idle.** direnv/zsh double
+  load could swallow the first `send-keys` (`yarn serve` never ran; web-app
+  sat at an empty prompt). Cairn now waits for a real shell (not empty
+  `pane_current_command`), then retries the main command up to 3 times until
+  the pane leaves the idle shell.
+- **docker refresh no longer fires on cold-start against already-running
+  containers.** `--cold-start` re-runs `compose up` but that is not a refresh
+  when containers were already up — tmux is only recreated when containers
+  were actually down before the up.
+
 ## [1.40.2] - 2026-07-17
 
 ### Fixed

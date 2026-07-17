@@ -100,6 +100,13 @@ const TMUX_SHELL_READY_MS = 30_000;
 const TMUX_PRE_COMMAND_RETURN_MS = 900_000;
 /** Consecutive polls that must report the same shell before we send keys. */
 const TMUX_SHELL_STABLE_POLLS = 2;
+/**
+ * After send-keys of the main command, how long to wait for the pane to leave
+ * the idle shell (command accepted). If still idle, re-send.
+ */
+const TMUX_COMMAND_ACCEPT_MS = 3_000;
+/** Max send-keys attempts for the main long-lived command. */
+const TMUX_COMMAND_SEND_ATTEMPTS = 3;
 const SHELL_TAIL_LINES = 40;
 const DEFAULT_HC_INTERVAL_S = 30;
 const DEFAULT_HC_RETRIES = 3;
@@ -119,6 +126,7 @@ export async function startServices(
   const coldStart = ctx.coldStart ?? isTruthyEnv(process.env.CI);
   const phases: PhaseState = {
     dockerStarted: false,
+    dockerRefreshed: false,
     tmuxSession: undefined,
     tmuxSessionName: undefined,
     tmuxReuse: false,
@@ -302,6 +310,13 @@ async function teardownStartedPhases(
 
 interface PhaseState {
   dockerStarted: boolean;
+  /**
+   * True when docker compose actually had to bring containers up (they were
+   * not already running). Distinct from `dockerStarted`, which is also set
+   * when cold-start re-runs `compose up` against already-running containers.
+   * Only a real refresh should invalidate a live tmux session.
+   */
+  dockerRefreshed: boolean;
   tmuxSession: string | undefined;
   /** The managed tmux session name (set even when reused, for teardown-skip). */
   tmuxSessionName: string | undefined;
@@ -336,15 +351,15 @@ async function startDocker(
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
   const env = { ...process.env, ...cfg.env };
   const timeout = cfg.readyTimeoutMs ?? DEFAULT_DOCKER_TIMEOUT_MS;
+  // Snapshot before any compose command so cold-start re-runs of
+  // `compose up` against already-running containers don't look like a refresh.
+  const wasRunning = await dockerComposeRunning(cwd);
 
   // Reuse check: is docker compose already reporting running containers?
-  if (reuse) {
-    const running = await dockerComposeRunning(cwd);
-    if (running) {
-      ctx.log?.("services: docker — reusing running containers");
-      emit("docker", "reuse", "reusing running containers");
-      return;
-    }
+  if (reuse && wasRunning) {
+    ctx.log?.("services: docker — reusing running containers");
+    emit("docker", "reuse", "reusing running containers");
+    return;
   }
 
   ctx.log?.(`services: docker (${cfg.command})`);
@@ -414,6 +429,8 @@ async function startDocker(
   }
 
   phases.dockerStarted = true;
+  // Only a real bring-up of previously-down containers invalidates tmux panes.
+  phases.dockerRefreshed = !wasRunning;
   ctx.log?.("services: docker — ready");
   emit("docker", "ready", "docker ready");
 }
@@ -608,13 +625,14 @@ async function startTmux(
   // leftover session (empty shells after lost send-keys, or services that
   // crashed while scrollback still contains the ready text).
   //
-  // Exception: if docker was freshly brought up this run (not reused), the
-  // leftover pane processes still hold dead connections to the old
-  // mongo/rabbit/temporal containers. "Already live" is a lie in that case —
-  // kill the session and recreate so app services reconnect cleanly.
+  // Exception: if docker containers were actually down and got brought up
+  // this run, leftover pane processes still hold dead connections to the old
+  // mongo/rabbit/temporal. Kill and recreate so app services reconnect.
+  // (cold-start re-running `compose up` against already-running containers
+  // does NOT count — that is not a refresh.)
   if (reuse) {
     const exists = await tmuxSessionExists(cfg.session);
-    if (exists && phases.dockerStarted) {
+    if (exists && phases.dockerRefreshed) {
       ctx.log?.(
         `services: tmux — docker was refreshed this run; recreating session "${cfg.session}" so app processes reconnect`,
       );
@@ -637,14 +655,12 @@ async function startTmux(
     }
   }
 
-  // Not reusing (reuseExisting: false), or docker-refresh invalidated the
-  // session above: kill any leftover session first so create doesn't collide.
-  if (!reuse || phases.dockerStarted) {
-    await execa("tmux", ["kill-session", "-t", cfg.session], {
-      reject: false,
-      timeout: 5_000,
-    });
-  }
+  // Always kill any leftover session before create so new-session cannot
+  // silently fail (reject:false) and boot into a half-dead session.
+  await execa("tmux", ["kill-session", "-t", cfg.session], {
+    reject: false,
+    timeout: 5_000,
+  });
 
   // Create the session with the first window, then add the rest.
   ctx.log?.(
@@ -947,15 +963,52 @@ async function sendWindowCommands(
       TMUX_PRE_COMMAND_RETURN_MS,
     );
   }
-  // Shell must be ready before the long-lived main command.
-  await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
-  await sendTmuxCommand(session, win.name, win.command);
+  // Main long-lived command: wait for shell, send, verify it was accepted
+  // (pane left idle shell). direnv/zsh double-load can swallow the first
+  // send-keys — retry a few times rather than hang forever on readyOn.
+  await sendMainCommandWithRetry(session, win, ctx);
+}
+
+/**
+ * Send the window's main command and confirm the pane left the idle shell
+ * (or the readyOn URL already answers). Retries when direnv/zsh ate the keys.
+ */
+async function sendMainCommandWithRetry(
+  session: string,
+  win: TmuxWindow,
+  ctx: StartServicesContext,
+): Promise<void> {
+  for (let attempt = 1; attempt <= TMUX_COMMAND_SEND_ATTEMPTS; attempt++) {
+    await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
+    if (attempt > 1) {
+      ctx.log?.(
+        `services: tmux — ${win.name}: re-sending command (attempt ${attempt}/${TMUX_COMMAND_SEND_ATTEMPTS})`,
+      );
+    }
+    await sendTmuxCommand(session, win.name, win.command);
+
+    const acceptedBy = Date.now() + TMUX_COMMAND_ACCEPT_MS;
+    while (Date.now() < acceptedBy) {
+      // Only trust a non-shell pane command as "accepted". URL readyOn can
+      // lag (vite still compiling) and must not short-circuit send retries
+      // or the ready-wait stall stream.
+      if (!(await isTmuxPaneIdleShell(session, win.name))) return;
+      await sleep(POLL_MS);
+    }
+  }
+  ctx.log?.(
+    `services: tmux — ${win.name}: command may not have started (pane still idle after ${TMUX_COMMAND_SEND_ATTEMPTS} sends); continuing to ready wait`,
+  );
 }
 
 /**
  * Poll until `#{pane_current_command}` looks like a stable interactive shell
  * (or until the deadline). Best-effort: on timeout we still proceed so a
  * misreported pane command can't brick startup.
+ *
+ * Empty pane_current_command is NOT treated as ready — that was the web-app
+ * failure mode: send-keys fired during direnv init and were swallowed, then
+ * the pane sat at an empty zsh prompt forever.
  */
 async function waitForTmuxShellReady(
   session: string,
@@ -966,19 +1019,9 @@ async function waitForTmuxShellReady(
   const deadline = Date.now() + timeoutMs;
   let stable = 0;
   let last = "";
-  let emptyPolls = 0;
   while (Date.now() < deadline) {
     const cmd = await tmuxPaneCurrentCommand(session, window);
-    // display-message can fail or return empty on some tmux builds; don't
-    // block startup for the full timeout when we get no signal at all.
-    if (!cmd) {
-      emptyPolls += 1;
-      if (emptyPolls >= TMUX_SHELL_STABLE_POLLS) return;
-      await sleep(POLL_MS);
-      continue;
-    }
-    emptyPolls = 0;
-    if (TMUX_IDLE_SHELL_RE.test(cmd)) {
+    if (cmd && TMUX_IDLE_SHELL_RE.test(cmd)) {
       if (cmd === last) stable += 1;
       else {
         stable = 1;
@@ -986,8 +1029,7 @@ async function waitForTmuxShellReady(
       }
       if (stable >= TMUX_SHELL_STABLE_POLLS) return;
     } else {
-      // A non-shell process is running (e.g. yarn build). Keep waiting for
-      // it to exit so the next send-keys hits the shell, not the child.
+      // Empty (shell still booting) or a non-shell child still running.
       stable = 0;
       last = cmd;
     }
@@ -1025,9 +1067,10 @@ async function isTmuxPaneIdleShell(
   window: string,
 ): Promise<boolean> {
   const cmd = await tmuxPaneCurrentCommand(session, window);
-  // Unknown / empty → treat as not idle so we don't thrash re-launches when
-  // display-message fails. ReadyOn URL/text still gate actual readiness.
-  if (!cmd) return false;
+  // Unknown / empty → treat as idle (not yet running a service). That way
+  // send-retry keeps trying and reuse heal re-launches instead of trusting
+  // a pane that never started.
+  if (!cmd) return true;
   return TMUX_IDLE_SHELL_RE.test(cmd);
 }
 

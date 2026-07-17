@@ -464,7 +464,19 @@ describe("startServices — indefinite wait + live output", () => {
 
   it("streams the tmux pane tail while waiting for a window to become ready", async () => {
     // capture-pane returns a non-ready tail; has-session says it doesn't exist.
+    // display-message returns zsh then node so send-keys is accepted once.
+    let mainSent = false;
     execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn serve")
+        mainSent = true;
+      if (cmd === "tmux" && args[0] === "display-message")
+        return {
+          exitCode: 0,
+          stdout: mainSent ? "node" : "zsh",
+          stderr: "",
+        };
+      if (base && args[0] !== "display-message") return base;
       if (cmd === "tmux" && args[0] === "capture-pane") {
         return {
           exitCode: 0,
@@ -1145,7 +1157,7 @@ describe("startServices — teardown", () => {
   });
 
   it("leaves tmux session alive on stop() when reusing (default)", async () => {
-    let killedSession = false;
+    let killCalls = 0;
     execaImpl = async (cmd, args) => {
       const base = tmuxBaseImpl(cmd, args);
       if (base) return base;
@@ -1154,7 +1166,7 @@ describe("startServices — teardown", () => {
       if (cmd === "tmux" && args[0] === "capture-pane")
         return { exitCode: 0, stdout: "ready", stderr: "" };
       if (cmd === "tmux" && args[0] === "kill-session") {
-        killedSession = true;
+        killCalls += 1;
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -1180,8 +1192,11 @@ describe("startServices — teardown", () => {
     );
 
     expect(handle.startedByUs).toBe(true);
+    const killsDuringStart = killCalls;
     await handle.stop();
-    expect(killedSession).toBe(false);
+    // Create path may kill-session before new-session; stop() must not kill again
+    // when reuse is the default.
+    expect(killCalls).toBe(killsDuringStart);
   });
 
   it("skips tmux kill-session AND docker compose down when reusing", async () => {
@@ -2281,11 +2296,22 @@ describe("startServices — tmux session options and env", () => {
 
 describe("startServices — tmux pre-commands", () => {
   it("sends pre-commands before the main command in a window", async () => {
+    let mainSent = false;
     execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
+        mainSent = true;
+      if (cmd === "tmux" && args[0] === "display-message")
+        return {
+          exitCode: 0,
+          stdout: mainSent ? "node" : "zsh",
+          stderr: "",
+        };
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "capture-pane")
         return { exitCode: 0, stdout: "ready", stderr: "" };
+      if (cmd === "tmux" && args[0] === "clear-history")
+        return { exitCode: 0, stdout: "", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
 
@@ -2419,10 +2445,21 @@ describe("startServices — tmux window with both url and text readyOn", () => {
   it("checks both url and text readiness in sequence", async () => {
     let probeCalls = 0;
     let captureCalls = 0;
+    let mainSent = false;
 
     execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
+        mainSent = true;
+      if (cmd === "tmux" && args[0] === "display-message")
+        return {
+          exitCode: 0,
+          stdout: mainSent ? "node" : "zsh",
+          stderr: "",
+        };
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "clear-history")
+        return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "capture-pane") {
         captureCalls++;
         // First capture doesn't have the text, second does
@@ -2433,10 +2470,10 @@ describe("startServices — tmux window with both url and text readyOn", () => {
       return { exitCode: 0, stdout: "", stderr: "" };
     };
 
-    // URL probe: first call returns false, second returns true
+    // URL never ready so wait falls through to text readiness.
     probeOnceImpl = async () => {
       probeCalls++;
-      return probeCalls >= 2;
+      return false;
     };
 
     const handle = track(
