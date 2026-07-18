@@ -152,8 +152,9 @@ per-agent code paths.
   vocabulary.
   For focused authoring guidance, use `cairn docs <topic> --json` or MCP
   `cairn_docs` (`authoring`, `steps`, `verifiers`, `downloads`, `scripts`,
-  `artifacts`, `mcp`, `backends`) — don't rely on training-data knowledge of
-  the CLI.
+  `artifacts`, `mcp`, `backends`, `discovery`, `export`) — don't rely on
+  training-data knowledge of the CLI. For Playwright handoff use
+  `cairn export playwright` / MCP `cairn_export_playwright` (see `export`).
 
 ## Services Lifecycle
 

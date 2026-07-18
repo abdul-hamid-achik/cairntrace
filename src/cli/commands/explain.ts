@@ -632,23 +632,51 @@ export function buildExplain(): ExplainResult {
       },
       {
         name: "export playwright",
-        summary: "Emit a @playwright/test .spec.ts from a Cairntrace spec",
-        synopsis: "cairn export playwright <spec> [--out <file>] [--stdout]",
+        summary:
+          "Emit a @playwright/test .spec.ts|.spec.js from a Cairntrace spec (or directory), with a coverage report",
+        synopsis:
+          "cairn export playwright <spec|dir> [--out <file>] [--out-dir <dir>] [--lang js|ts] [--stdout] [--format json|yaml|md]",
         flags: [
           {
             name: "--out",
             type: "string",
             description:
-              "Where to write (defaults to <spec-dir>/<name>.spec.ts)",
+              "Where to write a single file (defaults to <spec-dir>/<name>.spec.ts|js)",
+          },
+          {
+            name: "--out-dir",
+            type: "string",
+            description:
+              "Batch-write exported specs into this directory (required for directory input)",
+          },
+          {
+            name: "--lang",
+            type: "enum",
+            values: ["js", "ts"],
+            default: "ts",
+            description: "Output language (TypeScript or JavaScript)",
           },
           {
             name: "--stdout",
             type: "boolean",
             default: false,
-            description: "Print to stdout instead of writing",
+            description:
+              "Print source only to stdout (single-spec; no coverage report)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description:
+              "Coverage report format when writing files (not used with --stdout)",
           },
         ],
-        exitCodes: { "0": "success", "2": "error" },
+        exitCodes: {
+          "0": "success (written or partial with skips)",
+          "2": "usage/IO error",
+          "4": "spec parse failure",
+        },
       },
       {
         name: "import playwright",

@@ -83,6 +83,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_docs",
       "cairn_doctor",
       "cairn_explain",
+      "cairn_export_playwright",
       "cairn_investigate",
       "cairn_run",
       "cairn_secrets_status",

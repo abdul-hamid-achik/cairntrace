@@ -667,7 +667,7 @@ Common commands:
 | `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
 | `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session. |
 | `cairn login <name> --url <url>` | Open a headed login flow and save a checkpoint. |
-| `cairn export playwright <spec>` | Emit an `@playwright/test` spec from a Cairntrace spec. |
+| `cairn export playwright <spec\|dir>` | Emit `@playwright/test` `.spec.ts`/`.spec.js` (`--lang`, `--out-dir`, coverage report). |
 | `cairn import playwright <file>` | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines. |
 | `cairn stash save <run-id>` | Stash a run directory to the fcheap vault for persistence and search. Supports `--tag`, `--tool`, `--source`. |
 | `cairn stash list` | List stashes, optionally filtered by `--tag` or `--tool`. |
@@ -794,8 +794,10 @@ separate so the core stays deterministic and testable.
 - **Playwright import:** `cairn import playwright <file>` converts common
   Playwright actions and assertions to Cairntrace YAML, preserving TODO
   comments for unmapped lines that need human review.
-- **Playwright export:** `cairn export playwright <spec>` emits a normal
-  `@playwright/test` file when a Cairntrace spec is stable enough for CI.
+- **Playwright export:** `cairn export playwright <spec|dir> [--lang js|ts]
+  [--out-dir <dir>]` emits `@playwright/test` `.spec.ts` or `.spec.js` with a
+  coverage report (skips for constructs that cannot translate). MCP:
+  `cairn_export_playwright`. Docs: `cairn docs export`.
 
 ## Development
 

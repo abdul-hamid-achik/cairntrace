@@ -311,17 +311,23 @@ const exportCmd = program
   .command("export")
   .description("Export a spec to another test framework");
 
-exportCmd
-  .command("playwright <spec>")
-  .description(
-    "Emit a @playwright/test .spec.ts from the given Cairntrace spec",
-  )
-  .option(
-    "--out <file>",
-    "where to write (defaults to <spec-dir>/<name>.spec.ts)",
-  )
-  .option("--stdout", "print to stdout instead of writing", false)
-  .action((p: string, opts) => exportPlaywrightCommand(p, opts));
+addFormatFlags(
+  exportCmd
+    .command("playwright <spec>")
+    .description(
+      "Emit a @playwright/test .spec.ts|.spec.js from a Cairntrace spec (or directory)",
+    )
+    .option(
+      "--out <file>",
+      "where to write a single file (defaults to <spec-dir>/<name>.spec.ts|js)",
+    )
+    .option(
+      "--out-dir <dir>",
+      "batch-write exported specs into this directory (required for directory input)",
+    )
+    .option("--lang <js|ts>", "output language (default: ts)", "ts")
+    .option("--stdout", "print source to stdout (single-spec only)", false),
+).action((p: string, opts) => exportPlaywrightCommand(p, opts));
 
 const importCmd = program
   .command("import")

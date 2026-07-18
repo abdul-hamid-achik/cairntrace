@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Spec } from "../schema/spec.v1";
 import { exportPlaywright } from "./playwrightExporter";
 
+const srcOf = (...args: Parameters<typeof exportPlaywright>) =>
+  exportPlaywright(...args).source;
+
 const baseSpec = (overrides: Partial<Spec>): Spec =>
   ({
     version: 1,
@@ -21,14 +24,14 @@ const baseSpec = (overrides: Partial<Spec>): Spec =>
 
 describe("exportPlaywright", () => {
   it("emits a runnable @playwright/test scaffold", () => {
-    const src = exportPlaywright(baseSpec({}));
+    const src = srcOf(baseSpec({}));
     expect(src).toContain(`import { expect, test } from "@playwright/test";`);
     expect(src).toContain(`test("exporter_smoke", async ({ page }) => {`);
     expect(src.trim().endsWith("});")).toBe(true);
   });
 
   it("translates open/click/hover/fill steps", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         steps: [
           { id: "go", open: "https://example.com/" },
@@ -61,7 +64,7 @@ describe("exportPlaywright", () => {
   });
 
   it("translates select steps to selectOption by value or label", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         steps: [
           {
@@ -84,7 +87,7 @@ describe("exportPlaywright", () => {
   });
 
   it("translates text + url + count outcomes", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         outcomes: [
           {
@@ -115,7 +118,7 @@ describe("exportPlaywright", () => {
   });
 
   it("renders retrying text assertions and honors the case-sensitive opt-out", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         outcomes: [
           {
@@ -153,7 +156,7 @@ describe("exportPlaywright", () => {
   });
 
   it("installs network + console listeners only when needed", () => {
-    const noListeners = exportPlaywright(
+    const noListeners = srcOf(
       baseSpec({
         outcomes: [
           {
@@ -167,7 +170,7 @@ describe("exportPlaywright", () => {
     expect(noListeners).not.toContain(`requests.push`);
     expect(noListeners).not.toContain(`consoleErrors`);
 
-    const withListeners = exportPlaywright(
+    const withListeners = srcOf(
       baseSpec({
         outcomes: [
           {
@@ -198,7 +201,7 @@ describe("exportPlaywright", () => {
   });
 
   it("emits a page.evaluate block for the script verifier", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         outcomes: [
           {
@@ -218,7 +221,7 @@ describe("exportPlaywright", () => {
   });
 
   it("translates selector wait steps", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         steps: [
           {
@@ -252,7 +255,7 @@ describe("exportPlaywright", () => {
   });
 
   it("exports normalized text waits and preserves the case-sensitive opt-out", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         steps: [
           { wait: { text: "Order Saved" } },
@@ -270,7 +273,7 @@ describe("exportPlaywright", () => {
   });
 
   it("exports step and spec click settle overrides", () => {
-    const src = exportPlaywright(
+    const src = srcOf(
       baseSpec({
         settleMs: 1_200,
         steps: [
@@ -290,10 +293,129 @@ describe("exportPlaywright", () => {
   });
 
   it("includes the spec intent + source as a header comment", () => {
-    const src = exportPlaywright(baseSpec({ intent: "do the thing" }), {
+    const src = srcOf(baseSpec({ intent: "do the thing" }), {
       sourcePath: "/path/to/spec.yml",
     });
     expect(src).toContain(`Source: /path/to/spec.yml`);
     expect(src).toContain(`Intent: do the thing`);
+  });
+
+  it("emits JS without type annotations when lang is js", () => {
+    const src = srcOf(
+      baseSpec({
+        outcomes: [
+          {
+            id: "con",
+            description: "con",
+            verify: { console: { errorsMax: 0 } },
+          },
+        ],
+      }),
+      { lang: "js" },
+    );
+    expect(src).toContain(`// Lang: js`);
+    expect(src).toContain(`const consoleErrors = [];`);
+    expect(src).not.toContain(`: string[]`);
+  });
+
+  it("exports inline eval steps", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "seed",
+            eval: { js: "return window.__X = 1;", assign: "seeded" },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `const seeded = await page.evaluate(async (args) => {`,
+    );
+    expect(src).toContain(`return window.__X = 1;`);
+  });
+
+  it("flattens batch sub-steps", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "hover_then_click",
+            batch: [
+              { hover: { by: "selector", selector: ".menu" } },
+              { click: { by: "selector", selector: ".menu-item" } },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(`// batch: expanded sequentially`);
+    expect(src).toContain(`await page.locator(".menu").hover();`);
+    expect(src).toContain(`await page.locator(".menu-item").click();`);
+  });
+
+  it("wraps when: urlContains in a real if", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "maybe",
+            when: "urlContains:/login",
+            click: { by: "role", role: "button", name: "OK" },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(`if (page.url().includes("/login")) {`);
+    expect(src).toContain(
+      `await page.getByRole("button", { name: "OK" }).click();`,
+    );
+  });
+
+  it("exports request with body headers and expectStatus", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "post",
+            request: {
+              method: "POST",
+              url: "/api/x",
+              body: { a: 1 },
+              expectStatus: 201,
+              assign: "created",
+            },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(`page.request.fetch("/api/x"`);
+    expect(src).toContain(`"Content-Type":"application/json"`);
+    expect(src).toContain(`expect(created.status()).toBe(201);`);
+  });
+
+  it("reports coverage skips for monitor and node script", () => {
+    const result = exportPlaywright(
+      baseSpec({
+        steps: [
+          {
+            id: "prof",
+            monitor: { action: "snapshot", type: "sample" },
+          } as never,
+        ],
+        outcomes: [
+          {
+            id: "nodey",
+            description: "node",
+            verify: {
+              script: { runtime: "node", file: "./check.ts" },
+            },
+          },
+        ],
+      }),
+    );
+    expect(result.coverage.skips.length).toBeGreaterThan(0);
+    expect(result.coverage.skips.some((s) => s.kind === "step")).toBe(true);
+    expect(result.coverage.skips.some((s) => s.kind === "outcome")).toBe(true);
   });
 });

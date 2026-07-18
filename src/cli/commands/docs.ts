@@ -1148,6 +1148,67 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         ].join("\n"),
       },
     ],
-    relatedTopics: ["mcp", "authoring", "steps", "overview"],
+    relatedTopics: ["mcp", "authoring", "steps", "overview", "export"],
+  },
+
+  export: {
+    title: "Export & import (Playwright bridge)",
+    summary:
+      "Hand off Cairntrace specs to @playwright/test (JS or TS) for CI/legacy runners, or import Playwright tests into reviewable YAML. Cairntrace remains the agent source of truth.",
+    sections: [
+      {
+        title: "When to export",
+        body: "Use `cairn export playwright` when a team needs a plain Playwright file for CI, a Playwright-only suite, or a human who does not run cairn. Prefer keeping the YAML spec as source of truth for agent runs, heal, discovery, and outcomes. Export is a one-way bridge — not a full round-trip guarantee with `cairn import playwright`.",
+      },
+      {
+        title: "CLI",
+        body: "`cairn export playwright <spec|dir> [--lang js|ts] [--out <file>] [--out-dir <dir>] [--stdout] [--format json|yaml|md]`. Default language is TypeScript (`.spec.ts`). `--lang js` emits `.spec.js` without type annotations. Directory input requires `--out-dir` and expands recursively (skips `actions/` and `_*.yml` drafts). `--stdout` prints source only for a single spec (no coverage report) so you can pipe into a file.",
+      },
+      {
+        title: "Coverage report",
+        body: "When writing files, stdout is a structured report: status written|partial|error, per-file coverage (steps/outcomes exported vs total), and skips with reasons. Partial means at least one construct was commented/skipped (eval.file, node script verifiers, monitor, transform, unresolved use:). Agents should read `coverage.skips` in `--format json` before treating a handoff as complete.",
+      },
+      {
+        title: "Fidelity (what exports well)",
+        body: "Well supported: open, click, hover, fill, type, select, upload, download, wait (text/notText/selector/load), press, scroll, request (page.request with cookies + body/headers/expectStatus), eval (inline js), batch (flattened sequential steps — hover atomicity is lost), when: urlContains|urlNotContains|urlMatches|text|notText as real if-blocks, text/notText/url/count/network/console outcomes, browser script.run outcomes, basic httpJson. Skipped or partial: eval.file, script.file / runtime node, transform, snapshot, monitor, process/xlsx/file verifiers, ${requests.*}/${evals.*} splicing in later steps.",
+      },
+      {
+        title: "MCP",
+        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout. structuredContent is the same report schema as `--format json`.",
+      },
+      {
+        title: "Import (reverse direction)",
+        body: "`cairn import playwright <file>` converts common Playwright page.goto, locator actions, and expect assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines. Always re-run `cairn spec verify` and fix cold-start before treating an import as complete.",
+      },
+      {
+        title: "Authoring path (writing tests)",
+        body: "To write new tests as an agent: `cairn docs authoring` → discovery (`cairn_discover_*` or `cairn discover`) → export YAML → `cairn run --cold-start` → heal if needed. Only then `cairn export playwright` if a Playwright artifact is required.",
+      },
+    ],
+    examples: [
+      {
+        title: "Export one spec to TypeScript",
+        language: "bash",
+        code: "cairn export playwright flows/login.yml --format json",
+      },
+      {
+        title: "Export a directory as JavaScript",
+        language: "bash",
+        code: "cairn export playwright flows/ --lang js --out-dir playwright/tests --format md",
+      },
+      {
+        title: "Pipe source only",
+        language: "bash",
+        code: "cairn export playwright flows/login.yml --lang ts --stdout > tests/login.spec.ts",
+      },
+    ],
+    relatedTopics: [
+      "authoring",
+      "discovery",
+      "steps",
+      "verifiers",
+      "backends",
+      "mcp",
+    ],
   },
 };

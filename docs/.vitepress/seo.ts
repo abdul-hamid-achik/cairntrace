@@ -30,6 +30,8 @@ const pageDescriptions: Record<string, string> = {
     'Connect coding agents to the Cairntrace MCP server for browser-spec authoring, verification, replay, discovery, healing, and evidence retrieval.',
   'discover.md':
     'Explore live pages through Cairntrace discovery sessions, capture accessibility snapshots and locator inventories, and export recorded interactions as specs.',
+  'export.md':
+    'Export Cairntrace browser specs to Playwright JS or TypeScript with coverage reports, or import Playwright tests into reviewable YAML.',
   'troubleshooting.md':
     'Diagnose Cairntrace cold-start gates, outcome failures, request errors, timeouts, contract mismatches, backend problems, and flaky browser behavior.',
   'annotate.md':

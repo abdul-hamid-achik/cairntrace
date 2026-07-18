@@ -1,7 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execa } from "execa";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  resolve as resolvePath,
+} from "node:path";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import { z } from "zod";
 import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
@@ -2050,6 +2056,178 @@ export function buildMcpServer(): McpServer {
           sessions: list,
         }) as unknown as Record<string, unknown>,
       };
+    },
+  );
+
+  server.registerTool(
+    "cairn_export_playwright",
+    {
+      title: "Export spec(s) to Playwright",
+      description:
+        "Convert a Cairntrace YAML spec (or directory of specs) into " +
+        "@playwright/test source (TypeScript or JavaScript). Returns a " +
+        "coverage report with skips so agents know what was not fully " +
+        "translated. Use after authoring/healing when a Playwright handoff " +
+        "is required. See `cairn docs export`.",
+      inputSchema: {
+        path: z
+          .string()
+          .min(1)
+          .describe("Spec file or directory of YAML specs"),
+        out: z
+          .string()
+          .optional()
+          .describe("Single-file output path (not for directories)"),
+        outDir: z
+          .string()
+          .optional()
+          .describe(
+            "Directory for batch export (required for directory input)",
+          ),
+        lang: z
+          .enum(["js", "ts"])
+          .optional()
+          .describe("Output language; default ts"),
+        stdout: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true and path is a single file, return source in content (no write)",
+          ),
+      },
+    },
+    async ({ path: inputPath, out, outDir, lang, stdout }) => {
+      const { exportPlaywrightCommand } = await import(
+        "../cli/commands/export"
+      );
+      // Capture stdout by temporarily writing via the same logic as CLI.
+      // For structured results we re-implement a thin path using the exporter core.
+      const { exportPlaywright, exportExtension } = await import(
+        "../core/exporters/playwrightExporter"
+      );
+      const { expandSpecArgs } = await import("../cli/commands/run");
+      const resolvedLang = lang ?? "ts";
+
+      try {
+        const paths = await expandSpecArgs([inputPath]);
+        if (paths.length === 0) {
+          return {
+            content: [{ type: "text", text: `no specs found at ${inputPath}` }],
+            isError: true,
+          };
+        }
+        if (stdout) {
+          if (paths.length !== 1) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "stdout requires a single spec file",
+                },
+              ],
+              isError: true,
+            };
+          }
+          const parsed = await parseSpec(paths[0]!);
+          const result = exportPlaywright(parsed.resolved, {
+            sourcePath: parsed.path,
+            lang: resolvedLang,
+          });
+          return {
+            content: [{ type: "text", text: result.source }],
+            structuredContent: {
+              status: result.coverage.skips.length > 0 ? "partial" : "written",
+              lang: resolvedLang,
+              source: result.source,
+              coverage: result.coverage,
+              name: parsed.spec.name,
+            },
+          };
+        }
+        if (paths.length > 1 && !outDir) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "directory export requires outDir",
+              },
+            ],
+            isError: true,
+          };
+        }
+        // Delegate write+report shape via CLI helper by capturing process.stdout is fragile;
+        // write files here and build the same report object.
+        const files: Array<{
+          source: string;
+          path: string;
+          name: string;
+          coverage: ReturnType<typeof exportPlaywright>["coverage"];
+          status: "written" | "partial";
+        }> = [];
+        for (const p of paths) {
+          const parsed = await parseSpec(p);
+          const result = exportPlaywright(parsed.resolved, {
+            sourcePath: parsed.path,
+            lang: resolvedLang,
+          });
+          const ext = exportExtension(resolvedLang);
+          let outPath: string;
+          if (out && paths.length === 1) {
+            outPath = isAbsolute(out) ? out : resolvePath(process.cwd(), out);
+          } else if (outDir) {
+            const dir = isAbsolute(outDir)
+              ? outDir
+              : resolvePath(process.cwd(), outDir);
+            await mkdir(dir, { recursive: true });
+            outPath = join(dir, `${parsed.spec.name}${ext}`);
+          } else {
+            outPath = join(
+              dirname(resolvePath(p)),
+              `${parsed.spec.name}${ext}`,
+            );
+          }
+          await mkdir(dirname(outPath), { recursive: true });
+          await writeFile(outPath, result.source);
+          files.push({
+            source: resolvePath(p),
+            path: outPath,
+            name: parsed.spec.name,
+            coverage: result.coverage,
+            status: result.coverage.skips.length > 0 ? "partial" : "written",
+          });
+        }
+        const partial = files.filter((f) => f.status === "partial").length;
+        const written = files.filter((f) => f.status === "written").length;
+        const report = {
+          status: (partial > 0 ? "partial" : "written") as
+            | "partial"
+            | "written",
+          lang: resolvedLang,
+          files,
+          summary: { written, partial, failed: 0 },
+        };
+        // Keep import for tree-shake awareness; CLI command remains the public path.
+        void exportPlaywrightCommand;
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Exported ${files.length} file(s) (${report.status}): ${files.map((f) => f.path).join(", ")}`,
+            },
+          ],
+          structuredContent: report,
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `export failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 

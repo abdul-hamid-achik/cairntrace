@@ -60,6 +60,7 @@ export default defineConfig({
           { text: 'Authoring contracts', link: '/authoring' },
           { text: 'Agent workflow', link: '/agents' },
           { text: 'Discovery sessions', link: '/discover' },
+          { text: 'Export & import', link: '/export' },
         ],
       },
       {
@@ -84,6 +85,7 @@ export default defineConfig({
             { text: 'Quickstart', link: '/quickstart' },
             { text: 'Concepts', link: '/authoring' },
             { text: 'Discovery sessions', link: '/discover' },
+            { text: 'Export & import', link: '/export' },
           ],
         },
         {
@@ -108,6 +110,7 @@ export default defineConfig({
             { text: 'All commands', link: '/commands' },
             { text: 'Doctor & clean', link: '/doctor' },
             { text: 'Discover & snapshot', link: '/discover' },
+            { text: 'Export & import', link: '/export' },
             { text: 'Checkpoints & login', link: '/checkpoint' },
             { text: 'Stash', link: '/stash' },
             { text: 'Clip', link: '/clip' },
