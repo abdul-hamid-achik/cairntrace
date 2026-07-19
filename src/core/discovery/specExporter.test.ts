@@ -28,6 +28,18 @@ describe("specExporter", () => {
     it("handles a bare filename", () => {
       expect(deriveSpecName("dashboard.yml")).toBe("dashboard");
     });
+
+    it("prefixes a numeric stem so the name starts with a letter", () => {
+      expect(deriveSpecName("flows/456.yml")).toBe("spec_456");
+    });
+
+    it("prefixes when the stem starts with a digit but has letters", () => {
+      expect(deriveSpecName("flows/456_login.yml")).toBe("spec_456_login");
+    });
+
+    it("prefixes a digit-leading stem from a nested path", () => {
+      expect(deriveSpecName("123/456.yml")).toBe("spec_456");
+    });
   });
 
   describe("buildSpecYaml", () => {

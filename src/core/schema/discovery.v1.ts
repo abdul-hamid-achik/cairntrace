@@ -20,6 +20,8 @@ export const DiscoveryActionSchema = z.enum([
   "fill",
   "hover",
   "type",
+  "select",
+  "upload",
   "scroll",
   "press",
 ]);

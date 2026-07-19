@@ -717,7 +717,24 @@ export class AgentBrowserAdapter implements BrowserBackend {
         argv: ["--session", this.opts.session, "close"],
       };
     }
-    return this.invoke(["close"]);
+    const graceful = await this.invoke(["close"]);
+    if (graceful.ok) return graceful;
+    // Graceful close failed — typically a wedged daemon whose serial queue
+    // blocked the `close` client behind whatever it's stuck on, so the client
+    // timed out and died while the daemon lives on. Escalate to killing the
+    // daemon so we don't orphan it + Chrome, mirroring the child-timeout
+    // escalation above.
+    if (this.terminateDaemon()) {
+      return {
+        ok: true,
+        stdout: "session daemon terminated after graceful close failed",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+        argv: ["--session", this.opts.session, "close"],
+      };
+    }
+    return graceful;
   }
 
   /**

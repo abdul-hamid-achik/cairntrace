@@ -10,6 +10,7 @@ import {
   type LocatorInventory,
 } from "../snapshot/locatorInventory";
 import {
+  isEphemeralTarget,
   recordInteraction,
   recordOpen,
   recordOpenWithWait,
@@ -95,12 +96,15 @@ export async function openSession(
   const id = randomUUID();
   const now = Date.now();
 
-  // Navigate to the URL
+  // Navigate to the URL. Execute the SAME step we record (not a hardcoded
+  // `{open: url}`) so a caller-supplied waitUntil actually governs the
+  // navigation — otherwise discovery explores a half-settled page (e.g. an
+  // un-hydrated SPA) while the exported spec waits, and the two diverge.
   const openStep =
     opts?.waitUntil !== undefined
       ? recordOpenWithWait(url, opts.waitUntil)
       : recordOpen(url);
-  const result = await backend.runStep({ open: url } as never);
+  const result = await backend.runStep(openStep as never);
   if (!result.ok) {
     throw new Error(
       `discovery: navigation failed: ${result.stderr || result.stdout || "unknown error"}`,
@@ -154,17 +158,34 @@ export async function interact(
     action: DiscoveryAction;
     target?: Parameters<typeof recordInteraction>[0]["target"];
     value?: string;
+    label?: string;
+    path?: string;
     scrollDirection?: "up" | "down" | "left" | "right";
     scrollPixels?: number;
   },
 ): Promise<DiscoveryInteractResult> {
   handle.session.lastActivity = Date.now();
 
+  // Reject ephemeral snapshot @refs up front with a specific message: they
+  // execute live but can never replay, so recording one would silently produce
+  // a broken spec (recordInteraction also guards this for direct callers).
+  if (isEphemeralTarget(input.target)) {
+    return {
+      ok: false,
+      url: handle.session.currentUrl,
+      snapshot: handle.session.lastSnapshot,
+      error:
+        'target is an ephemeral snapshot @ref (e.g. "@e2") that cannot replay; pass a stable locator from cairn_discover_inventory (by: role|label|text) or a CSS selector instead',
+    };
+  }
+
   // Build the spec-compatible step to run
   const recordedStep = recordInteraction({
     action: input.action,
     target: input.target,
     value: input.value,
+    label: input.label,
+    path: input.path,
     scrollDirection: input.scrollDirection,
     scrollPixels: input.scrollPixels,
   });
@@ -235,12 +256,18 @@ export async function navigate(
       : recordOpen(url);
 
   return withLock(handle, async () => {
+    const previousUrl = handle.session.currentUrl;
     const result = await handle.backend.runStep(openStep as never);
 
     const snap = await handle.backend.snapshot({ interactive: true });
     const elements = snap.ok ? parseSnapshot(snap.text) : [];
     handle.session.lastSnapshot = elements;
-    const currentUrl = await handle.backend.getUrl().catch(() => url);
+    // If getUrl() fails, fall back to where we actually are: the target on a
+    // successful navigation, the previous page on a failed one (a failed nav
+    // leaves the browser where it started — never report a URL we didn't reach).
+    const currentUrl = await handle.backend
+      .getUrl()
+      .catch(() => (result.ok ? url : previousUrl));
     handle.session.currentUrl = currentUrl;
 
     handle.session.steps.push({
@@ -303,12 +330,13 @@ export function getExportableSteps(handle: DiscoverySessionHandle): {
 }
 
 /**
- * Close a session and free the backend.
+ * Close a session and free the backend. Runs under the session lock so the
+ * backend isn't torn down while an in-flight interact/navigate still uses it.
  */
 export async function closeSession(
   handle: DiscoverySessionHandle,
 ): Promise<void> {
-  await handle.backend.close().catch(() => undefined);
+  await withLock(handle, () => handle.backend.close()).catch(() => undefined);
 }
 
 /**
@@ -322,8 +350,10 @@ export async function sweepSessions(
   for (const [id, handle] of registry) {
     if (now - handle.session.lastActivity > SESSION_TTL_MS) {
       expired.push(id);
-      await closeSession(handle).catch(() => undefined);
+      // Drop from the registry BEFORE closing so a concurrent call sees
+      // "session not found" instead of racing the teardown.
       registry.delete(id);
+      await closeSession(handle).catch(() => undefined);
     }
   }
   return expired;

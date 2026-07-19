@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { parse as parseYaml, parseDocument } from "yaml";
+import { coldStartLint } from "../../../core/coldStart";
 import { computeContractHash } from "../../../core/contractHash";
 import { resolveSpecRuntimeContext } from "../../../core/config/runtimeContext";
 import {
@@ -102,19 +103,6 @@ export async function stampSpecContractHash(specPath: string): Promise<string> {
   doc.set("contractHash", hash);
   await writeFile(specPath, doc.toString());
   return hash;
-}
-
-function coldStartLint(
-  spec: Awaited<ReturnType<typeof parseSpec>>["spec"],
-): string | undefined {
-  if (spec.coldStart === "guest") return undefined;
-  const hasImports = (spec.imports?.length ?? 0) > 0;
-  const hasResume = !!spec.session?.resume;
-  const hasPreCmds = (spec.preconditions?.commands?.length ?? 0) > 0;
-  if (!hasImports && !hasResume && !hasPreCmds) {
-    return "cold-start: no imports, no session.resume, and no preconditions.commands. Specs without setup likely cannot replay from a fresh browser.";
-  }
-  return undefined;
 }
 
 function toMarkdown(r: VerifyResult): string {

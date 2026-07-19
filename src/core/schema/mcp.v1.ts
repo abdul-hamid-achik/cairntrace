@@ -74,6 +74,7 @@ export const DiscoverySuggestResultSchema = z
   .object({
     steps: z.array(z.unknown()),
     stepCount: z.number().int().nonnegative(),
+    skippedFailed: z.number().int().nonnegative(),
   })
   .passthrough();
 export type DiscoverySuggestResult = z.infer<
@@ -86,6 +87,7 @@ export const DiscoveryExportResultSchema = z
     path: z.string(),
     verifyOk: z.boolean(),
     verifyErrors: z.array(z.string()).optional(),
+    warnings: z.array(z.string()).optional(),
     stepCount: z.number().int().nonnegative(),
     skippedFailed: z.number().int().nonnegative(),
   })

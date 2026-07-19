@@ -543,6 +543,43 @@ describe("Cairntrace MCP discovery tools", () => {
     await c.close();
   });
 
+  it("cairn_discover_open enforces the session cap", async () => {
+    const c = await connectInMemory();
+    const sessionIds: string[] = [];
+
+    // Open the maximum (8) sessions.
+    for (let i = 0; i < 8; i++) {
+      const r = await c.callTool({
+        name: "cairn_discover_open",
+        arguments: { url: `/page${i}`, mock: true },
+      });
+      expect(r.isError).toBeFalsy();
+      sessionIds.push(
+        (r.structuredContent as Record<string, unknown>).sessionId as string,
+      );
+    }
+
+    // The 9th open is refused.
+    const overflow = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/overflow", mock: true },
+    });
+    expect(overflow.isError).toBe(true);
+    const overflowContent = overflow.content as Array<{
+      type: string;
+      text: string;
+    }>;
+    expect(overflowContent[0]?.text).toContain("too many open discovery");
+
+    for (const sessionId of sessionIds) {
+      await c.callTool({
+        name: "cairn_discover_close",
+        arguments: { sessionId },
+      });
+    }
+    await c.close();
+  });
+
   it("cairn_discover_suggest returns recorded steps as YAML", async () => {
     const c = await connectInMemory();
 
@@ -623,6 +660,14 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(sc.verifyOk).toBe(true);
     expect(sc.stepCount).toBe(2); // open + click
 
+    // A freshly exported spec parses but is neither stamped nor
+    // cold-start-satisfied — the tool must surface both warnings so the agent
+    // knows the spec isn't fully ready to run.
+    const warnings = sc.warnings as string[];
+    expect(warnings).toBeDefined();
+    expect(warnings.some((w) => w.includes("contractHash"))).toBe(true);
+    expect(warnings.some((w) => w.includes("cold-start"))).toBe(true);
+
     // Verify the file was written
     const { readFile } = await import("node:fs/promises");
     const content = await readFile(specPath, "utf8");
@@ -631,6 +676,82 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(content).toContain("open: /login");
     expect(content).toContain("click");
     expect(content).toContain("page_loads");
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
+    await c.close();
+  });
+
+  it("cairn_discover_export refuses to clobber a stamped spec without overwrite", async () => {
+    const c = await connectInMemory();
+    const specPath = join(dir, "stamped-spec.yml");
+
+    // Simulate an established (stamped) spec already on disk.
+    await writeFile(
+      specPath,
+      [
+        "version: 1",
+        "name: stamped_spec",
+        "intent: locked contract",
+        "contractHash: abc123",
+        "outcomes:",
+        "  - id: o",
+        "    description: d",
+        "    verify:",
+        "      text:",
+        "        contains: X",
+        "steps: []",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const outcomes = [
+      {
+        id: "page_loads",
+        description: "Page loads",
+        verify: { text: { contains: "Welcome" } },
+      },
+    ];
+
+    // Without overwrite: refused, and the stamped file is left intact.
+    const refused = await c.callTool({
+      name: "cairn_discover_export",
+      arguments: { sessionId, path: specPath, intent: "New intent", outcomes },
+    });
+    expect(refused.isError).toBe(true);
+    const refusedContent = refused.content as Array<{
+      type: string;
+      text: string;
+    }>;
+    expect(refusedContent[0]?.text).toContain("overwrite");
+    const { readFile } = await import("node:fs/promises");
+    expect(await readFile(specPath, "utf8")).toContain("contractHash: abc123");
+
+    // With overwrite: succeeds and replaces the stamped spec.
+    const ok = await c.callTool({
+      name: "cairn_discover_export",
+      arguments: {
+        sessionId,
+        path: specPath,
+        intent: "New intent",
+        outcomes,
+        overwrite: true,
+      },
+    });
+    expect(ok.isError).toBeFalsy();
+    const replaced = await readFile(specPath, "utf8");
+    expect(replaced).toContain("intent: New intent");
+    expect(replaced).not.toContain("contractHash: abc123");
 
     await c.callTool({
       name: "cairn_discover_close",

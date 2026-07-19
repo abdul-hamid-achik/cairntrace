@@ -25,6 +25,7 @@ import {
   type ArtifactRootOptions,
 } from "../cli/runRefs";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
+import { coldStartLint } from "../core/coldStart";
 import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
 import { computeContractHash } from "../core/contractHash";
 import {
@@ -33,7 +34,6 @@ import {
   captureSnapshot,
   getExportableSteps,
   getInventory,
-  getSteps,
   interact,
   navigate,
   openSession,
@@ -1422,6 +1422,10 @@ export function buildMcpServer(): McpServer {
   // Cap concurrent live browser sessions so a runaway loop can't exhaust
   // processes / file descriptors by opening sessions without closing them.
   const MAX_DISCOVERY_SESSIONS = 8;
+  // Counts opens that passed the cap check but haven't registered their session
+  // yet. The cap check and this increment are synchronous (no await between),
+  // so two concurrent opens can't both slip under the cap (TOCTOU).
+  let pendingOpens = 0;
 
   // Auto-sweep expired sessions every 60s
   const sweepTimer = setInterval(() => {
@@ -1439,6 +1443,7 @@ export function buildMcpServer(): McpServer {
     clearInterval(sweepTimer);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
+    process.off("exit", onExit);
   }
   let shuttingDown = false;
   function shutdownDiscovery(): void {
@@ -1465,8 +1470,22 @@ export function buildMcpServer(): McpServer {
   function onSigterm(): void {
     shutdownDiscovery();
   }
+  // 'exit' covers the cases the signal handlers miss — an uncaught-exception
+  // crash or a process.exit() elsewhere. The handler must be synchronous;
+  // terminateSync is, so each daemon is killed instead of orphaned. Idempotent
+  // with the signal path (killing an already-dead daemon is a no-op).
+  function onExit(): void {
+    for (const handle of sessions.values()) {
+      try {
+        handle.backend.terminateSync?.();
+      } catch {
+        // best-effort — keep terminating the remaining sessions
+      }
+    }
+  }
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
+  process.on("exit", onExit);
 
   // When the server closes (InMemory transport teardown in tests, or the
   // `cairn mcp` stdio transport ending), dispose the process-global signal
@@ -1519,7 +1538,7 @@ export function buildMcpServer(): McpServer {
     async ({ url, env, mock, headed, waitUntil, sessionName }) => {
       // Sweep expired sessions first so the cap reflects live sessions only.
       await sweepSessions(sessions);
-      if (sessions.size >= MAX_DISCOVERY_SESSIONS) {
+      if (sessions.size + pendingOpens >= MAX_DISCOVERY_SESSIONS) {
         return {
           content: [
             {
@@ -1530,71 +1549,82 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-      // Resolve relative URLs against config baseUrl when env is provided
-      const resolvedUrl = env
-        ? await resolveDiscoverUrl(url, { env }).catch(() => url)
-        : url;
-      const backend = mock
-        ? new MockBrowserBackend()
-        : new AgentBrowserAdapter({
-            session: sessionName ?? `cairntrace-disc-${process.pid}`,
-            ...(headed !== undefined ? { headed } : {}),
-          });
+      // Reserve the slot synchronously — no await between the cap check and
+      // this increment, so a concurrent open can't also pass the check.
+      pendingOpens++;
       try {
-        const handle = await openSession(
-          backend,
-          resolvedUrl,
-          waitUntil !== undefined ? { waitUntil } : undefined,
-        );
-        sessions.set(handle.session.id, handle);
-
-        // Collect initial inventory
-        let inventory;
+        // Resolve relative URLs against config baseUrl when env is provided
+        const resolvedUrl = env
+          ? await resolveDiscoverUrl(url, { env }).catch(() => url)
+          : url;
+        const backend = mock
+          ? new MockBrowserBackend()
+          : new AgentBrowserAdapter({
+              session: sessionName ?? `cairntrace-disc-${process.pid}`,
+              ...(headed !== undefined ? { headed } : {}),
+            });
         try {
-          inventory = await getInventory(handle);
-        } catch {
-          // inventory is best-effort
+          const handle = await openSession(
+            backend,
+            resolvedUrl,
+            waitUntil !== undefined ? { waitUntil } : undefined,
+          );
+
+          // Collect initial inventory (best-effort) before registering.
+          let inventory;
+          try {
+            inventory = await getInventory(handle);
+          } catch {
+            // inventory is best-effort
+          }
+
+          const result = {
+            sessionId: handle.session.id,
+            url: handle.session.currentUrl,
+            snapshot: handle.session.lastSnapshot,
+            ...(inventory ? { inventory } : {}),
+          };
+          // Parse before registering so a schema failure can't leave a dead
+          // handle in the registry counting against the session cap.
+          const structuredContent = DiscoveryOpenResultSchema.parse(result);
+          sessions.set(handle.session.id, handle);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: [
+                  `Session ${handle.session.id} opened at ${handle.session.currentUrl}`,
+                  `${handle.session.lastSnapshot.length} snapshot elements`,
+                  ...(inventory?.roles
+                    ? [`${inventory.roles.length} role locators`]
+                    : []),
+                  ...(inventory?.testids
+                    ? [`${inventory.testids.length} testid locators`]
+                    : []),
+                  `Use cairn_discover_interact / cairn_discover_snapshot to explore.`,
+                ].join("\n"),
+              },
+            ],
+            structuredContent: structuredContent as unknown as Record<
+              string,
+              unknown
+            >,
+          };
+        } catch (e) {
+          await backend.close().catch(() => undefined);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `discovery open failed: ${(e as Error).message}`,
+              },
+            ],
+            isError: true,
+          };
         }
-
-        const result = {
-          sessionId: handle.session.id,
-          url: handle.session.currentUrl,
-          snapshot: handle.session.lastSnapshot,
-          ...(inventory ? { inventory } : {}),
-        };
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: [
-                `Session ${handle.session.id} opened at ${handle.session.currentUrl}`,
-                `${handle.session.lastSnapshot.length} snapshot elements`,
-                ...(inventory?.roles
-                  ? [`${inventory.roles.length} role locators`]
-                  : []),
-                ...(inventory?.testids
-                  ? [`${inventory.testids.length} testid locators`]
-                  : []),
-                `Use cairn_discover_interact / cairn_discover_snapshot to explore.`,
-              ].join("\n"),
-            },
-          ],
-          structuredContent: DiscoveryOpenResultSchema.parse(
-            result,
-          ) as unknown as Record<string, unknown>,
-        };
-      } catch (e) {
-        await backend.close().catch(() => undefined);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `discovery open failed: ${(e as Error).message}`,
-            },
-          ],
-          isError: true,
-        };
+      } finally {
+        pendingOpens--;
       }
     },
   );
@@ -1649,27 +1679,47 @@ export function buildMcpServer(): McpServer {
     {
       title: "Interact with the page in a discovery session",
       description:
-        "Perform an action (click, fill, hover, type, scroll, press) on the " +
-        "current page. The interaction is recorded as a spec-compatible step. " +
-        "Returns the post-interaction snapshot and resolved element. Use " +
-        "cairn_discover_export to write all recorded steps as a spec YAML.",
+        "Perform an action (click, fill, hover, type, select, upload, scroll, " +
+        "press) on the current page. The interaction is recorded as a " +
+        "spec-compatible step. Returns the post-interaction snapshot and " +
+        "resolved element. Use cairn_discover_export to write all recorded " +
+        "steps as a spec YAML.",
       inputSchema: {
         sessionId: z.string().min(1).describe("Discovery session ID"),
         action: z
-          .enum(["click", "fill", "hover", "type", "scroll", "press"])
+          .enum([
+            "click",
+            "fill",
+            "hover",
+            "type",
+            "select",
+            "upload",
+            "scroll",
+            "press",
+          ])
           .describe("Action to perform"),
         target: z
           .union([LocatorSchema, z.string().min(1)])
           .optional()
           .describe(
-            "Element locator (role/label/text/selector) or CSS selector string. Required for click/fill/hover/type. Optional for scroll.",
+            'Element locator (role/label/text/selector) or CSS selector string. Required for click/fill/hover/type. Optional for scroll. Use a stable locator from cairn_discover_inventory — snapshot @refs (e.g. "@e2") are rejected because they cannot replay.',
           ),
         value: z
           .string()
           .optional()
           .describe(
-            "Value for fill/type (text input) or press (key name). For scroll, use scrollDirection + scrollPixels instead.",
+            "Value for fill/type (text input), press (key name), or select (option value attribute). For scroll, use scrollDirection + scrollPixels instead.",
           ),
+        label: z
+          .string()
+          .optional()
+          .describe(
+            "select action: the option's visible text (alternative to value; provide exactly one of value | label)",
+          ),
+        path: z
+          .string()
+          .optional()
+          .describe("upload action: the file path to set on the file input"),
         scrollDirection: z
           .enum(["up", "down", "left", "right"])
           .optional()
@@ -1687,6 +1737,8 @@ export function buildMcpServer(): McpServer {
       action,
       target,
       value,
+      label,
+      path,
       scrollDirection,
       scrollPixels,
     }) => {
@@ -1702,6 +1754,8 @@ export function buildMcpServer(): McpServer {
           action,
           ...(target !== undefined ? { target: target as never } : {}),
           ...(value !== undefined ? { value } : {}),
+          ...(label !== undefined ? { label } : {}),
+          ...(path !== undefined ? { path } : {}),
           ...(scrollDirection !== undefined ? { scrollDirection } : {}),
           ...(scrollPixels !== undefined ? { scrollPixels } : {}),
         });
@@ -1867,7 +1921,8 @@ export function buildMcpServer(): McpServer {
     {
       title: "Show recorded steps as spec YAML",
       description:
-        "Return all recorded steps from the session as spec-compatible YAML " +
+        "Return the session's exportable steps (failed interactions excluded — " +
+        "exactly what cairn_discover_export will write) as spec-compatible YAML " +
         "text. The agent can review this before exporting to a file, or copy " +
         "steps into an existing spec manually.",
       inputSchema: {
@@ -1882,13 +1937,20 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-      const steps = getSteps(handle);
+      const { steps, skippedFailed } = getExportableSteps(handle);
       const yaml = yamlStringify(steps);
+      const skipNote =
+        skippedFailed > 0
+          ? `# (excluded ${skippedFailed} failed step${
+              skippedFailed === 1 ? "" : "s"
+            } that did not replay)\n`
+          : "";
       return {
-        content: [{ type: "text", text: yaml }],
+        content: [{ type: "text", text: skipNote + yaml }],
         structuredContent: DiscoverySuggestResultSchema.parse({
           steps,
           stepCount: steps.length,
+          skippedFailed,
         }) as unknown as Record<string, unknown>,
       };
     },
@@ -1925,9 +1987,15 @@ export function buildMcpServer(): McpServer {
           )
           .min(1)
           .describe("Outcome definitions (the spec contract)"),
+        overwrite: z
+          .boolean()
+          .optional()
+          .describe(
+            "Replace an existing spec even if it carries a stamped contractHash. Without this, exporting over a stamped spec is refused so its locked intent/outcomes aren't silently clobbered.",
+          ),
       },
     },
-    async ({ sessionId, path, intent, outcomes }) => {
+    async ({ sessionId, path, intent, outcomes, overwrite }) => {
       const handle = sessions.get(sessionId);
       if (!handle) {
         return {
@@ -1936,6 +2004,25 @@ export function buildMcpServer(): McpServer {
         };
       }
       try {
+        // Guard an existing stamped spec: its contractHash means its
+        // intent/outcomes are locked, so refuse to clobber it unless the
+        // caller explicitly opts in (mirrors the `cairn spec verify --stamp`
+        // immutability contract).
+        if (!overwrite) {
+          const existingHash = await readContractHash(resolvePath(path));
+          if (existingHash) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `export failed: ${path} already exists with a stamped contractHash (${existingHash}); pass overwrite:true to replace it`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
+
         const { steps, skippedFailed } = getExportableSteps(handle);
         const name = deriveSpecName(path);
         const { yaml, stepCount } = buildSpecYaml({
@@ -1944,13 +2031,40 @@ export function buildMcpServer(): McpServer {
           outcomes,
           steps,
         });
+
+        // Validate in-memory BEFORE writing so an invalid spec (e.g. a bad
+        // derived name or a malformed recorded step) never lands on disk.
+        const precheck = SpecSchema.safeParse(parseYaml(yaml));
+        if (!precheck.success) {
+          const issues = precheck.error.issues
+            .map((i) => `${i.path.join(".") || "spec"}: ${i.message}`)
+            .join("; ");
+          return {
+            content: [
+              { type: "text", text: `export failed: invalid spec: ${issues}` },
+            ],
+            isError: true,
+          };
+        }
+
         await writeFile(resolvePath(path), yaml, "utf8");
 
-        // Verify the spec — parseSpec validates via SpecSchema internally
+        // Verify the spec — parseSpec validates via SpecSchema internally, then
+        // surface the same cold-start + contractHash warnings `cairn spec
+        // verify` reports. A parseable spec is not necessarily stamped or
+        // cold-start-replayable, so the agent must see those gaps explicitly.
         let verifyOk = true;
         let verifyErrors: string[] | undefined;
+        const warnings: string[] = [];
         try {
-          await parseSpec(path);
+          const parsed = await parseSpec(path);
+          if (!parsed.spec.contractHash) {
+            warnings.push(
+              "spec has no contractHash; run `cairn spec verify <file> --stamp` to lock it",
+            );
+          }
+          const coldStartWarning = coldStartLint(parsed.spec);
+          if (coldStartWarning) warnings.push(coldStartWarning);
         } catch (e) {
           verifyOk = false;
           verifyErrors = [(e as Error).message];
@@ -1962,10 +2076,13 @@ export function buildMcpServer(): McpServer {
                 skippedFailed === 1 ? "" : "s"
               } that did not replay)`
             : "";
+        const warningNote =
+          warnings.length > 0 ? ` Warnings: ${warnings.join(" ")}` : "";
         const result = {
           path,
           verifyOk,
           ...(verifyErrors ? { verifyErrors } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
           stepCount,
           skippedFailed,
         };
@@ -1974,7 +2091,7 @@ export function buildMcpServer(): McpServer {
             {
               type: "text",
               text: verifyOk
-                ? `Exported ${stepCount} steps to ${path} (verified OK)${skipNote}`
+                ? `Exported ${stepCount} steps to ${path} (parses OK)${skipNote}.${warningNote}`
                 : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})${skipNote}`,
             },
           ],
@@ -2013,8 +2130,10 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-      await closeSession(handle);
+      // Remove from the registry before closing so a concurrent call sees
+      // "session not found" rather than racing the teardown.
       sessions.delete(sessionId);
+      await closeSession(handle);
       return {
         content: [{ type: "text", text: `Session ${sessionId} closed` }],
       };
@@ -2357,4 +2476,23 @@ function summarizeRun(r: RunResult): string {
     ),
     `Run dir: ${r.runDir}`,
   ].join("\n");
+}
+
+/**
+ * Read the `contractHash` field from a spec file without full validation.
+ * Returns undefined when the file is missing, unreadable, or unstamped — so
+ * the discovery-export guard only refuses to clobber an *established*
+ * (stamped) spec, and freely re-exports over a prior unstamped export.
+ */
+async function readContractHash(path: string): Promise<string | undefined> {
+  try {
+    const raw = parseYaml(await readFile(path, "utf8"));
+    const hash =
+      raw && typeof raw === "object"
+        ? (raw as Record<string, unknown>)["contractHash"]
+        : undefined;
+    return typeof hash === "string" && hash.length > 0 ? hash : undefined;
+  } catch {
+    return undefined;
+  }
 }

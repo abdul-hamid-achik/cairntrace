@@ -1549,6 +1549,31 @@ describe("daemon teardown", () => {
     expect(await exitSignal).toBe("SIGTERM");
   });
 
+  it("close() escalates to a daemon kill when the graceful close itself fails", async () => {
+    const { stateDir, exitSignal } = await pidFixture("graceful-fail");
+    // No prior child timeout — sawChildTimeout stays false. The graceful
+    // `close` client itself fails (a wedged daemon times it out), so close()
+    // must still escalate to killing the daemon rather than orphaning it.
+    execaMock.mockResolvedValue({
+      timedOut: true,
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({
+      session: "graceful-fail",
+      stateDir,
+    });
+
+    const closed = await adapter.close();
+    expect(closed.ok).toBe(true);
+    expect(closed.stdout).toContain("daemon terminated");
+    // The graceful `close` was attempted once; escalation kills via process
+    // signals (not execa), so exactly one execa call.
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(await exitSignal).toBe("SIGTERM");
+  });
+
   it("terminateSync() kills the session daemon without invoking agent-browser", async () => {
     const { stateDir, exitSignal } = await pidFixture("sig-teardown");
     const adapter = new AgentBrowserAdapter({

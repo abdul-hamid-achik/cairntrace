@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { StepSchema } from "../schema/spec.v1";
 import {
+  isEphemeralTarget,
   recordInteraction,
   recordOpen,
   recordOpenWithWait,
@@ -94,6 +95,10 @@ describe("stepRecorder", () => {
       });
       expect(step).toEqual({ hover: { by: "label", name: "Menu" } });
     });
+
+    it("returns undefined when hover has no target", () => {
+      expect(recordInteraction({ action: "hover" })).toBeUndefined();
+    });
   });
 
   describe("recordInteraction — type", () => {
@@ -106,6 +111,84 @@ describe("stepRecorder", () => {
       expect(step).toEqual({
         type: { by: "selector", selector: "#search-box", value: "hello" },
       });
+    });
+
+    it("returns undefined when type has no value", () => {
+      expect(
+        recordInteraction({ action: "type", target: "#search-box" }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined when type has no target", () => {
+      expect(
+        recordInteraction({ action: "type", value: "hello" }),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("recordInteraction — select", () => {
+    it("records a select by value", () => {
+      const step = recordInteraction({
+        action: "select",
+        target: { by: "label", name: "Country" },
+        value: "ar",
+      });
+      expect(step).toEqual({
+        select: { by: "label", name: "Country", value: "ar" },
+      });
+    });
+
+    it("records a select by label", () => {
+      const step = recordInteraction({
+        action: "select",
+        target: "#country",
+        label: "Argentina",
+      });
+      expect(step).toEqual({
+        select: { by: "selector", selector: "#country", label: "Argentina" },
+      });
+    });
+
+    it("returns undefined when select has neither value nor label", () => {
+      expect(
+        recordInteraction({ action: "select", target: "#country" }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined when select has no target", () => {
+      expect(
+        recordInteraction({ action: "select", value: "ar" }),
+      ).toBeUndefined();
+    });
+  });
+
+  describe("recordInteraction — upload", () => {
+    it("records an upload with a path", () => {
+      const step = recordInteraction({
+        action: "upload",
+        target: { by: "role", role: "button", name: "Choose file" },
+        path: "/tmp/report.pdf",
+      });
+      expect(step).toEqual({
+        upload: {
+          by: "role",
+          role: "button",
+          name: "Choose file",
+          path: "/tmp/report.pdf",
+        },
+      });
+    });
+
+    it("returns undefined when upload has no path", () => {
+      expect(
+        recordInteraction({ action: "upload", target: "#file" }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined when upload has no target", () => {
+      expect(
+        recordInteraction({ action: "upload", path: "/tmp/x.png" }),
+      ).toBeUndefined();
     });
   });
 
@@ -125,6 +208,13 @@ describe("stepRecorder", () => {
         scrollDirection: "up",
       });
       expect(step).toEqual({ scroll: { direction: "up", px: 500 } });
+    });
+
+    it("treats a non-positive scrollPixels as the 500 default", () => {
+      // ScrollStepSchema requires a positive px, so 0 must not be emitted.
+      expect(recordInteraction({ action: "scroll", scrollPixels: 0 })).toEqual({
+        scroll: { direction: "down", px: 500 },
+      });
     });
 
     it("defaults to down 500 when no direction given", () => {
@@ -151,6 +241,44 @@ describe("stepRecorder", () => {
 
     it("returns undefined when press has no value", () => {
       expect(recordInteraction({ action: "press" })).toBeUndefined();
+    });
+  });
+
+  describe("ephemeral snapshot @ref rejection", () => {
+    it("returns undefined for a click targeting an @ref", () => {
+      expect(
+        recordInteraction({ action: "click", target: "@e2" }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined for a fill targeting an @ref", () => {
+      expect(
+        recordInteraction({ action: "fill", target: "@e5", value: "x" }),
+      ).toBeUndefined();
+    });
+
+    it("returns undefined when the @ref has leading whitespace", () => {
+      expect(
+        recordInteraction({ action: "click", target: "  @e2" }),
+      ).toBeUndefined();
+    });
+
+    it("still records a real CSS selector", () => {
+      expect(recordInteraction({ action: "click", target: "#submit" })).toEqual(
+        { click: { by: "selector", selector: "#submit" } },
+      );
+    });
+
+    it("isEphemeralTarget flags @refs only", () => {
+      expect(isEphemeralTarget("@e2")).toBe(true);
+      expect(isEphemeralTarget("  @e2")).toBe(true);
+      expect(isEphemeralTarget("#btn")).toBe(false);
+      expect(isEphemeralTarget("e2")).toBe(false);
+      expect(isEphemeralTarget(".item")).toBe(false);
+      expect(
+        isEphemeralTarget({ by: "role", role: "button", name: "Go" }),
+      ).toBe(false);
+      expect(isEphemeralTarget(undefined)).toBe(false);
     });
   });
 
@@ -211,6 +339,30 @@ describe("stepRecorder", () => {
         {
           name: "press",
           step: recordInteraction({ action: "press", value: "Enter" }),
+        },
+        {
+          name: "select-value",
+          step: recordInteraction({
+            action: "select",
+            target: "#country",
+            value: "ar",
+          }),
+        },
+        {
+          name: "select-label",
+          step: recordInteraction({
+            action: "select",
+            target: { by: "label", name: "Country" },
+            label: "Argentina",
+          }),
+        },
+        {
+          name: "upload",
+          step: recordInteraction({
+            action: "upload",
+            target: "#file",
+            path: "/tmp/report.pdf",
+          }),
         },
       ];
 

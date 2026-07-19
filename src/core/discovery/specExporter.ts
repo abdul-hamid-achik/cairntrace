@@ -65,5 +65,9 @@ export function deriveSpecName(path: string): string {
   const cleaned = stem.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
   // Strip leading/trailing underscores; fall back to default when nothing remains
   const stripped = cleaned.replace(/^_+|_+$/g, "");
-  return stripped || "discovered_spec";
+  if (!stripped) return "discovered_spec";
+  // spec.v1 requires `name` to start with a lowercase letter; a numeric stem
+  // (e.g. "456.yml") would otherwise yield an invalid spec name. Prefix rather
+  // than discard so distinct sources don't all collapse to the fallback.
+  return /^[a-z]/.test(stripped) ? stripped : `spec_${stripped}`;
 }

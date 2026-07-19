@@ -299,7 +299,10 @@ export class MockBrowserBackend implements BrowserBackend {
   async clearBrowserState(): Promise<void> {
     this.clearBrowserStateCalls++;
   }
+  /** Counter tests can assert against. */
+  public closeCalls = 0;
   async close(): Promise<InvocationResult> {
+    this.closeCalls++;
     return success();
   }
 }

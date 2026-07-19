@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import {
   captureSnapshot,
   closeSession,
   closeAllSessions,
+  getExportableSteps,
   getInventory,
   getSteps,
   interact,
@@ -79,6 +80,19 @@ describe("DiscoverySession", () => {
       await expect(openSession(backend, "/bad")).rejects.toThrow(
         /navigation failed/,
       );
+    });
+
+    it("executes the same waitUntil open step it records", async () => {
+      const backend = createMockBackend();
+      const handle = await openSession(backend, "/login", {
+        waitUntil: "networkidle",
+      });
+
+      const recorded = { open: { path: "/login", waitUntil: "networkidle" } };
+      expect(handle.session.steps[0]!.step).toEqual(recorded);
+      // The backend must have actually run that step (not a hardcoded
+      // `{ open: "/login" }`), so discovery settles the same way the export will.
+      expect(backend.stepLog[0]).toEqual(recorded);
     });
   });
 
@@ -184,6 +198,57 @@ describe("DiscoverySession", () => {
       expect(result.error).toContain("fill");
     });
 
+    it("rejects an ephemeral snapshot @ref with a specific error", async () => {
+      const backend = createMockBackend();
+      const handle = await openSession(backend, "/login");
+
+      const result = await interact(handle, {
+        action: "click",
+        target: "@e4",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("@ref");
+      expect(result.error).toContain("cannot replay");
+      // The brittle step must not be recorded.
+      expect(handle.session.steps).toHaveLength(1);
+    });
+
+    it("propagates the resolved element to the result and recorded step", async () => {
+      class ResolvingBackend extends MockBrowserBackend {
+        override async runStep(
+          step: Parameters<MockBrowserBackend["runStep"]>[0],
+        ): Promise<Awaited<ReturnType<MockBrowserBackend["runStep"]>>> {
+          const r = await super.runStep(step);
+          return {
+            ...r,
+            resolvedElement: { role: "button", name: "Sign In", ref: "e4" },
+          };
+        }
+      }
+      const backend = new ResolvingBackend();
+      backend.setSnapshot(SNAPSHOT_WITH_ELEMENTS);
+      const handle = await openSession(backend, "/login");
+
+      const result = await interact(handle, {
+        action: "click",
+        target: { by: "role", role: "button", name: "Sign In" },
+      });
+
+      expect(result.resolvedElement).toEqual({
+        role: "button",
+        name: "Sign In",
+        ref: "e4",
+      });
+      // The recorded step carries the resolved element as side metadata.
+      const last = handle.session.steps[handle.session.steps.length - 1]!;
+      expect(last.resolvedElement).toEqual({
+        role: "button",
+        name: "Sign In",
+        ref: "e4",
+      });
+    });
+
     it("records a scroll step with direction and pixels", async () => {
       const backend = createMockBackend();
       const handle = await openSession(backend, "/page");
@@ -254,6 +319,37 @@ describe("DiscoverySession", () => {
         { click: { by: "selector", selector: "#c" } },
       ]);
     });
+
+    it("a throwing op does not poison the lock queue for later ops", async () => {
+      class ThrowingBackend extends MockBrowserBackend {
+        throwNext = false;
+        override async runStep(
+          step: Parameters<MockBrowserBackend["runStep"]>[0],
+        ): Promise<Awaited<ReturnType<MockBrowserBackend["runStep"]>>> {
+          if (this.throwNext) {
+            this.throwNext = false;
+            throw new Error("backend exploded");
+          }
+          return super.runStep(step);
+        }
+      }
+      const backend = new ThrowingBackend();
+      backend.setSnapshot(SNAPSHOT_WITH_ELEMENTS);
+      const handle = await openSession(backend, "/page");
+
+      // First interact throws inside the lock; second queues behind it.
+      backend.throwNext = true;
+      const first = interact(handle, { action: "click", target: "#a" });
+      const second = interact(handle, { action: "click", target: "#b" });
+
+      await expect(first).rejects.toThrow("backend exploded");
+      // The stored lock swallows the rejection, so the queued op still runs.
+      const ok = await second;
+      expect(ok.ok).toBe(true);
+      expect(ok.recordedStep).toEqual({
+        click: { by: "selector", selector: "#b" },
+      });
+    });
   });
 
   describe("navigate", () => {
@@ -300,6 +396,68 @@ describe("DiscoverySession", () => {
       expect(buttonEntry).toBeDefined();
       expect(buttonEntry!.name).toBe("Sign In");
     });
+
+    it("collects testid inventory when requested", async () => {
+      const backend = createMockBackend();
+      backend.enqueueEvalResult([
+        {
+          testId: "login-btn",
+          tagName: "button",
+          text: "Sign In",
+          selector: '[data-testid="login-btn"]',
+        },
+      ]);
+      const handle = await openSession(backend, "/login");
+      const inventory = await getInventory(handle, {
+        roles: false,
+        testids: true,
+      });
+
+      expect(inventory.testids).toBeDefined();
+      expect(inventory.testids).toHaveLength(1);
+      expect(inventory.testids![0]!.testId).toBe("login-btn");
+      // roles not requested → absent
+      expect(inventory.roles).toBeUndefined();
+    });
+
+    it("collects both roles and testids by default", async () => {
+      const backend = createMockBackend();
+      backend.enqueueEvalResult([
+        {
+          testId: "login-btn",
+          tagName: "button",
+          text: "Sign In",
+          selector: '[data-testid="login-btn"]',
+        },
+      ]);
+      const handle = await openSession(backend, "/login");
+      const inventory = await getInventory(handle);
+
+      expect(inventory.roles).toBeDefined();
+      expect(inventory.testids).toBeDefined();
+      expect(inventory.testids![0]!.testId).toBe("login-btn");
+    });
+
+    it("surfaces unnamed interactive elements as nameless role locators", async () => {
+      // An unnamed button is still interactive — the inventory surfaces it as a
+      // role locator without a name (plus its count), giving the agent a stable
+      // alternative to an ephemeral @ref.
+      const backend = createMockBackend(
+        "- main\n  - button [ref=e1]\n  - button [ref=e2]",
+      );
+      const handle = await openSession(backend, "/page");
+      const inventory = await getInventory(handle, {
+        roles: true,
+        testids: false,
+      });
+
+      const unnamedButton = inventory.roles!.find(
+        (r) => r.role === "button" && r.name === undefined,
+      );
+      expect(unnamedButton).toBeDefined();
+      expect(unnamedButton!.count).toBe(2);
+      expect(unnamedButton!.locator).toEqual({ by: "role", role: "button" });
+    });
   });
 
   describe("getSteps", () => {
@@ -334,14 +492,56 @@ describe("DiscoverySession", () => {
     });
   });
 
+  describe("getExportableSteps", () => {
+    it("excludes failed steps and reports skippedFailed", async () => {
+      const backend = createMockBackend();
+      const handle = await openSession(backend, "/login"); // ok open step
+
+      await interact(handle, {
+        action: "fill",
+        target: { by: "role", role: "textbox", name: "Email" },
+        value: "test@test.com",
+      });
+
+      backend.failNextStep("element not found");
+      await interact(handle, {
+        action: "click",
+        target: { by: "role", role: "button", name: "Missing" },
+      });
+
+      const { steps, skippedFailed } = getExportableSteps(handle);
+      // open + fill replayed; the failed click is excluded so the exported
+      // spec stays replayable.
+      expect(steps).toHaveLength(2);
+      expect(steps[0]).toEqual({ open: "/login" });
+      expect(steps[1]).toEqual({
+        fill: {
+          by: "role",
+          role: "textbox",
+          name: "Email",
+          value: "test@test.com",
+        },
+      });
+      expect(skippedFailed).toBe(1);
+    });
+
+    it("reports zero skippedFailed when every step succeeded", async () => {
+      const backend = createMockBackend();
+      const handle = await openSession(backend, "/login");
+      await interact(handle, { action: "press", value: "Enter" });
+
+      const { steps, skippedFailed } = getExportableSteps(handle);
+      expect(steps).toHaveLength(2);
+      expect(skippedFailed).toBe(0);
+    });
+  });
+
   describe("closeSession", () => {
     it("closes the backend", async () => {
       const backend = createMockBackend();
       const handle = await openSession(backend, "/login");
       await closeSession(handle);
-      // Verify close was called by checking the step log (mock close returns ok)
-      // The key thing is it doesn't throw
-      expect(true).toBe(true);
+      expect(backend.closeCalls).toBe(1);
     });
   });
 
@@ -358,6 +558,7 @@ describe("DiscoverySession", () => {
       const expired = await sweepSessions(registry);
       expect(expired).toHaveLength(1);
       expect(registry.size).toBe(0);
+      expect(backend.closeCalls).toBe(1);
     });
 
     it("keeps active sessions", async () => {
@@ -369,6 +570,30 @@ describe("DiscoverySession", () => {
       const expired = await sweepSessions(registry);
       expect(expired).toHaveLength(0);
       expect(registry.size).toBe(1);
+    });
+
+    it("sweeps just past the TTL boundary but keeps a session exactly at it", async () => {
+      vi.useFakeTimers();
+      try {
+        const registry: SessionRegistry = new Map();
+        const backend = createMockBackend();
+        const handle = await openSession(backend, "/login");
+        registry.set(handle.session.id, handle);
+
+        const now = Date.now();
+        // Exactly at the 5-minute TTL: kept (the check is strictly >).
+        handle.session.lastActivity = now - 5 * 60 * 1000;
+        expect(await sweepSessions(registry)).toHaveLength(0);
+        expect(registry.size).toBe(1);
+
+        // One millisecond past the boundary: swept and closed.
+        handle.session.lastActivity = now - (5 * 60 * 1000 + 1);
+        expect(await sweepSessions(registry)).toHaveLength(1);
+        expect(registry.size).toBe(0);
+        expect(backend.closeCalls).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -384,6 +609,8 @@ describe("DiscoverySession", () => {
 
       await closeAllSessions(registry);
       expect(registry.size).toBe(0);
+      expect(b1.closeCalls).toBe(1);
+      expect(b2.closeCalls).toBe(1);
     });
   });
 });

@@ -11,6 +11,10 @@ export interface RecordInput {
   action: DiscoveryAction;
   target?: Locator | string;
   value?: string;
+  /** select action: the option's visible text (alternative to `value`). */
+  label?: string;
+  /** upload action: the file path to set on the file input. */
+  path?: string;
   scrollDirection?: "up" | "down" | "left" | "right";
   scrollPixels?: number;
 }
@@ -39,7 +43,12 @@ export function recordOpenWithWait(
 export function recordInteraction(
   input: RecordInput,
 ): Record<string, unknown> | undefined {
-  const { action, target, value, scrollDirection, scrollPixels } = input;
+  const { action, target, value, label, path, scrollDirection, scrollPixels } =
+    input;
+
+  // Snapshot @refs execute live but can never replay — refuse to record them
+  // so the exported spec stays replayable (see isEphemeralTarget).
+  if (isEphemeralTarget(target)) return undefined;
 
   switch (action) {
     case "click":
@@ -58,15 +67,34 @@ export function recordInteraction(
       if (!target || value === undefined) return undefined;
       return { type: { ...normalizeTargetToObject(target), value } };
 
+    case "select": {
+      // A native <select> needs exactly one of value | label (clicking the
+      // option doesn't work under automation — see SelectStepSchema).
+      if (!target) return undefined;
+      if (value !== undefined) {
+        return { select: { ...normalizeTargetToObject(target), value } };
+      }
+      if (label !== undefined) {
+        return { select: { ...normalizeTargetToObject(target), label } };
+      }
+      return undefined;
+    }
+
+    case "upload":
+      if (!target || path === undefined) return undefined;
+      return { upload: { ...normalizeTargetToObject(target), path } };
+
     case "scroll": {
       if (target) {
         return { scroll: { to: normalizeTarget(target) } };
       }
-      // Must match ScrollStepSchema: { direction, px } — a directional
-      // `{ [dir]: px }` shape is rejected by the strict schema and throws on
-      // the agent-browser backend.
+      // Must match ScrollStepSchema: { direction, px } with a positive px — a
+      // directional `{ [dir]: px }` shape is rejected by the strict schema, and
+      // a non-positive px (e.g. scrollPixels: 0) is too, so fall back to the
+      // 500 default rather than emit an invalid step.
       const direction = scrollDirection ?? "down";
-      const px = scrollPixels ?? 500;
+      const px =
+        scrollPixels !== undefined && scrollPixels > 0 ? scrollPixels : 500;
       return { scroll: { direction, px } };
     }
 
@@ -101,4 +129,21 @@ function normalizeTargetToObject(
     return { by: "selector", selector: target };
   }
   return target as Record<string, unknown>;
+}
+
+/**
+ * True when `target` is an ephemeral snapshot `@ref` (e.g. `"@e2"`).
+ *
+ * agent-browser resolves a `@`-prefixed target against the *current*
+ * snapshot's element handles, which are regenerated on every snapshot and do
+ * not survive a page reload — a spec step that records one can never replay.
+ * `@` is also never a valid CSS selector start, so this rejection has no
+ * false positives against real selectors. A bare ref without the `@` (e.g.
+ * `"e2"`) is treated as a CSS selector and simply fails to resolve, so it is
+ * not a replayability trap.
+ */
+export function isEphemeralTarget(
+  target: Locator | string | undefined,
+): boolean {
+  return typeof target === "string" && target.trimStart().startsWith("@");
 }
