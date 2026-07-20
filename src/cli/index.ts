@@ -89,6 +89,14 @@ addFormatFlags(
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
     .option(
+      "--provider <name>",
+      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+    )
+    .option(
+      "--device <name>",
+      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+    )
+    .option(
       "--parallel <n>",
       "run N specs concurrently (each in its own browser session)",
       "1",
@@ -220,6 +228,14 @@ addFormatFlags(
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
     .option(
+      "--provider <name>",
+      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+    )
+    .option(
+      "--device <name>",
+      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+    )
+    .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
@@ -241,6 +257,14 @@ addFormatFlags(
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--provider <name>",
+      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+    )
+    .option(
+      "--device <name>",
+      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+    )
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
@@ -363,6 +387,14 @@ program
     "wait for text:<...> or url:<...> instead of an ENTER keypress",
   )
   .option("--timeout <ms>", "max wait time when --wait-for is set", "300000")
+  .option(
+    "--provider <name>",
+    "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+  )
+  .option(
+    "--device <name>",
+    'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+  )
   .action((name: string, opts) => loginCommand(name, opts));
 
 const spec = program.command("spec").description("Spec authoring helpers");
@@ -419,6 +451,14 @@ addFormatFlags(
     )
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--provider <name>",
+      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+    )
+    .option(
+      "--device <name>",
+      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+    )
     .option("--headed", "show the browser window", false),
 ).action((p: string, opts) => healCommand(p, opts));
 
@@ -435,6 +475,11 @@ checkpoint
     "--session <ab-session>",
     "agent-browser --session value to read state from",
   )
+  .option(
+    "--provider <name>",
+    "agent-browser provider the target session uses (e.g. ios)",
+  )
+  .option("--device <name>", "iOS device name the target session uses")
   .action((name: string, opts) => captureFromSessionCommand(name, opts));
 
 addFormatFlags(

@@ -6,6 +6,10 @@ export interface CaptureOptions {
   session?: string;
   /** Override the checkpoint root directory (rarely needed). */
   root?: string;
+  /** agent-browser provider (-p) the target session uses (e.g. ios). */
+  provider?: string;
+  /** iOS device name (--device) the target session uses. */
+  device?: string;
 }
 
 export async function captureFromSessionCommand(
@@ -32,7 +36,11 @@ export async function captureFromSessionCommand(
 
   await store.ensureRoot();
 
-  const adapter = new AgentBrowserAdapter({ session: opts.session });
+  const adapter = new AgentBrowserAdapter({
+    session: opts.session,
+    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+    ...(opts.device !== undefined ? { device: opts.device } : {}),
+  });
   try {
     const r = await adapter.saveState(outPath);
     if (!r.ok) {

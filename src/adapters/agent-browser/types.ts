@@ -42,6 +42,15 @@ export interface AgentBrowserOptions {
   /** Extra global args to pass through. */
   extraGlobalArgs?: string[];
   /**
+   * Browser provider (`-p <name>`): selects the agent-browser transport —
+   * `ios` (Mobile Safari via Appium; requires Xcode + Appium), or a cloud
+   * provider (`browserbase`, `kernel`, …) connecting to a remote browser.
+   * Unset uses the default local Chromium.
+   */
+  provider?: string;
+  /** iOS device name (`--device <name>`), e.g. "iPhone 15 Pro". Used with `provider: "ios"`. */
+  device?: string;
+  /**
    * Enable the verify-after-click + post-nav settle guard. When true (the
    * default), every click step is followed by a short networkidle wait and
    * clicks whose settle times out fail at the click step instead of

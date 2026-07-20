@@ -1803,9 +1803,30 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe("Custom agent-browser session name"),
+        provider: z
+          .string()
+          .optional()
+          .describe(
+            "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+          ),
+        device: z
+          .string()
+          .optional()
+          .describe(
+            'iOS device name, e.g. "iPhone 15 Pro" (with provider: ios)',
+          ),
       },
     },
-    async ({ url, env, mock, headed, waitUntil, sessionName }) => {
+    async ({
+      url,
+      env,
+      mock,
+      headed,
+      waitUntil,
+      sessionName,
+      provider,
+      device,
+    }) => {
       // Sweep expired sessions first so the cap reflects live sessions only.
       await sweepSessions(sessions);
       if (sessions.size + pendingOpens >= MAX_DISCOVERY_SESSIONS) {
@@ -1832,6 +1853,8 @@ export function buildMcpServer(): McpServer {
           : new AgentBrowserAdapter({
               session: sessionName ?? `cairntrace-disc-${process.pid}`,
               ...(headed !== undefined ? { headed } : {}),
+              ...(provider !== undefined ? { provider } : {}),
+              ...(device !== undefined ? { device } : {}),
             });
         try {
           const handle = await openSession(

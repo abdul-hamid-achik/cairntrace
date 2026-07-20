@@ -57,6 +57,10 @@ export interface RunCommandOptions {
   headed?: boolean;
   mock?: boolean;
   backend?: BackendChoice;
+  /** agent-browser provider (-p): ios, browserbase, kernel, etc. */
+  provider?: string;
+  /** iOS device name (--device), e.g. "iPhone 15 Pro" (provider: ios). */
+  device?: string;
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -994,10 +998,15 @@ function backendOpts(
   opts: RunCommandOptions,
   browser?: BrowserConfig,
 ): Parameters<typeof createBackend>[0] {
+  // CLI flags win over config `browser.*`.
+  const provider = opts.provider ?? browser?.provider;
+  const device = opts.device ?? browser?.device;
   return {
     ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
     ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(provider !== undefined ? { provider } : {}),
+    ...(device !== undefined ? { device } : {}),
     ...(browser?.verifyAfterClick !== undefined
       ? { verifyAfterClick: browser.verifyAfterClick }
       : {}),

@@ -17,6 +17,8 @@ export interface SnapshotCommandOptions {
   headed?: boolean;
   mock?: boolean;
   backend?: BackendChoice;
+  provider?: string;
+  device?: string;
   config?: string;
   format?: string;
   json?: boolean;
@@ -40,6 +42,8 @@ export async function snapshotCommand(
     ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
     ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+    ...(opts.device !== undefined ? { device: opts.device } : {}),
   });
   const untrack = trackBackend(backend);
 

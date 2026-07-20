@@ -149,6 +149,8 @@ export function buildGlobalArgs(opts: AgentBrowserOptions): string[] {
   if (opts.maxOutput !== undefined)
     a.push("--max-output", String(opts.maxOutput));
   if (opts.debug) a.push("--debug");
+  if (opts.provider) a.push("-p", opts.provider);
+  if (opts.device) a.push("--device", opts.device);
   if (opts.extraGlobalArgs) a.push(...opts.extraGlobalArgs);
   return a;
 }

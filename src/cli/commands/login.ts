@@ -7,6 +7,8 @@ export interface LoginOptions {
   url?: string;
   waitFor?: string;
   timeout?: string;
+  provider?: string;
+  device?: string;
 }
 
 const ANSI = { dim: "\x1b[2m", green: "\x1b[32m", reset: "\x1b[0m" };
@@ -46,7 +48,12 @@ export async function loginCommand(
 
   // Stable session name lets the user re-attach if cairn is killed mid-flow.
   const session = `cairn-login-${name}`;
-  const adapter = new AgentBrowserAdapter({ session, headed: true });
+  const adapter = new AgentBrowserAdapter({
+    session,
+    headed: true,
+    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+    ...(opts.device !== undefined ? { device: opts.device } : {}),
+  });
 
   const timeoutMs = Number(opts.timeout ?? 300_000);
 

@@ -551,6 +551,13 @@ export const BrowserConfigSchema = z
     verifyAfterClick: z.boolean().optional(),
     /** Budget in ms for the post-click settle. Default 5000. */
     postClickSettleMs: z.number().int().positive().optional(),
+    /**
+     * agent-browser provider (`-p`): `ios` (Mobile Safari via Appium), or a
+     * cloud provider (`browserbase`, `kernel`, …). Unset uses local Chromium.
+     */
+    provider: z.string().optional(),
+    /** iOS device name (`--device`), e.g. "iPhone 15 Pro" (with `provider: ios`). */
+    device: z.string().optional(),
   })
   .strict();
 export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;

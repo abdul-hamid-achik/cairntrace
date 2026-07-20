@@ -12,6 +12,10 @@ export interface BackendOptions {
   session?: string;
   headed?: boolean;
   binary?: string;
+  /** agent-browser provider (`-p`): `ios`, `browserbase`, `kernel`, etc. */
+  provider?: string;
+  /** iOS device name (`--device`), e.g. "iPhone 15 Pro" (provider: ios). */
+  device?: string;
   /** Config `browser.verifyAfterClick` (agent-browser only). Default true. */
   verifyAfterClick?: boolean;
   /** Config `browser.postClickSettleMs` (agent-browser only). Default 5000. */
@@ -44,6 +48,8 @@ export function createBackend(opts: BackendOptions): BrowserBackend {
         session: opts.session ?? `cairntrace-${process.pid}`,
         ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
         ...(opts.binary !== undefined ? { binary: opts.binary } : {}),
+        ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+        ...(opts.device !== undefined ? { device: opts.device } : {}),
         ...(opts.verifyAfterClick !== undefined
           ? { verifyAfterClick: opts.verifyAfterClick }
           : {}),

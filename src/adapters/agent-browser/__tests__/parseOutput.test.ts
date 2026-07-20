@@ -137,6 +137,16 @@ describe("buildGlobalArgs", () => {
       buildGlobalArgs({ session: "x", headed: false, debug: false }),
     ).toEqual([]);
   });
+
+  it("emits provider and device flags for iOS/cloud providers", () => {
+    expect(
+      buildGlobalArgs({
+        session: "x",
+        provider: "ios",
+        device: "iPhone 15 Pro",
+      }),
+    ).toEqual(["-p", "ios", "--device", "iPhone 15 Pro"]);
+  });
 });
 
 describe("parseBoxEnvelope", () => {

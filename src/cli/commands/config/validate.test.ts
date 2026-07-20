@@ -709,6 +709,22 @@ describe("ConfigSchema with services", () => {
   });
 });
 
+describe("BrowserConfigSchema provider/device (iOS/cloud passthrough)", () => {
+  it("accepts browser.provider and browser.device", () => {
+    const cfg = validBaseConfig();
+    cfg.browser = { provider: "ios", device: "iPhone 15 Pro" };
+    const result = ConfigSchema.safeParse(cfg);
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an unknown browser key (strict)", () => {
+    const cfg = validBaseConfig();
+    cfg.browser = { provider: "ios", bogus: true };
+    const result = ConfigSchema.safeParse(cfg);
+    expect(result.success).toBe(false);
+  });
+});
+
 describe("EnvironmentConfigSchema with per-env services/secrets", () => {
   it("accepts environment with services: false", () => {
     const result = ConfigSchema.safeParse({

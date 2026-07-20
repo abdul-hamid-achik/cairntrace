@@ -16,6 +16,8 @@ export interface HealCommandOptions {
   verify?: boolean;
   mock?: boolean;
   backend?: BackendChoice;
+  provider?: string;
+  device?: string;
   headed?: boolean;
   format?: string;
   json?: boolean;
@@ -32,6 +34,8 @@ export async function healCommand(
     ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
     ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
     ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
+    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+    ...(opts.device !== undefined ? { device: opts.device } : {}),
   });
   const untrack = trackBackend(backend);
 

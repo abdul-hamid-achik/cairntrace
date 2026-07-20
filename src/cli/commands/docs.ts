@@ -528,6 +528,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         body: "`agent-browser` is the default backend. Use it for the normal agent-in-session workflow: semantic locators, compact snapshots, lower context cost, and no Playwright browser install requirement.",
       },
       {
+        title: "agent-browser Providers (iOS / Cloud)",
+        body: 'The agent-browser backend accepts a provider via `--provider <name>` (or config `browser.provider`): `ios` drives Mobile Safari through Appium (macOS + Xcode + `appium driver install xcuitest` required; web-only, first launch boots the simulator in ~30-60s), and cloud providers (`browserbase`, `kernel`, `browseruse`, `browserless`, `agentcore`) connect to a remote browser. Pair `--device "iPhone 15 Pro"` (or config `browser.device`) with `--provider ios` to pick a simulator/device. These flags are accepted by `cairn run`, `discover`, `snapshot`, `spec heal`, `login`, and `checkpoint capture-from-session`. iOS runs use the same spec/contract/artifacts as desktop; touch-only flows should avoid `hover` (no touch equivalent). State capture/resume (`state save/load`) and CDP-only features (traces, HAR) are unverified on the iOS/WebDriver transport — validate before relying on them for authenticated mobile flows.',
+      },
+      {
         title: "Timeouts And Cleanup",
         body: "Cairn enforces a hard deadline on browser-backend invocations. agent-browser uses a 60s default with step-level `timeoutMs` + 5s grace; a wedged daemon gets killed and the step fails with a normal timeout error instead of hanging the run. Playwright `wait` and browser `evaluate` paths also have Cairntrace-side deadlines (30000ms default, or `timeoutMs` when supplied). Real Chromium runs start an external watchdog process that kills the browser at the deadline, so page navigation churn cannot leave the suite waiting on Playwright forever. Ctrl-C / SIGTERM tears down the run's own browser session before exiting; other sessions are untouched.",
       },
@@ -556,6 +560,16 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "cairn run flows/import.yml --backend agent-browser",
           "cairn run flows/import.yml --backend playwright",
           "cairn run flows/import.yml --mock",
+        ].join("\n"),
+      },
+      {
+        title: "run on iOS Safari or a cloud browser (agent-browser provider)",
+        language: "bash",
+        code: [
+          'cairn run flows/checkout.yml --provider ios --device "iPhone 15 Pro"',
+          'cairn snapshot http://localhost:3000 --provider ios --device "iPhone 15 Pro" --wait-until networkidle',
+          "# or set it project-wide in cairntrace.config.yml:",
+          '# browser: { provider: ios, device: "iPhone 15 Pro" }',
         ].join("\n"),
       },
       {
