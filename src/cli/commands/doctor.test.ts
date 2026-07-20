@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveCodemapIndexCheck } from "./doctor.js";
+import {
+  resolveCodemapIndexCheck,
+  resolveIosChecks,
+  type IosCheckDeps,
+} from "./doctor.js";
 import type { CodemapDeps } from "./annotate.js";
 
 /* ---------------------------------------------------------------------------
@@ -161,5 +165,107 @@ describe("resolveCodemapIndexCheck — freshness (codemap status)", () => {
     const check = await resolveCodemapIndexCheck(notRegistered, true);
     expect(check!.detail).toMatch(/50 symbols/);
     expect(check!.detail).not.toContain("fresh");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * resolveIosChecks — `cairn doctor --ios` iOS readiness probes
+ * ------------------------------------------------------------------------- */
+function fakeIosExec(
+  responses: Record<string, { ok: boolean; stdout: string }>,
+): IosCheckDeps {
+  return {
+    async exec(bin, args) {
+      const key = `${bin} ${args.join(" ")}`;
+      return responses[key] ?? { ok: false, stdout: "" };
+    },
+  };
+}
+
+describe("resolveIosChecks (cairn doctor --ios)", () => {
+  it("reports all green when Xcode/Appium/xcuitest/simulators are present", async () => {
+    const checks = await resolveIosChecks(
+      fakeIosExec({
+        "xcode-select -p": {
+          ok: true,
+          stdout: "/Applications/Xcode.app/Contents/Developer\n",
+        },
+        "appium --version": { ok: true, stdout: "2.5.1\n" },
+        "appium driver list --installed": {
+          ok: true,
+          stdout: "- xcuitest@7.40.7 [installed]\n",
+        },
+        "xcrun simctl list devices available": {
+          ok: true,
+          stdout:
+            "    iPhone 15 Pro (ABC) (Shutdown)\n    iPad (A16) (DEF) (Booted)\n",
+        },
+      }),
+    );
+    expect(checks.every((c) => c.ok)).toBe(true);
+    expect(checks.find((c) => c.name === "ios-appium")!.detail).toContain(
+      "2.5.1",
+    );
+    expect(checks.find((c) => c.name === "ios-simulators")!.detail).toContain(
+      "2 iOS simulator(s)",
+    );
+  });
+
+  it("flags missing appium and skips the xcuitest check", async () => {
+    const checks = await resolveIosChecks(
+      fakeIosExec({
+        "xcode-select -p": { ok: true, stdout: "/Applications/Xcode.app\n" },
+        "appium --version": { ok: false, stdout: "" },
+        "xcrun simctl list devices available": {
+          ok: true,
+          stdout: "    iPhone 15 (ABC) (Shutdown)\n",
+        },
+      }),
+    );
+    const appium = checks.find((c) => c.name === "ios-appium")!;
+    expect(appium.ok).toBe(false);
+    expect(appium.detail).toContain("npm install -g appium");
+    // The xcuitest probe is skipped when appium itself is absent.
+    expect(checks.find((c) => c.name === "ios-xcuitest")).toBeUndefined();
+  });
+
+  it("flags appium present but the xcuitest driver missing", async () => {
+    const checks = await resolveIosChecks(
+      fakeIosExec({
+        "xcode-select -p": { ok: true, stdout: "/Applications/Xcode.app\n" },
+        "appium --version": { ok: true, stdout: "2.5.1\n" },
+        "appium driver list --installed": {
+          ok: true,
+          stdout: "- safari@1.0 [installed]\n",
+        },
+        "xcrun simctl list devices available": {
+          ok: true,
+          stdout: "    iPhone 15 (ABC) (Shutdown)\n",
+        },
+      }),
+    );
+    const xcuitest = checks.find((c) => c.name === "ios-xcuitest")!;
+    expect(xcuitest.ok).toBe(false);
+    expect(xcuitest.detail).toContain("appium driver install xcuitest");
+  });
+
+  it("flags no available simulators", async () => {
+    const checks = await resolveIosChecks(
+      fakeIosExec({
+        "xcode-select -p": { ok: true, stdout: "/Applications/Xcode.app\n" },
+        "appium --version": { ok: true, stdout: "2.5.1\n" },
+        "appium driver list --installed": {
+          ok: true,
+          stdout: "- xcuitest@7.40.7 [installed]\n",
+        },
+        "xcrun simctl list devices available": {
+          ok: true,
+          stdout: "== Devices ==\n-- iOS 17 --\n",
+        },
+      }),
+    );
+    const sims = checks.find((c) => c.name === "ios-simulators")!;
+    expect(sims.ok).toBe(false);
+    expect(sims.detail).toContain("no iOS simulators available");
   });
 });

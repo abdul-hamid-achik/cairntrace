@@ -21,6 +21,8 @@ export interface DoctorOptions {
   json?: boolean;
   yaml?: boolean;
   md?: boolean;
+  /** Also probe iOS readiness (Xcode / Appium / xcuitest / simulators). */
+  ios?: boolean;
 }
 
 export async function doctorCommand(
@@ -126,6 +128,12 @@ export async function doctorCommand(
     });
   }
 
+  // iOS readiness is opt-in: most projects never target iOS, so these checks
+  // only run (and only gate the exit code) when --ios is passed.
+  if (opts.ios) {
+    checks.push(...(await resolveIosChecks()));
+  }
+
   const ok = checks.every((c) => c.ok);
   const report: DoctorReport = { ok, checks };
 
@@ -193,6 +201,79 @@ export async function resolveCodemapIndexCheck(
         ? `codebase indexed: yes (${proj.symbols} symbols${where})`
         : `codebase indexed: yes${where}`,
   };
+}
+
+/** Injectable exec seam for the iOS readiness checks (`cairn doctor --ios`). */
+export interface IosCheckDeps {
+  exec: (
+    bin: string,
+    args: string[],
+  ) => Promise<{ ok: boolean; stdout: string }>;
+}
+
+/**
+ * Probe iOS readiness for `cairn doctor --ios`: Xcode (simulators), Appium,
+ * the xcuitest driver, and available iOS simulators. agent-browser drives
+ * Mobile Safari through Appium + xcuitest on top of Xcode's simulators.
+ */
+export async function resolveIosChecks(
+  deps: IosCheckDeps = { exec: tryExec },
+): Promise<Array<{ name: string; ok: boolean; detail: string }>> {
+  const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+  const xcode = await deps.exec("xcode-select", ["-p"]);
+  checks.push({
+    name: "ios-xcode",
+    ok: xcode.ok,
+    detail: xcode.ok
+      ? `Xcode at ${xcode.stdout.trim()}`
+      : "Xcode not found — install Xcode from the App Store (provides the iOS simulators)",
+  });
+
+  const appium = await deps.exec("appium", ["--version"]);
+  checks.push({
+    name: "ios-appium",
+    ok: appium.ok,
+    detail: appium.ok
+      ? `appium ${appium.stdout.trim()}`
+      : "appium not on $PATH — install with `npm install -g appium`",
+  });
+
+  if (appium.ok) {
+    const drivers = await deps.exec("appium", [
+      "driver",
+      "list",
+      "--installed",
+    ]);
+    const hasXcuitest = /xcuitest/i.test(drivers.stdout);
+    checks.push({
+      name: "ios-xcuitest",
+      ok: hasXcuitest,
+      detail: hasXcuitest
+        ? "xcuitest driver installed"
+        : "xcuitest driver missing — install with `appium driver install xcuitest`",
+    });
+  }
+
+  const sims = await deps.exec("xcrun", [
+    "simctl",
+    "list",
+    "devices",
+    "available",
+  ]);
+  const simCount = sims.stdout
+    .split("\n")
+    .filter((l) => /iphone|ipad/i.test(l)).length;
+  checks.push({
+    name: "ios-simulators",
+    ok: simCount > 0,
+    detail:
+      simCount > 0
+        ? `${simCount} iOS simulator(s) available — target one with --provider ios --device "<name>"`
+        : "no iOS simulators available — create one in Xcode → Settings → Platforms",
+  });
+
+  return checks;
 }
 
 async function tryExec(

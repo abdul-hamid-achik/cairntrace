@@ -183,7 +183,12 @@ addFormatFlags(
 addFormatFlags(
   program
     .command("doctor")
-    .description("Check environment for cairn dependencies"),
+    .description("Check environment for cairn dependencies")
+    .option(
+      "--ios",
+      "also probe iOS readiness (Xcode / Appium / xcuitest / simulators)",
+      false,
+    ),
 ).action((opts) => doctorCommand(opts));
 
 addFormatFlags(
