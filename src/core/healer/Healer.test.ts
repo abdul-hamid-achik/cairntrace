@@ -19,7 +19,7 @@ describe("proposeOps", () => {
   it("proposes a name replacement when a single role match exists", () => {
     const step: Step = {
       id: "click_link",
-      click: { by: "role", role: "link", name: "Dashboard link" },
+      click: { by: "role", role: "link", name: "Open dashboards" },
     };
     const snap = parseSnapshot(SNAPSHOT_WITH_RENAMED_LINK);
     const ops = proposeOps(step, 1, snap);
@@ -27,7 +27,7 @@ describe("proposeOps", () => {
     expect(ops[0]).toMatchObject({
       op: "replace",
       path: "/steps/1/click/name",
-      from: "Dashboard link",
+      from: "Open dashboards",
       to: "Open dashboard",
     });
   });
@@ -61,6 +61,67 @@ describe("proposeOps", () => {
     const ops = proposeOps(step, 0, snap);
     expect(ops).toHaveLength(1);
     expect((ops[0] as { to: string }).to).toBe("Apply coupon");
+  });
+
+  /* --- similarity / uniqueness gate --- */
+
+  it("refuses a rename when the only candidate is dissimilar (no confident match)", () => {
+    // The real target ("Apply") is gone and only an unrelated same-role button
+    // remains. Healing to it would retarget a clean failure onto the wrong
+    // element — a passing-but-WRONG spec.
+    const snap = parseSnapshot(`
+- main
+  - button "Cancel"
+`);
+    const step: Step = {
+      click: { by: "role", role: "button", name: "Apply" },
+    };
+    expect(proposeOps(step, 0, snap)).toHaveLength(0);
+  });
+
+  it("still heals a genuinely similar rename", () => {
+    const snap = parseSnapshot(`
+- main
+  - button "Submit Form"
+`);
+    const step: Step = {
+      click: { by: "role", role: "button", name: "Submit" },
+    };
+    const ops = proposeOps(step, 0, snap);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      op: "replace",
+      path: "/steps/0/click/name",
+      from: "Submit",
+      to: "Submit Form",
+    });
+  });
+
+  it("refuses a rename when multiple candidates tie for closest", () => {
+    // "Sage" and "Safe" are equidistant from "Save" — ambiguous, so heal must
+    // not guess between them.
+    const snap = parseSnapshot(`
+- main
+  - button "Sage"
+  - button "Safe"
+`);
+    const step: Step = {
+      click: { by: "role", role: "button", name: "Save" },
+    };
+    expect(proposeOps(step, 0, snap)).toHaveLength(0);
+  });
+
+  it("does not retarget a by: label locator onto a non-control role", () => {
+    // Only a heading carries a similar name; labels bind to form controls, so
+    // the heading must not be treated as a heal candidate.
+    const snap = parseSnapshot(`
+- main
+  - heading "Email address" [level=1]
+`);
+    const step: Step = {
+      fill: { by: "label", name: "Email", value: "a@b.c" },
+    };
+    expect(proposeOps(step, 0, snap)).toHaveLength(0);
   });
 
   it("heals hover locator drift", () => {

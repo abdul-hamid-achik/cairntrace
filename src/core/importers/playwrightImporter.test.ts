@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
+import { exportPlaywright } from "../exporters/playwrightExporter";
 import { parseSpec } from "../parser/parseSpec";
-import { SpecSchema } from "../schema/spec.v1";
+import { SpecSchema, type Spec } from "../schema/spec.v1";
 import { importPlaywright } from "./playwrightImporter";
 
 describe("importPlaywright", () => {
@@ -163,5 +164,140 @@ describe("importPlaywright", () => {
     await expect(parseSpec(specPath)).resolves.toMatchObject({
       spec: { name: "game_screen_renders_objective_state" },
     });
+  });
+
+  it("imports the first test and emits a TODO naming skipped tests", () => {
+    const imported = importPlaywright(
+      [
+        "test('first case', async ({ page }) => {",
+        "  await page.goto('/one');",
+        "});",
+        "test('second case', async ({ page }) => {",
+        "  await page.goto('/two');",
+        "});",
+      ].join("\n"),
+    );
+
+    // First test imported as before…
+    expect(imported.spec.intent).toBe("first case");
+    expect(imported.spec.steps).toEqual([{ open: "/one" }]);
+    // …and the second is named in a TODO instead of vanishing silently.
+    expect(imported.todos.some((t) => t.includes("second case"))).toBe(true);
+    expect(imported.yaml).toContain("# TODO:");
+    expect(imported.yaml).toContain("second case");
+  });
+
+  it("drops .nth(N) on a selector locator with an explicit TODO", () => {
+    const imported = importPlaywright(
+      [
+        "test('Rows', async ({ page }) => {",
+        "  await page.locator('.row').nth(2).click();",
+        "});",
+      ].join("\n"),
+    );
+
+    // SelectorLocatorSchema doesn't support nth, so the locator stays valid
+    // (no nth) and the dropped position is surfaced loudly instead of silently
+    // retargeting the element.
+    expect(imported.spec.steps).toEqual([
+      { click: { by: "selector", selector: ".row" } },
+    ]);
+    expect(
+      imported.todos.some((t) => t.includes(".nth(2)") && t.includes(".row")),
+    ).toBe(true);
+  });
+
+  it("imports page.request.fetch with an explicit method", () => {
+    const imported = importPlaywright(
+      [
+        "test('api', async ({ page }) => {",
+        "  const res = await page.request.fetch('/api/items', { method: 'POST', data: { name: 'x' } });",
+        "});",
+      ].join("\n"),
+    );
+
+    expect(imported.spec.steps).toEqual([
+      { request: { method: "POST", url: "/api/items", body: { name: "x" } } },
+    ]);
+  });
+
+  it("imports toHaveURL(new RegExp(...)) as a url-matches outcome", () => {
+    const imported = importPlaywright(
+      [
+        "test('nav', async ({ page }) => {",
+        "  await expect(page).toHaveURL(new RegExp('/done$'));",
+        "});",
+      ].join("\n"),
+    );
+
+    expect(imported.spec.outcomes[0]).toMatchObject({
+      verify: { url: { matches: "/done$" } },
+    });
+  });
+
+  it("imports toContainText(text, options) as a text-contains outcome", () => {
+    const imported = importPlaywright(
+      [
+        "test('text', async ({ page }) => {",
+        "  await expect(page.locator('body')).toContainText('Saved', { ignoreCase: true, useInnerText: true });",
+        "});",
+      ].join("\n"),
+    );
+
+    expect(imported.spec.outcomes[0]).toMatchObject({
+      verify: { text: { contains: "Saved" } },
+    });
+  });
+
+  it("round-trips a spec through exportPlaywright and back", () => {
+    const spec: Spec = {
+      version: 1,
+      name: "round_trip",
+      intent: "Round trip the contract",
+      mode: "normal",
+      steps: [
+        { open: "/start" },
+        { request: { method: "POST", url: "/api/save", body: { ok: true } } },
+      ],
+      outcomes: [
+        {
+          id: "url_matches",
+          description: "url matches",
+          verify: { url: { matches: "/done$" } },
+        },
+        {
+          id: "text_contains",
+          description: "saved text",
+          verify: { text: { contains: "Saved" } },
+        },
+      ],
+    };
+
+    const exported = exportPlaywright(spec);
+    const imported = importPlaywright(exported.source);
+
+    // request method + url survive the round trip
+    const requestStep = imported.spec.steps?.find((s) => "request" in s);
+    expect(requestStep).toMatchObject({
+      request: { method: "POST", url: "/api/save" },
+    });
+
+    // url match survives
+    expect(
+      imported.spec.outcomes.some(
+        (o) =>
+          "url" in o.verify &&
+          (o.verify.url as { matches?: string }).matches === "/done$",
+      ),
+    ).toBe(true);
+
+    // text contains survives
+    expect(
+      imported.spec.outcomes.some(
+        (o) =>
+          "text" in o.verify &&
+          (o.verify.text as { contains?: string }).contains === "Saved",
+      ),
+    ).toBe(true);
   });
 });

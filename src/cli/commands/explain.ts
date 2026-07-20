@@ -368,8 +368,7 @@ export function buildExplain(): ExplainResult {
         name: "docs",
         summary:
           "Return focused agent documentation for a topic as structured data",
-        synopsis:
-          "cairn docs [overview|authoring|steps|verifiers|downloads|scripts|artifacts|mcp|backends] [--format json|yaml|md]",
+        synopsis: `cairn docs [${DOC_TOPICS.join("|")}] [--format json|yaml|md]`,
         flags: [
           {
             name: "--format",
@@ -1034,6 +1033,71 @@ export function buildExplain(): ExplainResult {
         },
       },
       {
+        name: "clip",
+        summary: "Cut named clips from a run video using vidtrace",
+        synopsis:
+          "cairn clip <run-ref> --label <label=start-end> [--label ...] [--out <dir>] [--name <prefix>] [--reencode] [--stash] [--tag <tag>] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--label",
+            type: "string",
+            description:
+              "Clip label with start/end timestamps (name=start-end); repeatable. At least one is required.",
+          },
+          {
+            name: "--out",
+            type: "string",
+            description: "Clip output directory (default: run/videos/clips)",
+          },
+          {
+            name: "--name",
+            type: "string",
+            description: "Clip filename prefix",
+          },
+          {
+            name: "--reencode",
+            type: "boolean",
+            default: false,
+            description: "Re-encode clips instead of stream-copy",
+          },
+          {
+            name: "--stash",
+            type: "boolean",
+            default: false,
+            description:
+              "Stash the run directory to fcheap after cutting clips",
+          },
+          {
+            name: "--tag",
+            type: "string",
+            description: "Tag for the stash; repeatable",
+          },
+          {
+            name: "--artifact-root",
+            type: "string",
+            description: "Override artifact root directory",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description:
+              "Explicit cairntrace.config.yml (overrides auto-discovery)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Output format",
+          },
+        ],
+        exitCodes: {
+          "0": "success (a missing run video, bad --label, or missing vidtrace is reported in-band in the result error field)",
+        },
+        notes:
+          "MCP tool cairn_clip mirrors this command — see `cairn docs clip`.",
+      },
+      {
         name: "annotate",
         summary: "Pin a note and/or data to a code symbol via codemap annotate",
         synopsis:
@@ -1200,6 +1264,14 @@ export function buildExplain(): ExplainResult {
         summary: "Fill a locator with a string value",
         yamlExample:
           "steps:\n  - fill: { by: label, name: Email, value: user@example.com }",
+      },
+      {
+        id: "type",
+        kind: "interaction",
+        summary:
+          "Type text into a locator character-by-character as real keyboard events (value, optional delayMs per keystroke). Use instead of fill when an SPA framework listens for keydown/input events that fill's bulk value-set doesn't fire — the classic symptom is a submit button staying disabled after fill",
+        yamlExample:
+          "steps:\n  - type: { by: label, name: Email, value: user@example.com }\n  - type: { by: label, name: Code, value: '1234', delayMs: 50 }",
       },
       {
         id: "select",

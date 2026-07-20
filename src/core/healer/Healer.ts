@@ -47,7 +47,8 @@ export interface HealOutput {
  *   3. Read the snapshot captured at that step (post-attempt page state).
  *   4. proposeOps tries, in order:
  *        a. Name-drift heal — `by: role | label | text` → propose name/text replacement
- *           against the closest snapshot candidate.
+ *           against the closest snapshot candidate, only when it is confidently
+ *           similar and uniquely closest (otherwise refused, never guessed).
  *        b. Wait-insertion — when no candidate exists and the previous step
  *           isn't already a wait, insert a `wait: { text: <name>, timeoutMs: 5000 }`
  *           step before the failed one.
@@ -168,7 +169,7 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
       outcomesStillReachable: false,
       ops: [],
       summary:
-        "no healing candidates found in the snapshot — the role may not exist on the page, or there are too many matches to disambiguate",
+        "no confident healing candidate found in the snapshot — the target role may not exist, the closest match is too dissimilar, or multiple candidates tie for closest",
       exitCode: 5,
     };
   }
@@ -262,17 +263,20 @@ function tryLocatorDrift(
   const exactMatch = candidates.find((c) => (c.name ?? "") === current);
   if (exactMatch) return undefined;
 
-  const best =
-    candidates.length === 1
-      ? candidates[0]!
-      : candidates.toSorted(
-          (a, b) =>
-            stringDistance(a.name ?? "", current) -
-            stringDistance(b.name ?? "", current),
-        )[0]!;
+  // Rank by normalized name distance and only heal when the single closest
+  // candidate is confidently similar. Refuse a too-dissimilar best match (a
+  // different element, not a rename) and refuse a tie for closest (ambiguous).
+  // Guessing either way would let --apply silently retarget a clean failure
+  // onto the wrong element — a passing-but-WRONG spec.
+  const ranked = candidates
+    .map((c) => ({ el: c, d: normalizedDistance(c.name ?? "", current) }))
+    .toSorted((a, b) => a.d - b.d);
+  const best = ranked[0]!;
+  if (best.d > MAX_LOCATOR_DRIFT_DISTANCE) return undefined;
+  if (ranked.filter((r) => r.d === best.d).length > 1) return undefined;
 
   const driftedField = locator.by === "text" ? "text" : "name";
-  const newValue = best.name ?? "";
+  const newValue = best.el.name ?? "";
 
   return {
     op: "replace",
@@ -281,7 +285,7 @@ function tryLocatorDrift(
     to: newValue,
     reason: describeLocatorMatch(
       locator,
-      best.role,
+      best.el.role,
       newValue,
       candidates.length,
     ),
@@ -348,12 +352,56 @@ function extractLocatorTarget(step: Step): LocatorTarget | undefined {
   return undefined;
 }
 
+// Max normalized name distance (stringDistance / longer length) for a rename
+// to count as a confident drift heal. Above it the candidate is a different
+// element, not a rename — guessing would let --apply silently convert a clean
+// failure into a passing-but-WRONG spec. 0.5 keeps real renames
+// ("Email"→"Email address", "Download xlsx"→"Download template") and rejects
+// unrelated names ("Apply"→"Cancel").
+const MAX_LOCATOR_DRIFT_DISTANCE = 0.5;
+
+// Roles a `by: label` locator may resolve to — form controls a <label> binds
+// to. Stops a drifted label from being "healed" onto a heading/link/etc.
+const LABEL_CONTROL_ROLES = new Set([
+  "textbox",
+  "combobox",
+  "searchbox",
+  "spinbutton",
+  "checkbox",
+  "radio",
+  "switch",
+  "slider",
+  "listbox",
+]);
+
+// Roles a `by: text` locator may resolve to — elements whose primary content
+// is readable text. Excludes form controls and structural containers.
+const TEXT_BEARING_ROLES = new Set([
+  "heading",
+  "link",
+  "button",
+  "paragraph",
+  "text",
+  "listitem",
+  "menuitem",
+  "tab",
+  "option",
+  "treeitem",
+  "cell",
+  "columnheader",
+  "rowheader",
+  "label",
+  "tooltip",
+  "alert",
+  "status",
+]);
+
 /**
  * Return snapshot elements that could plausibly be the target of this locator.
  * - role+name: matching role only
- * - label+name: any element with a name (labels in agent-browser snapshots
- *   surface as the accessible name on form controls)
- * - text:      any element with a name (text-locators bind to the accessible name)
+ * - label+name: form-control roles only (a <label> binds to an input, not a
+ *   heading/link) — see LABEL_CONTROL_ROLES
+ * - text:      text-bearing roles only — see TEXT_BEARING_ROLES
  * - selector:  unsupported in v0 (no good heuristic without a CSS engine)
  */
 function candidatesForLocator(
@@ -365,8 +413,21 @@ function candidatesForLocator(
       (e) => e.name !== undefined,
     );
   }
-  if (locator.by === "label" || locator.by === "text") {
-    return snapshot.filter((e) => e.name !== undefined && e.name.length > 0);
+  if (locator.by === "label") {
+    return snapshot.filter(
+      (e) =>
+        e.name !== undefined &&
+        e.name.length > 0 &&
+        LABEL_CONTROL_ROLES.has(e.role),
+    );
+  }
+  if (locator.by === "text") {
+    return snapshot.filter(
+      (e) =>
+        e.name !== undefined &&
+        e.name.length > 0 &&
+        TEXT_BEARING_ROLES.has(e.role),
+    );
   }
   return [];
 }
@@ -462,6 +523,11 @@ function stringDistance(a: string, b: string): number {
     if (al[i] !== bl[i]) mismatches++;
   }
   return lenDiff + mismatches;
+}
+
+/** stringDistance normalized to [0, 1] over the longer name, for thresholding. */
+function normalizedDistance(a: string, b: string): number {
+  return stringDistance(a, b) / Math.max(a.length, b.length, 1);
 }
 
 // --- Verified transactional heal (SPEC §7.2) ---

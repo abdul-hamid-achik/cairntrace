@@ -149,10 +149,19 @@ export const buildRunNextActions = (
   const rerun = `cairn run ${result.spec.path} --json`;
   const f = result.failure;
   if (f?.step) {
+    // A step that did not complete is the classic locator-drift case: heal
+    // repairs the selector from a fresh snapshot. Outcome failures (all steps
+    // ran, an assertion failed) are behavior regressions, not drift, so heal
+    // is only suggested here.
     return [
       {
         command: rerun,
         reason: `step "${f.step}" failed: ${f.message} — inspect the step evidence and run artifacts, fix the spec or app, then rerun`,
+        safeToAutoRun: false,
+      },
+      {
+        command: `cairn spec heal ${result.spec.path} --verify --json`,
+        reason: `step "${f.step}" did not complete (likely locator drift): heal repairs the selector from a fresh snapshot and re-verifies before writing`,
         safeToAutoRun: false,
       },
     ];

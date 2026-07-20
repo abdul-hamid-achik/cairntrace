@@ -26,13 +26,13 @@ export function importPlaywright(
     const line = rawLine.trim();
     if (shouldIgnore(line)) continue;
 
-    const mappedStep = mapStep(line);
+    const mappedStep = mapStep(line, todos);
     if (mappedStep) {
       steps.push(mappedStep);
       continue;
     }
 
-    const mappedOutcome = mapOutcome(line, outcomes.length);
+    const mappedOutcome = mapOutcome(line, outcomes.length, todos);
     if (mappedOutcome) {
       outcomes.push(mappedOutcome);
       continue;
@@ -51,6 +51,15 @@ export function importPlaywright(
         "TODO replace with the behavior this Playwright test asserts",
       verify: { text: { contains: "TODO_replace_me" } },
     });
+  }
+
+  // Only the first test() is imported; name any further tests so a multi-test
+  // file doesn't lose whole cases silently.
+  const skippedTitles = findAllTestTitles(source).slice(1);
+  for (const skipped of skippedTitles) {
+    todos.push(
+      `Skipped test "${skipped}" — only the first test() is imported; convert it separately.`,
+    );
   }
 
   const spec: Spec = {
@@ -95,6 +104,18 @@ function findFirstTest(
     if (parsed) return parsed;
   }
   return undefined;
+}
+
+function findAllTestTitles(source: string): string[] {
+  const re = /\btest(?:\.(\w+))?\s*\(/gm;
+  const titles: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source))) {
+    if (m[1] === "describe") continue;
+    const parsed = parseTestAt(source, m.index + m[0].length);
+    if (parsed) titles.push(parsed.title);
+  }
+  return titles;
 }
 
 function parseTestAt(
@@ -152,7 +173,7 @@ function shouldIgnore(line: string): boolean {
   );
 }
 
-function mapStep(line: string): Step | undefined {
+function mapStep(line: string, todos?: string[]): Step | undefined {
   const goto = /^await\s+page\.goto\((.+?)\);?$/.exec(line);
   if (goto) {
     const path = literal(goto[1]!);
@@ -173,6 +194,30 @@ function mapStep(line: string): Step | undefined {
     const parsed = splitTopLevelArgs(request[2]!);
     const url = literal(parsed[0] ?? "");
     if (url !== undefined) {
+      const body = parseDataObject(parsed[1]);
+      return {
+        request: {
+          method,
+          url,
+          ...(body !== undefined ? { body } : {}),
+        },
+      };
+    }
+  }
+
+  // The exporter emits `page.request.fetch(url, { method, ... })` (optionally
+  // assigned to a const); read the method from the options object, default GET.
+  const fetch =
+    /^(?:const\s+[A-Za-z_$][\w$]*\s*=\s*)?await\s+page\.request\.fetch\((.+?)\);?$/.exec(
+      line,
+    );
+  if (fetch) {
+    const parsed = splitTopLevelArgs(fetch[1]!);
+    const url = literal(parsed[0] ?? "");
+    if (url !== undefined) {
+      const method = (
+        objectStringProperty(parsed[1], "method") ?? "GET"
+      ).toUpperCase() as "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
       const body = parseDataObject(parsed[1]);
       return {
         request: {
@@ -206,7 +251,7 @@ function mapStep(line: string): Step | undefined {
     /^await\s+(page\..+?)\.(fill|pressSequentially)\((.+?)\);?$/.exec(line);
   if (!action) return undefined;
 
-  const loc = locator(action[1]!);
+  const loc = locator(action[1]!, todos);
   if (!loc) return undefined;
   const op = action[2]!;
   if (op === "click") return { click: loc };
@@ -230,13 +275,17 @@ function isWaitState(
   );
 }
 
-function mapOutcome(line: string, idx: number): Outcome | undefined {
+function mapOutcome(
+  line: string,
+  idx: number,
+  todos?: string[],
+): Outcome | undefined {
   const assertion = parseExpectAssertion(line);
   if (!assertion) return undefined;
 
   if (assertion.target === "page" && assertion.matcher === "toHaveURL") {
     const arg = assertion.args.trim();
-    const matcher = regexLiteral(arg);
+    const matcher = regexLiteral(arg) ?? newRegExpLiteral(arg);
     if (matcher) {
       return outcome(idx, "url_matches", "page URL matches", {
         url: { matches: matcher },
@@ -251,7 +300,7 @@ function mapOutcome(line: string, idx: number): Outcome | undefined {
   }
 
   if (assertion.matcher === "toBeVisible") {
-    const loc = locator(assertion.target);
+    const loc = locator(assertion.target, todos);
     if (loc?.by === "selector") {
       return outcome(idx, "element_visible", "expected element is visible", {
         count: { selector: loc.selector, atLeast: 1 },
@@ -271,9 +320,12 @@ function mapOutcome(line: string, idx: number): Outcome | undefined {
   }
 
   if (assertion.matcher === "toContainText") {
-    const text = literal(assertion.args);
+    // Accept both `toContainText("x")` and the exporter's two-arg
+    // `toContainText("x", { ignoreCase, useInnerText })` form — the options
+    // object is ignored on import (contains is case-insensitive by default).
+    const text = literal(splitTopLevelArgs(assertion.args)[0] ?? "");
     if (text !== undefined) {
-      const loc = locator(assertion.target);
+      const loc = locator(assertion.target, todos);
       return outcome(idx, "text_contains", "expected text is present", {
         text: {
           contains: text,
@@ -299,20 +351,26 @@ function outcome(
   };
 }
 
-function locator(input: string): Locator | undefined {
+function locator(input: string, todos?: string[]): Locator | undefined {
   // A trailing `.nth(N)` selects the Nth match — strip it, parse the base
   // locator, then re-attach. Without this it was silently dropped, targeting a
   // different element than the source.
   const nthMatch = /^(.+)\.nth\((\d+)\)$/.exec(input.trim());
   const base = nthMatch ? nthMatch[1]! : input;
   const parsed = parseBaseLocator(base);
-  if (!parsed) return undefined;
-  // nth is a disambiguator on the semantic (role/label/text) locators; the
-  // selector locator can't carry it (encode position in the CSS instead).
-  if (nthMatch && parsed.by !== "selector") {
-    return { ...parsed, nth: Number(nthMatch[2]) };
+  if (!parsed || !nthMatch) return parsed;
+  const nth = Number(nthMatch[2]);
+  if (parsed.by === "selector") {
+    // SelectorLocatorSchema is `.strict()` without `nth`, and the agent-browser
+    // backend can't resolve nth on an arbitrary CSS selector — so carrying it
+    // would emit a spec that validates nowhere. Drop it but say so loudly
+    // instead of silently retargeting the element.
+    todos?.push(
+      `Dropped .nth(${nth}) on selector ${JSON.stringify(parsed.selector)} — selector locators don't support nth; disambiguate the CSS or use a semantic locator`,
+    );
+    return parsed;
   }
-  return parsed;
+  return { ...parsed, nth };
 }
 
 function parseBaseLocator(input: string): Locator | undefined {
@@ -416,6 +474,11 @@ function literal(input: string): string | undefined {
 function regexLiteral(input: string): string | undefined {
   const m = /^\/(.+)\/[a-z]*$/.exec(input.trim());
   return m?.[1];
+}
+
+function newRegExpLiteral(input: string): string | undefined {
+  const m = /^new RegExp\((['"`])([\s\S]*)\1\)$/.exec(input.trim());
+  return m?.[2];
 }
 
 function objectStringProperty(

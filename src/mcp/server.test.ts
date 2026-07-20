@@ -960,9 +960,12 @@ steps:
       failure: { step: "nav", message: "element not found" },
     };
     const acts = buildRunNextActions(failed);
-    expect(acts).toHaveLength(1);
+    // A step-level failure suggests both a rerun and a heal (locator drift).
+    expect(acts).toHaveLength(2);
     expect(acts[0]!.safeToAutoRun).toBe(false);
     expect(acts[0]!.command).toContain("cairn run");
     expect(acts[0]!.reason).toContain("nav");
+    expect(acts[1]!.command).toContain("cairn spec heal");
+    expect(acts[1]!.safeToAutoRun).toBe(false);
   });
 });

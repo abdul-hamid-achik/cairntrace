@@ -27,7 +27,6 @@ import {
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { coldStartLint } from "../core/coldStart";
 import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
-import { computeContractHash } from "../core/contractHash";
 import {
   closeAllSessions,
   closeSession,
@@ -42,7 +41,9 @@ import {
 } from "../core/discovery/DiscoverySession";
 import { buildSpecYaml, deriveSpecName } from "../core/discovery/specExporter";
 import { toHealResult } from "../cli/commands/spec/heal";
-import { healSpec } from "../core/healer/Healer";
+import { stampSpecContractHash } from "../cli/commands/spec/verify";
+import { createBackend } from "../cli/backendFactory";
+import { healSpec, healVerify } from "../core/healer/Healer";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
 import { DocsResultSchema, DocsTopicSchema } from "../core/schema/docs.v1";
@@ -177,6 +178,12 @@ export function buildMcpServer(): McpServer {
         path: z.string().describe("Path to the spec YAML"),
         env: z.string().optional().describe("Environment name override"),
         mock: z.boolean().optional().describe("Use mock backend"),
+        backend: z
+          .enum(["agent-browser", "playwright", "mock"])
+          .optional()
+          .describe(
+            "Browser backend (default agent-browser; playwright enables native traces/video/HAR)",
+          ),
         coldStart: z
           .boolean()
           .optional()
@@ -202,7 +209,16 @@ export function buildMcpServer(): McpServer {
           ),
       },
     },
-    async ({ path, env, mock, coldStart, artifactRoot, labels, since }) => {
+    async ({
+      path,
+      env,
+      mock,
+      backend: backendChoice,
+      coldStart,
+      artifactRoot,
+      labels,
+      since,
+    }) => {
       // `since` (FEATURES item 1): impact-driven selection. Skip the run unless
       // the spec's coversSymbol intersects `codemap review --since <ref>`
       // blast radius. Degrades to running when codemap is absent.
@@ -226,11 +242,11 @@ export function buildMcpServer(): McpServer {
           };
         }
       }
-      const backend = mock
-        ? new MockBrowserBackend()
-        : new AgentBrowserAdapter({
-            session: `cairntrace-mcp-${process.pid}`,
-          });
+      const backend = createBackend({
+        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+        mock,
+        session: `cairntrace-mcp-${process.pid}`,
+      });
       try {
         const result = await runSpec({
           specPath: path,
@@ -350,7 +366,9 @@ export function buildMcpServer(): McpServer {
     async ({ path, stamp, env, config }) => {
       try {
         if (stamp) {
-          const hash = await stampContractHash(path);
+          // Route through the same Document-API stamp the CLI uses so inline
+          // comments/quoting are preserved (a full re-serialize strips them).
+          const hash = await stampSpecContractHash(path);
           return {
             content: [{ type: "text", text: `Stamped contractHash: ${hash}` }],
             structuredContent: { status: "stamped", contractHash: hash, path },
@@ -364,19 +382,35 @@ export function buildMcpServer(): McpServer {
           vars: runtime.vars,
           ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
         });
+        // Surface the same cold-start + stamp signals `cairn spec verify`
+        // reports, so an agent doesn't mistake a parseable spec for one that
+        // replays from a fresh browser.
+        const warnings: string[] = [];
+        const coldStartWarning = coldStartLint(r.spec);
+        if (coldStartWarning) warnings.push(coldStartWarning);
+        if (!r.spec.contractHash) {
+          warnings.push(
+            "spec has no contractHash; call with stamp=true to lock it",
+          );
+        }
         return {
           content: [
             {
               type: "text",
               text:
                 `valid: ${path}\n` +
-                `contractHash: ${r.spec.contractHash ?? "(not stamped)"}`,
+                `contractHash: ${r.spec.contractHash ?? "(not stamped)"}` +
+                (warnings.length > 0
+                  ? `\nwarnings: ${warnings.join("; ")}`
+                  : ""),
             },
           ],
           structuredContent: {
             status: "valid",
             path,
             contractHash: r.spec.contractHash,
+            coldStartSatisfied: coldStartWarning === undefined,
+            ...(warnings.length > 0 ? { warnings } : {}),
           },
         };
       } catch (e) {
@@ -397,16 +431,51 @@ export function buildMcpServer(): McpServer {
       inputSchema: {
         path: z.string(),
         apply: z.boolean().optional(),
+        verify: z
+          .boolean()
+          .optional()
+          .describe(
+            "Transactionally verify: apply to the file, cold-start rerun, accept only if green (else rollback)",
+          ),
         mock: z.boolean().optional(),
+        backend: z
+          .enum(["agent-browser", "playwright", "mock"])
+          .optional()
+          .describe("Browser backend (default agent-browser)"),
       },
     },
-    async ({ path, apply, mock }) => {
-      const backend = mock
-        ? new MockBrowserBackend()
-        : new AgentBrowserAdapter({
-            session: `cairntrace-mcp-heal-${process.pid}`,
-          });
+    async ({ path, apply, verify, mock, backend: backendChoice }) => {
+      const backend = createBackend({
+        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+        mock,
+        session: `cairntrace-mcp-heal-${process.pid}`,
+      });
       try {
+        if (verify) {
+          const vr = await healVerify({ specPath: path, backend });
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `${
+                    vr.verified ? "verified" : "not verified"
+                  } (${vr.confidence} confidence): ${vr.reason ?? `${vr.ops.length} op(s)`}\n` +
+                  vr.ops
+                    .map(
+                      (op) =>
+                        `  ${op.op} ${op.path} → ${JSON.stringify(
+                          (op as { to?: unknown }).to ??
+                            (op as { value?: unknown }).value,
+                        )}`,
+                    )
+                    .join("\n"),
+              },
+            ],
+            structuredContent: vr as unknown as Record<string, unknown>,
+            isError: !vr.verified,
+          };
+        }
         const out = await healSpec({
           specPath: path,
           backend,
@@ -2437,31 +2506,6 @@ async function writeScaffold(
     header + yamlStringify(spec, { indent: 2, lineWidth: 100 }),
   );
   return path;
-}
-
-async function stampContractHash(path: string): Promise<string> {
-  const text = await readFile(path, "utf8");
-  const raw = parseYaml(text);
-  const spec = SpecSchema.parse(raw);
-  const hash = computeContractHash(spec);
-  const updated = { ...spec, contractHash: hash };
-  // Preserve any leading comment lines so stamping doesn't strip docs.
-  const header = extractLeadingComments(text);
-  await writeFile(
-    path,
-    header + yamlStringify(updated, { indent: 2, lineWidth: 100 }),
-  );
-  return hash;
-}
-
-function extractLeadingComments(text: string): string {
-  const lines = text.split("\n");
-  const keep: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith("#") || line.trim() === "") keep.push(line);
-    else break;
-  }
-  return keep.length > 0 ? keep.join("\n") + "\n" : "";
 }
 
 function summarizeRun(r: RunResult): string {
