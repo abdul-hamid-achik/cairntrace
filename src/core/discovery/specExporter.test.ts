@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { buildSpecYaml, deriveSpecName } from "./specExporter";
 
 describe("specExporter", () => {
@@ -87,6 +88,43 @@ describe("specExporter", () => {
 
       expect(stepCount).toBe(0);
       expect(yaml).toContain("steps: []");
+    });
+
+    it("emits session.resume when a checkpoint name is given", () => {
+      const { yaml } = buildSpecYaml({
+        name: "auth_flow",
+        intent: "Authenticated flow",
+        outcomes: [
+          {
+            id: "page-loads",
+            description: "Page loads",
+            verify: { text: { contains: "Welcome" } },
+          },
+        ],
+        steps: [{ open: "/dashboard" }],
+        resume: "admin_login",
+      });
+
+      const parsed = parseYaml(yaml) as Record<string, unknown>;
+      expect(parsed.session).toEqual({ resume: "admin_login" });
+    });
+
+    it("omits session when no resume checkpoint is given", () => {
+      const { yaml } = buildSpecYaml({
+        name: "guest_flow",
+        intent: "Public flow",
+        outcomes: [
+          {
+            id: "page-loads",
+            description: "Page loads",
+            verify: { text: { contains: "Welcome" } },
+          },
+        ],
+        steps: [{ open: "/" }],
+      });
+
+      const parsed = parseYaml(yaml) as Record<string, unknown>;
+      expect(parsed.session).toBeUndefined();
     });
 
     it("builds a spec with multiple outcomes", () => {

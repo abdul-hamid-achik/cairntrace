@@ -1091,7 +1091,8 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "4. cairn_discover_interact(sessionId, action, target, value?) — clicks/fills/hovers/types/selects/uploads/scrolls/presses; records the step; returns post-interaction snapshot",
           "5. cairn_discover_navigate(sessionId, url) — navigates to a new URL; records an open step",
           "6. cairn_discover_suggest(sessionId) — shows all recorded steps as YAML for review",
-          "7. cairn_discover_export(sessionId, path, intent, outcomes) — writes a spec YAML with cold-start contract comments; verifies it",
+          "7. cairn_discover_export(sessionId, path, intent, outcomes, resume?) — writes a spec YAML with cold-start contract comments; verifies it. Pass resume=<checkpoint> to embed `session: { resume }` for an authenticated flow",
+          "   For authenticated flows: log in during discovery, then cairn_checkpoint_capture(sessionId, name) saves the logged-in state as a resumable checkpoint to reference via resume",
           "8. cairn_discover_close(sessionId) — closes the session and frees the backend",
           "",
           "Use cairn_discover_list to check for active sessions (debugging). Sessions auto-expire after 5 minutes of inactivity.",
@@ -1108,7 +1109,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "- press → { press: 'Enter' }",
           "- navigate → { open: '/url' } or { open: { path: '/url', waitUntil: 'networkidle' } }",
           "",
-          "The exported spec YAML includes a cold-start contract comment header, same as `cairn spec scaffold`. The agent must satisfy the cold-start contract separately (imports, checkpoint, or preconditions).",
+          "The exported spec YAML includes a cold-start contract comment header, same as `cairn spec scaffold`. For an authenticated flow, log in during discovery, call cairn_checkpoint_capture(sessionId, name), then export with resume=name so the spec carries `session: { resume: name }` and replays from the captured session. Otherwise satisfy cold-start with an imported login action or preconditions.",
         ].join("\n"),
       },
       {

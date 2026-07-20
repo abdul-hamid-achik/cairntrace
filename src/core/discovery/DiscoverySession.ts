@@ -150,6 +150,21 @@ export async function captureSnapshot(
 }
 
 /**
+ * Capture the live session's browser state (cookies/localStorage/IndexedDB) to
+ * a checkpoint file via the backend's `saveState`. Runs under the session lock
+ * so it doesn't interleave with an in-flight interaction on the shared browser.
+ * The resulting file is resumable through `session: { resume: <name> }`, which
+ * is how a discovered authenticated flow satisfies the cold-start contract.
+ */
+export async function captureCheckpoint(
+  handle: DiscoverySessionHandle,
+  path: string,
+): Promise<InvocationResult> {
+  handle.session.lastActivity = Date.now();
+  return withLock(handle, () => handle.backend.saveState(path));
+}
+
+/**
  * Perform an interaction on the page and record the step.
  */
 export async function interact(

@@ -65,6 +65,7 @@ describe("Cairntrace MCP server", () => {
     expect(names).toEqual([
       "cairn_annotate",
       "cairn_audit",
+      "cairn_checkpoint_capture",
       "cairn_checkpoint_delete",
       "cairn_checkpoint_list",
       "cairn_checkpoint_show",
@@ -444,6 +445,42 @@ describe("Cairntrace MCP discovery tools", () => {
     expect(
       DiscoveryOpenResultSchema.safeParse(r.structuredContent).success,
     ).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_checkpoint_capture refuses a mock session and a missing session", async () => {
+    const c = await connectInMemory();
+
+    // A mock session can't produce a resumable checkpoint.
+    const openResult = await c.callTool({
+      name: "cairn_discover_open",
+      arguments: { url: "/login", mock: true },
+    });
+    const sessionId = (openResult.structuredContent as Record<string, unknown>)
+      .sessionId as string;
+
+    const mockCapture = await c.callTool({
+      name: "cairn_checkpoint_capture",
+      arguments: { sessionId, name: "auth" },
+    });
+    expect(mockCapture.isError).toBe(true);
+    const mockContent = mockCapture.content as Array<{
+      type: string;
+      text: string;
+    }>;
+    expect(mockContent[0]?.text).toContain("real browser session");
+
+    // A non-existent session is rejected.
+    const missing = await c.callTool({
+      name: "cairn_checkpoint_capture",
+      arguments: { sessionId: "nonexistent", name: "auth" },
+    });
+    expect(missing.isError).toBe(true);
+
+    await c.callTool({
+      name: "cairn_discover_close",
+      arguments: { sessionId },
+    });
     await c.close();
   });
 

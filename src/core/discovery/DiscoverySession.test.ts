@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import {
+  captureCheckpoint,
   captureSnapshot,
   closeSession,
   closeAllSessions,
@@ -533,6 +534,21 @@ describe("DiscoverySession", () => {
       const { steps, skippedFailed } = getExportableSteps(handle);
       expect(steps).toHaveLength(2);
       expect(skippedFailed).toBe(0);
+    });
+  });
+
+  describe("captureCheckpoint", () => {
+    it("saves the backend state to the given path", async () => {
+      const backend = createMockBackend();
+      const handle = await openSession(backend, "/login");
+
+      const result = await captureCheckpoint(
+        handle,
+        "/tmp/checkpoints/auth.json",
+      );
+
+      expect(result.ok).toBe(true);
+      expect(backend.saveStatePaths).toEqual(["/tmp/checkpoints/auth.json"]);
     });
   });
 

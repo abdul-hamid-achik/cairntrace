@@ -28,6 +28,7 @@ import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { coldStartLint } from "../core/coldStart";
 import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
 import {
+  captureCheckpoint,
   closeAllSessions,
   closeSession,
   captureSnapshot,
@@ -616,6 +617,89 @@ export function buildMcpServer(): McpServer {
         structuredContent: { name, deleted: ok },
         isError: !ok,
       };
+    },
+  );
+
+  server.registerTool(
+    "cairn_checkpoint_capture",
+    {
+      title: "Capture the discovery session's logged-in state as a checkpoint",
+      description:
+        "Save the live discovery session's browser state (cookies/localStorage/IndexedDB) " +
+        "as a named checkpoint at ~/.cairntrace/checkpoints/<name>.json. Log in during " +
+        "discovery first, then call this, then reference the checkpoint in the exported " +
+        "spec via `session: { resume: <name> }` to satisfy the cold-start contract. " +
+        "Requires a real (non-mock) session.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Discovery session ID"),
+        name: z
+          .string()
+          .regex(/^[a-z][a-z0-9-_]*$/i)
+          .describe("checkpoint name (letters, digits, hyphen, underscore)"),
+      },
+    },
+    async ({ sessionId, name }) => {
+      const handle = sessions.get(sessionId);
+      if (!handle) {
+        return {
+          content: [{ type: "text", text: `session not found: ${sessionId}` }],
+          isError: true,
+        };
+      }
+      if (handle.backend.name === "mock") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "checkpoint capture needs a real browser session; reopen with cairn_discover_open without mock:true",
+            },
+          ],
+          isError: true,
+        };
+      }
+      try {
+        const store = new CheckpointStore();
+        const outPath = store.pathFor(name);
+        await store.ensureRoot();
+        const r = await captureCheckpoint(handle, outPath);
+        if (!r.ok) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `checkpoint capture failed: ${r.stderr || r.stdout || "unknown error"}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Checkpoint saved: ${outPath}\n` +
+                `Reference it with: session: { resume: ${name} }`,
+            },
+          ],
+          structuredContent: {
+            name,
+            path: outPath,
+            ok: true,
+            resumeHint: `session: { resume: ${name} }`,
+          },
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `checkpoint capture failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 
@@ -2062,9 +2146,16 @@ export function buildMcpServer(): McpServer {
           .describe(
             "Replace an existing spec even if it carries a stamped contractHash. Without this, exporting over a stamped spec is refused so its locked intent/outcomes aren't silently clobbered.",
           ),
+        resume: z
+          .string()
+          .regex(/^[a-z][a-z0-9-_]*$/i)
+          .optional()
+          .describe(
+            "Checkpoint name to resume from (captured via cairn_checkpoint_capture). Sets `session: { resume: <name> }` so the exported spec satisfies the cold-start contract for an authenticated flow.",
+          ),
       },
     },
-    async ({ sessionId, path, intent, outcomes, overwrite }) => {
+    async ({ sessionId, path, intent, outcomes, overwrite, resume }) => {
       const handle = sessions.get(sessionId);
       if (!handle) {
         return {
@@ -2099,6 +2190,7 @@ export function buildMcpServer(): McpServer {
           intent,
           outcomes,
           steps,
+          ...(resume !== undefined ? { resume } : {}),
         });
 
         // Validate in-memory BEFORE writing so an invalid spec (e.g. a bad

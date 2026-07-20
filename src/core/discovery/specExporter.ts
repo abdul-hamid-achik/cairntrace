@@ -14,6 +14,12 @@ export interface ExportSpecInput {
   intent: string;
   outcomes: DiscoveryExportInput["outcomes"];
   steps: Record<string, unknown>[];
+  /**
+   * Checkpoint name to resume from. When set, the exported spec carries
+   * `session: { resume: <name> }`, satisfying the cold-start contract for an
+   * authenticated flow captured via cairn_checkpoint_capture.
+   */
+  resume?: string;
 }
 
 export interface ExportSpecResult {
@@ -28,7 +34,7 @@ const SPEC_HEADER = [
   "#   This spec must be replayable from a fresh browser session.",
   "#   Satisfy via ONE of:",
   "#     1. imports: [actions/login_admin.yml] + steps: [{ use: login_admin }]",
-  "#     2. session: { resume: <checkpoint-name> }  # from `cairn checkpoint capture-from-session`",
+  "#     2. session: { resume: <checkpoint-name> }  # from cairn_checkpoint_capture (MCP) or `cairn checkpoint capture-from-session`",
   "#     3. preconditions: { commands: [{ run: 'pnpm db:seed ...' }] }",
   "#     4. coldStart: guest  # intentionally public/sessionless flow",
   "#",
@@ -42,6 +48,9 @@ export function buildSpecYaml(input: ExportSpecInput): ExportSpecResult {
     version: 1,
     name: input.name,
     intent: input.intent,
+    // Resuming a captured checkpoint satisfies the cold-start contract for an
+    // authenticated flow (coldStartLint sees session.resume).
+    ...(input.resume ? { session: { resume: input.resume } } : {}),
     outcomes: input.outcomes,
     steps: input.steps,
   };

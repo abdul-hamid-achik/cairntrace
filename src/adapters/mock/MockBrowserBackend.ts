@@ -288,7 +288,10 @@ export class MockBrowserBackend implements BrowserBackend {
     };
   }
 
-  async saveState(_path: string): Promise<InvocationResult> {
+  /** Paths passed to saveState, so tests can assert checkpoint capture. */
+  public saveStatePaths: string[] = [];
+  async saveState(path: string): Promise<InvocationResult> {
+    this.saveStatePaths.push(path);
     return success();
   }
   async loadState(_path: string): Promise<InvocationResult> {
