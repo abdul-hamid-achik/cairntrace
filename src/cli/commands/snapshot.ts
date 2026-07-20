@@ -12,6 +12,7 @@ import { emit, resolveFormat } from "../format";
 export interface SnapshotCommandOptions {
   roles?: boolean;
   testids?: boolean;
+  waitUntil?: "networkidle" | "load" | "domcontentloaded";
   env?: string;
   headed?: boolean;
   mock?: boolean;
@@ -44,7 +45,14 @@ export async function snapshotCommand(
 
   try {
     const resolvedUrl = await resolveSnapshotUrl(targetUrl, opts);
-    const opened = await backend.runStep({ open: resolvedUrl });
+    // Use the object-form open with waitUntil so SPA inventory isn't captured
+    // pre-hydration (a bare open snapshots immediately, before the framework
+    // renders interactive elements).
+    const openStep =
+      opts.waitUntil !== undefined
+        ? { open: { path: resolvedUrl, waitUntil: opts.waitUntil } }
+        : { open: resolvedUrl };
+    const opened = await backend.runStep(openStep);
     if (!opened.ok) {
       throw new Error(opened.stderr || opened.stdout || "open step failed");
     }
@@ -104,7 +112,10 @@ function snapshotToMarkdown(report: SnapshotReport): string {
     } else {
       for (const entry of report.roles) {
         const name = entry.name ? ` "${entry.name}"` : "";
-        const count = entry.count > 1 ? ` (${entry.count} matches)` : "";
+        const count =
+          entry.count > 1
+            ? ` (${entry.count} matches; add nth to disambiguate)`
+            : "";
         const refs =
           entry.refs.length > 0 ? ` refs: ${entry.refs.join(", ")}` : "";
         const locator = entry.name
@@ -121,13 +132,16 @@ function snapshotToMarkdown(report: SnapshotReport): string {
       lines.push("- No data-testid attributes found");
     } else {
       for (const entry of report.testids) {
-        const count = entry.count > 1 ? ` (${entry.count} matches)` : "";
+        const count =
+          entry.count > 1
+            ? ` (${entry.count} matches; add nth to disambiguate)`
+            : "";
         const tags = entry.tagNames.join(", ");
         const sample = entry.textSamples[0]
           ? ` text: ${entry.textSamples[0]}`
           : "";
         lines.push(
-          `- ${entry.testId}${count} -> ${entry.selector} tags: ${tags}${sample}`,
+          `- ${entry.testId}${count} -> { by: selector, selector: ${entry.selector} } tags: ${tags}${sample}`,
         );
       }
     }

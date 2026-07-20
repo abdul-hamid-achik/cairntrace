@@ -14,6 +14,7 @@ import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapt
 import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
 import { type ClipOptions } from "../cli/commands/clip";
 import { resolveDiscoverUrl } from "../cli/commands/discover";
+import { resolveSnapshotUrl } from "../cli/commands/snapshot";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
 import { buildExplain } from "../cli/commands/explain";
 import { validateConfigFile } from "../cli/commands/config/validate";
@@ -45,6 +46,7 @@ import { toHealResult } from "../cli/commands/spec/heal";
 import { stampSpecContractHash } from "../cli/commands/spec/verify";
 import { createBackend } from "../cli/backendFactory";
 import { healSpec, healVerify } from "../core/healer/Healer";
+import { collectLocatorInventory } from "../core/snapshot/locatorInventory";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
 import { DocsResultSchema, DocsTopicSchema } from "../core/schema/docs.v1";
@@ -324,6 +326,121 @@ export function buildMcpServer(): McpServer {
           agentContextPath: `${resolved.runDir}/agent_context.md`,
         },
       };
+    },
+  );
+
+  server.registerTool(
+    "cairn_snapshot",
+    {
+      title: "One-shot locator inventory for a page",
+      description:
+        "Open a URL statelessly (no session) and return the role + data-testid locator " +
+        "inventory for agent-friendly step authoring. Use waitUntil for SPAs so the tree " +
+        "isn't captured pre-hydration. The stateless counterpart to the cairn_discover_* " +
+        "session tools — use this for a single-page inventory, discovery for multi-step exploration.",
+      inputSchema: {
+        url: z
+          .string()
+          .min(1)
+          .describe("Page URL (absolute, or relative to config baseUrl)"),
+        roles: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include role locators (default when neither roles nor testids is set)",
+          ),
+        testids: z
+          .boolean()
+          .optional()
+          .describe("Include data-testid locators"),
+        waitUntil: z
+          .enum(["networkidle", "load", "domcontentloaded"])
+          .optional()
+          .describe("Wait for SPA hydration before capturing the inventory"),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment override for config baseUrl"),
+        mock: z.boolean().optional().describe("Use the in-memory mock backend"),
+        backend: z
+          .enum(["agent-browser", "playwright", "mock"])
+          .optional()
+          .describe("Browser backend (default agent-browser)"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml"),
+      },
+    },
+    async ({
+      url,
+      roles,
+      testids,
+      waitUntil,
+      env,
+      mock,
+      backend: backendChoice,
+      config,
+    }) => {
+      const be = createBackend({
+        ...(mock !== undefined ? { mock } : {}),
+        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+        session: `cairntrace-snapshot-${process.pid}`,
+      });
+      try {
+        const resolvedUrl = await resolveSnapshotUrl(url, {
+          ...(env !== undefined ? { env } : {}),
+          ...(config !== undefined ? { config } : {}),
+        });
+        const openStep =
+          waitUntil !== undefined
+            ? { open: { path: resolvedUrl, waitUntil } }
+            : { open: resolvedUrl };
+        const opened = await be.runStep(openStep);
+        if (!opened.ok) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `snapshot open failed: ${opened.stderr || opened.stdout || "unknown error"}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const includeRoles = roles || (!roles && !testids);
+        const includeTestIds = testids || (!roles && !testids);
+        const inventory = await collectLocatorInventory(be, {
+          roles: includeRoles,
+          testids: includeTestIds,
+        });
+        const finalUrl = await be.getUrl().catch(() => resolvedUrl);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `Snapshot of ${finalUrl}: ${inventory.roles?.length ?? 0} role locators, ` +
+                `${inventory.testids?.length ?? 0} testids` +
+                (inventory.truncated ? " (truncated to limit)" : ""),
+            },
+          ],
+          structuredContent: {
+            url: finalUrl,
+            backend: be.name,
+            ...inventory,
+          },
+        };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `snapshot failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      } finally {
+        await be.close().catch(() => undefined);
+      }
     },
   );
 

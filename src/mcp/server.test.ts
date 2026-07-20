@@ -89,6 +89,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_run",
       "cairn_secrets_status",
       "cairn_services_status",
+      "cairn_snapshot",
       "cairn_spec_heal",
       "cairn_spec_scaffold",
       "cairn_spec_verify",
@@ -425,6 +426,24 @@ steps:
     expect(
       ServicesStatusResultSchema.safeParse(r.structuredContent).success,
     ).toBe(true);
+    await c.close();
+  });
+
+  it("cairn_snapshot returns a one-shot locator inventory (mock backend)", async () => {
+    const c = await connectInMemory();
+    const r = await c.callTool({
+      name: "cairn_snapshot",
+      arguments: { url: "http://localhost/login", mock: true },
+    });
+    expect(r.isError).toBeFalsy();
+    const sc = r.structuredContent as {
+      url: string;
+      backend: string;
+      roles?: unknown[];
+    };
+    expect(sc.backend).toBe("mock");
+    expect(sc.url).toBeTruthy();
+    expect(Array.isArray(sc.roles)).toBe(true);
     await c.close();
   });
 });

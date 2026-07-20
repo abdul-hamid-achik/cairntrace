@@ -211,6 +211,10 @@ addFormatFlags(
     .description("Inspect a page and print agent-facing locator inventory")
     .option("--roles", "include accessibility role locators", false)
     .option("--testids", "include data-testid locators", false)
+    .option(
+      "--wait-until <state>",
+      "wait for networkidle | load | domcontentloaded before inventory (SPA hydration)",
+    )
     .option("--env <name>", "environment override for config baseUrl")
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
@@ -229,6 +233,10 @@ addFormatFlags(
     )
     .option("--roles", "include accessibility role locators", false)
     .option("--testids", "include data-testid locators", false)
+    .option(
+      "--wait-until <state>",
+      "wait for networkidle | load | domcontentloaded before snapshot (SPA hydration)",
+    )
     .option("--env <name>", "environment override for config baseUrl")
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)

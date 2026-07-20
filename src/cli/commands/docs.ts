@@ -150,7 +150,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Authoring Helpers",
-        body: "`cairn snapshot <url>` opens a page and reports role and `data-testid` locators for agent-friendly step authoring. `cairn import playwright <file>` converts common Playwright `page.goto`, locator actions, request calls, and `expect` assertions into reviewable YAML with TODO comments for unmapped lines. `cairn run <dir> --junit reports/cairn.xml` expands YAML specs recursively for CI, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. `--stamp-if-green` stamps contract hashes only after every requested spec passes.",
+        body: "`cairn snapshot <url>` opens a page and reports role and `data-testid` locators for agent-friendly step authoring (pass `--wait-until networkidle` for SPAs so the inventory isn't captured pre-hydration; role entries with multiple matches note that `nth` is needed to disambiguate). `cairn import playwright <file>` converts common Playwright `page.goto`, locator actions, request calls, and `expect` assertions into reviewable YAML with TODO comments for unmapped lines. `cairn run <dir> --junit reports/cairn.xml` expands YAML specs recursively for CI, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. `--stamp-if-green` stamps contract hashes only after every requested spec passes.",
       },
     ],
     examples: [
@@ -1118,7 +1118,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "The CLI one-shot command is the quick inspection path:",
           "  cairn discover /login --env local --format json",
           "",
-          "Returns the full accessibility tree (structured SnapshotElement[]) plus role and testid locator inventory. Supports --roles, --testids, --env, --backend, --mock, --config, --format. Use this when you need a single-page inventory without interactive exploration.",
+          "Returns the full accessibility tree (structured SnapshotElement[]) plus role and testid locator inventory. Supports --roles, --testids, --wait-until (networkidle|load|domcontentloaded — wait out SPA hydration before capturing), --env, --backend, --mock, --config, --format. Use this when you need a single-page inventory without interactive exploration.",
         ].join("\n"),
       },
     ],

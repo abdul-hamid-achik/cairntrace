@@ -10,6 +10,7 @@ import { emit, resolveFormat } from "../format";
 export interface DiscoverCommandOptions {
   roles?: boolean;
   testids?: boolean;
+  waitUntil?: "networkidle" | "load" | "domcontentloaded";
   env?: string;
   headed?: boolean;
   mock?: boolean;
@@ -70,7 +71,13 @@ export async function discoverCommand(
 
   try {
     const resolvedUrl = await resolveDiscoverUrl(targetUrl, opts);
-    const opened = await backend.runStep({ open: resolvedUrl });
+    // Object-form open with waitUntil so an SPA settles before we snapshot it
+    // (a bare open captures the tree pre-hydration).
+    const openStep =
+      opts.waitUntil !== undefined
+        ? { open: { path: resolvedUrl, waitUntil: opts.waitUntil } }
+        : { open: resolvedUrl };
+    const opened = await backend.runStep(openStep);
     if (!opened.ok) {
       throw new Error(opened.stderr || opened.stdout || "open step failed");
     }

@@ -14,6 +14,8 @@ export interface TestIdInventoryEntry {
   testId: string;
   count: number;
   selector: string;
+  /** Ready-to-paste spec locator (symmetric with RoleInventoryEntry.locator). */
+  locator: Extract<Locator, { by: "selector" }>;
   tagNames: string[];
   textSamples: string[];
 }
@@ -124,6 +126,7 @@ export function parseTestIdInventory(stdout: string): TestIdInventoryEntry[] {
         testId: item.testId,
         count: 0,
         selector: item.selector,
+        locator: { by: "selector", selector: item.selector },
         tagNames: [],
         textSamples: [],
       } satisfies TestIdInventoryEntry);
