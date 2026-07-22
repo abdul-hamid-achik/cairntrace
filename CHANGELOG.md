@@ -4,6 +4,64 @@ All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [1.48.0] - 2026-07-22
+
+### Added
+
+- **Config-aware Playwright export**: `cairn export playwright` gains
+  `--config <path>`, `--env <name>` and repeatable `--var key=value`, resolving
+  `${vars.*}`/`baseUrl` from cairntrace.config.yml exactly like `spec verify` —
+  specs that lean on config vars are now exportable.
+- **`--project` mode** (`--out-dir` required): generates a STRUCTURED
+  Playwright project instead of standalone spec files — `playwright.config.ts`
+  (baseURL from config, serial workers, bypassCSP, globalSetup wired),
+  `global-setup.ts` (deduped spec preconditions as a runnable scaffold,
+  `SKIP_PRECONDITIONS=1` to opt out), `actions/<name>.ts` (each reusable action
+  becomes one exported `async function(page)`; `use:` steps become imports +
+  calls), `verifiers/` (node verifier files copied in — self-contained), and a
+  README operating manual.
+- **Node file verifiers export** (`runtime: node` + `file:`): the generated
+  test dynamically imports the verifier (relative path when the out path is
+  known, project-prefixed in `--project` mode) and calls `verify(ctx)` with
+  resolved fixtures; ESM/CJS default-export interop handled.
+- **Secrets and `${run.token}` are never inlined**: `${secrets.X}` and unset
+  `${env.X}` (no `:-default`) emit as `process.env.X ?? ""` references (header
+  comment lists required env vars); `${run.token}` emits a per-invocation
+  `RUN_TOKEN` const so exported tests stay re-runnable. Batch exports also
+  write a README.md documenting required env + per-spec preconditions.
+- **Parser/loader `secretRef`/`envRef` hooks** powering the above
+  (ParseOptions.secretRef, loadConfig/resolveSpecRuntimeContext envRef).
+- **`cairn run` starting banner**: first output line before config/secrets/
+  services resolution, so environment wedges (dead docker socket, locked
+  secret agent, thrashing swap) are localizable instead of 0-byte-log hangs.
+- **Precondition command `timeoutMs`** honored per command (spec schema +
+  runner), and services `preCommands` accept `{run, skipIf}` probes.
+
+### Changed
+
+- **Exporter rebuilt on a statement IR** (`codegen.ts`) with structured
+  template values (`templateValue.ts`): indentation/quoting/escaping are
+  correct by construction; the old regex post-passes over generated source are
+  gone. Golden-file tests + TypeScript parse AND type-check (against real
+  `@playwright/test` types) validate every emission
+  (`UPDATE_GOLDENS=1` to regenerate); an export→import round-trip floor test
+  guards the importer contract.
+- Semantic locators emit `.first()` (agent-browser acts on the first match;
+  Playwright strict mode would fail on multiples).
+- Evals containing `location.reload()` emit a try/catch retry — Playwright
+  destroys the evaluate context on navigation; agent-browser does not.
+- Generated tests stamp `CAIRN_RUN_START_FLOOR_MS` at test start so node
+  verifiers scope causation to THIS run (kills a cross-run false-positive
+  window observed when no cairn network capture exists).
+
+### Known limitations
+
+- Ambiguous semantic locators (e.g. two "Edit" buttons where one matches by
+  visible text and another by aria-label) can resolve to DIFFERENT elements
+  under agent-browser vs Playwright strict-mode `.first()`. Prefer unambiguous
+  selectors in specs destined for export.
+
+
 ## [1.41.0] - 2026-07-17
 
 ### Added

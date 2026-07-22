@@ -254,6 +254,27 @@ export const HealthcheckSchema = z
   .strict();
 export type Healthcheck = z.infer<typeof HealthcheckSchema>;
 
+/**
+ * A tmux pre-command: a plain command string, or `{run, skipIf}` where
+ * `skipIf` is a shell probe run HOST-SIDE (cwd = the window's cwd) before
+ * sending `run` to the pane. Probe exit 0 means "already fresh — skip run"
+ * (mirrors the seed freshnessCheck pattern, e.g. skip a minutes-long
+ * `yarn build` when dist/ is newer than every source file). Probe exit
+ * non-zero (or probe failure) means the pre-command runs.
+ */
+export const TmuxPreCommandSchema = z.union([
+  z.string().min(1),
+  z
+    .object({
+      /** The pre-command to send to the pane (e.g. "yarn build"). */
+      run: z.string().min(1),
+      /** Host-side freshness probe; exit 0 = skip `run`. */
+      skipIf: z.string().min(1).optional(),
+    })
+    .strict(),
+]);
+export type TmuxPreCommand = z.infer<typeof TmuxPreCommandSchema>;
+
 /** A single tmux window running one service. */
 export const TmuxWindowSchema = z
   .object({
@@ -272,9 +293,11 @@ export const TmuxWindowSchema = z
      * (e.g. `yarn build` before `yarn start`). Each is sent via `tmux send-keys ... Enter`
      * and cairn waits for it to finish before sending the next. A pre-command that
      * blocks will prevent the main command from running — use only for commands
-     * that exit (build, migrate, etc).
+     * that exit (build, migrate, etc). Entries may be objects `{run, skipIf}`
+     * to skip expensive builds when a host-side freshness probe passes — see
+     * TmuxPreCommandSchema.
      */
-    preCommands: z.array(z.string().min(1)).optional(),
+    preCommands: z.array(TmuxPreCommandSchema).optional(),
     /**
      * Periodic healthcheck run after the window becomes ready. If the check
      * fails `retries` consecutive times, cairn logs a warning. Does NOT

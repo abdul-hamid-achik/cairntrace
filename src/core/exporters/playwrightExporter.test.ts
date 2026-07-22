@@ -55,12 +55,14 @@ describe("exportPlaywright", () => {
     );
     expect(src).toContain(`await page.goto("https://example.com/");`);
     expect(src).toContain(
-      `await page.getByRole("button", { name: "Submit" }).click();`,
+      `await page.getByRole("button", { name: "Submit" }).first().click();`,
     );
     expect(src).toContain(
       `await page.locator(".question-table-wrap .table-title").hover();`,
     );
-    expect(src).toContain(`await page.getByLabel("Email").fill("a@b.c");`);
+    expect(src).toContain(
+      `await page.getByLabel("Email").first().fill("a@b.c");`,
+    );
   });
 
   it("translates select steps to selectOption by value or label", () => {
@@ -79,7 +81,7 @@ describe("exportPlaywright", () => {
       }),
     );
     expect(src).toContain(
-      `await page.getByLabel("Plan").selectOption({ value: "pro" });`,
+      `await page.getByLabel("Plan").first().selectOption({ value: "pro" });`,
     );
     expect(src).toContain(
       `await page.locator("#plan").selectOption({ label: "Pro plan" });`,
@@ -368,7 +370,7 @@ describe("exportPlaywright", () => {
     );
     expect(src).toContain(`if (page.url().includes("/login")) {`);
     expect(src).toContain(
-      `await page.getByRole("button", { name: "OK" }).click();`,
+      `await page.getByRole("button", { name: "OK" }).first().click();`,
     );
   });
 
@@ -390,7 +392,7 @@ describe("exportPlaywright", () => {
       }),
     );
     expect(src).toContain(`page.request.fetch("/api/x"`);
-    expect(src).toContain(`"Content-Type":"application/json"`);
+    expect(src).toContain(`"Content-Type": "application/json"`);
     expect(src).toContain(`expect(created.status()).toBe(201);`);
   });
 

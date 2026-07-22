@@ -363,7 +363,22 @@ addFormatFlags(
       "batch-write exported specs into this directory (required for directory input)",
     )
     .option("--lang <js|ts>", "output language (default: ts)", "ts")
-    .option("--stdout", "print source to stdout (single-spec only)", false),
+    .option("--stdout", "print source to stdout (single-spec only)", false)
+    .option(
+      "--config <path>",
+      "cairntrace.config.yml supplying ${vars.*}/baseUrl (auto-discovered from the spec dir when omitted)",
+    )
+    .option("--env <name>", "config environment for var resolution")
+    .option(
+      "--var <key=value>",
+      "override a ${vars.X} value (repeatable)",
+      (v: string, prev: string[] = []) => [...prev, v],
+    )
+    .option(
+      "--project",
+      "generate a structured project (actions/, verifiers/, config, global-setup) instead of standalone spec files",
+      false,
+    ),
 ).action((p: string, opts) => exportPlaywrightCommand(p, opts));
 
 const importCmd = program

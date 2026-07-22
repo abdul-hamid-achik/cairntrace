@@ -63,6 +63,7 @@ export interface RunEvent {
     | "artifact.monitor"
     | "artifact.video"
     | "viewport.set"
+    | "precondition.run"
     | "services.docker.start"
     | "services.docker.reuse"
     | "services.docker.ready"

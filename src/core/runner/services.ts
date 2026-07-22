@@ -279,13 +279,35 @@ export async function startServices(
  * a later phase fails mid-startup. Runs config teardown commands (e.g. docker
  * compose down), kills the tmux session, and removes the temp artifacts dir —
  * so a tmux/seed failure can't orphan running containers or dev-servers.
+ *
+ * Respects reuse mode exactly like `stop()` and the signal path: when the tmux
+ * session is in reuse mode, a mid-startup failure must NOT kill it or run
+ * docker-down — the warm session belongs to the user/next run, and nuking it
+ * turns every transient readyOn failure into a full cold rebuild of the stack.
  */
 async function teardownStartedPhases(
   cfg: ServicesConfig,
   phases: PhaseState,
   ctx: StartServicesContext,
 ): Promise<void> {
+  const managedSession = phases.tmuxSessionName;
   for (const cmd of phases.teardownCommands) {
+    if (
+      phases.tmuxReuse &&
+      managedSession &&
+      killsTmuxSession(cmd, managedSession)
+    ) {
+      ctx.log?.(
+        `services: failure-cleanup (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
+      );
+      continue;
+    }
+    if (phases.tmuxReuse && tearsDownDocker(cmd)) {
+      ctx.log?.(
+        `services: failure-cleanup (skipped docker down for reuse — tmux services still need infra)`,
+      );
+      continue;
+    }
     try {
       ctx.log?.(`services: teardown (${cmd})`);
       await runShell(cmd, { cwd: ctx.configDir, env: process.env });
@@ -293,7 +315,7 @@ async function teardownStartedPhases(
       // teardown is best-effort, never fatal
     }
   }
-  if (phases.tmuxSession) {
+  if (phases.tmuxSession && !phases.tmuxReuse) {
     await execa("tmux", ["kill-session", "-t", phases.tmuxSession], {
       reject: false,
       timeout: 5_000,
@@ -982,11 +1004,38 @@ async function sendWindowCommands(
   }
 
   // Send pre-commands first (no env needed — already set above).
-  for (const pre of win.preCommands ?? []) {
+  for (const preEntry of win.preCommands ?? []) {
+    const pre = typeof preEntry === "string" ? { run: preEntry } : preEntry;
+    // Freshness probe (mirrors the seed freshnessCheck pattern): run the
+    // skipIf shell HOST-SIDE with the window's cwd; exit 0 = the expensive
+    // pre-command (yarn build, tsc, migrate) is already satisfied — skip it.
+    // Probe errors are treated as "not fresh" so a broken probe can never
+    // silently skip a required build.
+    if (pre.skipIf) {
+      try {
+        const probe = await runShell(pre.skipIf, {
+          cwd: resolveCwd(win.cwd, ctx.configDir),
+          env: process.env,
+        });
+        if (probe.exitCode === 0) {
+          ctx.log?.(
+            `services: tmux — ${win.name}: pre-command skipped, skipIf passed (${pre.run})`,
+          );
+          continue;
+        }
+        ctx.log?.(
+          `services: tmux — ${win.name}: skipIf exited ${probe.exitCode} — running pre-command`,
+        );
+      } catch (e) {
+        ctx.log?.(
+          `services: tmux — ${win.name}: skipIf probe failed (${(e as Error).message}) — running pre-command`,
+        );
+      }
+    }
     // Ensure the shell is accepting input (direnv may have just reloaded).
     await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
-    ctx.log?.(`services: tmux — ${win.name}: pre-command (${pre})`);
-    await sendTmuxCommand(session, win.name, pre);
+    ctx.log?.(`services: tmux — ${win.name}: pre-command (${pre.run})`);
+    await sendTmuxCommand(session, win.name, pre.run);
     // Wait until the pre-command exits and the shell is idle again before
     // sending the next one / main command. Long deadline: cold `yarn build` /
     // tsc regularly takes minutes.

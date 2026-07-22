@@ -66,6 +66,13 @@ export interface ParseOptions {
   baseUrl?: string;
   /** Built-in runtime placeholders for per-run/per-worker identity. */
   runtime?: RuntimeTemplateContext;
+  /**
+   * When set, every `${secrets.X}` — and any `${env.X}` that is UNSET with no
+   * `:-default` — resolves to `secretRef("X")` instead of the env value. Lets
+   * exporters emit runtime references (e.g. `process.env.X`) so secret VALUES
+   * never land in generated files and unresolved env stays late-bound.
+   */
+  secretRef?: (name: string) => string;
 }
 
 export interface RuntimeTemplateContext {
@@ -107,6 +114,7 @@ export async function parseSpec(
     vars,
     baseUrl,
     opts.runtime,
+    opts.secretRef,
   );
   const spec = SpecSchema.parse(raw);
 
@@ -119,6 +127,7 @@ export async function parseSpec(
       vars,
       baseUrl,
       opts.runtime,
+      opts.secretRef,
     );
     assertBatchSelectorLocators(importRaw, resolvedImport);
     const action = ReusableActionSchema.parse(importRaw);
@@ -259,9 +268,18 @@ async function loadAndParse(
   vars: Record<string, string | number | boolean>,
   baseUrl: string | undefined,
   runtime: RuntimeTemplateContext | undefined,
+  secretRef?: (name: string) => string,
 ): Promise<unknown> {
   const text = await readFile(absPath, "utf8");
-  return loadAndParseSource(text, absPath, env, vars, baseUrl, runtime);
+  return loadAndParseSource(
+    text,
+    absPath,
+    env,
+    vars,
+    baseUrl,
+    runtime,
+    secretRef,
+  );
 }
 
 function loadAndParseSource(
@@ -271,6 +289,7 @@ function loadAndParseSource(
   vars: Record<string, string | number | boolean>,
   baseUrl: string | undefined,
   runtime: RuntimeTemplateContext | undefined,
+  secretRef?: (name: string) => string,
 ): unknown {
   // Parse to an AST first, then substitute into scalar *nodes*. Because the
   // YAML library owns serialization, a resolved value containing YAML
@@ -293,6 +312,7 @@ function loadAndParseSource(
         baseUrl,
         absPath,
         runtime,
+        secretRef,
       );
       // Only an unquoted whole-placeholder in a *value* position re-infers its
       // YAML type (so `port: ${env.PORT}` → number); map keys and quoted or
@@ -395,6 +415,7 @@ function substituteString(
   baseUrl: string | undefined,
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
+  secretRef?: (name: string) => string,
 ): string {
   let result = "";
   let i = 0;
@@ -420,6 +441,7 @@ function substituteString(
       baseUrl,
       filePath,
       runtime,
+      secretRef,
     );
     i = end + 1;
   }
@@ -463,6 +485,7 @@ function resolvePlaceholder(
   baseUrl: string | undefined,
   filePath: string,
   runtime: RuntimeTemplateContext | undefined,
+  secretRef?: (name: string) => string,
 ): string {
   if (body === "project.root") return projectRoot;
   if (body === "baseUrl") return baseUrl ?? "";
@@ -479,9 +502,12 @@ function resolvePlaceholder(
     const name = defaultIdx >= 0 ? rest.slice(0, defaultIdx) : rest;
     const defaultExpr =
       defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
+    if (ns === "secrets" && secretRef) return secretRef(name);
     const val = env[name];
     if (val === undefined || val === "") {
-      if (defaultExpr === undefined) return "";
+      if (defaultExpr === undefined) {
+        return secretRef ? secretRef(name) : "";
+      }
       // Resolve placeholders WITHIN the default expression only — a present
       // env value is returned without recursion.
       return substituteString(
@@ -492,6 +518,7 @@ function resolvePlaceholder(
         baseUrl,
         filePath,
         runtime,
+        secretRef,
       );
     }
     return val;

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   exportExtension,
@@ -6,16 +6,25 @@ import {
   type ExportCoverage,
   type ExportLang,
 } from "../../core/exporters/playwrightExporter";
+import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
 import { parseSpec } from "../../core/parser/parseSpec";
 import { emit, resolveFormat } from "../format";
-import { expandSpecArgs } from "./run";
+import { expandSpecArgs, parseVarFlags } from "./run";
 
 export interface ExportPlaywrightOptions {
+  /** Generate a structured project (actions/, verifiers/, config, setup). */
+  project?: boolean;
   out?: string;
   outDir?: string;
   lang?: string;
   /** Print source to stdout instead of writing a file (single-spec only). */
   stdout?: boolean;
+  /** Explicit cairntrace.config.yml (auto-discovered from the spec dir when omitted). */
+  config?: string;
+  /** Config environment for var resolution. */
+  env?: string;
+  /** Repeatable `--var key=value` overrides; win over config env vars. */
+  var?: string[];
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -67,8 +76,19 @@ export async function exportPlaywrightCommand(
       );
       process.exit(2);
     }
-    const result = await exportOne(paths[0]!, lang);
+    const result = await exportOne(paths[0]!, lang, opts);
     process.stdout.write(result.source);
+    return;
+  }
+
+  if (opts.project) {
+    if (!opts.outDir) {
+      process.stderr.write(
+        "cairn export playwright: --project requires --out-dir <dir>\n",
+      );
+      process.exit(2);
+    }
+    await exportProject(paths, lang, opts);
     return;
   }
 
@@ -86,11 +106,18 @@ export async function exportPlaywrightCommand(
   }
 
   const files: ExportFileReport[] = [];
+  const readmeInfo: Array<{
+    name: string;
+    file: string;
+    requiredEnv: string[];
+    preconditions: string[];
+  }> = [];
   let failed = 0;
   for (const p of paths) {
     try {
-      const exported = await exportOne(p, lang);
-      const outPath = resolveOutPath(p, exported.name, lang, opts);
+      const exported = await exportOne(p, lang, opts);
+      const outPath =
+        exported.outPath ?? resolveOutPath(p, exported.name, lang, opts);
       await mkdir(dirname(outPath), { recursive: true });
       await writeFile(outPath, exported.source);
       const status: "written" | "partial" =
@@ -102,6 +129,12 @@ export async function exportPlaywrightCommand(
         coverage: exported.coverage,
         status,
       });
+      readmeInfo.push({
+        name: exported.name,
+        file: outPath.split("/").pop() ?? outPath,
+        requiredEnv: exported.requiredEnv,
+        preconditions: exported.preconditions,
+      });
     } catch (e) {
       failed += 1;
       process.stderr.write(
@@ -112,6 +145,20 @@ export async function exportPlaywrightCommand(
 
   if (files.length === 0) {
     process.exit(failed > 0 ? 4 : 2);
+  }
+
+  // A generated suite must carry its own operating manual: which env vars to
+  // provide (from ANY secret source - no cairn/tvault dependency), which
+  // preconditions to wire into globalSetup, and how to run. Written on every
+  // batch export so it stays in sync with the tests.
+  if (opts.outDir && readmeInfo.length > 0) {
+    const readmePath = resolve(
+      isAbsolute(opts.outDir)
+        ? opts.outDir
+        : resolve(process.cwd(), opts.outDir),
+      "README.md",
+    );
+    await writeFile(readmePath, renderReadme(readmeInfo));
   }
 
   const partial = files.filter((f) => f.status === "partial").length;
@@ -130,26 +177,141 @@ export async function exportPlaywrightCommand(
   if (failed > 0 && files.length === 0) process.exit(4);
 }
 
+async function parseForExport(
+  specPath: string,
+  opts: ExportPlaywrightOptions,
+): Promise<{
+  parsed: Awaited<ReturnType<typeof parseSpec>>;
+  baseUrl?: string;
+}> {
+  const varOverrides = parseVarFlags(opts.var);
+  const runtime = await resolveSpecRuntimeContext(specPath, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(varOverrides).length > 0 ? { vars: varOverrides } : {}),
+    envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+  });
+  const parsed = await parseSpec(specPath, {
+    vars: runtime.vars,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+    secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+    runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
+  });
+  return { parsed, ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}) };
+}
+
+async function exportProject(
+  paths: string[],
+  lang: ExportLang,
+  opts: ExportPlaywrightOptions,
+): Promise<void> {
+  const { exportPlaywrightProject } = await import(
+    "../../core/exporters/playwrightProject"
+  );
+  const outDir = isAbsolute(opts.outDir!)
+    ? opts.outDir!
+    : resolve(process.cwd(), opts.outDir!);
+
+  const parsedSpecs = [];
+  let baseUrl: string | undefined;
+  for (const p of paths) {
+    const r = await parseForExport(p, opts);
+    parsedSpecs.push(r.parsed);
+    baseUrl = baseUrl ?? r.baseUrl;
+  }
+
+  const result = exportPlaywrightProject(parsedSpecs, {
+    lang,
+    ...(baseUrl ? { baseUrl } : {}),
+  });
+
+  for (const f of result.files) {
+    const abs = join(outDir, f.relPath);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, f.source);
+  }
+  // Self-contained project: copy referenced node verifiers in.
+  for (const v of result.verifierFiles) {
+    const dest = join(outDir, "verifiers", v.split("/").pop()!);
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, await readFile(v, "utf8"));
+  }
+
+  const report = {
+    status: "written",
+    lang,
+    outDir,
+    files: result.files.map((f) => f.relPath),
+    verifiersCopied: result.verifierFiles.map((v) => v.split("/").pop()),
+    requiredEnv: result.requiredEnv,
+    specs: result.specs.map((s) => ({
+      name: s.name,
+      file: s.file,
+      coverage: s.coverage,
+    })),
+  };
+  const format = resolveFormat(opts, "md");
+  if (format === "json" || format === "yaml") {
+    process.stdout.write(emit(format, report, () => ""));
+  } else {
+    const lines = [
+      `# Export Playwright project`,
+      ``,
+      `Out: \`${outDir}\``,
+      ``,
+      ...result.files.map((f) => `- ${f.relPath}`),
+      ...result.verifierFiles.map(
+        (v) => `- verifiers/${v.split("/").pop()} (copied)`,
+      ),
+      ``,
+      `Required env: ${result.requiredEnv.join(", ") || "none"}`,
+      ``,
+      ...result.specs.map(
+        (s) =>
+          `- ${s.name}: steps ${s.coverage.stepsExported}/${s.coverage.stepsTotal}, outcomes ${s.coverage.outcomesExported}/${s.coverage.outcomesTotal}`,
+      ),
+    ];
+    process.stdout.write(`${lines.join("\n")}\n`);
+  }
+}
+
 async function exportOne(
   specPath: string,
   lang: ExportLang,
-): Promise<{ source: string; name: string; coverage: ExportCoverage }> {
+  opts: ExportPlaywrightOptions = {},
+): Promise<{
+  source: string;
+  name: string;
+  coverage: ExportCoverage;
+  requiredEnv: string[];
+  preconditions: string[];
+  outPath?: string;
+}> {
   let parsed;
   try {
-    parsed = await parseSpec(specPath);
+    ({ parsed } = await parseForExport(specPath, opts));
   } catch (e) {
     const err = new Error((e as Error).message);
     (err as Error & { exitCode?: number }).exitCode = 4;
     throw err;
   }
+  // Out path is derived from the PARSED name, so it must be computed before
+  // rendering: the exporter emits verifier imports relative to it.
+  const outPath = opts.stdout
+    ? undefined
+    : resolveOutPath(specPath, parsed.spec.name, lang, opts);
   const result = exportPlaywright(parsed.resolved, {
     sourcePath: parsed.path,
     lang,
+    ...(outPath ? { outPath } : {}),
   });
   return {
     source: result.source,
     name: parsed.spec.name,
     coverage: result.coverage,
+    requiredEnv: result.requiredEnv,
+    preconditions: result.preconditions,
+    ...(outPath ? { outPath } : {}),
   };
 }
 
@@ -182,6 +344,62 @@ function parseLang(raw: string | undefined): ExportLang {
     `cairn export playwright: --lang must be js|ts (got ${JSON.stringify(raw)})\n`,
   );
   process.exit(2);
+}
+
+function renderReadme(
+  info: Array<{
+    name: string;
+    file: string;
+    requiredEnv: string[];
+    preconditions: string[];
+  }>,
+): string {
+  const allEnv = [...new Set(info.flatMap((i) => i.requiredEnv))].toSorted();
+  const lines = [
+    "# Exported Playwright suite",
+    "",
+    "Generated by `cairn export playwright` from Cairntrace specs. The specs",
+    "remain the source of truth; re-exporting overwrites these files.",
+    "",
+    "## Run",
+    "",
+    "```bash",
+    "npx playwright test        # serial (workers: 1) is required - the tests",
+    "                           # share one backend pipeline and must not overlap",
+    "```",
+    "",
+    "## Required environment",
+    "",
+    allEnv.length > 0
+      ? `Provide these env vars from ANY secret source (CI secrets, dotenv, a vault CLI):`
+      : "No secret env vars required.",
+    ...allEnv.map((e) => `- \`${e}\``),
+    "",
+    "`CAIRN_RUN_TOKEN` (optional) pins the per-run uniqueness token; omitted, a",
+    "random one is generated per invocation so re-runs keep writing new values.",
+    "",
+    "## Playwright config requirements",
+    "",
+    "- `use: { bypassCSP: true }` - the app ships a strict CSP (no unsafe-eval)",
+    "  that blocks exported string-eval steps.",
+    "- `workers: 1, fullyParallel: false` - shared backend state.",
+    "- Node-context verifiers (imported relatively from the spec repo) reach",
+    "  MongoDB via `MONGO_URI` (or a local `docker exec` fallback) and the",
+    "  Temporal UI API via their fixtures - keep those endpoints reachable.",
+    "",
+    "## Preconditions (NOT exported - wire into globalSetup or a CI step)",
+    "",
+  ];
+  for (const i of info) {
+    lines.push(`### ${i.name} (\`${i.file}\`)`);
+    if (i.preconditions.length === 0) {
+      lines.push("- none");
+    } else {
+      for (const p of i.preconditions) lines.push(`- ${p}`);
+    }
+    lines.push("");
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 function toMarkdown(report: ExportPlaywrightReport): string {

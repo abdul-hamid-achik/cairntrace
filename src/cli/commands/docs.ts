@@ -911,7 +911,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "tmux Phase",
-        body: "The `tmux` step creates a tmux session from scratch via `tmux new-session -d`, then creates N windows, each running one service. `reuseExisting` defaults to true: if the session already exists, it's reused. Under `--cold-start`, any existing session is killed first. Each window has a `name` (must be unique), `cwd` (relative to configDir or absolute), `command`, optional `readyOn` readiness signal, optional `env` (per-window env merged over session env + process.env), and optional `preCommands` (run before the main command, e.g. `yarn build` before `yarn start`). Readiness is probed via `readyOn.url` (HTTP probe) or `readyOn.text` (tmux capture-pane text match). `readyTimeoutMs` bounds the total wait (default 90s); set it to `0` to wait indefinitely. In interactive runs, while a window isn't ready yet its pane tail is streamed every few seconds so you can see startup logs / errors instead of a blind wait. Session-level `options` are applied via `tmux set-option`, and session-level `env` is propagated to all windows via `tmux set-environment`.",
+        body: "The `tmux` step creates a tmux session from scratch via `tmux new-session -d`, then creates N windows, each running one service. `reuseExisting` defaults to true: if the session already exists, it's reused. Under `--cold-start`, any existing session is killed first. Each window has a `name` (must be unique), `cwd` (relative to configDir or absolute), `command`, optional `readyOn` readiness signal, optional `env` (per-window env merged over session env + process.env), and optional `preCommands` (run before the main command, e.g. `yarn build` before `yarn start`). A preCommands entry may also be an object `{run, skipIf}`: `skipIf` is a shell probe executed HOST-SIDE with the window's cwd before sending `run` to the pane — exit 0 means already-fresh, skip `run` (the seed freshnessCheck pattern applied to builds: skip a minutes-long `yarn build` when dist/ is newer than every source file). Probe failure or non-zero exit runs the pre-command, so a broken probe can never silently skip a required build. Readiness is probed via `readyOn.url` (HTTP probe) or `readyOn.text` (tmux capture-pane text match). `readyTimeoutMs` bounds the total wait (default 90s); set it to `0` to wait indefinitely. In interactive runs, while a window isn't ready yet its pane tail is streamed every few seconds so you can see startup logs / errors instead of a blind wait. Session-level `options` are applied via `tmux set-option`, and session-level `env` is propagated to all windows via `tmux set-environment`.",
       },
       {
         title: "Healthchecks",
@@ -1179,19 +1179,47 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "CLI",
-        body: "`cairn export playwright <spec|dir> [--lang js|ts] [--out <file>] [--out-dir <dir>] [--stdout] [--format json|yaml|md]`. Default language is TypeScript (`.spec.ts`). `--lang js` emits `.spec.js` without type annotations. Directory input requires `--out-dir` and expands recursively (skips `actions/` and `_*.yml` drafts). `--stdout` prints source only for a single spec (no coverage report) so you can pipe into a file.",
+        body: "`cairn export playwright <spec|dir> [--lang js|ts] [--out <file>] [--out-dir <dir>] [--project] [--config <path>] [--env <name>] [--var key=value] [--stdout] [--format json|yaml|md]`. Default language is TypeScript (`.spec.ts`). `--lang js` emits `.spec.js` without type annotations. Directory input requires `--out-dir` and expands recursively (skips `actions/` and `_*.yml` drafts). `--stdout` prints source only for a single spec (no coverage report) so you can pipe into a file.",
+      },
+      {
+        title: "Config-aware export (--config/--env/--var)",
+        body: "`--config`, `--env`, and repeatable `--var key=value` resolve `cairntrace.config.yml` vars and `baseUrl` exactly like `cairn spec verify` — auto-discovered from the spec's directory when `--config` is omitted. This means specs using `${vars.*}` are exportable; the resolved values are inlined as literals (they are not secrets). `--project` mode also uses the resolved `baseUrl` to fill in `playwright.config.ts`.",
+      },
+      {
+        title: "Secrets and the run token are never inlined",
+        body: '`${secrets.X}` and an unset `${env.X}` (no `:-default`) never appear as literal values in generated source — they emit as `process.env.X ?? ""` template references, and the file\'s header comment lists every required env var so a reviewer/CI knows what to set. `${run.token}` emits a per-invocation `const RUN_TOKEN = process.env.CAIRN_RUN_TOKEN ?? Math.random()...` so re-running the exported test still produces unique values instead of colliding on stale data.',
+      },
+      {
+        title: "Node file verifiers now export",
+        body: "A `script.runtime: node` verifier backed by `script.file` is no longer skipped: the generated test dynamically `import()`s the verifier module (relative path when the output location is known, otherwise absolute) and calls its `verify(ctx)` with the same fixtures/vars/specDir shape the Cairntrace runner passes. ESM/CJS interop is handled (`mod.verify ?? mod.default ?? mod.default.default`) since Playwright's TS loader can surface a default export either way. Inline `runtime: node` scripts (no `file:`) and browser-context `script.file` are still not exportable — there's no equivalent execution context to run them in.",
+      },
+      {
+        title: "Locator and evaluate semantics",
+        body: 'Semantic locators (role/label/text) emit `.first()` unless an explicit `nth` is set, matching agent-browser\'s first-match behavior against Playwright\'s default strict mode (which throws on ambiguous matches). Evals containing `location.reload()` emit a try/catch retry: Playwright destroys the evaluate execution context on navigation, so a caught "Execution context was destroyed" error triggers `waitForLoadState("networkidle")` followed by a re-run of the same eval, preserving the reload-as-rescue pattern\'s source semantics.',
+      },
+      {
+        title: "Preconditions are not exportable",
+        body: "Spec `preconditions.commands` run outside the browser (shell/mongo resets, pipeline gates) with no Playwright equivalent. Single-file export surfaces them as a ⚠ header comment block instead of silently dropping them. Batch export (`--out-dir`) additionally writes a `README.md` next to the generated files documenting required env vars, config requirements (`bypassCSP: true`, `workers: 1`), and each spec's preconditions so a human can wire them into CI.",
+      },
+      {
+        title: "--project mode (structured project)",
+        body: "`--project` (requires `--out-dir`) generates a full Playwright project instead of standalone spec files: `playwright.config.ts` (baseURL from config, serial `workers: 1`, `bypassCSP: true`, `globalSetup` wired), `global-setup.ts` (deduped spec preconditions as a runnable scaffold; set `SKIP_PRECONDITIONS=1` to skip and wire your own), `actions/<name>.ts` (each reusable action from `imports:` becomes one exported `async function(page)` that tests import, instead of inlining the same flow N times), `verifiers/` (node verifier files copied in so the project is self-contained), `tests/<spec>.spec.ts` (`use:` steps become calls into `actions/`), and `README.md`.",
+      },
+      {
+        title: "--project layout",
+        body: "```\nexports/\n├── README.md\n├── playwright.config.ts   baseURL, workers: 1, bypassCSP, globalSetup\n├── global-setup.ts        deduped preconditions (SKIP_PRECONDITIONS=1 to skip)\n├── actions/\n│   └── login.ts           async function login(page) — from imports: login\n├── verifiers/\n│   └── check-mongo.ts     copied node verifier, self-contained\n└── tests/\n    ├── login.spec.ts\n    └── checkout.spec.ts\n```",
       },
       {
         title: "Coverage report",
-        body: "When writing files, stdout is a structured report: status written|partial|error, per-file coverage (steps/outcomes exported vs total), and skips with reasons. Partial means at least one construct was commented/skipped (eval.file, node script verifiers, monitor, transform, unresolved use:). Agents should read `coverage.skips` in `--format json` before treating a handoff as complete.",
+        body: "When writing files, stdout is a structured report: status written|partial|error, per-file coverage (steps/outcomes exported vs total), and skips with reasons. Partial means at least one construct was commented/skipped (eval.file, browser-context script.file, inline runtime: node scripts, transform, snapshot, monitor, unresolved use:). Agents should read `coverage.skips` in `--format json` before treating a handoff as complete.",
       },
       {
         title: "Fidelity (what exports well)",
-        body: "Well supported: open, click, hover, fill, type, select, upload, download, wait (text/notText/selector/load), press, scroll, request (page.request with cookies + body/headers/expectStatus), eval (inline js), batch (flattened sequential steps — hover atomicity is lost), when: urlContains|urlNotContains|urlMatches|text|notText as real if-blocks, text/notText/url/count/network/console outcomes, browser script.run outcomes, basic httpJson. Skipped or partial: eval.file, script.file / runtime node, transform, snapshot, monitor, process/xlsx/file verifiers, ${requests.*}/${evals.*} splicing in later steps.",
+        body: "Well supported: open, click, hover, fill, type, select, upload, download, wait (text/notText/selector/load), press, scroll, request (page.request with cookies + body/headers/expectStatus), eval (inline js, including location.reload() retry), batch (flattened sequential steps — hover atomicity is lost), when: urlContains|urlNotContains|urlMatches|text|notText as real if-blocks, text/notText/url/count/network/console outcomes, browser script.run outcomes, node file verifiers (script.runtime: node + file: — imported and invoked directly), basic httpJson, ${vars.*} via --config/--env/--var, ${secrets.*}/unset ${env.*}/${run.token} as env/RUN_TOKEN references. Skipped or partial: eval.file, browser-context script.file, inline runtime: node scripts (no file), transform, snapshot, monitor, process/xlsx verifiers, preconditions (surfaced as a comment/README instead), ${requests.*}/${evals.*} splicing in later steps, advanced httpJson matchers (matches/atLeast/atMost).",
       },
       {
         title: "MCP",
-        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout. structuredContent is the same report schema as `--format json`.",
+        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout. structuredContent is the same report schema as `--format json`. `--config`/`--env`/`--var`/`--project` are CLI-only for now.",
       },
       {
         title: "Import (reverse direction)",
@@ -1200,6 +1228,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       {
         title: "Authoring path (writing tests)",
         body: "To write new tests as an agent: `cairn docs authoring` → discovery (`cairn_discover_*` or `cairn discover`) → export YAML → `cairn run --cold-start` → heal if needed. Only then `cairn export playwright` if a Playwright artifact is required.",
+      },
+      {
+        title: "Under the hood",
+        body: "Emission is a small statement IR (`codegen.ts`: raw/comment/block/tryCatch nodes) rendered by a single printer, so indentation and block matching can't drift. String/value quoting is centralized in `templateValue.ts` (`emitStr`/`emitValue`), which is the only place that turns `${secrets.X}`/unset `${env.X}`/`${run.token}` sentinels into `process.env`/`RUN_TOKEN` splices. Golden-file tests (`playwrightExporter.golden.test.ts`, `UPDATE_GOLDENS=1` to regenerate) and a TypeScript parse/type-check pass (`playwrightExporter.validation.test.ts`) guard the generated source against silent drift.",
       },
     ],
     examples: [
@@ -1217,6 +1249,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Pipe source only",
         language: "bash",
         code: "cairn export playwright flows/login.yml --lang ts --stdout > tests/login.spec.ts",
+      },
+      {
+        title: "Export a structured project with resolved config",
+        language: "bash",
+        code: "cairn export playwright flows/ --project --out-dir exports --config cairntrace.config.yml",
       },
     ],
     relatedTopics: [

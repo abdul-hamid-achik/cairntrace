@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { execa } from "execa";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
@@ -227,6 +228,54 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     spec: spec.name,
   });
   opts.listener?.onRunStart?.(spec, runId, runDir, backendName);
+
+  // Execute spec preconditions (setup/reset shell commands) BEFORE any browser
+  // interaction. Until v1.48 the schema accepted `preconditions.commands` but
+  // nothing executed them — guards and data resets silently did nothing. Each
+  // command runs through the shell with cwd = the spec's directory (or its own
+  // `cwd`, resolved against it); `preconditions.env` is layered over
+  // process.env. A non-zero exit aborts the run: a failed precondition means
+  // the spec's contract cannot be evaluated.
+  const preconditionCommands = spec.preconditions?.commands ?? [];
+  if (preconditionCommands.length > 0) {
+    const specDir = dirname(specPath);
+    const preEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...Object.fromEntries(
+        Object.entries(spec.preconditions?.env ?? {}).map(([k, v]) => [
+          k,
+          String(v),
+        ]),
+      ),
+    };
+    for (const [index, command] of preconditionCommands.entries()) {
+      const label = command.name ?? `precondition[${index}]`;
+      const cwd = command.cwd ? resolve(specDir, command.cwd) : specDir;
+      const startedAtMs = Date.now();
+      const result = await execa(command.run, {
+        shell: true,
+        cwd,
+        env: preEnv,
+        reject: false,
+        timeout: command.timeoutMs ?? 120_000,
+        all: true,
+      });
+      const output = String(result.all ?? "");
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "precondition.run",
+        name: label,
+        exitCode: result.exitCode,
+        durationMs: Date.now() - startedAtMs,
+        output: output.slice(0, 4000),
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `Precondition "${label}" failed (exit ${result.exitCode}): ${output.slice(0, 500)}`,
+        );
+      }
+    }
+  }
 
   // Reset backend's network/console logs before the run so we don't pick up
   // leakage from a previous spec on the same session.

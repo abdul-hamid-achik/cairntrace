@@ -642,6 +642,9 @@ export const PreconditionsSchema = z
             name: z.string().optional(),
             run: z.string().min(1),
             cwd: z.string().optional(),
+            /** Per-command timeout in ms (default 120000). Raise for slow
+             * setup like environment quiesce polls. */
+            timeoutMs: z.number().int().positive().optional(),
           })
           .strict(),
       )

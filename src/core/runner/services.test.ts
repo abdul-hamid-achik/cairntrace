@@ -1187,6 +1187,60 @@ describe("startServices — teardown", () => {
     expect(shellCalls.some((c) => c.command === "echo teardown2")).toBe(true);
   });
 
+  it("failure-cleanup leaves tmux + docker alive in reuse mode (mid-startup failure)", async () => {
+    // Regression: a window that never becomes ready throws mid-startup; the
+    // failure-cleanup path used to run ALL teardown commands unconditionally,
+    // killing a reuse-mode session and docker infra. It must skip both, while
+    // still running unrelated teardown commands. has-session succeeds: the
+    // session PRE-EXISTS (the real incident shape - a warm dev session).
+    let killCalls = 0;
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "still booting", stderr: "" };
+      if (cmd === "tmux" && args[0] === "kill-session") {
+        killCalls += 1;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    await expect(
+      startServices(
+        {
+          teardown: [
+            "tmux kill-session -t test-sess",
+            "docker compose down",
+            "echo safe-teardown",
+          ],
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "never-appears" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    ).rejects.toThrow();
+
+    expect(killCalls).toBe(0);
+    expect(shellCalls.some((c) => c.command === "docker compose down")).toBe(
+      false,
+    );
+    expect(shellCalls.some((c) => c.command === "echo safe-teardown")).toBe(
+      true,
+    );
+  });
+
   it("kills tmux session on stop() when reuseExisting: false", async () => {
     let killedSession = false;
     execaImpl = async (cmd, args) => {
@@ -2421,6 +2475,74 @@ describe("startServices — tmux pre-commands", () => {
     expect(sentCommands[0]).toBe("yarn build");
     expect(sentCommands[1]).toBe("yarn migrate");
     expect(sentCommands[2]).toBe("yarn start");
+    void handle;
+  });
+
+  it("skips a pre-command when its skipIf probe exits 0, runs it when non-zero", async () => {
+    let mainSent = false;
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
+        mainSent = true;
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: mainSent ? "node" : "zsh", stderr: "" };
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "ready", stderr: "" };
+      if (cmd === "tmux" && args[0] === "clear-history")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    // First probe (dist fresh) passes -> skip build; second probe fails -> run migrate.
+    shellImpl = async (command: string) => {
+      if (command === "probe-fresh")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (command === "probe-stale")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "answers",
+                command: "yarn start",
+                preCommands: [
+                  { run: "yarn build", skipIf: "probe-fresh" },
+                  { run: "yarn migrate", skipIf: "probe-stale" },
+                  "yarn seed-local",
+                ],
+                readyOn: { text: "ready" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: true },
+      ),
+    );
+
+    const sentCommands = execaCalls
+      .filter(
+        (c) =>
+          c.cmd === "tmux" &&
+          c.args[0] === "send-keys" &&
+          c.args[2]?.includes("answers"),
+      )
+      .map((c) => c.args[3]);
+    // "yarn build" skipped (probe passed); migrate + plain string + main run.
+    expect(sentCommands).toEqual([
+      "yarn migrate",
+      "yarn seed-local",
+      "yarn start",
+    ]);
+    // Both probes ran host-side.
+    expect(shellCalls.some((c) => c.command === "probe-fresh")).toBe(true);
+    expect(shellCalls.some((c) => c.command === "probe-stale")).toBe(true);
     void handle;
   });
 });

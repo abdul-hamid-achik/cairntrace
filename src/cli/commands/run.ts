@@ -215,6 +215,12 @@ export async function runCommand(
   specs: string[],
   opts: RunCommandOptions,
 ): Promise<void> {
+  // First output, before ANY resolution work (config, secrets, services,
+  // browser). A wedged environment (dead docker socket, thrashing swap,
+  // locked secret agent) can stall the later phases for minutes with no
+  // other output; this line makes such hangs localizable from the log
+  // instead of presenting as a 0-byte mystery.
+  runLog.info(`starting: ${specs.join(", ")}`);
   const parallel = Math.max(1, Number(opts.parallel ?? "1"));
   let expandedSpecs: string[];
 
