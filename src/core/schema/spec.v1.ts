@@ -214,6 +214,40 @@ export const WaitConditionSchema = z.union([
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
 
+/**
+ * Post-click condition used by `click.until`. The runner re-issues the click
+ * (at most four total attempts) until this condition holds or its timeout is
+ * exhausted. Text checks use the same normalized, case-insensitive semantics
+ * as `wait` text/notText.
+ */
+export const ClickUntilSchema = z.union([
+  z
+    .object({
+      selectorGone: z.string().min(1),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      selector: z.string().min(1),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      text: z.string().min(1),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      notText: z.string().min(1),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+]);
+export type ClickUntil = z.infer<typeof ClickUntilSchema>;
+
 /* ----- step variants (discriminated by which key is present) ----- */
 
 const stepCommon = {
@@ -251,15 +285,28 @@ export function openPath(step: OpenStep): string {
   return typeof step.open === "string" ? step.open : step.open.path;
 }
 
+const clickTargetSchema = z.union([
+  RoleLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+  LabelLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+  TextLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+  SelectorLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+]);
+
 export const ClickStepSchema = z
   .object({
     ...stepCommon,
-    click: LocatorSchema,
+    click: clickTargetSchema,
     /** Override post-click settling for this interaction. */
     settleMs: z.number().int().min(0).optional(),
   })
   .strict();
 export type ClickStep = z.infer<typeof ClickStepSchema>;
+
+/** Locator portion of a click step, excluding the runner-owned `until`. */
+export function clickLocator(step: ClickStep): Locator {
+  const { until: _until, ...locator } = step.click;
+  return locator as Locator;
+}
 
 export const HoverStepSchema = z
   .object({ ...stepCommon, hover: LocatorSchema })
@@ -270,6 +317,12 @@ export const FillStepSchema = z
   .object({
     ...stepCommon,
     fill: fillTargetSchema,
+    /**
+     * Re-read the live input value after a short settle and retry a wiped
+     * value up to three times. Default true; set false for intentionally
+     * transformed/masked controls whose DOM value differs from authored text.
+     */
+    verifyFill: z.boolean().optional(),
   })
   .strict();
 export type FillStep = z.infer<typeof FillStepSchema>;
@@ -310,6 +363,8 @@ export const TypeStepSchema = z
   .object({
     ...stepCommon,
     type: typeTargetSchema,
+    /** Same hydration-wipe guard as `fill`; default true. */
+    verifyFill: z.boolean().optional(),
   })
   .strict();
 export type TypeStep = z.infer<typeof TypeStepSchema>;

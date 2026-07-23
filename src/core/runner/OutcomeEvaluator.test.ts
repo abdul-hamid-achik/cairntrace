@@ -27,6 +27,9 @@ describe("evaluateOutcomes (dispatcher)", () => {
       getTitle: async () => "Dashboard",
       getText: async () => "Welcome back, Ada",
       getCount: async () => 3,
+      getValue: async () => "",
+      waitForTimeout: async () => undefined,
+      setWaitScale: () => undefined,
       getNetworkRequests: async () => [
         {
           method: "POST",

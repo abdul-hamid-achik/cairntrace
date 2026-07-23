@@ -1247,9 +1247,9 @@ export function buildExplain(): ExplainResult {
         id: "click",
         kind: "interaction",
         summary:
-          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Optional sibling settleMs overrides post-click network-idle settling. Agent-browser precedence is click > spec > browser.postClickSettleMs > 5000; Playwright honors explicit click/spec values; 0 skips the extra settle",
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Optional click.until retries at most four clicks until selectorGone|selector|text|notText holds. Optional sibling settleMs overrides post-click network-idle settling. Agent-browser precedence is click > spec > browser.postClickSettleMs > 5000; Playwright honors explicit click/spec values; 0 skips the extra settle",
         yamlExample:
-          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }\n    settleMs: 0",
+          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }\n    settleMs: 0",
       },
       {
         id: "hover",
@@ -1261,15 +1261,16 @@ export function buildExplain(): ExplainResult {
       {
         id: "fill",
         kind: "interaction",
-        summary: "Fill a locator with a string value",
+        summary:
+          "Fill a locator with a string value, then re-read the live value after settling; retries three times when hydration wipes it. Set sibling verifyFill: false to opt out for transformed/masked controls",
         yamlExample:
-          "steps:\n  - fill: { by: label, name: Email, value: user@example.com }",
+          "steps:\n  - fill: { by: label, name: Email, value: user@example.com }\n  - fill: { by: label, name: Masked ID, value: '1234' }\n    verifyFill: false",
       },
       {
         id: "type",
         kind: "interaction",
         summary:
-          "Type text into a locator character-by-character as real keyboard events (value, optional delayMs per keystroke). Use instead of fill when an SPA framework listens for keydown/input events that fill's bulk value-set doesn't fire — the classic symptom is a submit button staying disabled after fill",
+          "Type text into a locator character-by-character as real keyboard events (value, optional delayMs per keystroke), then re-read and retry when hydration wipes it (sibling verifyFill: false opts out). Use instead of fill when an SPA framework listens for keydown/input events that fill's bulk value-set doesn't fire",
         yamlExample:
           "steps:\n  - type: { by: label, name: Email, value: user@example.com }\n  - type: { by: label, name: Code, value: '1234', delayMs: 50 }",
       },

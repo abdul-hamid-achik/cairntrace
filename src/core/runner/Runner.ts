@@ -56,6 +56,11 @@ import {
   resolveRuntimeFilePath,
 } from "./runtimePlaceholders";
 import { generateRunId } from "./runId";
+import {
+  applyWaitScale,
+  resolveWaitScale,
+  runResilientBrowserStep,
+} from "./interactionResilience";
 import { isRelativeUrl, joinUrl, resolveUrl } from "./url";
 import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
 import {
@@ -191,6 +196,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   });
 
   const env = runtime.envName;
+  const waitScale = resolveWaitScale(
+    runtime.waitScale,
+    opts.env?.["CAIRN_WAIT_SCALE"] ?? process.env["CAIRN_WAIT_SCALE"],
+  );
+  opts.backend.setWaitScale(waitScale);
   // The actual backend that ran is authoritative — spec.backend is only
   // advisory metadata that may not match the CLI's --backend choice.
   const backendName = opts.backend.name;
@@ -515,6 +525,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       artifacts: namedArtifacts,
     });
     stepToRun = applySpecClickSettle(stepToRun, resolved.settleMs);
+    stepToRun = applyWaitScale(stepToRun, waitScale);
     let pendingDownload:
       | {
           assign: string;
@@ -668,7 +679,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           });
         }
       } else {
-        const r = await opts.backend.runStep(stepToRun);
+        const r = await runResilientBrowserStep(
+          stepToRun,
+          opts.backend,
+          waitScale,
+        );
         stepResolved = r.resolvedElement;
         if (!r.ok) {
           stepStatus = "failed";

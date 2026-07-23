@@ -123,6 +123,19 @@ per-agent code paths.
 - Hydration-sensitive first interactions: prefer
   `open: { path, waitUntil: networkidle }` over a separate
   `wait: { load: … }` step.
+- Top-level `fill` / `type` steps re-read the live control value after a short
+  settle and retry up to three times when hydration wipes it. This is on by
+  default; use sibling `verifyFill: false` only for masked/transformed controls
+  whose DOM value intentionally differs from the authored text.
+- When a click can report success before its effect is delivered, use
+  `click.until` with exactly one of `selectorGone`, `selector`, `text`, or
+  `notText` plus optional `timeoutMs`. Cairntrace retries with backoff, at most
+  four total clicks. Text conditions use the same normalized,
+  case-insensitive semantics as waits.
+- High-latency environments can set `environments.<name>.waitScale` (or
+  override it with `CAIRN_WAIT_SCALE`) to multiply wait/settle budgets and the
+  ~500ms network-idle quiet window without hardcoding remote-only budgets into
+  shared actions.
 - On agent-browser, post-click network-idle settling uses click-step `settleMs`,
   then spec-root `settleMs`, config `browser.postClickSettleMs`, then 5000ms.
   Playwright honors explicit click/spec values and otherwise keeps its native

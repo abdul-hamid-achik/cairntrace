@@ -18,23 +18,44 @@ test("golden_late_bound", async ({ page }) => {
   // step: go
   await page.goto("https://example.com/login");
   // step: fill_password
-  await page.locator("input[type=password]").fill(`${process.env.APP_PASSWORD ?? ""}`);
+  {
+    for (let fillAttempt = 0; ; fillAttempt++) {
+      await page.locator("input[type=password]").fill(`${process.env.APP_PASSWORD ?? ""}`);
+      await page.waitForTimeout(500);
+      try {
+        await expect(page.locator("input[type=password]")).toHaveValue(`${process.env.APP_PASSWORD ?? ""}`, { timeout: 500 });
+        break;
+      } catch (err) {
+        if (fillAttempt >= 3) throw new Error("hydration wiped value after 4 attempts", { cause: err });
+      }
+    }
+  }
   // step: fill_unique
-  await page.locator("#site").fill(`site-${RUN_TOKEN}.example.com`);
+  {
+    for (let fillAttempt = 0; ; fillAttempt++) {
+      await page.locator("#site").fill(`site-${RUN_TOKEN}.example.com`);
+      await page.waitForTimeout(500);
+      try {
+        await expect(page.locator("#site")).toHaveValue(`site-${RUN_TOKEN}.example.com`, { timeout: 500 });
+        break;
+      } catch (err) {
+        if (fillAttempt >= 3) throw new Error("hydration wiped value after 4 attempts", { cause: err });
+      }
+    }
+  }
   // step: rescue_blank
   let rescued;
-  try {
-    rescued = await page.evaluate(async (args) => {
-      if (!document.querySelector('#card')) { location.reload(); }
-      return 'ok';
-    }, {});
-  } catch (err) {
-    if (!String(err).includes("Execution context was destroyed")) throw err;
-    await page.waitForLoadState("networkidle", { timeout: 45000 });
-    rescued = await page.evaluate(async (args) => {
-      if (!document.querySelector('#card')) { location.reload(); }
-      return 'ok';
-    }, {});
+  for (let evalAttempt = 0; ; evalAttempt++) {
+    try {
+      rescued = await page.evaluate(async (args) => {
+        if (!document.querySelector('#card')) { location.reload(); }
+        return 'ok';
+      }, {});
+      break;
+    } catch (err) {
+      if (evalAttempt >= 3 || !String(err).includes("Execution context was destroyed")) throw err;
+      await page.waitForLoadState("networkidle", { timeout: 45000 });
+    }
   }
   // Note: later steps that splice ${evals.rescued…} are not rewritten — wire variables manually if needed.
 

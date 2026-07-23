@@ -63,6 +63,75 @@ describe("exportPlaywright", () => {
     expect(src).toContain(
       `await page.getByLabel("Email").first().fill("a@b.c");`,
     );
+    expect(src).toContain(
+      `await expect(page.getByLabel("Email").first()).toHaveValue("a@b.c", { timeout: 500 });`,
+    );
+  });
+
+  it("exports verified fill/type retries and the per-step opt-out", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            fill: { by: "selector", selector: "#name", value: "Ada" },
+          },
+          {
+            type: {
+              by: "selector",
+              selector: "#slug",
+              value: "ada",
+              delayMs: 10,
+            },
+          },
+          {
+            fill: { by: "selector", selector: "#masked", value: "1234" },
+            verifyFill: false,
+          },
+        ],
+      }),
+    );
+
+    expect(
+      src.match(/for \(let fillAttempt = 0; ; fillAttempt\+\+\)/g),
+    ).toHaveLength(2);
+    expect(src).toContain(
+      `if (fillAttempt > 0) await page.locator("#slug").fill("");`,
+    );
+    expect(src).toContain(
+      `await page.locator("#slug").pressSequentially("ada", { delay: 10 });`,
+    );
+    expect(src).toContain(`hydration wiped value after 4 attempts`);
+    expect(src).toContain(`await page.locator("#masked").fill("1234");`);
+  });
+
+  it("exports click.until as a bounded retry loop", () => {
+    const src = srcOf(
+      baseSpec({
+        settleMs: 2_000,
+        steps: [
+          {
+            click: {
+              by: "role",
+              role: "button",
+              name: "Save",
+              until: { selectorGone: "#editor", timeoutMs: 12_000 },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(src).toContain(
+      `const clickTarget = page.getByRole("button", { name: "Save" }).first();`,
+    );
+    expect(src).toContain(`const clickUntilDeadline = Date.now() + 12000;`);
+    expect(src).toContain(`for (let clickAttempt = 0; ; clickAttempt++) {`);
+    expect(src).toContain(
+      `await page.waitForLoadState("networkidle", { timeout: 2000 });`,
+    );
+    expect(src).toContain(
+      `await expect(page.locator("#editor")).toHaveCount(0, { timeout: clickUntilAttemptTimeout });`,
+    );
   });
 
   it("translates select steps to selectOption by value or label", () => {

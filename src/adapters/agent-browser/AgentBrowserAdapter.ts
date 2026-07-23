@@ -16,6 +16,7 @@ import type {
   WaitCondition,
   WaitStep,
 } from "../../core/schema/spec.v1";
+import { clickLocator } from "../../core/schema/spec.v1";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -145,6 +146,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
   private readonly globalArgs: string[];
   /** Set when a child had to be killed — close() escalates to a daemon kill. */
   private sawChildTimeout = false;
+  /** Environment-level multiplier for waits and network-idle quiet windows. */
+  private waitScale = 1;
 
   constructor(private readonly opts: AgentBrowserOptions) {
     this.binary = opts.binary ?? "agent-browser";
@@ -168,7 +171,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if ("download" in step) return this.runDownloadStep(step);
     if ("click" in step)
       return this.runInteractiveStep(
-        step.click,
+        clickLocator(step),
         "click",
         undefined,
         step.settleMs,
@@ -214,6 +217,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // `--load` would burn its full budget (or time out) for nothing.
       const nav = await this.invoke(["navigate", step.open.path]);
       if (!nav.ok) return nav;
+      const waitStartedAt = Date.now();
       const wait = await this.invoke(
         openReadinessArgv(step.open.waitUntil, step.open.timeoutMs),
         { timeoutMs: childDeadline(step.open.timeoutMs) },
@@ -227,9 +231,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
         step.open.waitUntil === "networkidle" &&
         /timed out/i.test(wait.stderr)
       ) {
+        // The full authored/scaled budget was already spent observing a page
+        // that had reached idle before this follow-up command subscribed.
         return { ...wait, ok: true, stderr: "" };
       }
-      return wait;
+      return step.open.waitUntil === "networkidle"
+        ? this.extendNetworkIdleWindow(wait, step.open.timeoutMs, waitStartedAt)
+        : wait;
     }
     if ("wait" in step) return this.runWaitStep(step);
     return this.invoke(stepToArgv(step));
@@ -259,9 +267,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // no spec deadline to divide into slices in the first place — cairn
       // still enforces the deadline via `childDeadline`, it just doesn't own
       // a spec-level number to slice.
-      return this.invoke(stepToArgv(step), {
+      const startedAt = Date.now();
+      const result = await this.invoke(stepToArgv(step), {
         timeoutMs: childDeadline(budgetMs),
       });
+      return "load" in w && w.load === "networkidle"
+        ? this.extendNetworkIdleWindow(result, budgetMs, startedAt)
+        : result;
     }
     return this.runSlicedWaitStep(w, budgetMs);
   }
@@ -464,6 +476,51 @@ export class AgentBrowserAdapter implements BrowserBackend {
       );
     }
     return n;
+  }
+
+  async getValue(locator: Locator): Promise<string> {
+    let target: string;
+    if (locator.by === "selector") {
+      target = locator.selector;
+    } else {
+      const resolved = await this.resolveInteractiveRef(
+        locator,
+        this.locatorTimeoutMs(),
+        "fill",
+      );
+      if (!resolved.ok) {
+        throw new Error(
+          `could not read input value: ${
+            resolved.result.stderr.trim() || `exit ${resolved.result.exitCode}`
+          }`,
+        );
+      }
+      target = `@${resolved.element.ref}`;
+    }
+    const result = await this.invoke(["get", "value", target]);
+    if (!result.ok) {
+      throw new Error(
+        `could not read input value from ${describeLocator(locator)}: ${
+          result.stderr.trim() || `exit ${result.exitCode}`
+        }`,
+      );
+    }
+    return result.stdout;
+  }
+
+  async waitForTimeout(timeoutMs: number): Promise<void> {
+    const result = await this.invoke(["wait", String(timeoutMs)], {
+      timeoutMs: childDeadline(timeoutMs),
+    });
+    if (!result.ok) {
+      throw new Error(
+        result.stderr.trim() || `wait timed out after ${timeoutMs}ms`,
+      );
+    }
+  }
+
+  setWaitScale(scale: number): void {
+    this.waitScale = scale;
   }
 
   /* ----- network ----- */
@@ -1035,11 +1092,69 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   /** The resolved post-click settle budget (click override → config → default). */
   private resolveClickSettleMs(settleMsOverride?: number): number {
-    return (
-      settleMsOverride ??
-      this.opts.postClickSettleMs ??
-      POST_CLICK_NAV_SETTLE_MS
+    if (settleMsOverride !== undefined) return settleMsOverride;
+    return Math.max(
+      1,
+      Math.round(
+        (this.opts.postClickSettleMs ?? POST_CLICK_NAV_SETTLE_MS) *
+          this.waitScale,
+      ),
     );
+  }
+
+  /**
+   * agent-browser's networkidle transition uses a fixed ~500ms quiet window.
+   * Once it reports idle, keep polling PerformanceTiming until the most recent
+   * completed navigation/resource has stayed quiet for the scaled window.
+   */
+  private async extendNetworkIdleWindow(
+    result: InvocationResult,
+    timeoutMs: number | undefined,
+    startedAt: number,
+  ): Promise<InvocationResult> {
+    if (!result.ok || this.waitScale <= 1) return result;
+    const budgetMs =
+      timeoutMs ?? this.opts.defaultTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    const remaining = budgetMs - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      return {
+        ...result,
+        ok: false,
+        exitCode: 1,
+        stderr: appendLine(
+          result.stderr,
+          `scaled networkidle window timed out after ${budgetMs}ms`,
+        ),
+      };
+    }
+    const quietMs = Math.max(
+      NETWORK_IDLE_BASE_WINDOW_MS,
+      Math.round(NETWORK_IDLE_BASE_WINDOW_MS * this.waitScale),
+    );
+    const extended = await this.invoke(
+      [
+        "wait",
+        "--fn",
+        networkIdleQuietExpression(quietMs),
+        "--timeout",
+        String(remaining),
+      ],
+      { timeoutMs: childDeadline(remaining) },
+    );
+    return {
+      ...result,
+      ok: extended.ok,
+      exitCode: extended.ok ? result.exitCode : extended.exitCode,
+      durationMs: result.durationMs + extended.durationMs,
+      stderr: appendLine(
+        result.stderr,
+        extended.ok
+          ? ""
+          : `scaled networkidle window: ${
+              extended.stderr.trim() || `timed out after ${remaining}ms`
+            }`,
+      ),
+    };
   }
 
   /**
@@ -1381,12 +1496,18 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ? { ...r, resolvedElement: toResolvedElement(resolved) }
         : r;
     }
-    const settleResult = await this.invoke(
+    const settleStartedAt = Date.now();
+    const initialSettle = await this.invoke(
       waitConditionToArgv({
         load: "networkidle",
         timeoutMs: settleMs,
       }),
       { timeoutMs: childDeadline(settleMs) },
+    );
+    const settleResult = await this.extendNetworkIdleWindow(
+      initialSettle,
+      settleMs,
+      settleStartedAt,
     );
     // A click that ran for 700ms+ then a wait that timed out is the exact
     // shape of the liftclub failure; surface a short, honest message at the
@@ -1827,6 +1948,7 @@ const WAIT_SLICE_FLOOR_MS = 250;
  * so the daemon's own deadline matches the wrapper's hard kill.
  */
 const POST_CLICK_NAV_SETTLE_MS = 5_000;
+const NETWORK_IDLE_BASE_WINDOW_MS = 500;
 
 /** Link clicks should synchronously schedule SPA navigation; keep retry cheap. */
 const LINK_CLICK_DELIVERY_TIMEOUT_MS = 750;
@@ -1868,6 +1990,25 @@ function childDeadline(stepTimeoutMs: number | undefined): number | undefined {
   return stepTimeoutMs === undefined
     ? undefined
     : stepTimeoutMs + CHILD_KILL_GRACE_MS;
+}
+
+function appendLine(existing: string, line: string): string {
+  return [existing.trim(), line.trim()].filter(Boolean).join("\n");
+}
+
+function networkIdleQuietExpression(quietMs: number): string {
+  return `(() => {
+    const entries = [
+      ...performance.getEntriesByType("navigation"),
+      ...performance.getEntriesByType("resource"),
+    ];
+    const lastActivity = entries.reduce((latest, entry) => {
+      const responseEnd = Number(entry.responseEnd || 0);
+      const startTime = Number(entry.startTime || 0);
+      return Math.max(latest, responseEnd, startTime);
+    }, 0);
+    return performance.now() - lastActivity >= ${quietMs};
+  })()`;
 }
 
 /** How long the SIGTERM attempt waits for the daemon to exit. */

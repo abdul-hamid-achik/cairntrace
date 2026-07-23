@@ -529,6 +529,32 @@ describe("PlaywrightAdapter wait", () => {
     });
   });
 
+  it("extends the fixed networkidle quiet window with waitScale", async () => {
+    vi.useFakeTimers();
+    const adapter = new PlaywrightAdapter();
+    adapter.setWaitScale(3);
+    const waitForLoadState = vi.fn().mockResolvedValue(undefined);
+    const on = vi.fn();
+    const off = vi.fn();
+    installPage(adapter, { waitForLoadState, on, off });
+
+    const pending = adapter.runStep({
+      wait: { load: "networkidle", timeoutMs: 5_000 },
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(on).toHaveBeenCalledWith("request", expect.any(Function));
+    expect(off).toHaveBeenCalledWith("request", expect.any(Function));
+  });
+
   it("waits for a selector to become visible by default", async () => {
     vi.useFakeTimers();
     const adapter = new PlaywrightAdapter();
@@ -816,6 +842,17 @@ describe("PlaywrightAdapter fill on date-ish inputs", () => {
 
     expect(fill).toHaveBeenCalledWith("Ada", { timeout: 1000 });
     expect(result).toMatchObject({ ok: true });
+  });
+
+  it("reads the live input value through the resolved locator", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1_000 });
+    const inputValue = vi.fn().mockResolvedValue("Ada");
+    installPage(adapter, { locator: () => ({ inputValue }) });
+
+    await expect(
+      adapter.getValue({ by: "selector", selector: "#name" }),
+    ).resolves.toBe("Ada");
+    expect(inputValue).toHaveBeenCalledWith({ timeout: 1_000 });
   });
 });
 

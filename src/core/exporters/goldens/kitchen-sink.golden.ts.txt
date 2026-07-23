@@ -24,7 +24,18 @@ test("golden_kitchen_sink", async ({ page }) => {
   // step: hover_row
   await page.locator(".row").hover();
   // step: fill_name
-  await page.getByLabel("Name").first().fill("Ada");
+  {
+    for (let fillAttempt = 0; ; fillAttempt++) {
+      await page.getByLabel("Name").first().fill("Ada");
+      await page.waitForTimeout(500);
+      try {
+        await expect(page.getByLabel("Name").first()).toHaveValue("Ada", { timeout: 500 });
+        break;
+      } catch (err) {
+        if (fillAttempt >= 3) throw new Error("hydration wiped value after 4 attempts", { cause: err });
+      }
+    }
+  }
   // step: pick
   await page.locator("#plan").selectOption({ value: "pro" });
   // step: press_enter

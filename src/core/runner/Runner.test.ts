@@ -1,4 +1,10 @@
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir as makeDir,
+  mkdtemp,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -72,6 +78,49 @@ function withoutNativeRequest(backend: MockBrowserBackend): BrowserBackend {
 }
 
 describe("runSpec e2e (mock backend)", () => {
+  it("applies CAIRN_WAIT_SCALE over the environment config", async () => {
+    const projectDir = join(workDir, "wait-scale-runner");
+    await makeDir(projectDir, { recursive: true });
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: remote
+environments:
+  remote:
+    waitScale: 3
+`,
+    );
+    const specPath = await writeSpecIn(
+      projectDir,
+      "scaled",
+      `version: 1
+name: scaled
+intent: scale remote waits
+outcomes:
+  - id: clean
+    description: console stays clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - wait: { text: Ready, timeoutMs: 1000 }
+`,
+    );
+    const backend = new MockBrowserBackend();
+
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      env: { CAIRN_WAIT_SCALE: "4" },
+    });
+
+    expect(result.status).toBe("passed");
+    expect(backend.waitScale).toBe(4);
+    expect(backend.stepLog).toEqual([
+      { wait: { text: "Ready", timeoutMs: 4_000 } },
+    ]);
+  });
+
   it("produces a complete run dir with passing outcomes", async () => {
     const specPath = await writeSpec(
       "happy",

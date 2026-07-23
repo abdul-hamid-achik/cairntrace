@@ -30,6 +30,8 @@ export interface EnvironmentConfig {
   baseUrl?: string;
   vars?: Record<string, ConfigVarValue>;
   viewport?: ViewportConfig;
+  /** Multiplier for browser waits, settles, and network-idle quiet windows. */
+  waitScale?: number;
   /** Per-env services override: false disables all; partial ServicesConfig
    * is deep-merged over the top-level services block. */
   services?: false | ServicesConfig;
@@ -516,6 +518,8 @@ export const EnvironmentConfigSchema = z
     vars: z.record(ConfigVarValueSchema).optional(),
     /** Browser viewport applied at run start. Spec-level `viewport:` wins. */
     viewport: ViewportConfigSchema.optional(),
+    /** Multiply waits/settles for high-latency environments. Default 1. */
+    waitScale: z.number().positive().finite().optional(),
     /** Per-env services override: false disables all; partial ServicesConfig
      * is deep-merged over the top-level services block. */
     services: z.union([z.literal(false), ServicesConfigSchema]).optional(),

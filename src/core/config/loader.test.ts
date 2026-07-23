@@ -257,6 +257,29 @@ browser:
       ),
     ).rejects.toThrow();
   });
+
+  it("parses a positive per-environment waitScale", async () => {
+    const loaded = await loadBrowserConfig(
+      `version: 1
+environments:
+  local:
+    waitScale: 3
+`,
+    );
+    expect(loaded?.config.environments["local"]?.waitScale).toBe(3);
+  });
+
+  it("rejects a non-positive per-environment waitScale", async () => {
+    await expect(
+      loadBrowserConfig(
+        `version: 1
+environments:
+  local:
+    waitScale: 0
+`,
+      ),
+    ).rejects.toThrow();
+  });
 });
 
 describe("loadConfig env substitution", () => {

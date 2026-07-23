@@ -21,11 +21,13 @@ import {
 } from "../schema/verifier.v1";
 import type {
   BatchSubStep,
+  ClickUntil,
   Locator,
   Outcome,
   Spec,
   Step,
 } from "../schema/spec.v1";
+import { clickLocator } from "../schema/spec.v1";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { bodyTextContainsExpression } from "../textMatching";
 import {
@@ -414,7 +416,12 @@ function renderStepBody(
   }
   if ("click" in step) {
     const settleMs = step.settleMs ?? specSettleMs;
-    const stmts: Stmt[] = [raw(`await ${locator(step.click, ctx)}.click();`)];
+    if (step.click.until) {
+      return renderClickUntilStep(step, settleMs, ctx);
+    }
+    const stmts: Stmt[] = [
+      raw(`await ${locator(clickLocator(step), ctx)}.click();`),
+    ];
     if (settleMs !== undefined && settleMs > 0) {
       stmts.push(
         raw(
@@ -429,18 +436,24 @@ function renderStepBody(
   }
   if ("fill" in step) {
     const { value, ...loc } = step.fill;
-    return one(
-      raw(`await ${locator(loc as Locator, ctx)}.fill(${str(value)});`),
-    );
+    const target = locator(loc as Locator, ctx);
+    const emittedValue = str(value);
+    if (step.verifyFill === false) {
+      return one(raw(`await ${target}.fill(${emittedValue});`));
+    }
+    return renderVerifiedInput(target, emittedValue, "fill");
   }
   if ("type" in step) {
     const { value, delayMs, ...loc } = step.type;
     const opts = delayMs !== undefined ? `, { delay: ${delayMs} }` : "";
-    return one(
-      raw(
-        `await ${locator(loc as Locator, ctx)}.pressSequentially(${str(value)}${opts});`,
-      ),
-    );
+    const target = locator(loc as Locator, ctx);
+    const emittedValue = str(value);
+    if (step.verifyFill === false) {
+      return one(
+        raw(`await ${target}.pressSequentially(${emittedValue}${opts});`),
+      );
+    }
+    return renderVerifiedInput(target, emittedValue, "type", opts);
   }
   if ("select" in step) {
     const { value, label, ...loc } = step.select;
@@ -579,6 +592,101 @@ function renderStepBody(
   );
 }
 
+function renderVerifiedInput(
+  target: string,
+  value: string,
+  action: "fill" | "type",
+  typeOptions = "",
+): Rendered {
+  const invoke =
+    action === "fill"
+      ? `await ${target}.fill(${value});`
+      : `await ${target}.pressSequentially(${value}${typeOptions});`;
+  return {
+    stmts: [
+      braces([
+        block(`for (let fillAttempt = 0; ; fillAttempt++) {`, [
+          ...(action === "type"
+            ? [raw(`if (fillAttempt > 0) await ${target}.fill("");`)]
+            : []),
+          raw(invoke),
+          raw(`await page.waitForTimeout(500);`),
+          tryCatch(
+            [
+              raw(
+                `await expect(${target}).toHaveValue(${value}, { timeout: 500 });`,
+              ),
+              raw(`break;`),
+            ],
+            "err",
+            [
+              raw(
+                `if (fillAttempt >= 3) throw new Error("hydration wiped value after 4 attempts", { cause: err });`,
+              ),
+            ],
+          ),
+        ]),
+      ]),
+    ],
+    exported: true,
+  };
+}
+
+function renderClickUntilStep(
+  step: Extract<Step, { click: unknown }>,
+  settleMs: number | undefined,
+  ctx: EmitCtx,
+): Rendered {
+  const until = step.click.until!;
+  const timeoutMs = until.timeoutMs ?? 30_000;
+  const loop: Stmt[] = [
+    raw(`await clickTarget.click();`),
+    ...(settleMs !== undefined && settleMs > 0
+      ? [
+          raw(
+            `await page.waitForLoadState("networkidle", { timeout: ${settleMs} });`,
+          ),
+        ]
+      : []),
+    raw(
+      `const clickUntilRemaining = Math.max(1, clickUntilDeadline - Date.now());`,
+    ),
+    raw(
+      `const clickUntilAttemptTimeout = clickAttempt >= 3 ? clickUntilRemaining : Math.min(clickUntilRemaining, 250 * (2 ** clickAttempt));`,
+    ),
+    tryCatch([raw(clickUntilAssertion(until, ctx)), raw(`break;`)], "err", [
+      raw(
+        `if (clickAttempt >= 3 || Date.now() >= clickUntilDeadline) throw new Error("click.until condition was not satisfied after 4 attempts", { cause: err });`,
+      ),
+    ]),
+  ];
+
+  return {
+    stmts: [
+      braces([
+        raw(`const clickTarget = ${locator(clickLocator(step), ctx)};`),
+        raw(`const clickUntilDeadline = Date.now() + ${timeoutMs};`),
+        block(`for (let clickAttempt = 0; ; clickAttempt++) {`, loop),
+      ]),
+    ],
+    exported: true,
+  };
+}
+
+function clickUntilAssertion(until: ClickUntil, ctx: EmitCtx): string {
+  const str = (value: string): string => emitStr(value, ctx.usage);
+  if ("selectorGone" in until) {
+    return `await expect(page.locator(${str(until.selectorGone)})).toHaveCount(0, { timeout: clickUntilAttemptTimeout });`;
+  }
+  if ("selector" in until) {
+    return `await expect(page.locator(${str(until.selector)})).not.toHaveCount(0, { timeout: clickUntilAttemptTimeout });`;
+  }
+  if ("text" in until) {
+    return `await expect(page.locator("body")).toContainText(${str(until.text)}, { ignoreCase: true, useInnerText: true, timeout: clickUntilAttemptTimeout });`;
+  }
+  return `await expect(page.locator("body")).not.toContainText(${str(until.notText)}, { ignoreCase: true, useInnerText: true, timeout: clickUntilAttemptTimeout });`;
+}
+
 function renderEvalStep(
   step: Extract<Step, { eval: unknown }>,
   ctx: EmitCtx,
@@ -623,17 +731,24 @@ function renderEvalStep(
   let stmts: Stmt[];
   if (js.includes("location.reload()")) {
     // agent-browser evals survive an in-page location.reload(); Playwright's
-    // evaluate context is destroyed by the navigation instead. Emit a retry so
-    // reload-as-rescue eval patterns keep their source semantics: after the
-    // reload settles, the same eval re-runs and (rescued) succeeds immediately.
+    // evaluate context is destroyed by the navigation instead. Retry in a LOOP
+    // (up to 4 contexts): a hot dev server can navigate/reload more than once
+    // (HMR recompile) while the rescue eval is in flight.
     stmts = [
       ...(varName ? [raw(`let ${varName};`)] : []),
-      tryCatch(evalCall(varName ? `${varName} = ` : ""), "err", [
-        raw(
-          `if (!String(err).includes("Execution context was destroyed")) throw err;`,
+      block(`for (let evalAttempt = 0; ; evalAttempt++) {`, [
+        tryCatch(
+          [...evalCall(varName ? `${varName} = ` : ""), raw(`break;`)],
+          "err",
+          [
+            raw(
+              `if (evalAttempt >= 3 || !String(err).includes("Execution context was destroyed")) throw err;`,
+            ),
+            raw(
+              `await page.waitForLoadState("networkidle", { timeout: 45000 });`,
+            ),
+          ],
         ),
-        raw(`await page.waitForLoadState("networkidle", { timeout: 45000 });`),
-        ...evalCall(varName ? `${varName} = ` : ""),
       ]),
     ];
   } else {

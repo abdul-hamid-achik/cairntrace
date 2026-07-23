@@ -1708,6 +1708,31 @@ describe("verify-after-click + post-nav settle", () => {
     expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("20000");
   });
 
+  it("scales the default settle and extends the networkidle quiet window", async () => {
+    mockClickSequence({
+      snapshot: '- main\n  - button "Save" [ref=e3]\n',
+    });
+    const adapter = new AgentBrowserAdapter({ session: "scaled-settle" });
+    adapter.setWaitScale(3);
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "button", name: "Save" },
+    });
+
+    expect(result.ok).toBe(true);
+    const settleCall = execaMock.mock.calls.find((call) =>
+      (call[1] as string[]).includes("networkidle"),
+    )?.[1] as string[];
+    expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("15000");
+    const quietCall = execaMock.mock.calls.find((call) =>
+      String((call[1] as string[]).join(" ")).includes(
+        "performance.getEntriesByType",
+      ),
+    )?.[1] as string[];
+    expect(quietCall).toContain("--fn");
+    expect(quietCall.join(" ")).toContain(">= 1500");
+  });
+
   it("prefers the click settleMs override over the adapter config", async () => {
     mockClickSequence({ snapshot: '- main\n  - button "Save" [ref=e3]\n' });
     const adapter = new AgentBrowserAdapter({
@@ -2658,6 +2683,22 @@ describe("read failures fail loudly instead of reporting a green verdict", () =>
     const adapter = new AgentBrowserAdapter({ session: "read-fail" });
 
     await expect(adapter.getCount("#absent")).resolves.toBe(0);
+  });
+
+  it("reads the live value of a selector input", async () => {
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "Ada",
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({ session: "read-value" });
+
+    await expect(
+      adapter.getValue({ by: "selector", selector: "#name" }),
+    ).resolves.toBe("Ada");
+    expect(execaMock.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining(["get", "value", "#name"]),
+    );
   });
 
   it("getCount throws when stdout is not a number rather than silently reporting 0", async () => {

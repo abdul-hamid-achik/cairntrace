@@ -30,6 +30,8 @@ export interface SpecRuntimeContext {
   vars: Record<string, ConfigVarValue>;
   /** Environment-level viewport from config (spec-level `viewport:` wins). */
   viewport?: ViewportConfig;
+  /** Environment-level multiplier for waits/settles. */
+  waitScale?: number;
   config?: Config;
   configPath?: string;
   /** Effective services config after merging top-level + per-env override.
@@ -83,6 +85,9 @@ export async function resolveSpecRuntimeContext(
     vars,
     ...(envConfig?.baseUrl ? { baseUrl: envConfig.baseUrl } : {}),
     ...(envConfig?.viewport ? { viewport: envConfig.viewport } : {}),
+    ...(envConfig?.waitScale !== undefined
+      ? { waitScale: envConfig.waitScale }
+      : {}),
     ...(loaded ? loadedConfigFields(loaded) : {}),
     ...(services ? { services } : {}),
     ...(secrets ? { secrets } : {}),

@@ -22,6 +22,85 @@ afterAll(async () => {
 });
 
 describe("parseSpec", () => {
+  it("accepts verifyFill opt-out and typed click.until conditions", async () => {
+    const path = join(dir, "latency-resilience.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: latency_resilience
+intent: survive hydration and delayed save delivery
+outcomes:
+  - id: clean
+    description: console stays clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - fill:
+      by: label
+      name: Name
+      value: Ada
+    verifyFill: false
+  - type:
+      by: selector
+      selector: "#slug"
+      value: ada
+    verifyFill: true
+  - click:
+      by: role
+      role: button
+      name: Save
+      until:
+        selectorGone: "#editor"
+        timeoutMs: 12000
+`,
+    );
+
+    const parsed = await parseSpec(path);
+    expect(parsed.spec.steps).toEqual([
+      {
+        fill: { by: "label", name: "Name", value: "Ada" },
+        verifyFill: false,
+      },
+      {
+        type: { by: "selector", selector: "#slug", value: "ada" },
+        verifyFill: true,
+      },
+      {
+        click: {
+          by: "role",
+          role: "button",
+          name: "Save",
+          until: { selectorGone: "#editor", timeoutMs: 12000 },
+        },
+      },
+    ]);
+  });
+
+  it("rejects click.until with more than one condition", async () => {
+    const path = join(dir, "invalid-click-until.yml");
+    await writeFile(
+      path,
+      `version: 1
+name: invalid_click_until
+intent: reject ambiguous until conditions
+outcomes:
+  - id: clean
+    description: console stays clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - click:
+      by: selector
+      selector: "#save"
+      until:
+        text: Saved
+        selectorGone: "#editor"
+`,
+    );
+
+    await expect(parseSpec(path)).rejects.toThrow();
+  });
+
   it("loads, validates, and resolves ${env.X} substitution", async () => {
     const path = join(dir, "env.yml");
     await writeFile(

@@ -87,6 +87,40 @@ steps:
     expect(ctx.viewport).toEqual({ width: 1280, height: 800 });
   });
 
+  it("surfaces the environment waitScale from config", async () => {
+    const projectRoot = join(dir, "wait-scale-project");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: remote
+environments:
+  remote:
+    baseUrl: https://remote.example.com
+    waitScale: 3
+`,
+    );
+    const specPath = join(flowsDir, "remote.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: remote
+intent: widen remote waits
+outcomes:
+  - id: clean
+    description: console stays clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: /
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath);
+    expect(ctx.waitScale).toBe(3);
+  });
+
   it("lets CLI vars override environment config vars", async () => {
     const projectRoot = join(dir, "override-project");
     const flowsDir = join(projectRoot, "flows");

@@ -1,6 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { openPath, type Step, StepSchema } from "../../core/schema/spec.v1";
+import {
+  openPath,
+  type Locator,
+  type Step,
+  StepSchema,
+} from "../../core/schema/spec.v1";
 import type {
   BackendRequest,
   BackendResponse,
@@ -36,6 +41,8 @@ export class MockBrowserBackend implements BrowserBackend {
   private snapshotText = "- generic\n  - body";
   private textByRegion = new Map<string, string>();
   private countBySelector = new Map<string, number>();
+  private valueByLocator = new Map<string, string>();
+  private valueQueue: Array<string | Error> = [];
   private networkLog: NetworkEntry[] = [];
   private consoleLog: ConsoleEntry[] = [];
   private scriptQueue: unknown[] = [];
@@ -48,6 +55,7 @@ export class MockBrowserBackend implements BrowserBackend {
   public lastEvaluatedScript = "";
   public lastEvaluateOptions: { timeoutMs?: number } | undefined;
   public lastRequest: BackendRequest | undefined;
+  public waitScale = 1;
   /** Settable browser PID for --monitor / monitor-step tests. */
   private mockBrowserPid: number | undefined;
 
@@ -78,6 +86,12 @@ export class MockBrowserBackend implements BrowserBackend {
   }
   setCount(selector: string, n: number): void {
     this.countBySelector.set(selector, n);
+  }
+  setValue(locator: Locator, value: string): void {
+    this.valueByLocator.set(locatorKey(locator), value);
+  }
+  enqueueValue(value: string | Error): void {
+    this.valueQueue.push(value);
   }
   pushNetworkEntry(
     e: Partial<NetworkEntry> & { url: string; method: string },
@@ -127,6 +141,18 @@ export class MockBrowserBackend implements BrowserBackend {
       }
     }
     if ("open" in step) this.url = openPath(step);
+    if ("fill" in step) {
+      const { value, ...locator } = step.fill;
+      this.valueByLocator.set(locatorKey(locator as Locator), value);
+    }
+    if ("type" in step) {
+      const { value, delayMs: _delayMs, ...locator } = step.type;
+      const key = locatorKey(locator as Locator);
+      this.valueByLocator.set(
+        key,
+        (this.valueByLocator.get(key) ?? "") + value,
+      );
+    }
     if ("download" in step) {
       await mkdir(dirname(step.download.saveAs), { recursive: true });
       await writeFile(step.download.saveAs, MOCK_DOWNLOAD);
@@ -163,6 +189,18 @@ export class MockBrowserBackend implements BrowserBackend {
   }
   async getCount(selector: string): Promise<number> {
     return this.countBySelector.get(selector) ?? 0;
+  }
+  async getValue(locator: Locator): Promise<string> {
+    const queued = this.valueQueue.shift();
+    if (queued instanceof Error) throw queued;
+    if (queued !== undefined) return queued;
+    return this.valueByLocator.get(locatorKey(locator)) ?? "";
+  }
+  async waitForTimeout(_timeoutMs: number): Promise<void> {
+    // Mock state transitions are synchronous; keep tests deterministic and fast.
+  }
+  setWaitScale(scale: number): void {
+    this.waitScale = scale;
   }
 
   async getNetworkRequests(filter?: NetworkFilter): Promise<NetworkEntry[]> {
@@ -363,6 +401,19 @@ function matchesStatusFilter(status: number, filter: string): boolean {
   }
   const n = Number(filter);
   return Number.isFinite(n) ? status === n : false;
+}
+
+function locatorKey(locator: Locator): string {
+  switch (locator.by) {
+    case "role":
+      return `role:${locator.role}:${locator.name ?? ""}:${locator.nth ?? ""}`;
+    case "label":
+      return `label:${locator.name}:${locator.nth ?? ""}`;
+    case "text":
+      return `text:${locator.text}:${locator.nth ?? ""}`;
+    case "selector":
+      return `selector:${locator.selector}`;
+  }
 }
 
 /** Minimal 1×1 transparent PNG. */

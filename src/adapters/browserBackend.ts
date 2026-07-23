@@ -1,4 +1,4 @@
-import type { Step } from "../core/schema/spec.v1";
+import type { Locator, Step } from "../core/schema/spec.v1";
 
 /**
  * Generic browser-backend interface. Implemented by AgentBrowserAdapter and
@@ -122,6 +122,16 @@ export interface BrowserBackend {
   getTitle(): Promise<string>;
   getText(selector: string): Promise<string>;
   getCount(selector: string): Promise<number>;
+  /** Read the live DOM value of a form control resolved by a spec locator. */
+  getValue(locator: Locator): Promise<string>;
+  /** Backend-native bounded delay; the mock implementation may resolve immediately. */
+  waitForTimeout(timeoutMs: number): Promise<void>;
+  /**
+   * Set the environment's timing multiplier. Backends use this for timing
+   * that cannot be represented directly on a step, notably the network-idle
+   * quiet window and default post-click settle.
+   */
+  setWaitScale(scale: number): void;
 
   /* ----- network ----- */
   getNetworkRequests(filter?: NetworkFilter): Promise<NetworkEntry[]>;

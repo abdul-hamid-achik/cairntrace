@@ -1,4 +1,5 @@
 import {
+  clickLocator,
   openPath,
   type BatchSubStep,
   type ClickStep,
@@ -84,7 +85,7 @@ export function openStepToArgv(step: OpenStep): string[] {
 }
 
 export function clickStepToArgv(step: ClickStep): string[] {
-  return locatorToArgv(step.click, "click");
+  return locatorToArgv(clickLocator(step), "click");
 }
 
 export function hoverStepToArgv(step: HoverStep): string[] {

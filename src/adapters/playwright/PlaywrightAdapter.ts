@@ -20,6 +20,7 @@ import type {
   Step,
   WaitCondition,
 } from "../../core/schema/spec.v1";
+import { clickLocator } from "../../core/schema/spec.v1";
 import { bodyTextContainsExpression } from "../../core/textMatching";
 import type {
   BackendRequest,
@@ -111,6 +112,8 @@ export class PlaywrightAdapter implements BrowserBackend {
   private videoSpeed = 1;
   /** Sticky when an in-process hard deadline had to abandon a page operation. */
   private pageOperationWedged = false;
+  /** Environment-level multiplier for waits and network-idle quiet windows. */
+  private waitScale = 1;
 
   constructor(private readonly opts: PlaywrightAdapterOptions = {}) {}
 
@@ -124,19 +127,24 @@ export class PlaywrightAdapter implements BrowserBackend {
         if (typeof step.open === "string") {
           await page.goto(step.open, { timeout: this.opts.defaultTimeoutMs });
         } else {
+          const timeout = step.open.timeoutMs ?? this.opts.defaultTimeoutMs;
           await page.goto(step.open.path, {
             waitUntil: step.open.waitUntil,
-            timeout: step.open.timeoutMs ?? this.opts.defaultTimeoutMs,
+            timeout,
           });
+          if (step.open.waitUntil === "networkidle" && this.waitScale > 1) {
+            await this.waitForScaledNetworkIdle(
+              page,
+              timeout ?? DEFAULT_WAIT_TIMEOUT_MS,
+            );
+          }
         }
       } else if ("click" in step) {
-        await this.resolveLocator(step.click).click({
+        await this.resolveLocator(clickLocator(step)).click({
           timeout: this.opts.defaultTimeoutMs,
         });
         if (step.settleMs !== undefined && step.settleMs > 0) {
-          await page.waitForLoadState("networkidle", {
-            timeout: step.settleMs,
-          });
+          await this.waitForScaledNetworkIdle(page, step.settleMs);
         }
       } else if ("hover" in step) {
         await this.resolveLocator(step.hover).hover({
@@ -359,6 +367,27 @@ export class PlaywrightAdapter implements BrowserBackend {
         { cause: e },
       );
     }
+  }
+
+  async getValue(locator: Locator): Promise<string> {
+    try {
+      return await this.resolveLocator(locator).inputValue({
+        timeout: this.opts.defaultTimeoutMs,
+      });
+    } catch (e) {
+      throw new Error(`could not read input value: ${(e as Error).message}`, {
+        cause: e,
+      });
+    }
+  }
+
+  async waitForTimeout(timeoutMs: number): Promise<void> {
+    const page = await this.ensurePage();
+    await page.waitForTimeout(timeoutMs);
+  }
+
+  setWaitScale(scale: number): void {
+    this.waitScale = scale;
   }
 
   async getNetworkRequests(filter?: NetworkFilter): Promise<NetworkEntry[]> {
@@ -1024,8 +1053,35 @@ export class PlaywrightAdapter implements BrowserBackend {
         timeout,
       });
     } else {
-      await page.waitForLoadState(cond.load, { timeout });
+      if (cond.load === "networkidle") {
+        await this.waitForScaledNetworkIdle(page, timeout);
+      } else {
+        await page.waitForLoadState(cond.load, { timeout });
+      }
     }
+  }
+
+  /**
+   * Playwright's built-in networkidle uses a fixed ~500ms quiet window. After
+   * it succeeds, keep tracking new requests until the environment-scaled
+   * remainder is also continuously quiet.
+   */
+  private async waitForScaledNetworkIdle(
+    page: Page,
+    timeoutMs: number,
+  ): Promise<void> {
+    const started = Date.now();
+    await page.waitForLoadState("networkidle", { timeout: timeoutMs });
+    const extraQuietMs = Math.max(
+      0,
+      Math.round(NETWORK_IDLE_BASE_WINDOW_MS * (this.waitScale - 1)),
+    );
+    if (extraQuietMs === 0) return;
+    const remaining = timeoutMs - (Date.now() - started);
+    if (remaining <= 0) {
+      throw new TimeoutError(`networkidle timed out after ${timeoutMs}ms`);
+    }
+    await waitForContinuousRequestQuiet(page, extraQuietMs, remaining);
   }
 
   private evaluateTimeoutMs(): number {
@@ -1149,6 +1205,7 @@ const DEFAULT_SCROLL_PX = 400;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_EVALUATE_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+const NETWORK_IDLE_BASE_WINDOW_MS = 500;
 const SCREENSHOT_TIMEOUT_MS = 15_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
@@ -1158,6 +1215,51 @@ const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
 const HARD_TIMEOUT_FLOOR_BUFFER_MS = 1_000;
 
 class TimeoutError extends Error {}
+
+function waitForContinuousRequestQuiet(
+  page: Page,
+  quietMs: number,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const pending = new Set<Request>();
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutTimer = setTimeout(() => {
+      cleanup();
+      reject(new TimeoutError(`networkidle timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const armQuietTimer = (): void => {
+      if (pending.size > 0) return;
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, quietMs);
+    };
+    const onRequest = (request: Request): void => {
+      pending.add(request);
+      if (quietTimer) clearTimeout(quietTimer);
+      quietTimer = undefined;
+    };
+    const onRequestDone = (request: Request): void => {
+      pending.delete(request);
+      armQuietTimer();
+    };
+    const cleanup = (): void => {
+      clearTimeout(timeoutTimer);
+      if (quietTimer) clearTimeout(quietTimer);
+      page.off("request", onRequest);
+      page.off("requestfinished", onRequestDone);
+      page.off("requestfailed", onRequestDone);
+    };
+
+    page.on("request", onRequest);
+    page.on("requestfinished", onRequestDone);
+    page.on("requestfailed", onRequestDone);
+    armQuietTimer();
+  });
+}
 
 function screenshotTimeoutMessage(): string {
   return `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms — no rendering surface; is the display asleep or headless?`;
