@@ -35,20 +35,41 @@ your own permission shim.
 
 ## Artifact contents
 
-Run artifacts (`run.json`, `agent_context.md`, `network/*.ndjson`,
-`console/*.ndjson`) include:
+Run artifacts can include request URLs and response metadata, console
+messages, page text, storage-derived state, screenshots, videos, downloads,
+and browser traces.
 
-- Full request URLs (including query-string `?token=...` parameters)
-- Network response headers
-- Console messages (which may contain credentials if your app logs them)
-- localStorage / sessionStorage snapshots (when captured)
+Cairntrace applies its redactor before writing Cairntrace-authored text and
+structured JSON. Registered literal secrets (including values resolved from
+TinyVault), values under sensitive keys, Authorization/Cookie header lines,
+and common token-bearing query parameters are replaced with `[redacted]`. The
+spec's `redaction.values` adds application-specific literals to that set. This
+protection covers run records, reports, event streams, network and console
+text, request/eval captures, investigation results, and outcome JSON sidecars.
 
-The `RedactionConfig` in `spec.v1.ts` (`headers`, `queryParams`,
-`storageKeys`, `values`) is declared but **not yet wired through to the
-artifact writers**. Until v1.x lands the redaction pipeline, treat
-`~/.cairntrace/runs/` as containing potentially sensitive material. Do
-not commit it to git; do not paste run paths into public issues without
-reviewing the content.
+The redactor cannot inspect producer-owned binary files. Screenshots and videos
+can show credentials or personal data rendered in the page. Downloads and
+transform outputs keep their original contents. Trace archives can embed DOM,
+storage, and network resources. Audit applies a post-extraction redaction pass
+to vidtrace `.json`, `.txt`, `.srt`, `.tsv`, `.vtt`, `.md`, and `.csv` files,
+including registered spec literal values. Vidtrace frames and other images
+remain uninspected binary evidence. Unknown sensitive values can remain in
+Cairntrace-authored text if neither their key nor their literal value is
+registered.
+
+Treat `~/.cairntrace/runs/` as sensitive. Do not commit run directories or
+attach them to public issues without reviewing both text and binary content.
+Use narrow capture policies and isolated per-tenant artifact roots in shared CI.
+
+## Dependency override boundary
+
+Production verification runs `bun audit --production`. The current dependency
+resolution overrides `@hono/node-server` to `2.0.11` to avoid advisories in the
+older line, even though the MCP SDK currently declares `^1.19.9`. Cairntrace
+exposes and tests the MCP server over stdio only; it does not expose an HTTP MCP
+transport. The override therefore has stdio test coverage, but it is not a
+claim of HTTP compatibility with that SDK dependency range. Re-evaluate or
+remove the override when the SDK adopts a compatible patched range.
 
 ## What we hardened in v1.0
 

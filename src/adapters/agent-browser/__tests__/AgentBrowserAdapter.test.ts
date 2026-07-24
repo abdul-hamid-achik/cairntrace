@@ -338,28 +338,28 @@ describe("strict semantic interaction resolution", () => {
     execaMock
       .mockResolvedValueOnce({
         exitCode: 0,
-        stdout: '- main\n  - button "Cobrar plan" [ref=e5]\n',
+        stdout: '- main\n  - button "Pay for plan" [ref=e5]\n',
         stderr: "",
       })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // scrollintoview
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!) // get box (post-scroll check)
       .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!) // eval viewport metrics
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }) // click
-      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // post-click settle (wait --load networkidle)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" }); // click
     const adapter = new AgentBrowserAdapter({ session: "click-test" });
 
     const result = await adapter.runStep({
-      click: { by: "role", role: "button", name: "Cobrar plan" },
+      click: { by: "role", role: "button", name: "Pay for plan" },
     });
 
     expect(result.ok).toBe(true);
     expect(result.resolvedElement).toEqual({
       role: "button",
-      name: "Cobrar plan",
+      name: "Pay for plan",
       ref: "e5",
     });
-    // 1 snapshot + 1 scrollintoview + 1 get box + 1 eval metrics + 1 click + 1 wait (settle) = 6
-    expect(execaMock).toHaveBeenCalledTimes(6);
+    // Ordinary buttons do not pay a default networkidle wait.
+    // 1 snapshot + 1 scrollintoview + 1 get box + 1 eval metrics + 1 click = 5.
+    expect(execaMock).toHaveBeenCalledTimes(5);
     expect(execaMock).toHaveBeenNthCalledWith(
       5,
       "agent-browser",
@@ -596,10 +596,10 @@ describe("strict semantic interaction resolution", () => {
     expect(result.resolvedElement?.ref).toBe("e3");
   });
 
-  it("does NOT substring-match: 'Cobrar' must not bind to 'Cobrar plan'", async () => {
+  it("does NOT substring-match: 'Pay' must not bind to 'Pay for plan'", async () => {
     execaMock.mockResolvedValue({
       exitCode: 0,
-      stdout: '- main\n  - button "Cobrar plan" [ref=e5]\n',
+      stdout: '- main\n  - button "Pay for plan" [ref=e5]\n',
       stderr: "",
     });
     const adapter = new AgentBrowserAdapter({
@@ -608,7 +608,7 @@ describe("strict semantic interaction resolution", () => {
     });
 
     const result = await adapter.runStep({
-      click: { by: "role", role: "button", name: "Cobrar" },
+      click: { by: "role", role: "button", name: "Pay" },
     });
 
     expect(result.ok).toBe(false);
@@ -642,13 +642,13 @@ describe("strict semantic interaction resolution", () => {
     execaMock.mockResolvedValue({
       exitCode: 0,
       stdout:
-        '- main\n  - button "Cobrar" [ref=e5]\n  - button "Cobrar" [ref=e9]\n  - button "Cobrar" [ref=e10]\n  - button "Cobrar" [ref=e11]\n',
+        '- main\n  - button "Pay" [ref=e5]\n  - button "Pay" [ref=e9]\n  - button "Pay" [ref=e10]\n  - button "Pay" [ref=e11]\n',
       stderr: "",
     });
     const adapter = new AgentBrowserAdapter({ session: "ambiguous-test" });
 
     const result = await adapter.runStep({
-      click: { by: "role", role: "button", name: "Cobrar" },
+      click: { by: "role", role: "button", name: "Pay" },
     });
 
     expect(result.ok).toBe(false);
@@ -669,7 +669,7 @@ describe("strict semantic interaction resolution", () => {
       .mockResolvedValueOnce({
         exitCode: 0,
         stdout:
-          '- main\n  - button "Cobrar" [ref=e5]\n  - button "Cobrar" [ref=e9]\n',
+          '- main\n  - button "Pay" [ref=e5]\n  - button "Pay" [ref=e9]\n',
         stderr: "",
       })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
@@ -682,7 +682,7 @@ describe("strict semantic interaction resolution", () => {
     const adapter = new AgentBrowserAdapter({ session: "nth-test" });
 
     const result = await adapter.runStep({
-      click: { by: "role", role: "button", name: "Cobrar", nth: 1 },
+      click: { by: "role", role: "button", name: "Pay", nth: 1 },
     });
 
     expect(result.ok).toBe(true);
@@ -1632,7 +1632,7 @@ describe("verify-after-click + post-nav settle", () => {
     execaMock.mockReset();
   });
 
-  it("passes when the URL is already stable across pre/post (no nav)", async () => {
+  it("skips the default networkidle wait for an ordinary non-navigation button", async () => {
     mockClickSequence({ snapshot: '- main\n  - button "Toggle" [ref=e1]\n' });
     const adapter = new AgentBrowserAdapter({ session: "stable-url" });
 
@@ -1640,19 +1640,15 @@ describe("verify-after-click + post-nav settle", () => {
       click: { by: "role", role: "button", name: "Toggle" },
     });
     expect(r.ok).toBe(true);
-    // The settle fold is the only thing that distinguishes this from the
-    // non-verify case — it issues a `wait --load networkidle` after the
-    // click (1 snapshot + 1 scrollintoview + 1 get box + 1 eval metrics +
-    // 1 click + 1 wait = 6).
-    expect(execaMock).toHaveBeenCalledTimes(6);
-    const settleCall = execaMock.mock.calls.find((call) =>
-      (call[1] as string[]).includes("--load"),
-    )?.[1] as string[];
-    expect(settleCall).toContain("wait");
-    expect(settleCall).toContain("networkidle");
+    expect(execaMock).toHaveBeenCalledTimes(5);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("networkidle"),
+      ),
+    ).toBe(false);
   });
 
-  it("fails the click at the click step when the post-click settle times out", async () => {
+  it("fails the click when an explicitly-authored settle times out", async () => {
     mockClickSequence({
       snapshot: '- main\n  - button "ELEGIR PLAN" [ref=e22]\n',
       onSettle: () => ({
@@ -1666,6 +1662,7 @@ describe("verify-after-click + post-nav settle", () => {
 
     const r = await adapter.runStep({
       click: { by: "role", role: "button", name: "ELEGIR PLAN" },
+      settleMs: 5_000,
     });
     expect(r.ok).toBe(false);
     expect(r.stderr).toContain("post-click settle");
@@ -1708,11 +1705,14 @@ describe("verify-after-click + post-nav settle", () => {
     expect(settleCall[settleCall.indexOf("--timeout") + 1]).toBe("20000");
   });
 
-  it("scales the default settle and extends the networkidle quiet window", async () => {
+  it("scales a configured settle and extends the networkidle quiet window", async () => {
     mockClickSequence({
       snapshot: '- main\n  - button "Save" [ref=e3]\n',
     });
-    const adapter = new AgentBrowserAdapter({ session: "scaled-settle" });
+    const adapter = new AgentBrowserAdapter({
+      session: "scaled-settle",
+      postClickSettleMs: 5_000,
+    });
     adapter.setWaitScale(3);
 
     const result = await adapter.runStep({
@@ -1779,7 +1779,7 @@ describe("verify-after-click + post-nav settle", () => {
   });
 
   it("retries the adapter's own 'daemon may be unresponsive' timeout message", async () => {
-    // Mirrors the liftclub pattern: a click that doesn't land produces
+    // Mirrors a production pattern: a click that doesn't land produces
     // a 30s agent-browser --timeout hit, surfacing the adapter's own
     // generated stderr. The fixed regex now matches it for one retry.
     mockClickSequence({
@@ -1795,6 +1795,7 @@ describe("verify-after-click + post-nav settle", () => {
 
     await adapter.runStep({
       click: { by: "role", role: "button", name: "Submit" },
+      settleMs: 5_000,
     });
     // 1 snapshot + 1 scrollintoview + 1 get box + 1 metrics + 1 click + 1 settle
     // (the retry short-circuits because sawChildTimeout is now true). The
@@ -1895,12 +1896,13 @@ describe("link click delivery recovery", () => {
     expect(mouseArgv).toContain("mouse move 140 220");
     expect(mouseArgv).toContain("mouse down left");
     expect(mouseArgv).toContain("mouse up left");
-    // Delivery succeeded, so the default post-click networkidle settle runs.
+    // Delivery confirmation is the default handoff; a healthy link must not
+    // be false-failed by a second, implicit networkidle wait.
     expect(
       execaMock.mock.calls.some((call) =>
         (call[1] as string[]).includes("networkidle"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("does not queue a recovery command after the delivery child hard-times out", async () => {
@@ -2048,7 +2050,7 @@ describe("link click delivery recovery", () => {
     ).toBe(false);
   });
 
-  it("does not retry a link whose first click changes URL or DOM", async () => {
+  it("uses delivered same-tab link evidence as the default handoff without networkidle", async () => {
     execaMock.mockImplementation((_bin: string, argv: string[]) => {
       if (argv.includes("snapshot")) {
         return Promise.resolve({
@@ -2091,6 +2093,16 @@ describe("link click delivery recovery", () => {
     expect(
       execaMock.mock.calls.some((call) =>
         (call[1] as string[]).includes("batch"),
+      ),
+    ).toBe(false);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("--fn"),
+      ),
+    ).toBe(true);
+    expect(
+      execaMock.mock.calls.some((call) =>
+        (call[1] as string[]).includes("networkidle"),
       ),
     ).toBe(false);
   });
@@ -2197,7 +2209,7 @@ describe("selector click rect-settle guard", () => {
   });
 
   it("fails a selector click loudly when the target settles off-viewport", async () => {
-    // liftclub round-2 item 1b: a `by: selector` click into a transitioning
+    // Regression: a `by: selector` click into a transitioning
     // sheet used to skip the ref path's off-viewport guard entirely —
     // agent-browser exits 0 and the step reported ✓ while the app's handler
     // never fired.
@@ -2279,9 +2291,9 @@ describe("selector click rect-settle guard", () => {
     });
 
     expect(result.ok).toBe(true);
-    // Folded scroll+settle+classify eval + click + networkidle settle = 3 —
-    // the guard rides the eval this path already paid for.
-    expect(execaMock).toHaveBeenCalledTimes(3);
+    // Folded scroll+settle+classify eval + click = 2 — no default
+    // networkidle invocation, and the guard rides the eval already paid for.
+    expect(execaMock).toHaveBeenCalledTimes(2);
     expect(
       execaMock.mock.calls.filter((call) =>
         (call[1] as string[]).includes("click"),

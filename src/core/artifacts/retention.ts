@@ -81,6 +81,8 @@ export interface PruneResult {
   freedBytes: number;
   /** Run dirs remaining after the prune. */
   kept: number;
+  /** Runs retained because their archive step failed. */
+  archiveFailures: Array<{ runId: string; error: string }>;
 }
 
 /** The spec-name segment of a run id, or undefined for non-run entries. */
@@ -109,7 +111,12 @@ export async function pruneRuns(
   );
 
   const keepCount = Math.max(0, opts.keepRuns);
-  const result: PruneResult = { removed: [], freedBytes: 0, kept: 0 };
+  const result: PruneResult = {
+    removed: [],
+    freedBytes: 0,
+    kept: 0,
+    archiveFailures: [],
+  };
   for (const runs of bySpec.values()) {
     runs.sort(); // ISO prefix → chronological
 
@@ -149,8 +156,13 @@ export async function pruneRuns(
       if (opts.onArchive) {
         try {
           await opts.onArchive(dir, runId);
-        } catch {
+        } catch (error) {
           // Archive failed — keep the run, skip deletion.
+          result.kept++;
+          result.archiveFailures.push({
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
           continue;
         }
       }

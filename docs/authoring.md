@@ -62,7 +62,7 @@ metadata:
   feature: answer-change-temporal
   priority: high
   tags:
-    - OPG-14827
+    - checkout-regression
     - temporal
     - answer-change
 ```
@@ -73,7 +73,7 @@ cairn run flows/ --tag answer-change --select-only --json
 
 # run every matching spec (AND if you pass multiple --tag)
 cairn run flows/ --tag answer-change --cold-start --headed
-cairn run flows/ --tag temporal --tag OPG-14827 --cold-start
+cairn run flows/ --tag temporal --tag checkout-regression --cold-start
 ```
 
 Matching is **case-insensitive**. Multiple `--tag` flags mean **AND** (the spec must declare every listed tag). Specs with no `metadata.tags` never match a tag filter.
@@ -85,7 +85,7 @@ Stamp free-form **cohort labels** on every run in an invocation:
 ```bash
 cairn run flows/ --tag answer-change \
   --label path=temporal \
-  --label suite=opg-14827-ab \
+  --label suite=answer-change-ab \
   --before 'tools/set-answer-change-path.sh temporal' \
   --cold-start
 ```
@@ -98,7 +98,7 @@ cairn run flows/ --tag answer-change \
 Aggregate cohorts:
 
 ```bash
-cairn stats --group-by path --label suite=opg-14827-ab --baseline rabbit --format md
+cairn stats --group-by path --label suite=answer-change-ab --baseline rabbit --format md
 ```
 
 Markdown output includes a table, ASCII bar charts (pass rate / duration p50 / optional domain metric), and pairwise deltas. JSON/YAML use schema `urn:cairntrace.dev:stats:v1`. Domain latency is harvested from `outcomes/*.raw.json` when fields like `processingDurationMS` are present.
@@ -140,7 +140,11 @@ over a separate `wait:` step. Two `wait`s in series are how a fast spec turns in
 
 ## Repairs are first-class
 
-When a run fails, the artifacts include `agent_context.md`, `outcomes/*.md`, `diagnostics/failure.md`, and the raw `console/`, `network/`, `screens/final.txt`, and `frames/frames.ndjson`. The repair engine reads those and proposes step rewrites that preserve the contract hash.
+When a run fails, start with `agent_context.md` and `outcomes/*.md`. The run
+also retains `events.ndjson`, `console/`, `network/`, per-step files under
+`diagnostics/`, and any snapshots, screenshots, trace, or video enabled by the
+capture policy. The repair engine reads the structured evidence and proposes
+step rewrites that preserve the contract hash.
 
 The repair proposal is a suggestion, not an approval. Open the diff, check that the contract is unchanged, and apply only what keeps the behavior intact. If the diff touches `intent` or `outcomes`, that is *not* a repair; that is a contract change, and the hash must be re-stamped.
 

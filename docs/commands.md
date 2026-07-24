@@ -21,14 +21,16 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 
 ## Evidence
 
-- [Stash](/stash) — `cairn stash` persists run packs to fcheap for search and sharing.
+- [Stash](/stash) — `cairn stash` persists run packs in the local file.cheap vault for retention-safe search.
 - [Clip](/clip) — `cairn clip` cuts named clips from a run video via vidtrace.
 - [Process monitoring](/monitor) — `--monitor` samples the browser process tree; the `monitor` step and `process` verifier assert on it.
 - **Stats** — `cairn stats --group-by <label-key>` aggregates labeled runs (`cairn run --label key=value`) into A/B cohorts with pass rate, duration percentiles, optional domain metrics from `outcomes/*.raw.json`, and ASCII charts in markdown. Pair with `--before` hooks for domain path flips before a suite.
 
 ## Failure → code
 
-- [Investigate & audit](/investigate) — `cairn investigate` / `cairn audit` stash a failed run and surface code candidates via vecgrep.
+- [Investigate & audit](/investigate) — `cairn investigate` stashes an existing
+  run for optional code search; `cairn audit` records a Playwright video and
+  uses file.cheap/vecgrep only when stash or connection is requested.
 - [Annotate](/annotate) — `cairn annotate` pins cairntrace findings to codemap symbols; `--auto-annotate` does it per run.
 
 ## Environment

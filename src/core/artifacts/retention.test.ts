@@ -39,8 +39,8 @@ async function makeRunDir(
 describe("specNameOfRunId", () => {
   it("extracts snake_case spec names (with underscores) from run ids", () => {
     expect(
-      specNameOfRunId("2026-06-04T10-00-00-000Z_member_checkout_a1b2c3"),
-    ).toBe("member_checkout");
+      specNameOfRunId("2026-06-04T10-00-00-000Z_checkout_flow_a1b2c3"),
+    ).toBe("checkout_flow");
   });
 
   it("rejects non-run directory names", () => {
@@ -92,7 +92,12 @@ describe("pruneRuns", () => {
     const result = await pruneRuns("/nonexistent/cairntrace-root", {
       keepRuns: 5,
     });
-    expect(result).toEqual({ removed: [], freedBytes: 0, kept: 0 });
+    expect(result).toEqual({
+      removed: [],
+      freedBytes: 0,
+      kept: 0,
+      archiveFailures: [],
+    });
   });
 
   it("archives pruned runs via onArchive before deletion", async () => {
@@ -137,7 +142,17 @@ describe("pruneRuns", () => {
 
     // Nothing removed — archive failed, runs retained to avoid data loss.
     expect(result.removed).toEqual([]);
-    expect(result.kept).toBe(1);
+    expect(result.kept).toBe(3);
+    expect(result.archiveFailures).toEqual([
+      {
+        runId: "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",
+        error: "fcheap down",
+      },
+      {
+        runId: "2026-06-02T10-00-00-000Z_spec_a_bbbbbb",
+        error: "fcheap down",
+      },
+    ]);
     const remaining = (await readdir(root)).toSorted();
     expect(remaining).toEqual([
       "2026-06-01T10-00-00-000Z_spec_a_aaaaaa",

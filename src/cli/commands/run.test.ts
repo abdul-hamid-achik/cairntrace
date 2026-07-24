@@ -1,5 +1,13 @@
 import { execa } from "execa";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -175,10 +183,17 @@ describe("tag selection (metadata.tags)", () => {
   });
 
   it("specMatchesTags is case-insensitive AND", () => {
-    expect(specMatchesTags(["OPG-14827", "temporal"], ["temporal"])).toBe(true);
-    expect(specMatchesTags(["OPG-14827", "temporal"], ["TEMPORAL"])).toBe(true);
     expect(
-      specMatchesTags(["OPG-14827", "temporal"], ["temporal", "buyer-path"]),
+      specMatchesTags(["checkout-regression", "temporal"], ["temporal"]),
+    ).toBe(true);
+    expect(
+      specMatchesTags(["checkout-regression", "temporal"], ["TEMPORAL"]),
+    ).toBe(true);
+    expect(
+      specMatchesTags(
+        ["checkout-regression", "temporal"],
+        ["temporal", "buyer-path"],
+      ),
     ).toBe(false);
     expect(specMatchesTags([], ["temporal"])).toBe(false);
     expect(specMatchesTags(["x"], [])).toBe(true);
@@ -205,7 +220,7 @@ describe("tag selection (metadata.tags)", () => {
     const r = await selectSpecsByTags([a, b, c], ["answer-change"]);
     expect(r.selected).toEqual([a]);
     expect(r.skipped).toHaveLength(2);
-    expect(r.skipped.map((s) => basename(s.path)).sort()).toEqual([
+    expect(r.skipped.map((s) => basename(s.path)).toSorted()).toEqual([
       "b.yml",
       "c.yml",
     ]);
@@ -221,7 +236,7 @@ describe("tag selection (metadata.tags)", () => {
     const b = join(dir, "miss.yml");
     await writeFile(
       a,
-      `version: 1\nname: hit\nintent: hit\nmetadata:\n  tags: [answer-change, OPG-14827]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+      `version: 1\nname: hit\nintent: hit\nmetadata:\n  tags: [answer-change, checkout-regression]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
     );
     await writeFile(
       b,
@@ -238,7 +253,7 @@ describe("tag selection (metadata.tags)", () => {
     expect(result.selected).toHaveLength(1);
     expect(result.selected[0]!.name).toBe("hit");
     expect(result.selected[0]!.tags).toEqual(
-      expect.arrayContaining(["answer-change", "OPG-14827"]),
+      expect.arrayContaining(["answer-change", "checkout-regression"]),
     );
     expect(result.skipped).toHaveLength(1);
     expect(result.skipped[0]!.name).toBe("miss");
@@ -322,7 +337,7 @@ services:
     command: "yarn demo-import --mongo-include=queuelogs --mongo-include=eventlogs"
     ttlSeconds: 3600
   tmux:
-    session: graphite
+    session: sample-app
     windows:
       - name: web-app
         cwd: web-app
@@ -335,7 +350,7 @@ services:
         readyOn:
           text: "listening on"
   teardown:
-    - "tmux kill-session -t graphite"
+    - "tmux kill-session -t sample-app"
     - "docker compose down"
 `,
       `version: 1
@@ -357,7 +372,7 @@ steps:
     expect(stderr).toContain("reuseExisting: true");
     expect(stderr).toContain("seed: yarn demo-import");
     expect(stderr).toContain("ttlSeconds: 3600");
-    expect(stderr).toContain("tmux: session=graphite, 2 windows");
+    expect(stderr).toContain("tmux: session=sample-app, 2 windows");
     expect(stderr).toContain("teardown: 2 command(s)");
   });
 
@@ -888,6 +903,116 @@ steps: []
     ).toMatchObject({ run: { status: "passed" } });
     expect(terminated.stderr).toContain("wrote aborted batch summary");
   }, 10_000);
+});
+
+describe("run failure automation (file.cheap)", () => {
+  it("consumes stash + investigate config and reuses one validated stash receipt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-automation-"));
+    const runsRoot = join(dir, "runs");
+    const codebase = join(dir, "codebase");
+    const binDir = join(dir, "bin");
+    const specPath = join(dir, "failing.yml");
+    const configPath = join(dir, "cairntrace.config.yml");
+    const argsPath = join(dir, "fcheap-args.txt");
+    await mkdir(codebase, { recursive: true });
+    await mkdir(binDir, { recursive: true });
+    await writeFile(
+      specPath,
+      `version: 1
+name: failure_automation
+intent: failed runs trigger configured local investigation
+coldStart: guest
+outcomes:
+  - id: fails
+    description: deliberately missing text
+    verify: { text: { contains: "never-present" } }
+steps:
+  - open: /
+`,
+    );
+    await writeFile(
+      configPath,
+      `version: 1
+environments: {}
+artifactRoot: ${JSON.stringify(runsRoot)}
+retention:
+  enabled: false
+stash:
+  enabled: true
+  autoStash: on-failure
+  tags: [automation]
+investigate:
+  codebaseDir: ./codebase
+  mode: keyword
+  limit: 3
+  index: true
+  autoInvestigate: on-failure
+`,
+    );
+    const fakeFcheap = join(binDir, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$FCHEAP_ARGS_FILE"
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap 0.30.0'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"stash-automation","status":"saved"}'
+  exit 0
+fi
+if [ "$1" = "connect" ]; then
+  printf '%s\\n' '{"stash_id":"stash-automation","codebase":"${codebase}","query":"failure","matches":[{"stash_id":"stash-automation","file":"src/failure.ts","line":9,"score":0.8,"text":"failure path"}]}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+    const fakeCodemap = join(binDir, "codemap");
+    await writeFile(fakeCodemap, "#!/bin/sh\nexit 1\n");
+    await chmod(fakeCodemap, 0o755);
+
+    const command = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      [
+        "run",
+        specPath,
+        "--mock",
+        "--no-web-server",
+        "--config",
+        configPath,
+        "--json",
+      ],
+      {
+        reject: false,
+        env: {
+          ...process.env,
+          FCHEAP_BIN: fakeFcheap,
+          FCHEAP_ARGS_FILE: argsPath,
+          PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        },
+      },
+    );
+
+    expect(command.exitCode).toBe(1);
+    const run = RunResultSchema.parse(JSON.parse(command.stdout));
+    const calls = (await readFile(argsPath, "utf8"))
+      .split("\n")
+      .filter(Boolean);
+    expect(calls.filter((call) => call.startsWith("save "))).toHaveLength(1);
+    expect(calls).toContain(
+      `connect stash-automation ${codebase} --json --mode keyword --limit 3 --index`,
+    );
+    expect(
+      JSON.parse(await readFile(join(run.runDir, "investigate.json"), "utf8")),
+    ).toMatchObject({
+      stashId: "stash-automation",
+      codeMatches: [{ file: "src/failure.ts", line: 9, score: 0.8 }],
+    });
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 async function waitForCompletedRun(

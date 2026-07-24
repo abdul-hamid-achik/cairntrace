@@ -8,9 +8,9 @@ import type { Locator, Step } from "../core/schema/spec.v1";
 
 /**
  * The element an interactive step actually acted on, captured from the
- * accessibility snapshot at resolution time. Step-level evidence: issues 1–3
- * of the liftclub dogfood report were diagnosable only by manual CLI
- * bisection because runs never recorded what a click really hit.
+ * accessibility snapshot at resolution time. Several production dogfood
+ * failures were diagnosable only by manual CLI bisection because runs never
+ * recorded what a click really hit.
  */
 export interface ResolvedElement {
   role: string;

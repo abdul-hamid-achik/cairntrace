@@ -136,8 +136,10 @@ per-agent code paths.
   override it with `CAIRN_WAIT_SCALE`) to multiply wait/settle budgets and the
   ~500ms network-idle quiet window without hardcoding remote-only budgets into
   shared actions.
-- On agent-browser, post-click network-idle settling uses click-step `settleMs`,
-  then spec-root `settleMs`, config `browser.postClickSettleMs`, then 5000ms.
+- On agent-browser, the default post-click guard confirms same-tab link
+  delivery from URL, document, or DOM evidence; it does not wait for
+  network-idle. A positive click/spec `settleMs` or
+  `browser.postClickSettleMs` explicitly adds network-idle settling.
   Playwright honors explicit click/spec values and otherwise keeps its native
   action/navigation waits. A resolved `settleMs: 0` skips the extra settle AND
   the link-delivery probe (the author is opting out of post-click waiting).

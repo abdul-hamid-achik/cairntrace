@@ -5,6 +5,7 @@ import { execa } from "execa";
 import { emit, resolveFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { codemapProjects, codemapStatus } from "./codemap.js";
+import { resolveFcheapBinary } from "./fcheapClient.js";
 
 /** Injectable codemap seam for `cairn doctor` (FEATURES item 7). */
 export interface DoctorDeps {
@@ -13,7 +14,13 @@ export interface DoctorDeps {
 
 export interface DoctorReport {
   ok: boolean;
-  checks: Array<{ name: string; ok: boolean; detail: string }>;
+  checks: DoctorCheck[];
+}
+
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
 }
 
 export interface DoctorOptions {
@@ -54,7 +61,9 @@ export async function doctorCommand(
       : "agent-browser not on $PATH (cairn run will fail without --mock)",
   });
 
-  const fcheap = await tryExec("fcheap", ["--version"]);
+  checks.push(...(await resolvePlaywrightChecks()));
+
+  const fcheap = await tryExec(resolveFcheapBinary(), ["--version"]);
   checks.push({
     name: "fcheap",
     ok: fcheap.ok,
@@ -79,6 +88,24 @@ export async function doctorCommand(
     detail: vidtrace.ok
       ? vidtrace.stdout.trim()
       : "vidtrace not on $PATH (cairn audit video evidence extraction will be unavailable)",
+  });
+
+  const monitor = await tryExec("monitor", ["--version"]);
+  checks.push({
+    name: "monitor",
+    ok: monitor.ok,
+    detail: monitor.ok
+      ? monitor.stdout.trim()
+      : "monitor not on $PATH (cairn run --monitor and monitor steps will be unavailable)",
+  });
+
+  const ffmpeg = await tryExec("ffmpeg", ["-version"]);
+  checks.push({
+    name: "ffmpeg",
+    ok: ffmpeg.ok,
+    detail: ffmpeg.ok
+      ? (ffmpeg.stdout.trim().split("\n")[0] ?? "ffmpeg available")
+      : "ffmpeg not on $PATH (video speed adjustment and audit audio bridging will be unavailable)",
   });
 
   const codemap = await tryExec("codemap", ["version"]);
@@ -142,6 +169,109 @@ export async function doctorCommand(
   process.exit(ok ? 0 : 2);
 }
 
+interface PlaywrightRuntime {
+  chromium: {
+    executablePath(): string;
+  };
+}
+
+/** Injectable seams for the Playwright package/browser preflight. */
+export interface PlaywrightCheckDeps {
+  load: () => Promise<PlaywrightRuntime>;
+  access: (path: string, mode?: number) => Promise<void>;
+}
+
+/**
+ * Check the two independent prerequisites for `--backend playwright`:
+ * Cairntrace's Playwright package must load, and that package's matching
+ * Chromium executable must have been installed.
+ */
+export async function resolvePlaywrightChecks(
+  deps: PlaywrightCheckDeps = {
+    load: async () => import("playwright"),
+    access,
+  },
+): Promise<DoctorCheck[]> {
+  let runtime: PlaywrightRuntime;
+  try {
+    runtime = await deps.load();
+  } catch (error) {
+    const detail =
+      error instanceof Error && error.message.trim()
+        ? ` (${error.message.trim()})`
+        : "";
+    return [
+      {
+        name: "playwright-package",
+        ok: false,
+        detail: `Playwright package unavailable${detail} — run \`bun install\``,
+      },
+      {
+        name: "playwright-chromium",
+        ok: false,
+        detail:
+          "Chromium readiness not checked because the Playwright package is unavailable",
+      },
+    ];
+  }
+
+  const checks: DoctorCheck[] = [
+    {
+      name: "playwright-package",
+      ok: true,
+      detail: "Playwright package available",
+    },
+  ];
+
+  let executablePath: string;
+  try {
+    executablePath = runtime.chromium.executablePath();
+  } catch (error) {
+    const detail =
+      error instanceof Error && error.message.trim()
+        ? `: ${error.message.trim()}`
+        : "";
+    checks.push({
+      name: "playwright-chromium",
+      ok: false,
+      detail:
+        `could not resolve Playwright Chromium${detail} — ` +
+        "run `bunx playwright install chromium`",
+    });
+    return checks;
+  }
+
+  if (!executablePath.trim()) {
+    checks.push({
+      name: "playwright-chromium",
+      ok: false,
+      detail:
+        "Playwright returned an empty Chromium executable path — " +
+        "run `bunx playwright install chromium`",
+    });
+    return checks;
+  }
+
+  try {
+    await deps.access(executablePath, constants.X_OK);
+    checks.push({
+      name: "playwright-chromium",
+      ok: true,
+      detail: `Chromium executable ready at ${executablePath}`,
+    });
+  } catch {
+    checks.push({
+      name: "playwright-chromium",
+      ok: false,
+      detail:
+        `Chromium executable missing or not executable at ${executablePath} — ` +
+        "run `bunx playwright install chromium`",
+    });
+  }
+
+  return checks;
+}
+
 /**
  * Resolve the target codebase's codemap index status + freshness and build the
  * doctor "codebase indexed" check. Prefers `codemap status --json` (current
@@ -188,10 +318,18 @@ export async function resolveCodemapIndexCheck(
     };
   }
   const cwd = process.cwd();
-  const proj =
-    projects.find(
-      (p) => p.path && (cwd === p.path || cwd.startsWith(`${p.path}/`)),
-    ) ?? projects[0]!;
+  const proj = projects.find(
+    (p) => p.path && (cwd === p.path || cwd.startsWith(`${p.path}/`)),
+  );
+  if (!proj) {
+    return {
+      name: "codemap-index",
+      ok: false,
+      detail:
+        `current codebase is not indexed (${cwd}) — ` +
+        "run `codemap index` from this directory",
+    };
+  }
   const where = proj.path ? ` at ${proj.path}` : "";
   return {
     name: "codemap-index",

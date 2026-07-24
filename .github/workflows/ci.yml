@@ -31,7 +31,7 @@ jobs:
         # --no-sandbox / --disable-dev-shm-usage automatically.
         run: bunx playwright install --with-deps chromium
 
-      - name: Verify (typecheck + lint + format + knip + test)
+      - name: Verify (production audit + typecheck + lint + format + knip + test)
         run: bun run verify
 
       - name: Smoke — run a spec end-to-end against real Chromium

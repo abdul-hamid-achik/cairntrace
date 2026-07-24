@@ -85,7 +85,7 @@ environments:
   it("validates a config with full services block", async () => {
     const path = writeConfig(
       `version: 1
-project: graphite
+project: sample-app
 defaultEnvironment: local
 environments:
   local:
@@ -94,7 +94,7 @@ secrets:
   provider: tvault
   required: [MONGO_SOURCE_PASSWORD, ES_SOURCE_PASSWORD]
   tvault:
-    project: graphite
+    project: sample-app
 services:
   docker:
     command: "docker compose up -d"
@@ -104,7 +104,7 @@ services:
     ttlSeconds: 3600
     freshnessCheck: "mongosh --quiet --eval 'db.count()'"
   tmux:
-    session: graphite
+    session: sample-app
     reuseExisting: true
     options:
       - { key: mouse, value: "on" }
@@ -125,7 +125,7 @@ services:
         readyOn:
           text: "listening on"
   teardown:
-    - "tmux kill-session -t graphite"
+    - "tmux kill-session -t sample-app"
     - "docker compose down"
 `,
       tmpDir,
@@ -137,7 +137,7 @@ services:
     expect(result.services!.docker).toBe(true);
     expect(result.services!.seed).toBe(true);
     expect(result.services!.tmux).toBe(true);
-    expect(result.services!.tmuxSession).toBe("graphite");
+    expect(result.services!.tmuxSession).toBe("sample-app");
     expect(result.services!.tmuxWindows).toBe(2);
     expect(result.services!.teardown).toBe(2);
   });
@@ -250,7 +250,7 @@ services:
 describe("TmuxConfigSchema validations", () => {
   it("accepts a minimal valid tmux config", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       windows: [{ name: "web", command: "yarn start" }],
     });
     expect(result.success).toBe(true);
@@ -258,7 +258,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("rejects empty windows array", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       windows: [],
     });
     expect(result.success).toBe(false);
@@ -266,7 +266,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("rejects duplicate window names", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       windows: [
         { name: "web", command: "yarn start" },
         { name: "web", command: "yarn start" },
@@ -281,7 +281,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("accepts session options", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       options: [
         { key: "mouse", value: "on" },
         { key: "history-limit", value: "50000" },
@@ -294,7 +294,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("accepts session-level env", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       env: { NODE_ENV: "development", DEBUG: "true" },
       windows: [{ name: "web", command: "yarn start" }],
     });
@@ -303,7 +303,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("accepts defaultShell", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       defaultShell: "/bin/zsh",
       windows: [{ name: "web", command: "yarn start" }],
     });
@@ -312,7 +312,7 @@ describe("TmuxConfigSchema validations", () => {
 
   it("rejects unknown keys", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       windows: [{ name: "web", command: "yarn start" }],
       bogus: true,
     });
@@ -370,7 +370,7 @@ describe("timeout fields accept 0 (indefinite)", () => {
 
   it("accepts tmux readyTimeoutMs: 0", () => {
     const result = TmuxConfigSchema.safeParse({
-      session: "graphite",
+      session: "sample-app",
       readyTimeoutMs: 0,
       windows: [{ name: "web", command: "yarn start" }],
     });
@@ -393,13 +393,13 @@ describe("RetentionConfigSchema defaults", () => {
     const result = RetentionConfigSchema.safeParse({
       keepRuns: 5,
       archiveToStash: true,
-      archiveTags: ["regression", "graphite"],
+      archiveTags: ["regression", "sample-app"],
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.keepRuns).toBe(5);
       expect(result.data.archiveToStash).toBe(true);
-      expect(result.data.archiveTags).toEqual(["regression", "graphite"]);
+      expect(result.data.archiveTags).toEqual(["regression", "sample-app"]);
     }
   });
 
@@ -524,7 +524,7 @@ describe("ServicesConfigSchema cross-field validations", () => {
   it("accepts services with only tmux", () => {
     const result = ServicesConfigSchema.safeParse({
       tmux: {
-        session: "graphite",
+        session: "sample-app",
         windows: [{ name: "web", command: "yarn start" }],
       },
     });
@@ -543,12 +543,12 @@ describe("ServicesConfigSchema cross-field validations", () => {
       docker: { command: "docker compose up -d" },
       seed: { command: "yarn seed", ttlSeconds: 3600 },
       tmux: {
-        session: "graphite",
+        session: "sample-app",
         windows: [
           { name: "web", command: "yarn start", readyOn: { text: "ready" } },
         ],
       },
-      teardown: ["tmux kill-session -t graphite", "docker compose down"],
+      teardown: ["tmux kill-session -t sample-app", "docker compose down"],
     });
     expect(result.success).toBe(true);
   });
@@ -556,7 +556,7 @@ describe("ServicesConfigSchema cross-field validations", () => {
   it("rejects empty readyOn object on tmux window", () => {
     const result = ServicesConfigSchema.safeParse({
       tmux: {
-        session: "graphite",
+        session: "sample-app",
         windows: [{ name: "web", command: "yarn start", readyOn: {} }],
       },
     });
@@ -678,7 +678,7 @@ describe("ConfigSchema with services", () => {
       docker: { command: "docker compose up -d" },
       seed: { command: "yarn seed", ttlSeconds: 3600 },
       tmux: {
-        session: "graphite",
+        session: "sample-app",
         windows: [
           {
             name: "web",
@@ -688,7 +688,7 @@ describe("ConfigSchema with services", () => {
           },
         ],
       },
-      teardown: ["tmux kill-session -t graphite"],
+      teardown: ["tmux kill-session -t sample-app"],
     };
     const result = ConfigSchema.safeParse(cfg);
     expect(result.success).toBe(true);
@@ -949,7 +949,7 @@ environments:
   it("outputs markdown when md option is set (default)", async () => {
     const path = writeConfig(
       `version: 1
-project: graphite
+project: sample-app
 environments:
   local:
     baseUrl: http://localhost:8080
@@ -960,7 +960,7 @@ services:
     command: "yarn seed"
     ttlSeconds: 3600
   tmux:
-    session: graphite
+    session: sample-app
     windows:
       - name: web
         command: "yarn start"
@@ -978,7 +978,7 @@ services:
     expect(output).toContain("docker: configured");
     expect(output).toContain("seed: configured");
     expect(output).toContain("tmux: configured");
-    expect(output).toContain("tmux session: graphite");
+    expect(output).toContain("tmux session: sample-app");
     expect(output).toContain("tmux windows: 1");
     expect(output).toContain("teardown commands: 1");
     expect(exitSpy).toHaveBeenCalledWith(0);

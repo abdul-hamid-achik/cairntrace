@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   resolveCodemapIndexCheck,
   resolveIosChecks,
+  resolvePlaywrightChecks,
   type IosCheckDeps,
+  type PlaywrightCheckDeps,
 } from "./doctor.js";
 import type { CodemapDeps } from "./annotate.js";
 
@@ -12,11 +14,11 @@ import type { CodemapDeps } from "./annotate.js";
  * `cairn doctor` resolves the target codebase from the `codemap projects`
  * registry (XDG) instead of a hardcoded `codemap.path`, and reports
  * "codebase indexed: yes (N symbols)". A fake codemap verifies the registry
- * lookup without codemap on $PATH. No `codemap status` freshness — best-effort
- * + TODO (not yet shipped in codemap).
+ * lookup without codemap on $PATH. An unrelated registry entry must never
+ * satisfy the current codebase check.
  * ------------------------------------------------------------------------- */
 
-function fakeCodemap(symbols: number, path = "/repo/myapp"): CodemapDeps {
+function fakeCodemap(symbols: number, path = process.cwd()): CodemapDeps {
   return {
     isAvailable: async () => true,
     async exec(args) {
@@ -50,7 +52,7 @@ describe("resolveCodemapIndexCheck (feature 7)", () => {
     expect(check!.name).toBe("codemap-index");
     expect(check!.ok).toBe(true);
     expect(check!.detail).toMatch(/codebase indexed: yes \(4522 symbols/);
-    expect(check!.detail).toContain("/repo/myapp");
+    expect(check!.detail).toContain(process.cwd());
   });
 
   it("returns undefined when codemap is not on $PATH (the codemap check covers it)", async () => {
@@ -72,7 +74,7 @@ describe("resolveCodemapIndexCheck (feature 7)", () => {
         if (args[0] === "projects")
           return {
             exitCode: 0,
-            stdout: JSON.stringify([{ name: "myapp", path: "/repo/myapp" }]),
+            stdout: JSON.stringify([{ name: "myapp", path: process.cwd() }]),
             stderr: "",
           };
         return { exitCode: 1, stdout: "", stderr: "" };
@@ -80,7 +82,22 @@ describe("resolveCodemapIndexCheck (feature 7)", () => {
     };
     const check = await resolveCodemapIndexCheck(noCount, true);
     expect(check!.ok).toBe(true);
-    expect(check!.detail).toBe("codebase indexed: yes at /repo/myapp");
+    expect(check!.detail).toBe(`codebase indexed: yes at ${process.cwd()}`);
+  });
+
+  it("does not accept an unrelated registered project as the current codebase", async () => {
+    const check = await resolveCodemapIndexCheck(
+      fakeCodemap(4522, "/repo/unrelated"),
+      true,
+    );
+
+    expect(check).toEqual({
+      name: "codemap-index",
+      ok: false,
+      detail:
+        `current codebase is not indexed (${process.cwd()}) — ` +
+        "run `codemap index` from this directory",
+    });
   });
 });
 
@@ -155,7 +172,7 @@ describe("resolveCodemapIndexCheck — freshness (codemap status)", () => {
           return {
             exitCode: 0,
             stdout: JSON.stringify([
-              { name: "myapp", path: "/repo/myapp", symbols: 50 },
+              { name: "myapp", path: process.cwd(), symbols: 50 },
             ]),
             stderr: "",
           };
@@ -165,6 +182,110 @@ describe("resolveCodemapIndexCheck — freshness (codemap status)", () => {
     const check = await resolveCodemapIndexCheck(notRegistered, true);
     expect(check!.detail).toMatch(/50 symbols/);
     expect(check!.detail).not.toContain("fresh");
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * resolvePlaywrightChecks — package + matching Chromium readiness
+ * ------------------------------------------------------------------------- */
+
+function fakePlaywrightDeps(
+  options: {
+    packageError?: Error;
+    executablePath?: string;
+    executableReady?: boolean;
+    executablePathError?: Error;
+  } = {},
+): PlaywrightCheckDeps {
+  return {
+    async load() {
+      if (options.packageError) throw options.packageError;
+      return {
+        chromium: {
+          executablePath() {
+            if (options.executablePathError) throw options.executablePathError;
+            return options.executablePath ?? "/cache/playwright/chromium";
+          },
+        },
+      };
+    },
+    async access() {
+      if (options.executableReady === false) {
+        throw new Error("ENOENT");
+      }
+    },
+  };
+}
+
+describe("resolvePlaywrightChecks", () => {
+  it("reports the package and matching Chromium executable as ready", async () => {
+    const checks = await resolvePlaywrightChecks(fakePlaywrightDeps());
+
+    expect(checks).toEqual([
+      {
+        name: "playwright-package",
+        ok: true,
+        detail: "Playwright package available",
+      },
+      {
+        name: "playwright-chromium",
+        ok: true,
+        detail: "Chromium executable ready at /cache/playwright/chromium",
+      },
+    ]);
+  });
+
+  it("reports bun install when the Playwright package cannot load", async () => {
+    const checks = await resolvePlaywrightChecks(
+      fakePlaywrightDeps({
+        packageError: new Error("Cannot find package 'playwright'"),
+      }),
+    );
+
+    expect(checks.map((check) => check.ok)).toEqual([false, false]);
+    expect(checks[0]!.detail).toContain("bun install");
+    expect(checks[1]!.detail).toContain("not checked");
+  });
+
+  it("reports the exact browser install command when Chromium is absent", async () => {
+    const checks = await resolvePlaywrightChecks(
+      fakePlaywrightDeps({ executableReady: false }),
+    );
+
+    expect(checks[0]!.ok).toBe(true);
+    expect(checks[1]).toMatchObject({
+      name: "playwright-chromium",
+      ok: false,
+    });
+    expect(checks[1]!.detail).toContain("bunx playwright install chromium");
+    expect(checks[1]!.detail).toContain("/cache/playwright/chromium");
+  });
+
+  it("handles a Playwright runtime that cannot resolve its browser path", async () => {
+    const checks = await resolvePlaywrightChecks(
+      fakePlaywrightDeps({
+        executablePathError: new Error("browser registry unavailable"),
+      }),
+    );
+
+    expect(checks[1]).toMatchObject({
+      name: "playwright-chromium",
+      ok: false,
+    });
+    expect(checks[1]!.detail).toContain("browser registry unavailable");
+    expect(checks[1]!.detail).toContain("bunx playwright install chromium");
+  });
+
+  it("rejects an empty Chromium executable path", async () => {
+    const checks = await resolvePlaywrightChecks(
+      fakePlaywrightDeps({ executablePath: "" }),
+    );
+
+    expect(checks[1]).toMatchObject({
+      name: "playwright-chromium",
+      ok: false,
+    });
+    expect(checks[1]!.detail).toContain("empty Chromium executable path");
   });
 });
 

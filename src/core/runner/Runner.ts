@@ -13,7 +13,10 @@ import {
   DEFAULT_KEEP_RUNS,
   DEFAULT_KEEP_FAILED_RUNS,
 } from "../artifacts/retention";
-import { createArtifactRedactor } from "../artifacts/redaction";
+import {
+  createArtifactRedactor,
+  registerSecretValues,
+} from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
@@ -155,6 +158,15 @@ export interface RunOptions {
    * Used by `cairn stats --group-by` for A/B cohorts. Optional.
    */
   labels?: Record<string, string>;
+  /** Internal command-level capture override (used by `cairn audit`). */
+  captureOverride?: Partial<{
+    screenshots: "always" | "on-failure" | "never";
+    snapshots: "always" | "on-failure" | "never";
+    trace: "always" | "on-failure" | "never";
+    video: "always" | "on-failure" | "never";
+  }>;
+  /** Internal command-level video settings (used by `cairn audit`). */
+  videoOptions?: { slowMo?: number; speed?: number };
 }
 
 export interface MonitorConfig {
@@ -212,6 +224,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const runId = generateRunId(spec.name, now);
   const runDir = resolve(artifactRoot, runId);
 
+  // Investigation and vidtrace enrichment happen after the core run writer
+  // finishes. Register spec-declared literals process-wide so those post-run
+  // text artifacts use the same redaction boundary as the main artifact pack.
+  registerSecretValues(spec.redaction?.values ?? []);
   const redactor = createArtifactRedactor(
     spec.redaction,
     opts.env ?? (process.env as Record<string, string | undefined>),
@@ -292,15 +308,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   await safe(() => opts.backend.clearNetworkLog());
   await safe(() => opts.backend.clearConsole());
 
-  const policy = mergeCapturePolicy(spec);
-
-  // Start trace recording. Trace artifacts are best-effort: backends without
-  // trace support no-op, and a failed start is swallowed. With the default
-  // `on-failure` policy the trace still has to record from the start — it's
-  // deleted after the run if everything passed.
-  if (policy.trace !== "never") {
-    await safe(async () => opts.backend.startTrace?.());
-  }
+  const policy = mergeCapturePolicy(spec, opts.captureOverride);
 
   // Surface clip/video misconfigurations that would otherwise silently produce
   // nothing — the marquee "run → video → vidtrace clip" loop only works on the
@@ -330,7 +338,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // without video support no-op. The default policy is `never` so videos are
   // only recorded when the spec explicitly opts in.
   if (policy.video !== "never") {
-    const videoConfig = spec.artifacts?.video;
+    const videoConfig = {
+      ...spec.artifacts?.video,
+      ...opts.videoOptions,
+    };
     await safe(async () =>
       opts.backend.startVideo?.({
         slowMo: videoConfig?.slowMo,
@@ -347,6 +358,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ? { speed: videoConfig.speed }
         : {}),
     });
+  }
+
+  // Start trace after video setup. Playwright creates its context when tracing
+  // starts, so video must configure recordVideo + slowMo first or the trace
+  // context would be discarded and the recording options ignored.
+  if (policy.trace !== "never") {
+    await safe(async () => opts.backend.startTrace?.());
   }
 
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
@@ -964,23 +982,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
   }
 
-  // Stop video recording and save to videos/<backend>-video.webm.
+  // The video is finalized after outcome evaluation. Playwright cannot save a
+  // recording until its page/context closes, while outcome verifiers still
+  // need that live page.
   const videoRelPath = `videos/${backendName}-video.webm`;
   let videoPath: string | undefined;
-  if (!backendWedgedAfterSteps && policy.video !== "never") {
-    const videoResult = await safe(async () =>
-      opts.backend.stopVideo?.(await writer.preparePath(videoRelPath, "video")),
-    );
-    if (videoResult?.ok) {
-      videoPath = videoRelPath;
-    }
-    await writer.appendEvent({
-      ts: new Date().toISOString(),
-      type: "artifact.video",
-      action: "stop",
-      ...(videoPath ? { path: videoPath } : {}),
-    });
-  }
 
   // Evaluate outcomes first so we know whether the run failed before
   // deciding whether to auto-cut video clips.
@@ -1096,6 +1102,23 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     summary = `outcome '${failedOutcome.id}' failed`;
   } else {
     summary = status;
+  }
+
+  // Now that every verifier has finished with the page, finalize the browser
+  // context and save the recording.
+  if (!backendWedgedAfterSteps && policy.video !== "never") {
+    const videoResult = await safe(async () =>
+      opts.backend.stopVideo?.(await writer.preparePath(videoRelPath, "video")),
+    );
+    if (videoResult?.ok) {
+      videoPath = videoRelPath;
+    }
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.video",
+      action: "stop",
+      ...(videoPath ? { path: videoPath } : {}),
+    });
   }
 
   // Honor the trace capture policy: with the default "on-failure", a passing
@@ -1305,6 +1328,20 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       ? undefined
       : (retention?.keepRuns ?? DEFAULT_KEEP_RUNS);
   if (keepRuns !== undefined) {
+    if (retention?.archiveToStash && !opts.onArchiveRun) {
+      // Fail closed: deleting without the configured archive callback would
+      // violate the user's retention policy. Some callers (for example
+      // library/MCP integrations) do not inject the CLI's file.cheap adapter.
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.retention",
+        action: "warning",
+        warning:
+          "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
+      });
+      return publicResult;
+    }
+
     // Archive pruned runs to fcheap before deletion when configured. The
     // archive callback is injected via opts so the core runner doesn't depend
     // on the stash (fcheap) CLI module.
@@ -1331,7 +1368,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
 }
 
 /** Capture policies with sensible defaults. */
-function mergeCapturePolicy(spec: Spec): {
+function mergeCapturePolicy(
+  spec: Spec,
+  override: RunOptions["captureOverride"] = {},
+): {
   screenshots: "always" | "on-failure" | "never";
   snapshots: "always" | "on-failure" | "never";
   trace: "always" | "on-failure" | "never";
@@ -1339,10 +1379,10 @@ function mergeCapturePolicy(spec: Spec): {
 } {
   const c = spec.artifacts?.capture ?? {};
   return {
-    screenshots: c.screenshots ?? "on-failure",
-    snapshots: c.snapshots ?? "always",
-    trace: c.trace ?? "on-failure",
-    video: c.video ?? "never",
+    screenshots: override.screenshots ?? c.screenshots ?? "on-failure",
+    snapshots: override.snapshots ?? c.snapshots ?? "always",
+    trace: override.trace ?? c.trace ?? "on-failure",
+    video: override.video ?? c.video ?? "never",
   };
 }
 

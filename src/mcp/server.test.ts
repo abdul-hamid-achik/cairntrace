@@ -1,18 +1,24 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execa } from "execa";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AuditResultSchema } from "../core/schema/audit.v1";
 import { DocsResultSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
 import { HealResultSchema } from "../core/schema/heal.v1";
+import { InvestigateResultSchema } from "../core/schema/investigate.v1";
 import {
   ConfigValidateResultSchema,
   DiscoveryActionResultSchema,
   DiscoveryOpenResultSchema,
   DiscoverySnapshotResultSchema,
   ServicesStatusResultSchema,
+  StashInfoResultSchema,
+  StashRestoreResultSchema,
+  StashToolErrorSchema,
 } from "../core/schema/mcp.v1";
 import {
   buildRunNextActions,
@@ -93,10 +99,101 @@ describe("Cairntrace MCP server", () => {
       "cairn_spec_heal",
       "cairn_spec_scaffold",
       "cairn_spec_verify",
+      "cairn_stash_info",
       "cairn_stash_list",
+      "cairn_stash_restore",
       "cairn_stash_save",
       "cairn_stash_search",
     ]);
+    const investigateSchema = list.tools.find(
+      (tool) => tool.name === "cairn_investigate",
+    )?.inputSchema;
+    expect(investigateSchema).toMatchObject({
+      required: ["runId"],
+      properties: {
+        codebase: { type: "string" },
+        connect: { type: "boolean" },
+        clips: { type: "boolean" },
+        query: { type: "string" },
+        mode: { type: "string" },
+        limit: { type: "integer" },
+        index: { type: "boolean" },
+        config: { type: "string" },
+        artifactRoot: { type: "string" },
+      },
+    });
+    expect(
+      list.tools.find((tool) => tool.name === "cairn_audit")?.inputSchema,
+    ).toMatchObject({
+      required: ["specPath"],
+      properties: {
+        codebase: { type: "string" },
+        connect: { type: "boolean" },
+        speed: { type: "number" },
+        slowMo: { type: "number" },
+        mode: { type: "string" },
+        limit: { type: "integer" },
+        index: { type: "boolean" },
+        coldStart: { type: "boolean" },
+      },
+    });
+    expect(
+      list.tools.find((tool) => tool.name === "cairn_stash_info")?.outputSchema,
+    ).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: expect.arrayContaining([
+        "schemaVersion",
+        "id",
+        "createdAt",
+        "fileCount",
+        "sizeBytes",
+        "contentHash",
+      ]),
+    });
+    expect(
+      list.tools.find((tool) => tool.name === "cairn_stash_restore")
+        ?.outputSchema,
+    ).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: expect.arrayContaining([
+        "stashId",
+        "restoredTo",
+        "fileCount",
+        "verified",
+        "mismatches",
+        "status",
+      ]),
+    });
+    expect(
+      list.tools.find((tool) => tool.name === "cairn_investigate")
+        ?.outputSchema,
+    ).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: expect.arrayContaining([
+        "version",
+        "runId",
+        "runDir",
+        "codeMatches",
+      ]),
+      properties: {
+        version: { const: "1" },
+        codeMatches: { type: "array" },
+      },
+    });
+    expect(
+      list.tools.find((tool) => tool.name === "cairn_audit")?.outputSchema,
+    ).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: expect.arrayContaining(["version", "specPath", "codeMatches"]),
+      properties: {
+        version: { const: "1" },
+        codeMatches: { type: "array" },
+      },
+    });
     await c.close();
   });
 
@@ -289,7 +386,419 @@ steps:
     await c.close();
   });
 
-  it("cairn_doctor includes fcheap in health checks", async () => {
+  it("cairn_stash_save maps canonical file.cheap id and resolves latest", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-contract-"),
+    );
+    const runsRoot = join(fixtureRoot, "runs");
+    const runId = "checkout-2026-07-23T130000Z";
+    const runDir = join(runsRoot, runId);
+    const fakeBin = join(fixtureRoot, "bin");
+    await mkdir(runDir, { recursive: true });
+    await mkdir(fakeBin, { recursive: true });
+
+    const fakeFcheap = join(fakeBin, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap test'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"mcp-stash-20260723","schema_version":"1.0","status":"saved"}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_stash_save",
+        arguments: { runId: "latest", artifactRoot: runsRoot },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        runId,
+        stashId: "mcp-stash-20260723",
+        runDir,
+      });
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0]?.text).toContain(`Stashed run ${runId}`);
+    } finally {
+      await c.close();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("cairn_stash_save preserves a saved_with_failures receipt as a structured MCP error", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-partial-save-"),
+    );
+    const runsRoot = join(fixtureRoot, "runs");
+    const runId = "audit-2026-07-24T010203Z";
+    const runDir = join(runsRoot, runId);
+    const fakeFcheap = join(fixtureRoot, "fcheap");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap 0.30.0'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"mcp-stash-partial","status":"saved_with_failures","failed":[{"id":"mcp-stash-partial","stage":"index","error":"vecgrep unavailable"}]}'
+  printf '%s\\n' 'stash saved with 1 failed post-save operation' >&2
+  exit 2
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const previousBinary = process.env.FCHEAP_BIN;
+    process.env.FCHEAP_BIN = fakeFcheap;
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_stash_save",
+        arguments: { runId: "latest", artifactRoot: runsRoot },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        runId,
+        runDir,
+        stashId: "mcp-stash-partial",
+        status: "saved_with_failures",
+        failures: [
+          {
+            id: "mcp-stash-partial",
+            stage: "index",
+            error: "vecgrep unavailable",
+          },
+        ],
+        warning: expect.stringContaining("failed post-save operation"),
+      });
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0]?.text).toContain("mcp-stash-partial");
+      expect(content[0]?.text).toContain("post-save failures");
+    } finally {
+      await c.close();
+      if (previousBinary === undefined) delete process.env.FCHEAP_BIN;
+      else process.env.FCHEAP_BIN = previousBinary;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("cairn_stash_save rejects a successful response without an id", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-invalid-receipt-"),
+    );
+    const runsRoot = join(fixtureRoot, "runs");
+    const runDir = join(runsRoot, "checkout-2026-07-23T140000Z");
+    const fakeBin = join(fixtureRoot, "bin");
+    await mkdir(runDir, { recursive: true });
+    await mkdir(fakeBin, { recursive: true });
+
+    const fakeFcheap = join(fakeBin, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap test'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"status":"saved"}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_stash_save",
+        arguments: { runId: "latest", artifactRoot: runsRoot },
+      });
+
+      expect(result.isError).toBe(true);
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0]?.text).toMatch(/expected a non-empty id/i);
+      expect(result.structuredContent).toMatchObject({
+        runDir,
+        tags: [],
+        error: expect.stringContaining("expected a non-empty id"),
+      });
+    } finally {
+      await c.close();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes file.cheap v0.30 list and search responses", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-read-contract-"),
+    );
+    const fakeBin = join(fixtureRoot, "bin");
+    await mkdir(fakeBin, { recursive: true });
+
+    const fakeFcheap = join(fakeBin, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap 0.30.0'
+  exit 0
+fi
+if [ "$1" = "list" ]; then
+  printf '%s\\n' '[{"id":"stash-list","tool":"cairntrace","tags":["failed"],"file_count":3,"total_size":4096,"created_at":"2026-07-24T03:01:59Z"}]'
+  exit 0
+fi
+if [ "$1" = "search" ]; then
+  printf '%s\\n' '[{"stash_id":"stash-list","score":0.91,"text":"checkout redirect failed","file":"outcomes/redirect.md"}]'
+  exit 0
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${originalPath ?? ""}`;
+    const c = await connectInMemory();
+    try {
+      const listResult = await c.callTool({
+        name: "cairn_stash_list",
+        arguments: {},
+      });
+      expect(listResult.isError).toBeFalsy();
+      expect(listResult.structuredContent).toEqual({
+        stashes: [
+          {
+            id: "stash-list",
+            tool: "cairntrace",
+            tags: ["failed"],
+            fileCount: 3,
+            sizeBytes: 4096,
+            createdAt: "2026-07-24T03:01:59Z",
+          },
+        ],
+      });
+      expect(
+        (listResult.content as Array<{ text: string }>)[0]?.text,
+      ).not.toContain("undefined");
+
+      const searchResult = await c.callTool({
+        name: "cairn_stash_search",
+        arguments: { query: "redirect" },
+      });
+      expect(searchResult.isError).toBeFalsy();
+      expect(searchResult.structuredContent).toEqual({
+        query: "redirect",
+        results: [
+          {
+            stashId: "stash-list",
+            snippet: "checkout redirect failed",
+            score: 0.91,
+            file: "outcomes/redirect.md",
+          },
+        ],
+      });
+      expect(
+        (searchResult.content as Array<{ text: string }>)[0]?.text,
+      ).toContain("stash-list (0.91): checkout redirect failed");
+    } finally {
+      await c.close();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes validated file.cheap v0.30 info and restore receipts", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-info-restore-"),
+    );
+    const fakeFcheap = join(fixtureRoot, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "info" ]; then
+  printf '%s\\n' '{"schema_version":"1.0","id":"stash-detail","created_at":"2026-07-24T04:05:06Z","source_path":"/private/run","tool":"cairntrace","tags":["failed"],"file_count":2,"total_size":2048,"content_hash":"abc123","files":[{"path":"run.json","size":512,"hash":"def456"}],"custom":{"source":"local-run"}}'
+  exit 0
+fi
+if [ "$1" = "restore" ]; then
+  printf '%s\\n' '{"stash_id":"stash-detail","target":"/tmp/restored-stash-detail","file_count":2,"verified":true,"mismatches":[],"status":"restored"}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const previousBinary = process.env.FCHEAP_BIN;
+    process.env.FCHEAP_BIN = fakeFcheap;
+    const c = await connectInMemory();
+    try {
+      const infoResult = await c.callTool({
+        name: "cairn_stash_info",
+        arguments: { stashId: "stash-detail" },
+      });
+      expect(infoResult.isError).toBeFalsy();
+      expect(
+        StashInfoResultSchema.parse(infoResult.structuredContent),
+      ).toMatchObject({
+        schemaVersion: "1.0",
+        id: "stash-detail",
+        sourcePath: "/private/run",
+        source: "local-run",
+        tool: "cairntrace",
+        tags: ["failed"],
+        fileCount: 2,
+        sizeBytes: 2048,
+        contentHash: "abc123",
+        files: [{ path: "run.json", size: 512, hash: "def456" }],
+      });
+
+      const restoreResult = await c.callTool({
+        name: "cairn_stash_restore",
+        arguments: { stashId: "stash-detail", to: "/tmp/restored-stash" },
+      });
+      expect(restoreResult.isError).toBeFalsy();
+      expect(
+        StashRestoreResultSchema.parse(restoreResult.structuredContent),
+      ).toEqual({
+        stashId: "stash-detail",
+        restoredTo: "/tmp/restored-stash-detail",
+        fileCount: 2,
+        verified: true,
+        mismatches: [],
+        status: "restored",
+      });
+    } finally {
+      await c.close();
+      if (previousBinary === undefined) delete process.env.FCHEAP_BIN;
+      else process.env.FCHEAP_BIN = previousBinary;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns structured errors for invalid info and unverified restores", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-fcheap-errors-"),
+    );
+    const fakeFcheap = join(fixtureRoot, "fcheap");
+    await writeFile(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "info" ]; then
+  printf '%s\\n' '{"id":"missing-required-manifest-fields"}'
+  exit 0
+fi
+if [ "$1" = "restore" ]; then
+  printf '%s\\n' '{"stash_id":"stash-mismatch","target":"/tmp/restored-mismatch","file_count":1,"verified":false,"mismatches":["report.json"],"status":"restored_with_mismatches"}'
+  printf '%s\\n' 'restore verification failed' >&2
+  exit 2
+fi
+exit 2
+`,
+    );
+    await chmod(fakeFcheap, 0o755);
+
+    const previousBinary = process.env.FCHEAP_BIN;
+    process.env.FCHEAP_BIN = fakeFcheap;
+    const c = await connectInMemory();
+    try {
+      const infoResult = await c.callTool({
+        name: "cairn_stash_info",
+        arguments: { stashId: "stash-invalid" },
+      });
+      expect(infoResult.isError).toBe(true);
+      expect(
+        StashToolErrorSchema.parse(infoResult.structuredContent),
+      ).toMatchObject({
+        code: "FCHEAP_INVALID_RESPONSE",
+        command: "info",
+        stashId: "stash-invalid",
+        message: expect.stringContaining("Invalid fcheap info JSON"),
+        hint: expect.stringContaining("v0.30"),
+      });
+
+      const restoreResult = await c.callTool({
+        name: "cairn_stash_restore",
+        arguments: { stashId: "stash-mismatch" },
+      });
+      expect(restoreResult.isError).toBe(true);
+      expect(
+        StashToolErrorSchema.parse(restoreResult.structuredContent),
+      ).toEqual({
+        code: "FCHEAP_RESTORE_UNVERIFIED",
+        command: "restore",
+        message: "Restored 1 file(s), but integrity verification failed.",
+        hint: "Treat the restored directory as forensic-only; inspect `restore.mismatches` and retry from a known-good stash.",
+        stashId: "stash-mismatch",
+        restore: {
+          stashId: "stash-mismatch",
+          restoredTo: "/tmp/restored-mismatch",
+          fileCount: 1,
+          verified: false,
+          mismatches: ["report.json"],
+          status: "restored_with_mismatches",
+        },
+      });
+      expect(
+        (restoreResult.content as Array<{ text: string }>)[0]?.text,
+      ).toContain("Next:");
+    } finally {
+      await c.close();
+      if (previousBinary === undefined) delete process.env.FCHEAP_BIN;
+      else process.env.FCHEAP_BIN = previousBinary;
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("makes a missing file.cheap binary actionable", async () => {
+    const previousBinary = process.env.FCHEAP_BIN;
+    process.env.FCHEAP_BIN = join(tmpdir(), "cairntrace-fcheap-does-not-exist");
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_stash_info",
+        arguments: { stashId: "stash-missing-bin" },
+      });
+      expect(result.isError).toBe(true);
+      expect(
+        StashToolErrorSchema.parse(result.structuredContent),
+      ).toMatchObject({
+        code: "FCHEAP_UNAVAILABLE",
+        command: "info",
+        hint: expect.stringContaining("FCHEAP_BIN"),
+      });
+    } finally {
+      await c.close();
+      if (previousBinary === undefined) delete process.env.FCHEAP_BIN;
+      else process.env.FCHEAP_BIN = previousBinary;
+    }
+  });
+
+  it("cairn_doctor includes browser and investigation readiness checks", async () => {
     const c = await connectInMemory();
     const r = await c.callTool({ name: "cairn_doctor", arguments: {} });
     const checks = (r.structuredContent as { checks: Array<{ name: string }> })
@@ -298,6 +807,10 @@ steps:
     expect(names).toContain("fcheap");
     expect(names).toContain("vecgrep");
     expect(names).toContain("vidtrace");
+    expect(names).toContain("monitor");
+    expect(names).toContain("ffmpeg");
+    expect(names).toContain("playwright-package");
+    expect(names).toContain("playwright-chromium");
     await c.close();
   });
 
@@ -327,6 +840,87 @@ steps:
     expect(text).toContain("vidtrace");
     expect(text).toContain("agent_context");
     await c.close();
+  });
+
+  it("cairn_investigate returns structuredContent when latest has no run", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-investigate-missing-run-"),
+    );
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_investigate",
+        arguments: { runId: "latest", artifactRoot: fixtureRoot },
+      });
+
+      expect(result.isError).toBe(true);
+      const structured = InvestigateResultSchema.parse(
+        result.structuredContent,
+      );
+      expect(structured).toMatchObject({
+        $schema: "urn:cairntrace.dev:investigate:v1",
+        version: "1",
+        runId: "latest",
+        runDir: "",
+        codeMatches: [],
+        error: expect.stringContaining("no run available at slot latest"),
+      });
+      const cli = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        ["investigate", "latest", "--artifact-root", fixtureRoot, "--json"],
+        { reject: false },
+      );
+      expect(cli.exitCode).toBe(2);
+      expect(structured).toEqual(JSON.parse(cli.stdout));
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content[0]?.text).toContain("no run available at slot latest");
+    } finally {
+      await c.close();
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("cairn_audit maps setup errors to structured MCP errors", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-audit-missing-spec-"),
+    );
+    const missingSpec = join(fixtureRoot, "missing-spec.yml");
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_audit",
+        arguments: {
+          specPath: missingSpec,
+          artifactRoot: join(fixtureRoot, "runs"),
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      const structured = AuditResultSchema.parse(result.structuredContent);
+      expect(structured).toMatchObject({
+        $schema: "urn:cairntrace.dev:audit:v1",
+        version: "1",
+        specPath: missingSpec,
+        codeMatches: [],
+        error: expect.stringContaining("no such file or directory"),
+      });
+      const cli = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        [
+          "audit",
+          missingSpec,
+          "--artifact-root",
+          join(fixtureRoot, "runs"),
+          "--json",
+        ],
+        { reject: false },
+      );
+      expect(cli.exitCode).toBe(2);
+      expect(structured).toEqual(JSON.parse(cli.stdout));
+    } finally {
+      await c.close();
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it("cairn_explain includes annotate and secrets commands", async () => {

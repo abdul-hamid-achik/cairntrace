@@ -1,60 +1,60 @@
 import { execa } from "execa";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
+import {
+  readdir,
+  readFile as readFileAsync,
+  rm,
+  writeFile as writeFileAsync,
+} from "node:fs/promises";
+import { resolveArtifactRootContext, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
-import { maybeAutoStash, isFcheapAvailable } from "./stash";
+import { maybeAutoStash, stashDirectory } from "./stash";
+import { isFcheapAvailable, runFcheap } from "./fcheapClient.js";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
-import { codemapRisk, type CodemapRiskFactor } from "./codemap.js";
-import { join, resolve } from "node:path";
+import { codemapRisk } from "./codemap.js";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import type { RunResult } from "../../core/schema/run.v1.js";
+import type { BrowserBackend } from "../../adapters/browserBackend.js";
+import type { ServicesHandle } from "../../core/runner/services.js";
+import type { WebServerHandle } from "../../core/runner/webServer.js";
+import { refreshAgentContextCodeMatches } from "../../core/artifacts/agentContext.js";
+import { createArtifactRedactor } from "../../core/artifacts/redaction.js";
+import { loadConfig } from "../../core/config/loader.js";
+import { trackBackend, trackServices, trackWebServer } from "../cleanup.js";
+import { parseFcheapConnectOutput } from "./fcheapContract.js";
+import {
+  AuditResultSchema,
+  type AuditResult,
+} from "../../core/schema/audit.v1.js";
+import {
+  InvestigateResultSchema,
+  type CodeMatch,
+  type InvestigateResult,
+} from "../../core/schema/investigate.v1.js";
+
+export type { AuditResult } from "../../core/schema/audit.v1.js";
+export type {
+  CodeMatch,
+  InvestigateResult,
+} from "../../core/schema/investigate.v1.js";
 
 /* ---------------------------------------------------------------------------
  * Types
  * ------------------------------------------------------------------------- */
 
-export interface CodeMatch {
-  file: string;
-  line: number;
-  score: number;
-  snippet?: string;
-  /** Enclosing symbol resolved by `codemap symbol-at` (item 3). */
-  symbol?: string;
-  /** Number of inbound callers (`codemap callers` depth). */
-  callers?: number;
-  /** Blast-radius size (`codemap impact` affected-node count). */
-  blastRadius?: number;
-  /** Graph-derived rank: hotspot centrality + caller depth + blast radius. */
-  codemapScore?: number;
-  /** Change-risk score from `codemap risk` (item 8): 0..1; absent when codemap unavailable. */
-  riskScore?: number;
-  /** Risk level: low | medium | high | unknown (item 8). */
-  riskLevel?: string;
-  /** Risk factors from `codemap risk` (item 8). */
-  riskFactors?: CodemapRiskFactor[];
-}
-
-export interface InvestigateResult {
-  runId: string;
-  runDir: string;
-  stashId?: string;
-  codeMatches: CodeMatch[];
-  query?: string;
-  mode?: string;
-  /**
-   * Entry→failure call trace reconstructed from the ranked code matches via
-   * `codemap callers` (FEATURES item 4). Ordered list of symbols; empty when
-   * no chain could be built or codemap is absent.
-   */
-  failureTrace?: string[];
-  /** Number of codemap path annotations emitted for the failure trace edges. */
-  pathAnnotations?: number;
-  error?: string;
-}
-
 export interface InvestigateOptions {
   codebase?: string;
   mode?: string;
-  limit?: number;
+  limit?: number | string;
+  index?: boolean;
   query?: string;
   connect?: boolean;
   /**
@@ -74,53 +74,57 @@ export interface InvestigateOptions {
 /* ---------------------------------------------------------------------------
  * fcheap connect wrapper
  *
- * `fcheap connect <stash-id> <codebase> [--index] [--mode hybrid] [--limit N]
- *   --json` returns an array of code matches: { file, line, score, snippet }.
+ * `fcheap connect <stash-id> <codebase> [--mode hybrid] [--limit N]
+ *   [--query text] --json` returns an envelope containing code matches.
  * ------------------------------------------------------------------------- */
+
+export interface FcheapConnectOptions {
+  mode?: string;
+  limit?: number;
+  query?: string;
+  index?: boolean;
+}
+
+export function buildFcheapConnectArgs(
+  stashId: string,
+  codebase: string,
+  opts: FcheapConnectOptions,
+): string[] {
+  const args = ["connect", stashId, codebase, "--json"];
+  if (opts.mode) args.push("--mode", opts.mode);
+  if (opts.limit) args.push("--limit", String(opts.limit));
+  if (opts.query) args.push("--query", opts.query);
+  if (opts.index) args.push("--index");
+  return args;
+}
 
 async function runFcheapConnect(
   stashId: string,
   codebase: string,
-  opts: { mode?: string; limit?: number },
+  opts: FcheapConnectOptions,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const args = ["connect", stashId, codebase, "--json"];
-  if (opts.mode) args.push("--mode", opts.mode);
-  if (opts.limit) args.push("--limit", String(opts.limit));
-  try {
-    const r = await execa("fcheap", args, { reject: false, timeout: 120_000 });
-    return {
-      ok: r.exitCode === 0,
-      stdout: typeof r.stdout === "string" ? r.stdout : "",
-      stderr: typeof r.stderr === "string" ? r.stderr : "",
-    };
-  } catch (e) {
-    const err = e as Error;
-    return { ok: false, stdout: "", stderr: err.message };
-  }
+  const args = buildFcheapConnectArgs(stashId, codebase, opts);
+  const result = await runFcheap(args, { timeoutMs: 120_000 });
+  return {
+    ok: result.ok,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
 }
 
-function parseCodeMatches(stdout: string): CodeMatch[] {
-  try {
-    const data = JSON.parse(stdout);
-    // fcheap connect returns an array of matches or { matches: [...] }
-    const matches = Array.isArray(data) ? data : (data?.matches ?? []);
-    return matches.map(
-      (m: {
-        file?: string;
-        path?: string;
-        line?: number;
-        score?: number;
-        snippet?: string;
-      }) => ({
-        file: m.file ?? m.path ?? "(unknown)",
-        line: m.line ?? 0,
-        score: typeof m.score === "number" ? m.score : 0,
-        ...(m.snippet ? { snippet: m.snippet } : {}),
-      }),
-    );
-  } catch {
-    return [];
-  }
+export function parseCodeMatches(stdout: string): CodeMatch[] {
+  return normalizeCodeMatches(parseFcheapConnectOutput(stdout).matches);
+}
+
+function normalizeCodeMatches(
+  matches: ReturnType<typeof parseFcheapConnectOutput>["matches"],
+): CodeMatch[] {
+  return matches.map((match) => ({
+    file: match.file ?? "(unknown)",
+    line: match.line ?? 0,
+    score: match.score,
+    ...(match.snippet ? { snippet: match.snippet } : {}),
+  }));
 }
 
 /* ---------------------------------------------------------------------------
@@ -133,11 +137,80 @@ function parseCodeMatches(stdout: string): CodeMatch[] {
 async function runVidtraceExtract(
   videoPath: string,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  let inputPath = videoPath;
+  let compatibilityInput: string | undefined;
   try {
-    const r = await execa("vidtrace", ["extract", videoPath, "--json"], {
-      reject: false,
-      timeout: 300_000,
-    });
+    const probe = await execa(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        videoPath,
+      ],
+      { reject: false, timeout: 30_000 },
+    );
+    if (probe.exitCode === 0 && !String(probe.stdout).trim()) {
+      // Playwright recordings are video-only, while vidtrace's Whisper stage
+      // expects an audio stream. Add silence to a disposable copy so browser
+      // audits still produce frame/OCR evidence without mutating the source.
+      compatibilityInput = join(
+        dirname(videoPath),
+        `.vidtrace-input-${process.pid}-${Date.now()}.webm`,
+      );
+      const remux = await execa(
+        "ffmpeg",
+        [
+          "-y",
+          "-i",
+          videoPath,
+          "-f",
+          "lavfi",
+          "-i",
+          "anullsrc=channel_layout=stereo:sample_rate=48000",
+          "-shortest",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "libopus",
+          compatibilityInput,
+        ],
+        { reject: false, timeout: 120_000 },
+      );
+      if (remux.exitCode !== 0) {
+        return {
+          ok: false,
+          stdout: typeof remux.stdout === "string" ? remux.stdout : "",
+          stderr:
+            typeof remux.stderr === "string" && remux.stderr.trim()
+              ? `could not prepare video-only recording for vidtrace: ${remux.stderr}`
+              : "could not prepare video-only recording for vidtrace",
+        };
+      }
+      inputPath = compatibilityInput;
+    }
+
+    const r = await execa(
+      "vidtrace",
+      [
+        "extract",
+        inputPath,
+        "--out",
+        join(dirname(videoPath), "vidtrace"),
+        "--name",
+        basename(videoPath, ".webm"),
+        "--json",
+      ],
+      {
+        reject: false,
+        timeout: 300_000,
+      },
+    );
     return {
       ok: r.exitCode === 0,
       stdout: typeof r.stdout === "string" ? r.stdout : "",
@@ -146,6 +219,69 @@ async function runVidtraceExtract(
   } catch (e) {
     const err = e as Error;
     return { ok: false, stdout: "", stderr: err.message };
+  } finally {
+    if (compatibilityInput) {
+      await rm(compatibilityInput, { force: true }).catch(() => undefined);
+    }
+  }
+}
+
+function vidtraceFailureMessage(result: {
+  stdout: string;
+  stderr: string;
+}): string {
+  if (result.stderr.trim()) return result.stderr.trim();
+  try {
+    const parsed = JSON.parse(result.stdout) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Fall through to a bounded plain-text diagnostic.
+  }
+  return result.stdout.trim().slice(0, 500) || "unknown error";
+}
+
+const VIDTRACE_TEXT_EXTENSIONS = new Set([
+  ".csv",
+  ".json",
+  ".log",
+  ".md",
+  ".srt",
+  ".tsv",
+  ".txt",
+  ".vtt",
+  ".yaml",
+  ".yml",
+]);
+
+export function pathIsWithin(parent: string, child: string): boolean {
+  const childRelative = relative(resolve(parent), resolve(child));
+  return (
+    childRelative === "" ||
+    (!childRelative.startsWith("..") && !isAbsolute(childRelative))
+  );
+}
+
+export async function redactVidtraceTextArtifacts(
+  bundleDir: string,
+): Promise<void> {
+  const redactor = createArtifactRedactor(undefined);
+  for (const entry of await readdir(bundleDir, { withFileTypes: true })) {
+    const entryPath = join(bundleDir, entry.name);
+    if (entry.isDirectory()) {
+      await redactVidtraceTextArtifacts(entryPath);
+      continue;
+    }
+    if (
+      !entry.isFile() ||
+      !VIDTRACE_TEXT_EXTENSIONS.has(extname(entry.name).toLowerCase())
+    ) {
+      continue;
+    }
+    const original = await readFileAsync(entryPath, "utf8");
+    const redacted = redactor.text(original);
+    if (redacted !== original) await writeFileAsync(entryPath, redacted);
   }
 }
 
@@ -199,9 +335,17 @@ const investigateCodemapDeps: CodemapDeps = {
 /** Best-effort: read `run.json` from a run dir; undefined if missing/invalid. */
 function readRunResult(runDir: string): RunResult | undefined {
   try {
-    return JSON.parse(
+    const parsed = JSON.parse(
       readFileSync(join(runDir, "run.json"), "utf8"),
-    ) as RunResult;
+    ) as unknown;
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !Array.isArray((parsed as { outcomes?: unknown }).outcomes)
+    ) {
+      return undefined;
+    }
+    return parsed as RunResult;
   } catch {
     return undefined;
   }
@@ -680,83 +824,100 @@ export async function annotateCallPath(
  * 4. Return structured results with file:line:score matches
  * ------------------------------------------------------------------------- */
 
-export async function investigateCommand(
-  runRef: string,
-  opts: InvestigateOptions,
-): Promise<void> {
-  const format = resolveFormat(opts, "md");
-  const root = await resolveArtifactRoot({
-    ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
-    ...(opts.config ? { config: opts.config } : {}),
-  });
+export interface InvestigateRunOptions {
+  codebase?: string;
+  mode?: "semantic" | "keyword" | "hybrid";
+  limit?: number;
+  index?: boolean;
+  query?: string;
+  connect?: boolean;
+  clips?: boolean;
+  /** Reuse a receipt from an earlier auto-stash instead of saving twice. */
+  stashId?: string;
+}
 
-  const runDir = await resolveRunRef(runRef, root);
-  const runId =
-    runRef === "latest" || runRef === "previous"
-      ? (runDir.split("/").pop() ?? runRef)
-      : runRef;
-
+/**
+ * Run the investigation pipeline for an already-resolved run directory.
+ * This is the shared CLI/MCP/auto-investigate implementation: it returns data
+ * and never writes command output, so MCP stdio cannot be polluted.
+ */
+export async function investigateRunDirectory(
+  runDir: string,
+  runId: string,
+  opts: InvestigateRunOptions,
+): Promise<InvestigateResult> {
   const result: InvestigateResult = {
+    $schema: "urn:cairntrace.dev:investigate:v1",
+    version: "1",
     runId,
     runDir,
     codeMatches: [],
   };
 
-  // Check fcheap availability
   const fcheapOk = await isFcheapAvailable();
   if (!fcheapOk) {
     result.error =
       "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap";
-    process.stderr.write(`cairn investigate: ${result.error}\n`);
-    process.stdout.write(
-      emit(format, result, () => investigateMarkdown(result)),
+    return InvestigateResultSchema.parse(
+      createArtifactRedactor(undefined).value(result),
     );
-    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
-    return;
   }
 
-  // Stash the run directory
-  const stashPath =
-    opts.clips && existsSync(join(runDir, "videos", "clips"))
-      ? resolve(join(runDir, "videos", "clips"))
-      : runDir;
-  const stashR = await execa(
-    "fcheap",
-    [
-      "save",
-      stashPath,
-      "--tool",
-      "cairntrace",
-      "--tag",
-      `investigate-${runId}`,
-      "--json",
-    ],
-    { reject: false, timeout: 60_000 },
-  );
-
-  if (stashR.exitCode !== 0) {
-    result.error = `fcheap save failed: ${stashR.stderr}`;
-    process.stderr.write(`cairn investigate: ${result.error}\n`);
-    process.stdout.write(
-      emit(format, result, () => investigateMarkdown(result)),
-    );
-    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
-    return;
+  if (opts.stashId) {
+    result.stashId = opts.stashId;
+  } else {
+    const stashPath =
+      opts.clips && existsSync(join(runDir, "videos", "clips"))
+        ? resolve(join(runDir, "videos", "clips"))
+        : runDir;
+    const saved = await stashDirectory(stashPath, {
+      tool: "cairntrace",
+      tags: [`investigate-${runId}`],
+    });
+    if (!saved.ok || !saved.stashId) {
+      result.stashId = saved.stashId;
+      result.error = `fcheap save failed: ${saved.error ?? "missing stash id"}`;
+      return InvestigateResultSchema.parse(
+        createArtifactRedactor(undefined).value(result),
+      );
+    }
+    result.stashId = saved.stashId;
+    if (saved.warning) {
+      result.warnings = [
+        `fcheap save completed with post-save failures: ${saved.warning}`,
+      ];
+    }
   }
 
-  const stashData = JSON.parse(stashR.stdout);
-  result.stashId =
-    stashData.stashId ?? stashData.id ?? stashData.path ?? "(unknown)";
-
-  // Connect to codebase if requested
-  if (opts.connect && opts.codebase) {
-    const connectR = await runFcheapConnect(result.stashId!, opts.codebase, {
+  if (opts.connect) {
+    if (!opts.codebase) {
+      result.error =
+        "--connect requires --codebase <dir> or investigate.codebaseDir in config";
+      return InvestigateResultSchema.parse(
+        createArtifactRedactor(undefined).value(result),
+      );
+    }
+    const connectR = await runFcheapConnect(result.stashId, opts.codebase, {
       mode: opts.mode,
       limit: opts.limit,
+      query: opts.query,
+      index: opts.index,
     });
 
     if (connectR.ok) {
-      result.codeMatches = parseCodeMatches(connectR.stdout);
+      try {
+        const connectResult = parseFcheapConnectOutput(connectR.stdout);
+        result.codeMatches = normalizeCodeMatches(connectResult.matches);
+        result.query = connectResult.query ?? opts.query;
+        result.indexStatus = connectResult.indexStatus;
+        if (connectResult.indexStatus === "missing") {
+          result.error =
+            "file.cheap could not search this codebase because its vecgrep index is missing; rerun with --index to build it";
+        }
+      } catch (error) {
+        result.error = (error as Error).message;
+        result.codeMatches = [];
+      }
       result.mode = opts.mode;
       // Re-rank the raw search matches by the codemap graph (centrality +
       // caller depth + blast radius). Best-effort: falls back to the fcheap
@@ -767,12 +928,7 @@ export async function investigateCommand(
       );
     } else {
       result.error = `fcheap connect failed: ${connectR.stderr}`;
-      process.stderr.write(`cairn investigate: ${result.error}\n`);
     }
-  } else if (opts.connect && !opts.codebase) {
-    result.error =
-      "--connect requires --codebase <dir> (or set investigate.codebaseDir in config)";
-    process.stderr.write(`cairn investigate: ${result.error}\n`);
   }
 
   // Reconstruct the entry→failure call trace from the ranked matches and
@@ -793,15 +949,114 @@ export async function investigateCommand(
 
   // Write investigate.json to the run directory so agent_context.md can
   // surface the code matches on the next render.
+  const publicResult = InvestigateResultSchema.parse(
+    createArtifactRedactor(undefined).value(result),
+  );
   try {
     writeFileSync(
       join(runDir, "investigate.json"),
-      JSON.stringify(result, null, 2),
+      JSON.stringify(publicResult, null, 2),
     );
+    refreshAgentContextCodeMatches(runDir);
   } catch {
     // best-effort — the run dir might be read-only or gone
   }
 
+  return publicResult;
+}
+
+function resolveCodebasePath(
+  codebase: string | undefined,
+  configPath: string | undefined,
+): string | undefined {
+  if (!codebase) return undefined;
+  if (isAbsolute(codebase)) return codebase;
+  return resolve(configPath ? dirname(configPath) : process.cwd(), codebase);
+}
+
+function positiveLimit(
+  value: number | string | undefined,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`--limit expects a positive integer, got "${value}"`);
+  }
+  return parsed;
+}
+
+type SearchMode = NonNullable<InvestigateRunOptions["mode"]>;
+
+function searchMode(
+  value: string | undefined,
+  fallback: SearchMode,
+): SearchMode {
+  const resolved = value ?? fallback;
+  if (!["semantic", "keyword", "hybrid"].includes(resolved)) {
+    throw new Error(
+      `--mode expects semantic, keyword, or hybrid, got "${resolved}"`,
+    );
+  }
+  return resolved as SearchMode;
+}
+
+export async function investigateRunRef(
+  runRef: string,
+  opts: InvestigateOptions,
+): Promise<InvestigateResult> {
+  const resolved = await resolveArtifactRootContext({
+    ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
+    ...(opts.config ? { config: opts.config } : {}),
+  });
+  const runDir = await resolveRunRef(runRef, resolved.artifactRoot);
+  const runId = basename(runDir);
+  const config = resolved.loaded?.config.investigate;
+  const connect = opts.connect === true || opts.codebase !== undefined;
+  const codebase = opts.codebase
+    ? resolveCodebasePath(opts.codebase, undefined)
+    : resolveCodebasePath(
+        opts.connect ? config?.codebaseDir : undefined,
+        resolved.loaded?.path,
+      );
+  return investigateRunDirectory(runDir, runId, {
+    connect,
+    codebase,
+    mode: searchMode(opts.mode, config?.mode ?? "hybrid"),
+    limit: positiveLimit(opts.limit ?? config?.limit, 10),
+    index: opts.index === true || config?.index === true,
+    query: opts.query,
+    clips: opts.clips,
+  });
+}
+
+export async function investigateCommand(
+  runRef: string,
+  opts: InvestigateOptions,
+): Promise<void> {
+  const format = resolveFormat(opts, "md");
+  let result: InvestigateResult;
+  try {
+    result = InvestigateResultSchema.parse(
+      await investigateRunRef(runRef, opts),
+    );
+  } catch (error) {
+    result = InvestigateResultSchema.parse({
+      $schema: "urn:cairntrace.dev:investigate:v1",
+      version: "1",
+      runId: runRef,
+      runDir: "",
+      codeMatches: [],
+      error: (error as Error).message,
+    });
+  }
+  if (result.error) {
+    process.stderr.write(`cairn investigate: ${result.error}\n`);
+  }
+  for (const warning of result.warnings ?? []) {
+    process.stderr.write(`cairn investigate: warning: ${warning}\n`);
+  }
+  if (result.error || result.warnings?.length) process.exitCode = 2;
   process.stdout.write(emit(format, result, () => investigateMarkdown(result)));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 }
@@ -846,6 +1101,10 @@ function investigateMarkdown(r: InvestigateResult): string {
     );
   }
 
+  if (r.warnings?.length) {
+    lines.push("", "## Warnings", "", ...r.warnings.map((w) => `- ${w}`));
+  }
+
   if (r.failureTrace && r.failureTrace.length >= 2) {
     lines.push(
       "",
@@ -877,8 +1136,11 @@ function investigateMarkdown(r: InvestigateResult): string {
 export interface AuditOptions {
   codebase?: string;
   mode?: string;
-  limit?: number;
+  limit?: number | string;
+  index?: boolean;
   connect?: boolean;
+  speed?: number | string;
+  slowMo?: number | string;
   env?: string;
   coldStart?: boolean;
   artifactRoot?: string;
@@ -889,15 +1151,284 @@ export interface AuditOptions {
   md?: boolean;
 }
 
-export interface AuditResult {
-  specPath: string;
-  runId?: string;
-  runDir?: string;
-  videoPath?: string;
-  vidtraceBundle?: string;
-  stashId?: string;
-  codeMatches: CodeMatch[];
-  error?: string;
+function boundedNumber(
+  value: number | string | undefined,
+  label: string,
+  min: number,
+  max: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${label} expects a number from ${min} to ${max}`);
+  }
+  return parsed;
+}
+
+export async function auditSpec(
+  specPath: string,
+  opts: AuditOptions,
+): Promise<AuditResult> {
+  const result: AuditResult = {
+    $schema: "urn:cairntrace.dev:audit:v1",
+    version: "1",
+    specPath,
+    codeMatches: [],
+    warnings: [],
+  };
+
+  let backend: BrowserBackend | undefined;
+  let stopTrackingBackend: (() => void) | undefined;
+  let server: WebServerHandle | undefined;
+  let stopTrackingServer: (() => void) | undefined;
+  let services: ServicesHandle | undefined;
+  let stopTrackingServices: (() => void) | undefined;
+
+  try {
+    const { runSpec } = await import("../../core/runner/Runner");
+    const { createBackend } = await import("../backendFactory");
+    const lifecycle = await import("./run");
+    const coldStart = opts.coldStart ?? true;
+    const runOptions = {
+      ...(opts.env !== undefined ? { env: opts.env } : {}),
+      coldStart,
+      ...(opts.artifactRoot !== undefined
+        ? { artifactRoot: opts.artifactRoot }
+        : {}),
+      ...(opts.config !== undefined ? { config: opts.config } : {}),
+    };
+    if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
+      process.env.CAIRN_TVAULT_ENV = opts.env;
+    }
+    server = await lifecycle.maybeStartWebServer(
+      specPath,
+      runOptions,
+      (terminateSync) => {
+        stopTrackingServer = trackWebServer({ terminateSync });
+      },
+    );
+    services = await lifecycle.maybeStartServices(
+      specPath,
+      runOptions,
+      (terminateSync) => {
+        stopTrackingServices = trackServices({ terminateSync });
+      },
+    );
+    await lifecycle.maybeInjectTvaultSecrets(specPath, runOptions);
+    const browser = await lifecycle.resolveBrowserConfig(specPath, runOptions);
+    backend = createBackend(
+      lifecycle.backendOpts({ ...runOptions, backend: "playwright" }, browser),
+    );
+    stopTrackingBackend = trackBackend(backend);
+
+    const loaded = await loadConfig(specPath, opts.config);
+    const investigateConfig = loaded?.config.investigate;
+    const stashConfig = loaded?.config.stash;
+    const connect = opts.connect === true || opts.codebase !== undefined;
+    const codebase = opts.codebase
+      ? resolveCodebasePath(opts.codebase, undefined)
+      : resolveCodebasePath(
+          opts.connect ? investigateConfig?.codebaseDir : undefined,
+          loaded?.path,
+        );
+    const mode = searchMode(opts.mode, investigateConfig?.mode ?? "hybrid");
+    const limit = positiveLimit(opts.limit ?? investigateConfig?.limit, 10);
+    const index = opts.index === true || investigateConfig?.index === true;
+    const speed = boundedNumber(opts.speed, "--speed", 0.25, 4);
+    const slowMo = boundedNumber(opts.slowMo, "--slow-mo", 0, 5_000);
+
+    const runResult = await runSpec({
+      specPath,
+      backend,
+      ...(opts.artifactRoot !== undefined
+        ? { artifactRoot: opts.artifactRoot }
+        : {}),
+      coldStart,
+      ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
+      ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      captureOverride: { video: "always" },
+      videoOptions: {
+        ...(speed !== undefined ? { speed } : {}),
+        ...(slowMo !== undefined ? { slowMo } : {}),
+      },
+      ...(services && services.events.length > 0
+        ? { servicesEvents: services.events }
+        : {}),
+      onArchiveRun: async (runDir, _runId, tags) => {
+        const archived = await stashDirectory(runDir, {
+          tool: "cairntrace",
+          tags,
+        });
+        if (!archived.ok) {
+          throw new Error(
+            `file.cheap archive failed: ${archived.error ?? "unknown error"}`,
+          );
+        }
+      },
+      workerIndex: 0,
+    });
+
+    result.runId = runResult.runId;
+    result.runDir = runResult.runDir;
+    result.status = runResult.status;
+    result.exitCode = runResult.exitCode;
+
+    if (runResult.artifacts.video) {
+      result.videoPath = `${runResult.runDir}/${runResult.artifacts.video}`;
+    }
+
+    if (result.videoPath) {
+      const vidtraceOk = await isVidtraceAvailable();
+      if (vidtraceOk) {
+        const vidR = await runVidtraceExtract(result.videoPath);
+        if (vidR.ok) {
+          try {
+            const vidData = JSON.parse(vidR.stdout) as {
+              output_dir?: unknown;
+              bundle_dir?: unknown;
+            };
+            const bundle = vidData.output_dir ?? vidData.bundle_dir;
+            if (typeof bundle === "string" && bundle.trim()) {
+              const requestedOutputRoot = join(
+                dirname(result.videoPath),
+                "vidtrace",
+              );
+              if (!pathIsWithin(requestedOutputRoot, bundle)) {
+                result.warnings?.push(
+                  "vidtrace returned a bundle outside the requested run directory; ignored it",
+                );
+              } else {
+                result.vidtraceBundle = resolve(bundle);
+                await redactVidtraceTextArtifacts(result.vidtraceBundle).catch(
+                  (error) => {
+                    result.warnings?.push(
+                      `could not redact vidtrace text artifacts: ${(error as Error).message}`,
+                    );
+                  },
+                );
+              }
+            } else {
+              result.warnings?.push(
+                "vidtrace returned JSON without output_dir or bundle_dir",
+              );
+            }
+          } catch (error) {
+            result.warnings?.push(
+              `vidtrace returned invalid JSON: ${(error as Error).message}`,
+            );
+          }
+        } else {
+          result.warnings?.push(
+            `vidtrace extract failed: ${vidtraceFailureMessage(vidR)}`,
+          );
+        }
+      } else {
+        result.warnings?.push(
+          "vidtrace not on $PATH; skipped video evidence extraction",
+        );
+      }
+    } else {
+      result.error =
+        "Playwright did not produce the required audit video; vidtrace extraction was skipped";
+    }
+
+    if (connect) {
+      if (!codebase) {
+        result.error =
+          "--connect requires --codebase <dir> or investigate.codebaseDir in config";
+      } else if (result.runDir && result.runId) {
+        const runStash = await stashDirectory(result.runDir, {
+          tool: "cairntrace",
+          tags: [`audit-${result.runId}`],
+        });
+        if (!runStash.ok || !runStash.stashId) {
+          result.error = `fcheap save failed: ${runStash.error ?? "missing stash id"}`;
+        } else {
+          result.stashId = runStash.stashId;
+          if (runStash.warning) {
+            result.warnings?.push(
+              `run stash completed with post-save failures: ${runStash.warning}`,
+            );
+          }
+          let connectStashId = runStash.stashId;
+          if (result.vidtraceBundle && existsSync(result.vidtraceBundle)) {
+            const evidenceStash = await stashDirectory(result.vidtraceBundle, {
+              tool: "cairntrace",
+              tags: [`audit-evidence-${result.runId}`],
+              source: result.runDir,
+            });
+            if (evidenceStash.ok && evidenceStash.stashId) {
+              result.evidenceStashId = evidenceStash.stashId;
+              connectStashId = evidenceStash.stashId;
+              if (evidenceStash.warning) {
+                result.warnings?.push(
+                  `vidtrace evidence stash completed with post-save failures: ${evidenceStash.warning}`,
+                );
+              }
+            } else {
+              result.warnings?.push(
+                `vidtrace evidence stash failed; connected the run stash instead: ${
+                  evidenceStash.error ?? "missing stash id"
+                }`,
+              );
+            }
+          }
+
+          const investigation = await investigateRunDirectory(
+            result.runDir,
+            result.runId,
+            {
+              stashId: connectStashId,
+              connect: true,
+              codebase,
+              mode,
+              limit,
+              index,
+            },
+          );
+          result.codeMatches = investigation.codeMatches;
+          result.warnings?.push(...(investigation.warnings ?? []));
+          if (investigation.error) result.error = investigation.error;
+        }
+      }
+    } else if (runResult.status !== "passed" && result.runDir) {
+      const autoStash = await maybeAutoStash(
+        result.runDir,
+        result.runId,
+        runResult.spec.name,
+        {
+          stashOnFailure: false,
+          ...(stashConfig ? { configStash: stashConfig } : {}),
+        },
+      );
+      if (autoStash?.ok && autoStash.stashId) {
+        result.stashId = autoStash.stashId;
+      } else if (autoStash && !autoStash.ok) {
+        result.warnings?.push(
+          `failed-run stash failed: ${autoStash.error ?? "unknown error"}`,
+        );
+      }
+    }
+  } catch (error) {
+    result.error = (error as Error).message;
+  } finally {
+    await backend?.close().catch(() => undefined);
+    stopTrackingBackend?.();
+    await services?.stop().catch(() => undefined);
+    stopTrackingServices?.();
+    await server?.stop().catch(() => undefined);
+    stopTrackingServer?.();
+  }
+
+  if (result.warnings?.length === 0) delete result.warnings;
+  return AuditResultSchema.parse(
+    createArtifactRedactor(undefined).value(result),
+  );
+}
+
+export function auditResultExitCode(result: AuditResult): number {
+  if (result.error) return 2;
+  return result.exitCode ?? 0;
 }
 
 export async function auditCommand(
@@ -905,117 +1436,14 @@ export async function auditCommand(
   opts: AuditOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
-  const result: AuditResult = {
-    specPath,
-    codeMatches: [],
-  };
-
-  // Lazy import to avoid circular dependency at module load time
-  const { runSpec } = await import("../../core/runner/Runner");
-  const { createBackend } = await import("../backendFactory");
-
-  // Run the spec with video recording
-  const backend = createBackend({
-    backend: "playwright",
-    ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
-  });
-
-  try {
-    const runResult = await runSpec({
-      specPath,
-      backend,
-      ...(opts.artifactRoot !== undefined
-        ? { artifactRoot: opts.artifactRoot }
-        : {}),
-      ...(opts.coldStart !== undefined ? { coldStart: opts.coldStart } : {}),
-      ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
-      ...(opts.config !== undefined ? { configPath: opts.config } : {}),
-      workerIndex: 0,
-    });
-
-    result.runId = runResult.runId;
-    result.runDir = runResult.runDir;
-
-    if (runResult.artifacts.video) {
-      result.videoPath = `${runResult.runDir}/${runResult.artifacts.video}`;
-    }
-
-    // If the run failed, auto-stash it
-    if (runResult.status !== "passed" && result.runDir) {
-      await maybeAutoStash(result.runDir, result.runId, runResult.spec.name, {
-        stashOnFailure: true,
-      });
-    }
-
-    // If we have a video, try vidtrace extract
-    if (result.videoPath) {
-      const vidtraceOk = await isVidtraceAvailable();
-      if (vidtraceOk) {
-        const vidR = await runVidtraceExtract(result.videoPath);
-        if (vidR.ok) {
-          try {
-            const vidData = JSON.parse(vidR.stdout);
-            result.vidtraceBundle = vidData.output_dir ?? vidData.bundle_dir;
-          } catch {
-            // vidtrace extract returned non-JSON; skip
-          }
-        }
-      } else {
-        process.stderr.write(
-          "cairn audit: vidtrace not on $PATH — skipping video evidence extraction\n",
-        );
-      }
-    }
-
-    // If --connect and --codebase, stash and connect
-    if (opts.connect && opts.codebase && result.runDir) {
-      const fcheapOk = await isFcheapAvailable();
-      if (!fcheapOk) {
-        result.error =
-          "fcheap not on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap";
-        process.stderr.write(`cairn audit: ${result.error}\n`);
-      } else {
-        const stashR = await execa(
-          "fcheap",
-          [
-            "save",
-            result.runDir,
-            "--tool",
-            "cairntrace",
-            "--tag",
-            `audit-${result.runId}`,
-            "--json",
-          ],
-          { reject: false, timeout: 60_000 },
-        );
-        if (stashR.exitCode === 0) {
-          const stashData = JSON.parse(stashR.stdout);
-          result.stashId = stashData.stashId ?? stashData.id ?? stashData.path;
-
-          const connectR = await runFcheapConnect(
-            result.stashId!,
-            opts.codebase,
-            {
-              mode: opts.mode,
-              limit: opts.limit,
-            },
-          );
-          if (connectR.ok) {
-            result.codeMatches = parseCodeMatches(connectR.stdout);
-          }
-        }
-      }
-    } else if (opts.connect && !opts.codebase) {
-      result.error = "--connect requires --codebase <dir>";
-      process.stderr.write(`cairn audit: ${result.error}\n`);
-    }
-  } catch (e) {
-    result.error = (e as Error).message;
-    process.stderr.write(`cairn audit: ${result.error}\n`);
-  } finally {
-    await backend.close().catch(() => undefined);
+  const result = AuditResultSchema.parse(await auditSpec(specPath, opts));
+  for (const warning of result.warnings ?? []) {
+    process.stderr.write(`cairn audit: warning: ${warning}\n`);
   }
-
+  if (result.error) {
+    process.stderr.write(`cairn audit: ${result.error}\n`);
+  }
+  process.exitCode = auditResultExitCode(result);
   process.stdout.write(emit(format, result, () => auditMarkdown(result)));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
 }
@@ -1026,9 +1454,11 @@ function auditMarkdown(r: AuditResult): string {
     "",
     ...(r.runId ? [`- runId: ${r.runId}`] : []),
     ...(r.runDir ? [`- runDir: ${r.runDir}`] : []),
+    ...(r.status ? [`- status: ${r.status}`] : []),
     ...(r.videoPath ? [`- video: ${r.videoPath}`] : []),
     ...(r.vidtraceBundle ? [`- vidtrace bundle: ${r.vidtraceBundle}`] : []),
     ...(r.stashId ? [`- stashId: ${r.stashId}`] : []),
+    ...(r.evidenceStashId ? [`- evidence stashId: ${r.evidenceStashId}`] : []),
   ];
 
   if (r.codeMatches.length > 0) {
@@ -1045,6 +1475,10 @@ function auditMarkdown(r: AuditResult): string {
       "",
       "No code matches. Use --connect --codebase <dir> to run fcheap connect.",
     );
+  }
+
+  if (r.warnings?.length) {
+    lines.push("", "## Warnings", "", ...r.warnings.map((w) => `- ${w}`));
   }
 
   return lines.join("\n");

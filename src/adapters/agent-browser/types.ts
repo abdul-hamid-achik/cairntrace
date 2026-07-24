@@ -51,20 +51,15 @@ export interface AgentBrowserOptions {
   /** iOS device name (`--device <name>`), e.g. "iPhone 15 Pro". Used with `provider: "ios"`. */
   device?: string;
   /**
-   * Enable the verify-after-click + post-nav settle guard. When true (the
-   * default), every click step is followed by a short networkidle wait and
-   * clicks whose settle times out fail at the click step instead of
-   * hanging the next step's wait. Set to false for backends / scenarios
-   * where a click is expected to NOT navigate and the next spec step does
-   * its own waiting.
+   * Enable the verify-after-click delivery guard. When true (the default),
+   * same-tab links must produce URL, document, or DOM evidence before the
+   * next step. Set to false when the spec owns all post-click waiting.
    */
   verifyAfterClick?: boolean;
   /**
-   * Budget in ms for the post-click networkidle settle (default 5000).
-   * Dev-mode SPA apps that load modules on demand can take well over 5s to
-   * go network-quiet after a login/navigation click even though the page is
-   * fine — raise this instead of disabling `verifyAfterClick` to keep the
-   * wedge protection.
+   * Project-level opt-in budget for a post-click networkidle settle.
+   * Unset means delivery confirmation is sufficient; no implicit
+   * networkidle wait is added.
    */
   postClickSettleMs?: number;
 }

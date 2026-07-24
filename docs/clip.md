@@ -14,7 +14,11 @@ cairn clip latest --label "bug=0:12-0:18" --stash --tag regression
 
 ### Labels
 
-Each `--label` is `name=start-end` in `MM:SS` (or `HH:MM:SS`). The clip is named `<prefix>-<name>.<ext>` and moved into the run dir's `videos/clips/` (or `--out`), plus written to a clips manifest.
+Each `--label` is `name=start-end` in `MM:SS` (or `HH:MM:SS`). Vidtrace
+produces an MP4 for each label. Cairntrace moves the clips into
+`videos/clips/<label>.mp4` and writes `videos/clips/clips.json`. `--out`
+controls vidtrace's working output location; the completed clips still join
+the run pack.
 
 ### Flags
 
@@ -22,7 +26,7 @@ Each `--label` is `name=start-end` in `MM:SS` (or `HH:MM:SS`). The clip is named
 |---|---|
 | `--label <label=start-end>` | clip label with start/end timestamps (repeatable, required) |
 | `--out <dir>` | clip output directory (default `run/videos/clips`) |
-| `--name <prefix>` | clip filename prefix |
+| `--name <name>` | name passed to vidtrace for its working output set; final run-pack filenames use the labels |
 | `--reencode` | re-encode clips instead of stream-copy (slower, needed for some codecs) |
 | `--stash` | stash the run directory to fcheap after cutting clips |
 | `--tag <tag>` | tag for the stash (repeatable) |
@@ -36,16 +40,18 @@ At least one `--label` is required. With `--stash`, the enriched run directory (
 {
   "runId": "login-2026-...",
   "runDir": "run/login-2026-...",
-  "sourceVideo": "run/login-2026-.../videos/playwright.mp4",
+  "sourceVideo": "run/login-2026-.../videos/playwright-video.webm",
   "outputDir": "run/login-2026-.../videos/clips",
-  "clips": { "failure": "login-failure-0:12-0:18.mp4" },
+  "clips": { "failure": "videos/clips/failure.mp4" },
   "stashId": "fcheap-..."   // only with --stash
 }
 ```
 
 ## When to clip
 
-- **A failing run you want to show a teammate** — clip the seconds around the failure, stash, and share the clip. Smaller than the full video; self-contained.
+- **A failing run you want to show a teammate** — clip the seconds around the
+  failure, review it for sensitive content, then transfer it explicitly. A
+  file.cheap stash remains local and is not shared automatically.
 - **A regression reel** — clip the same label across several stashed runs and stitch them in vidtrace.
 - **A PR review** — clip the interaction the spec covers so a reviewer sees the behavior, not just the green check.
 
@@ -56,6 +62,6 @@ At least one `--label` is required. With `--stash`, the enriched run directory (
 
 ## See also
 
-- [Artifacts](/artifacts) — `videos/` and `frames/` (the source `clip` reads)
+- [Artifacts](/artifacts) — the `videos/` source and generated clips
 - [Stash](/stash) — the `--stash` post-clip handoff
 - [Doctor & clean](/doctor) — the `vidtrace` availability check

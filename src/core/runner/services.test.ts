@@ -904,7 +904,7 @@ describe("startServices — tmux phase", () => {
             readinessCheck: "true",
           },
           tmux: {
-            session: "cairn-graphite",
+            session: "cairn-sample-app",
             reuseExisting: true,
             readyTimeoutMs: 5000,
             windows: [
@@ -933,7 +933,7 @@ describe("startServices — tmux phase", () => {
 
   it("re-launches a dead pane when reusing a session with idle shell", async () => {
     // Session exists, window exists, but pane is sitting at zsh with stale
-    // ready text in scrollback — the graphite go-services failure mode.
+    // ready text in scrollback — the stale-service-log failure mode.
     execaImpl = async (cmd, args) => {
       const base = tmuxBaseImpl(cmd, args);
       if (base) return base;
@@ -955,7 +955,7 @@ describe("startServices — tmux phase", () => {
       await startServices(
         {
           tmux: {
-            session: "cairn-graphite",
+            session: "cairn-sample-app",
             reuseExisting: true,
             readyTimeoutMs: 5000,
             windows: [
@@ -1017,7 +1017,7 @@ describe("startServices — tmux phase", () => {
       await startServices(
         {
           tmux: {
-            session: "cairn-graphite",
+            session: "cairn-sample-app",
             reuseExisting: true,
             readyTimeoutMs: 5000,
             windows: [
@@ -1348,7 +1348,7 @@ describe("startServices — teardown", () => {
       await startServices(
         {
           tmux: {
-            session: "graphite",
+            session: "sample-app",
             readyTimeoutMs: 2000,
             windows: [
               {
@@ -1358,7 +1358,7 @@ describe("startServices — teardown", () => {
               },
             ],
           },
-          teardown: ["tmux kill-session -t graphite", "docker compose down"],
+          teardown: ["tmux kill-session -t sample-app", "docker compose down"],
         },
         { configDir: dir, project: "test", coldStart: true },
       ),
@@ -1390,7 +1390,7 @@ describe("startServices — teardown", () => {
       await startServices(
         {
           tmux: {
-            session: "graphite",
+            session: "sample-app",
             reuseExisting: false,
             readyTimeoutMs: 2000,
             windows: [
@@ -1401,7 +1401,7 @@ describe("startServices — teardown", () => {
               },
             ],
           },
-          teardown: ["tmux kill-session -t graphite", "docker compose down"],
+          teardown: ["tmux kill-session -t sample-app", "docker compose down"],
         },
         { configDir: dir, project: "test", coldStart: true },
       ),
@@ -1857,7 +1857,7 @@ describe("startServices — tvault integration", () => {
           coldStart: false,
           secrets: {
             provider: "tvault",
-            tvault: { project: "graphite" },
+            tvault: { project: "sample-app" },
           },
         },
       ),
@@ -1887,7 +1887,7 @@ describe("startServices — tvault integration", () => {
           coldStart: false,
           secrets: {
             provider: "tvault",
-            tvault: { project: "graphite" },
+            tvault: { project: "sample-app" },
           },
         },
       ),
@@ -2806,10 +2806,10 @@ describe("startServices — fcheap stash integration", () => {
             enabled: true,
             autoStash: "always",
             capture: ["tmux", "docker", "seed"],
-            tags: ["graphite", "test"],
+            tags: ["sample-app", "test"],
           },
         },
-        { configDir: dir, project: "graphite", coldStart: true },
+        { configDir: dir, project: "sample-app", coldStart: true },
       ),
     );
 
@@ -2819,9 +2819,9 @@ describe("startServices — fcheap stash integration", () => {
     expect(stashCalls.length).toBe(1);
     expect(stashCalls[0]!.tool).toBe("cairntrace-services");
     expect(stashCalls[0]!.tags).toContain("services");
-    expect(stashCalls[0]!.tags).toContain("graphite");
+    expect(stashCalls[0]!.tags).toContain("sample-app");
     expect(stashCalls[0]!.tags).toContain("test");
-    expect(stashCalls[0]!.name).toContain("graphite-services");
+    expect(stashCalls[0]!.name).toContain("sample-app-services");
   });
 
   it("does not stash when stash is disabled (default)", async () => {

@@ -9,3 +9,6 @@ export * from "./diff.v1";
 export * from "./stats.v1";
 export * from "./docs.v1";
 export * from "./selection.v1";
+export * from "./investigate.v1";
+export * from "./audit.v1";
+export * from "./stash.v1";

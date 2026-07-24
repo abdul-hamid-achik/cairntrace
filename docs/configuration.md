@@ -29,7 +29,7 @@ workflowRoots: [./flows, ./checks]    # dirs cairn scans for specs (cairn explai
 environments:                         # required — at least one environment
   local:
     baseUrl: http://localhost:3000
-    vars: { allowed_countries: [US, MX] }
+    vars: { allowedCountry: US, retryCount: 3, useSandbox: true }
     viewport: { width: 1280, height: 800 }
   staging:
     baseUrl: https://staging.app.com
@@ -37,7 +37,7 @@ environments:                         # required — at least one environment
     secrets: { provider: tvault, tvault: { group: payments, env: prod } }
 
 secrets:                              # default secrets block (an env-level secrets replaces it)
-  provider: env                       # env | tvault
+  provider: tvault                    # env | tvault
   required: [API_KEY, DB_URL]         # fail the run if these are unset/empty
   tvault:                             # required when provider: tvault
     project: my-app                    # direct mode — OR —
@@ -49,14 +49,13 @@ retention:
   keepFailedRuns: 10                  # newest N failed/errored runs survive pruning anyway (default: 10)
 
 report:
-  theme: cairn                        # cairn | graphite | midnight | contrast
+  theme: cairn                        # cairn | slate | midnight | contrast
   colors: { accent: "rgb(94,129,172)", danger: "#c0392b" }   # optional CSS token overrides
 
 browser:                              # browser-backend tuning (agent-browser)
-  verifyAfterClick: true              # fold a networkidle settle into every click (default: true)
-  postClickSettleMs: 20000            # settle budget in ms (default: 5000) — raise for dev servers
-                                      # that compile modules on demand instead of disabling the guard
-                                      # click settleMs > spec settleMs > this value > 5000
+  verifyAfterClick: true              # confirm same-tab link delivery (default: true)
+  postClickSettleMs: 20000            # opt in to network-idle after every click
+                                      # click settleMs > spec settleMs > this value
 
 webServer:                            # optional single-server lifecycle for `cairn run`
   command: "node .output/server/index.mjs"
@@ -83,15 +82,14 @@ stash:                                # fcheap run-artifact stash — see Stash 
   autoStash: on-failure               # on-failure | never
   tags: [regression, audit]
 
-clips:                                # vidtrace video clip points — see Clip page
-  points:
-    - { label: failure, start: "0:12", end: "0:18" }
+clips:                                # default tags; clip points live in the spec
   tags: [regression]
 
 investigate:                          # fcheap connect + vecgrep — see Investigate page
   codebaseDir: ./src                   # default codebase for `cairn investigate --connect`
   mode: hybrid                         # semantic | keyword | hybrid
   limit: 10
+  index: false                         # build/refresh vecgrep before connecting
   autoInvestigate: on-failure          # on-failure | never
 
 annotate:                             # codemap annotation — see Annotate page
@@ -102,12 +100,14 @@ annotate:                             # codemap annotation — see Annotate page
 
 The schema is `.strict()` at every level, so a misspelled key (e.g. `runner:` or `run:` — neither exists) is a validation error, not a silent no-op.
 
-Agent-browser click settling can be narrowed without slowing every flow. Its
-effective network-idle budget is a click step's sibling `settleMs`, the
-spec-root `settleMs`, `browser.postClickSettleMs`, then the 5000 ms default.
-Playwright honors explicit click/spec values and otherwise keeps its native
-waits. A resolved value of `0` skips the extra settle.
-`browser.verifyAfterClick: false` disables the agent-browser guard globally.
+Agent-browser confirms same-tab link delivery from URL, document, or DOM
+evidence by default without waiting for network-idle. A positive click-step or
+spec-root `settleMs`, or `browser.postClickSettleMs`, opts into network-idle
+settling; click/spec values take precedence over config. Playwright honors
+explicit click/spec values and otherwise keeps its native waits. A resolved
+value of `0` skips both the extra settle and the link-delivery probe at that
+scope. `browser.verifyAfterClick: false` disables the agent-browser guard
+globally.
 
 ## Environments
 

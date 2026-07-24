@@ -59,30 +59,6 @@ export interface PlaywrightAdapterOptions {
 type RequestMode = "api" | "cookie-bridge" | "subprocess-cookie-bridge";
 
 /**
- * Build an ffmpeg `atempo` filter chain for arbitrary speed values.
- * `atempo` only supports 0.5–2.0 per filter instance, so extreme values
- * need chaining (e.g. speed=4 → atempo=2.0,atempo=2.0).
- * Returns null when no audio adjustment is needed (speed=1).
- */
-function buildAtempoChain(speed: number): string | null {
-  if (speed === 1) return null;
-  const filters: string[] = [];
-  let remaining = speed;
-  while (remaining > 2) {
-    filters.push("atempo=2.0");
-    remaining /= 2;
-  }
-  while (remaining < 0.5) {
-    filters.push("atempo=0.5");
-    remaining /= 0.5;
-  }
-  if (remaining !== 1) {
-    filters.push(`atempo=${remaining.toFixed(4)}`);
-  }
-  return filters.length > 0 ? filters.join(",") : null;
-}
-
-/**
  * Playwright BrowserBackend.
  *
  * Single-context, single-page model. Network and console events are buffered
@@ -573,9 +549,17 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   async stopVideo(path: string): Promise<{ ok: boolean; path: string }> {
     if (!this.page || !this.videoEnabled) return { ok: false, path };
+    const video = this.page.video();
+    if (!video) return { ok: false, path };
+
     try {
-      const video = this.page.video();
-      if (!video) return { ok: false, path };
+      // Playwright finalizes native recordings only when the context closes.
+      // Runner calls stopVideo after all outcome verifiers have finished with
+      // the live page, so closing here is safe and prevents saveAs deadlocks.
+      await this.context?.close();
+      this.context = undefined;
+      this.page = undefined;
+
       // If speed is 1 (default), save directly — no ffmpeg needed.
       if (this.videoSpeed === 1) {
         await video.saveAs(path);
@@ -598,12 +582,23 @@ export class PlaywrightAdapter implements BrowserBackend {
       return { ok: reencoded, path };
     } catch {
       return { ok: false, path };
+    } finally {
+      // slowMo is a browser-launch option. Close the browser so a later run on
+      // the same adapter can relaunch with its own recording settings.
+      await this.browser?.close().catch(() => undefined);
+      this.browser = undefined;
+      this.context = undefined;
+      this.page = undefined;
+      this.videoEnabled = false;
+      this.videoSlowMo = 0;
+      this.videoSpeed = 1;
     }
   }
 
   /**
-   * Re-encode a video at a different playback speed using ffmpeg.
-   * Uses the `setpts` (video) + `atempo` (audio) filters.
+   * Re-encode a Playwright video at a different playback speed using ffmpeg.
+   * Playwright's native recordings are video-only, so no audio filter is
+   * needed (and supplying one makes ffmpeg fail on the absent audio stream).
    * Returns true if ffmpeg succeeded and the output file exists.
    */
   private async reencodeVideoSpeed(
@@ -611,11 +606,7 @@ export class PlaywrightAdapter implements BrowserBackend {
     output: string,
     speed: number,
   ): Promise<boolean> {
-    // setpts=PTS/speed for video; atempo=speed for audio.
-    // atempo only supports 0.5–2.0 per filter; chain for extreme values.
     const videoFilter = `setpts=${(1 / speed).toFixed(4)}*PTS`;
-    const audioFilters = buildAtempoChain(speed);
-    const vf = audioFilters ? `${videoFilter},${audioFilters}` : videoFilter;
     return new Promise((resolve) => {
       const proc = spawn(
         "ffmpeg",
@@ -624,14 +615,12 @@ export class PlaywrightAdapter implements BrowserBackend {
           "-i",
           input,
           "-vf",
-          vf,
-          // Preserve audio sync by dropping/duplicating as needed.
-          ...(audioFilters ? ["-af", audioFilters] : []),
+          videoFilter,
+          "-an",
           "-c:v",
           "libvpx-vp9",
           "-b:v",
           "1M",
-          ...(audioFilters ? ["-c:a", "libopus"] : (["-an"] as string[])),
           output,
         ],
         { stdio: ["ignore", "ignore", "ignore"] },

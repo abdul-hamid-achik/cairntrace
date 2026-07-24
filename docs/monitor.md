@@ -10,7 +10,11 @@ cairn run flows/heavy-dashboard.yml --monitor --format json
 
 While the run executes, the runner samples `backend.browserPid()` on a schedule and writes `diagnostics/process.{md,json}` into the run directory. It also implicitly turns on under `MONITOR=1` for CI that wants it everywhere. Without `--monitor` (and without `MONITOR=1`), no sampling happens and the `process` verifier reports `skipped`, not `failed`.
 
-`diagnostics/process.json` carries the sampler summary: `peakRss`, `meanRss`, `finalRss` (megabytes), `peakCpu`, `meanCpu` (summed tree CPU percent), and `samples` (count).
+`diagnostics/process.json` carries the sampler summary:
+`peakRssBytes`, `meanRssBytes`, `finalRssBytes`, `peakCpuPercent`,
+`meanCpuPercent`, the full `samples` array, and the final process `tree`. The
+`process` verifier exposes the author-facing megabyte/percent matcher names
+shown below.
 
 ## The `monitor` step
 
@@ -23,8 +27,12 @@ steps:
   - monitor: { action: snapshot, label: after-scroll }
 ```
 
-- `action: profile` with `type: heap|cpu|goroutine|sample` captures a profile of the backend's browser process tree. With `assign`, the result is written to `monitor/<assign>.json` and registered as a named artifact, reusable via `${artifacts.<assign>.path}`.
-- `action: snapshot` takes a one-shot sample, optionally labeled.
+- `action: profile` with `type: heap|cpu|goroutine|sample` captures a profile
+  of the backend's browser process tree. Files use an ordinal/action name such
+  as `monitor/002_profile.json`. With `assign`, that path is also registered
+  as a named artifact, reusable via `${artifacts.<assign>.path}`.
+- `action: snapshot` takes a one-shot sample and writes an ordinal/action path
+  such as `monitor/003_snapshot_after-scroll.json`.
 
 The `monitor` step targets `backend.browserPid()`, so it fails if no browser has spawned yet or `monitor` is not on `$PATH`. It is handled by the runner *before* adapter dispatch — it is not a backend interaction.
 

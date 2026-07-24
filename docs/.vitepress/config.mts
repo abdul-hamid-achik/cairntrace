@@ -20,8 +20,6 @@ export default defineConfig({
 
   sitemap: {
     hostname: SITE_URL,
-    transformItems: (items) =>
-      items.filter((item) => !item.url.endsWith('video-screenshot-fallback')),
   },
 
   transformPageData(pageData) {

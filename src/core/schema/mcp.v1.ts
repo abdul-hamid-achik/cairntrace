@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SafeStashIdSchema } from "./stash.v1";
 
 /**
  * Wire schemas for MCP tool results that don't already have a declared v1
@@ -157,3 +158,74 @@ export const ServicesStatusResultSchema = z
   })
   .passthrough();
 export type ServicesStatusResult = z.infer<typeof ServicesStatusResultSchema>;
+
+const StashFileEntrySchema = z
+  .object({
+    path: z.string().min(1),
+    size: z.number().int().nonnegative(),
+    hash: z.string().min(1).optional(),
+  })
+  .strict();
+
+/** `cairn_stash_info`: normalized file.cheap v0.30 manifest metadata. */
+export const StashInfoResultSchema = z
+  .object({
+    schemaVersion: z.string().min(1),
+    id: SafeStashIdSchema,
+    name: z.string().min(1).optional(),
+    createdAt: z.string().min(1),
+    sourcePath: z.string().min(1).optional(),
+    source: z.string().min(1).optional(),
+    tool: z.string().min(1).optional(),
+    tags: z.array(z.string()),
+    fileCount: z.number().int().nonnegative(),
+    sizeBytes: z.number().int().nonnegative(),
+    contentHash: z.string().min(1),
+    compression: z.string().min(1).optional(),
+    compressedSizeBytes: z.number().int().nonnegative().optional(),
+    bundleType: z.string().min(1).optional(),
+    expiresAt: z.string().min(1).optional(),
+    files: z.array(StashFileEntrySchema).optional(),
+    custom: z.record(z.string()).optional(),
+  })
+  .strict();
+export type StashInfoResult = z.infer<typeof StashInfoResultSchema>;
+
+/** `cairn_stash_restore`: normalized file.cheap v0.30 restore receipt. */
+export const StashRestoreResultSchema = z
+  .object({
+    stashId: SafeStashIdSchema,
+    restoredTo: z.string().min(1),
+    fileCount: z.number().int().nonnegative(),
+    verified: z.boolean(),
+    mismatches: z.array(z.string()),
+    status: z.enum([
+      "restored",
+      "restored_unverified",
+      "restored_with_mismatches",
+    ]),
+  })
+  .strict();
+export type StashRestoreResult = z.infer<typeof StashRestoreResultSchema>;
+
+/**
+ * Structured operational errors returned by stash MCP tools. The server does
+ * not declare this as a success output schema because MCP skips output-schema
+ * validation for `isError` results.
+ */
+export const StashToolErrorSchema = z
+  .object({
+    code: z.enum([
+      "FCHEAP_UNAVAILABLE",
+      "FCHEAP_COMMAND_FAILED",
+      "FCHEAP_INVALID_RESPONSE",
+      "FCHEAP_RESTORE_UNVERIFIED",
+    ]),
+    command: z.enum(["info", "restore"]),
+    message: z.string().min(1),
+    hint: z.string().min(1),
+    stashId: z.string().min(1).optional(),
+    restore: StashRestoreResultSchema.optional(),
+  })
+  .strict();
+export type StashToolError = z.infer<typeof StashToolErrorSchema>;

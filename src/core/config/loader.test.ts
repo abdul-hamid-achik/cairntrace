@@ -58,7 +58,7 @@ environments:
   staging:
     baseUrl: https://staging.example.com
 report:
-  theme: graphite
+  theme: slate
   colors:
     accent: "#256f7d"
     surface: "rgb(243, 245, 242)"
@@ -76,7 +76,7 @@ report:
     expect(loaded?.config.environments["staging"]?.baseUrl).toBe(
       "https://staging.example.com",
     );
-    expect(loaded?.config.report?.theme).toBe("graphite");
+    expect(loaded?.config.report?.theme).toBe("slate");
     expect(loaded?.config.report?.colors?.surface).toBe("rgb(243, 245, 242)");
     expect(loaded?.path).toBe(configPath);
   });

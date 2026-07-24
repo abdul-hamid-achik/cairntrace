@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Step } from "../schema/spec.v1";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
+import { PlaywrightAdapter } from "../../adapters/playwright/PlaywrightAdapter";
 import {
   applyWaitScale,
   resolveWaitScale,
@@ -197,6 +198,79 @@ describe("wait scaling", () => {
     const step: Step = { wait: { text: "Ready" } };
     expect(applyWaitScale(step, 1)).toBe(step);
   });
+});
+
+describe("latency resilience in real Chromium", () => {
+  it("combines scaled hydration verification with delayed click delivery", async () => {
+    const backend = new PlaywrightAdapter({ defaultTimeoutMs: 5_000 });
+    backend.setWaitScale(2);
+    const page = encodeURIComponent(`<!doctype html>
+        <html>
+          <body>
+            <label>Name <input id="name" /></label>
+            <section id="editor">Editor</section>
+            <button id="save">Save</button>
+            <script>
+              const input = document.querySelector("#name");
+              const save = document.querySelector("#save");
+              let hydrationWipeScheduled = false;
+              input.addEventListener("input", () => {
+                if (hydrationWipeScheduled) return;
+                hydrationWipeScheduled = true;
+                setTimeout(() => { input.value = ""; }, 650);
+              });
+              let deliveryScheduled = false;
+              save.addEventListener("click", () => {
+                if (deliveryScheduled) return;
+                deliveryScheduled = true;
+                setTimeout(() => document.querySelector("#editor")?.remove(), 700);
+              });
+            </script>
+          </body>
+        </html>`);
+
+    try {
+      expect(
+        await backend.runStep({
+          open: `data:text/html;charset=utf-8,${page}`,
+        }),
+      ).toMatchObject({ ok: true });
+
+      const fill = await runResilientBrowserStep(
+        {
+          fill: { by: "selector", selector: "#name", value: "Ada" },
+        },
+        backend,
+        2,
+      );
+      expect(fill).toMatchObject({ ok: true });
+      expect(fill.stderr).toContain(
+        "input value survived hydration after 2 attempts",
+      );
+      await expect(
+        backend.getValue({ by: "selector", selector: "#name" }),
+      ).resolves.toBe("Ada");
+
+      const click = await runResilientBrowserStep(
+        {
+          click: {
+            by: "selector",
+            selector: "#save",
+            until: { selectorGone: "#editor", timeoutMs: 2_000 },
+          },
+        },
+        backend,
+        2,
+      );
+      expect(click).toMatchObject({ ok: true });
+      expect(click.stderr).toContain(
+        "click.until satisfied after 2 click attempts",
+      );
+      await expect(backend.getCount("#editor")).resolves.toBe(0);
+    } finally {
+      await backend.close();
+    }
+  }, 20_000);
 });
 
 class ClickEffectBackend extends MockBrowserBackend {

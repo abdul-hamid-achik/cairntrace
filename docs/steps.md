@@ -58,15 +58,17 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 
 ```yaml
 - click: { by: role, role: button, name: Save }
-- click: { by: role, role: button, name: Cobrar, nth: 1 }
+- click: { by: role, role: button, name: Pay, nth: 1 }
 - click: { by: selector, selector: "button.primary" }
 - click: { by: role, role: link, name: Reports }
   settleMs: 15000
 ```
 
-Agent-browser clicks wait for network-idle settling by default. Their budget
-resolves as click-step `settleMs` → top-level spec `settleMs` → config
-`browser.postClickSettleMs` → 5000 ms. Playwright honors explicit click/spec
+Agent-browser confirms same-tab link delivery from URL, document, or DOM
+evidence by default; it does not add an implicit network-idle wait. A positive
+click-step or top-level spec `settleMs`, or config
+`browser.postClickSettleMs`, explicitly adds network-idle settling. Click/spec
+values take precedence over config. Playwright honors explicit click/spec
 values and otherwise keeps its native action/navigation waits. A resolved
 `settleMs: 0` skips the extra settle at that scope AND the agent-browser
 link-delivery probe (you are declaring that the next step waits on the
@@ -266,7 +268,11 @@ Capture a process profile or a one-shot sample of the backend's browser process 
 
 ## Step output
 
-Every step produces an entry in `events.ndjson` and `frames/frames.ndjson` even when no screenshot is requested — that is the agent-context substrate. Steps gated by `when:` produce a `skipped` record; steps that failed are surfaced with the full DOM diff in `diagnostics/failure.md`.
+Every step produces timing and status entries in `events.ndjson`, and its final
+result is included in `run.json`, even when no screenshot is requested. Steps
+gated by `when:` produce a skipped event. A failed browser step writes
+`diagnostics/<step-ordinal>_<step-id>.json` with the captured page diagnostics
+when the backend is still responsive.
 
 ## What is deliberately not a step
 

@@ -1,12 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execa } from "execa";
 import {
   type CodeMatch,
   annotateCallPath,
+  auditResultExitCode,
+  buildFcheapConnectArgs,
   gatherFailureContext,
+  parseCodeMatches,
+  pathIsWithin,
   rankCodeMatches,
+  redactVidtraceTextArtifacts,
   reconstructFailureTrace,
 } from "./investigate";
 import type { CodemapDeps } from "./annotate.js";
@@ -48,6 +61,416 @@ describe("investigate module", () => {
     expect(match.callers).toBe(8);
     expect(match.blastRadius).toBe(12);
     expect(match.codemapScore).toBe(1.0);
+  });
+
+  it("normalizes the file.cheap v0.30 connect envelope", () => {
+    expect(
+      parseCodeMatches(
+        JSON.stringify({
+          stash_id: "stash-123",
+          codebase: "/workspace/app",
+          query: "login failure",
+          index_status: "indexed",
+          matches: [
+            {
+              stash_id: "stash-123",
+              file: "src/auth/login.ts",
+              line: 42,
+              score: 0.89,
+              text: "handleSubmit",
+            },
+          ],
+        }),
+      ),
+    ).toEqual([
+      {
+        file: "src/auth/login.ts",
+        line: 42,
+        score: 0.89,
+        snippet: "handleSubmit",
+      },
+    ]);
+  });
+
+  it("rejects malformed file.cheap connect output", () => {
+    expect(() => parseCodeMatches('{"matches":[{"score":0.9}]}')).toThrow(
+      /Invalid fcheap connect JSON/,
+    );
+  });
+
+  it("forwards an explicit query to file.cheap connect", () => {
+    expect(
+      buildFcheapConnectArgs("stash-123", "/workspace/app", {
+        mode: "keyword",
+        limit: 5,
+        query: "parseFcheapConnectOutput",
+        index: true,
+      }),
+    ).toEqual([
+      "connect",
+      "stash-123",
+      "/workspace/app",
+      "--json",
+      "--mode",
+      "keyword",
+      "--limit",
+      "5",
+      "--query",
+      "parseFcheapConnectOutput",
+      "--index",
+    ]);
+  });
+
+  it("maps audit verdicts to stable process and MCP exit semantics", () => {
+    const base = {
+      $schema: "urn:cairntrace.dev:audit:v1" as const,
+      version: "1" as const,
+      specPath: "flows/login.yml",
+      codeMatches: [],
+    };
+    expect(
+      auditResultExitCode({
+        ...base,
+        status: "passed",
+        exitCode: 0,
+      }),
+    ).toBe(0);
+    expect(
+      auditResultExitCode({
+        ...base,
+        status: "failed",
+        exitCode: 1,
+      }),
+    ).toBe(1);
+    expect(
+      auditResultExitCode({
+        ...base,
+        status: "passed",
+        exitCode: 0,
+        error: "file.cheap contract failed",
+      }),
+    ).toBe(2);
+  });
+
+  it("keeps vidtrace bundles inside the run and redacts their text artifacts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cairn-vidtrace-redaction-"));
+    const bundle = join(root, "videos", "vidtrace", "bundle");
+    const nested = join(bundle, "transcript");
+    const outside = join(root, "outside");
+    const previousSecret = process.env.CAIRN_TEST_API_KEY;
+    process.env.CAIRN_TEST_API_KEY = "vidtrace-secret-value";
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(
+      join(bundle, "timeline.json"),
+      '{"text":"vidtrace-secret-value"}',
+    );
+    writeFileSync(join(nested, "audio.txt"), "heard vidtrace-secret-value");
+    writeFileSync(join(bundle, "frame.png"), "vidtrace-secret-value");
+
+    try {
+      expect(pathIsWithin(join(root, "videos", "vidtrace"), bundle)).toBe(true);
+      expect(pathIsWithin(join(root, "videos", "vidtrace"), outside)).toBe(
+        false,
+      );
+      await redactVidtraceTextArtifacts(bundle);
+      expect(readFileSync(join(bundle, "timeline.json"), "utf8")).toContain(
+        "[redacted]",
+      );
+      expect(readFileSync(join(nested, "audio.txt"), "utf8")).toContain(
+        "[redacted]",
+      );
+      expect(readFileSync(join(bundle, "frame.png"), "utf8")).toContain(
+        "vidtrace-secret-value",
+      );
+    } finally {
+      if (previousSecret === undefined) {
+        delete process.env.CAIRN_TEST_API_KEY;
+      } else {
+        process.env.CAIRN_TEST_API_KEY = previousSecret;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("cairn investigate CLI contract", () => {
+  it("uses config defaults, forwards --query, and lets --codebase/--connect select connection", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cairn-investigate-cli-"));
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run-smoke");
+    const codebase = join(root, "codebase");
+    const binDir = join(root, "bin");
+    const argsFile = join(root, "fcheap-args.txt");
+    const configPath = join(root, "cairntrace.config.yml");
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(codebase, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(join(runDir, "run.json"), '{"status":"failed"}');
+    writeFileSync(join(runDir, "agent_context.md"), "# Existing context\n");
+    writeFileSync(
+      configPath,
+      [
+        "version: 1",
+        "environments: {}",
+        "investigate:",
+        "  codebaseDir: ./codebase",
+        "  mode: keyword",
+        "  limit: 7",
+        "  index: true",
+        "",
+      ].join("\n"),
+    );
+    const fakeFcheap = join(binDir, "fcheap");
+    writeFileSync(
+      fakeFcheap,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$FCHEAP_ARGS_FILE"
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap 0.30.0'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"stash-cli","status":"saved"}'
+  exit 0
+fi
+if [ "$1" = "connect" ]; then
+  printf '%s\\n' '{"stash_id":"stash-cli","codebase":"${codebase}","query":"custom query","matches":[{"stash_id":"stash-cli","file":"src/auth.ts","line":12,"score":0.9,"text":"auth failure"}]}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    chmodSync(fakeFcheap, 0o755);
+
+    try {
+      const command = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        [
+          "investigate",
+          "latest",
+          "--artifact-root",
+          runsRoot,
+          "--config",
+          configPath,
+          "--connect",
+          "--query",
+          "custom query",
+          "--json",
+        ],
+        {
+          reject: false,
+          env: {
+            ...process.env,
+            FCHEAP_BIN: fakeFcheap,
+            FCHEAP_ARGS_FILE: argsFile,
+            CAIRN_TEST_API_KEY: "auth failure",
+          },
+        },
+      );
+
+      expect(command.exitCode).toBe(0);
+      expect(JSON.parse(command.stdout)).toMatchObject({
+        runId: "run-smoke",
+        stashId: "stash-cli",
+        query: "custom query",
+        mode: "keyword",
+        codeMatches: [
+          {
+            file: "src/auth.ts",
+            line: 12,
+            score: 0.9,
+            snippet: "[redacted]",
+          },
+        ],
+      });
+      expect(command.stdout).not.toContain("auth failure");
+      const calls = readFileSync(argsFile, "utf8");
+      expect(calls).toContain(
+        `connect stash-cli ${codebase} --json --mode keyword --limit 7 --query custom query --index`,
+      );
+      expect(readFileSync(join(runDir, "investigate.json"), "utf8")).toContain(
+        '"stashId": "stash-cli"',
+      );
+      expect(
+        readFileSync(join(runDir, "investigate.json"), "utf8"),
+      ).not.toContain("auth failure");
+      const context = readFileSync(join(runDir, "agent_context.md"), "utf8");
+      expect(context).toContain("## Code Matches");
+      expect(context).toContain("src/auth.ts:12 (score: 0.90)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns exit 2 when file.cheap connect violates its JSON contract", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cairn-investigate-invalid-"));
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run-invalid");
+    const fakeFcheap = join(root, "fcheap");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "run.json"), '{"status":"failed"}');
+    writeFileSync(
+      fakeFcheap,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"stash-invalid","status":"saved"}'
+  exit 0
+fi
+if [ "$1" = "connect" ]; then
+  printf '%s\\n' '{"matches":[{"stash_id":"stash-invalid","score":0.9,"text":"missing file"}]}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    chmodSync(fakeFcheap, 0o755);
+
+    try {
+      const command = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        [
+          "investigate",
+          "latest",
+          "--artifact-root",
+          runsRoot,
+          "--codebase",
+          root,
+          "--json",
+        ],
+        {
+          reject: false,
+          env: { ...process.env, FCHEAP_BIN: fakeFcheap },
+        },
+      );
+      expect(command.exitCode).toBe(2);
+      expect(JSON.parse(command.stdout).error).toMatch(
+        /Invalid fcheap connect JSON/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns an actionable exit 2 result when the codebase index is missing", async () => {
+    const root = mkdtempSync(
+      join(tmpdir(), "cairn-investigate-index-missing-"),
+    );
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run-index-missing");
+    const codebase = join(root, "codebase");
+    const argsFile = join(root, "fcheap-args.txt");
+    const fakeFcheap = join(root, "fcheap");
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(codebase, { recursive: true });
+    writeFileSync(join(runDir, "run.json"), '{"status":"failed"}');
+    writeFileSync(
+      fakeFcheap,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$FCHEAP_ARGS_FILE"
+if [ "$1" = "--version" ]; then
+  printf '%s\\n' 'fcheap 0.30.0'
+  exit 0
+fi
+if [ "$1" = "save" ]; then
+  printf '%s\\n' '{"id":"stash-index-missing","status":"saved"}'
+  exit 0
+fi
+if [ "$1" = "connect" ]; then
+  printf '%s\\n' '{"stash_id":"stash-index-missing","codebase":"${codebase}","query":"failed run","index_status":"missing","matches":[]}'
+  exit 0
+fi
+exit 2
+`,
+    );
+    chmodSync(fakeFcheap, 0o755);
+
+    try {
+      const command = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        [
+          "investigate",
+          "latest",
+          "--artifact-root",
+          runsRoot,
+          "--codebase",
+          codebase,
+          "--json",
+        ],
+        {
+          reject: false,
+          env: {
+            ...process.env,
+            FCHEAP_BIN: fakeFcheap,
+            FCHEAP_ARGS_FILE: argsFile,
+          },
+        },
+      );
+
+      expect(command.exitCode).toBe(2);
+      expect(JSON.parse(command.stdout)).toMatchObject({
+        runId: "run-index-missing",
+        stashId: "stash-index-missing",
+        indexStatus: "missing",
+        codeMatches: [],
+        error: expect.stringContaining("rerun with --index"),
+      });
+      expect(command.stderr).toContain("rerun with --index");
+      expect(readFileSync(argsFile, "utf8")).toContain(
+        `connect stash-index-missing ${codebase} --json --mode hybrid --limit 10`,
+      );
+      expect(readFileSync(argsFile, "utf8")).not.toContain("--index");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns structured exit 2 results when investigate or audit setup fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cairn-investigate-setup-error-"));
+    const runsRoot = join(root, "runs");
+    const runDir = join(runsRoot, "run-invalid-config");
+    const invalidConfig = join(root, "cairntrace.config.yml");
+    const missingSpec = join(root, "missing-spec.yml");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "run.json"), '{"status":"failed"}');
+    writeFileSync(invalidConfig, "investigate:\n  mode: hybrid\n");
+
+    try {
+      const investigate = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        [
+          "investigate",
+          "latest",
+          "--artifact-root",
+          runsRoot,
+          "--config",
+          invalidConfig,
+          "--json",
+        ],
+        { reject: false },
+      );
+      expect(investigate.exitCode).toBe(2);
+      expect(JSON.parse(investigate.stdout)).toMatchObject({
+        runId: "latest",
+        codeMatches: [],
+        error: expect.stringContaining("Invalid literal value"),
+      });
+      rmSync(invalidConfig);
+
+      const audit = await execa(
+        join(process.cwd(), "bin", "cairn"),
+        ["audit", missingSpec, "--json"],
+        { reject: false },
+      );
+      expect(audit.exitCode).toBe(2);
+      expect(JSON.parse(audit.stdout)).toMatchObject({
+        specPath: missingSpec,
+        codeMatches: [],
+        error: expect.stringContaining("no such file or directory"),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

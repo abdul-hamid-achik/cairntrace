@@ -15,7 +15,7 @@ There is no HTTP transport, no `serve` subcommand, and no `--port` flag. If you 
 
 ## Tool surface
 
-29 tools, grouped by concern. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`). Every tool's `--format json` output is identical between transports, so an agent does not special-case which one is in use.
+35 tools, grouped by concern. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`). Every tool's `--format json` output is identical between transports, so an agent does not special-case which one is in use.
 
 ### Bootstrap & docs
 
@@ -46,7 +46,7 @@ There is no HTTP transport, no `serve` subcommand, and no `--port` flag. If you 
 | MCP tool | CLI | Purpose |
 |---|---|---|
 | `cairn_checkpoint_list` / `_show` / `_delete` | `cairn checkpoint …` | manage resumable checkpoints |
-| `cairn_stash_save` / `_list` / `_search` | `cairn stash …` | fcheap run-artifact stash + search |
+| `cairn_stash_save` / `_list` / `_info` / `_restore` / `_search` | `cairn stash …` | validated file.cheap v0.30 save, discovery, inspection, restore, and search |
 | `cairn_clip` | `cairn clip <run-ref>` | cut vidtrace video clips from a run |
 
 ### Failure → code
@@ -72,13 +72,29 @@ Nine stateful tools that keep one browser session alive across calls (auto-expir
 
 ## Read-only vs mutating
 
-The bootstrap/docs trio (`cairn_explain`, `cairn_docs`, `cairn_doctor`) and `cairn_config_validate`, `cairn_checkpoint_show`, `cairn_stash_list`, `cairn_secrets_status`, `cairn_services_status`, `cairn_discover_list`/`_snapshot`/`_inventory` are read-only. The rest are mutating — they write spec changes, run the runner, cut clips, stash artifacts, or annotate codemap.
+The bootstrap/docs trio (`cairn_explain`, `cairn_docs`, `cairn_doctor`) and `cairn_config_validate`, `cairn_checkpoint_show`, `cairn_stash_list`, `cairn_stash_info`, `cairn_secrets_status`, `cairn_services_status`, `cairn_discover_list`/`_snapshot`/`_inventory` are read-only. The rest are mutating — they write spec changes, run the runner, restore or stash artifacts, cut clips, or annotate codemap.
 
 Cairntrace ships **no built-in confirm gate**. If your harness wants a typed "I really meant to run that" gate, enforce it harness-side with a tool-permission allowlist: allow the read-only set freely, gate the mutating set behind an explicit approval. The server does not pause for interactive prompts.
 
+`cairn_stash_info` and `cairn_stash_restore` declare MCP output schemas.
+Malformed file.cheap responses are rejected before they reach
+`structuredContent`. Operational failures return `isError: true` with a stable
+error code and a next-step hint. A restore that wrote bytes but failed hash
+verification also preserves its normalized receipt under
+`structuredContent.restore`; do not treat that target as trusted.
+
 ## Secret redaction
 
-The MCP server inherits the redaction layer from the CLI. Artifact content returned through tool responses is the same redacted shape that lands on disk — `Authorization` headers, cookies, bearer tokens, and anything matching a spec's `redaction:` block are scrubbed. If a harness needs raw artifacts, point it at the run dir on disk; the MCP transport never returns unredacted secrets.
+The MCP server inherits the CLI's text/JSON redaction layer. Structured tool
+responses and text evidence use the same redacted shape written to disk:
+registered literal secrets, sensitive keys, Authorization/Cookie header lines,
+and common token-bearing query parameters are scrubbed. Tool results can still
+contain paths to producer-owned binary artifacts. Screenshots, videos,
+downloads, transforms, and trace archives are not content-redacted and may
+contain secrets or personal data. Audit post-processes vidtrace text formats
+through the redactor, but extracted frames/images remain uninspected. Treat a
+run-directory path as access to sensitive evidence; do not make it available
+to an untrusted MCP client.
 
 ## Cookbook: setting up an MCP client
 

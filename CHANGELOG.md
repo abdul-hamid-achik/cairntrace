@@ -2,7 +2,133 @@
 
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
+
 ## [Unreleased]
+
+## [2.0.0] - 2026-07-24
+
+### Breaking
+
+- The report-theme catalog now uses the neutral `slate` wire value. Consumers
+  that depended on the removed legacy theme key must migrate to `slate`; the
+  release is therefore versioned as `v2.0.0`.
+- Structured `stash list`, `stash info`, and `stash search` output now
+  normalizes file.cheap's snake_case wire fields to Cairntrace camelCase
+  fields such as `fileCount`, `sizeBytes`, `createdAt`, and `stashId`.
+- `cairn clean` structured output now always includes the required
+  `archiveFailures` array. Consumers must handle it; any entry means the source
+  run was retained and the command exited with code 2.
+
+### Added
+
+- CLI and MCP doctor reports now distinguish a loadable Playwright package from
+  its matching installed Chromium executable and provide the exact Bun repair
+  command for either failure.
+- Investigate and audit results now have strict executable Zod v1 contracts,
+  publish those contracts as MCP `outputSchema`, and validate the same wire
+  value before CLI or MCP emission.
+- MCP now mirrors `stash info` and `stash restore` with strict file.cheap v0.30
+  output contracts, safe stash identifiers, actionable structured errors, and
+  preserved integrity-mismatch receipts.
+
+### Changed
+
+- Stash documentation now describes file.cheap accurately as a local,
+  non-replicating vault. Sharing artifacts between machines requires an
+  explicit transfer.
+- Investigate and audit now share one structured pipeline across the CLI and
+  MCP server. `investigate.codebaseDir`, `mode`, `limit`, `index`, and
+  `autoInvestigate` are active runtime settings. Explicit CLI codebase paths
+  resolve from the current working directory; configured paths resolve from
+  the config file.
+- `cairn audit` records Playwright video even when the spec's normal capture
+  policy is `never`, starts configured web/server services and TinyVault
+  injection like `cairn run`, supports recording speed and slow-motion
+  overrides, and keeps optional vidtrace failures visible as warnings.
+- `--index` and `investigate.index` build or refresh the vecgrep index before a
+  requested investigate/audit connection. Without an index, the error points
+  to this opt-in instead of silently returning no matches.
+- The repository is Bun-only again: the obsolete npm lockfile is gone and the
+  remaining Playwright troubleshooting command uses `bunx`.
+
+### Fixed
+
+- Cairntrace now validates and normalizes the real file.cheap v0.30 JSON
+  contracts for `save`, `list`, `info`, `search`, `connect`, and `restore`
+  across the CLI, MCP tools, investigate, audit, auto-stash, and service
+  capture paths.
+- Archive receipts fail closed. A successful file.cheap process with malformed
+  JSON or no usable stash identifier is treated as a failed archive, so
+  retention cleanup cannot delete the source after an unverified save.
+- Restore verification failures preserve the structured file.cheap receipt
+  while returning exit code 2, including the restore target and mismatch
+  details.
+- Investigate and audit failures now return structured errors and exit code 2.
+  File.cheap connect matches without a file path are rejected instead of being
+  surfaced as unknown locations.
+- `cairn audit` no longer stashes an unconnected failed run unless project
+  config explicitly enables failed-run auto-stash. File.cheap and vecgrep are
+  optional when the audit does not request either stage.
+- Audit keeps vidtrace bundles under the run's `videos/vidtrace/`, supplies a
+  disposable silent-audio copy when Whisper receives Playwright's video-only
+  WebM, and removes the copy afterward. Extracted text formats pass through the
+  redactor; frames/images remain uninspected.
+- Failed-run automation consumes the documented stash and investigate config,
+  and reuses a validated auto-stash receipt instead of archiving the same run
+  twice.
+- Retention archive failures are reported, count as retained runs, and make
+  `cairn clean` exit non-zero without deleting the source artifacts.
+- MCP stash results now report the resolved run identifier consistently for
+  `latest` and `previous`.
+- Partial file.cheap save receipts preserve the valid stash identifier and
+  stage failures while returning exit code 2, preventing duplicate saves and
+  lost recovery handles.
+- `agent_context.md` refreshes its generated Code Matches section after
+  investigation but omits raw source snippets; detailed redacted matches
+  remain in `investigate.json`.
+- Public config examples for stash, investigate, annotate, and TinyVault now
+  validate against the strict v1 schema.
+- Agent-browser no longer adds an implicit network-idle wait after every
+  click. Same-tab links retain delivery confirmation and safe retry behavior;
+  positive click/spec `settleMs` or `browser.postClickSettleMs` explicitly
+  opts into network-idle settling.
+- Successful automatic stashes add a path-free `stash-receipt.json`, an
+  `artifact.stash` event, and a refreshed manifest without mutating the
+  finalized run verdict. Receipt creation fails closed if redaction would
+  corrupt its recovery identifier.
+- Browser-evidence documentation now matches the artifacts Cairntrace actually
+  writes. The unimplemented screenshot-video fallback proposal was replaced by
+  backend-specific video and screenshot guidance.
+- Doctor no longer treats an unrelated project from the codemap registry as
+  proof that the current codebase is indexed.
+
+### Security
+
+- Production dependency auditing is part of `bun run verify` and CI. Pinned
+  transitive overrides remove the known production advisories reported by Bun.
+- The `@hono/node-server` `2.0.11` security override is outside the MCP SDK's
+  declared `^1.19.9` range. Cairntrace tests and exposes stdio MCP only; this
+  does not claim compatibility for an HTTP transport.
+- Documentation now states the actual redaction boundary: Cairntrace-authored
+  text/JSON and supported vidtrace text formats are scrubbed, while
+  producer-owned screenshots, videos, downloads, transforms, trace archives,
+  and extracted frames/images can still contain secrets or personal data.
+- Public examples, fixtures, docs, report themes, and test data use neutral
+  project and issue names.
+
+## [1.49.0] - 2026-07-23
+
+### Added
+
+- Per-environment `waitScale` and `CAIRN_WAIT_SCALE` controls for high-latency
+  browser waits, settles, and network-idle quiet windows.
+- Bounded `click.until` retry conditions plus fill/type live-value verification
+  that recovers when hydration wipes an interaction.
+
+### Changed
+
+- Pinned `@playwright/test` to the Playwright runtime version used by the
+  project.
 
 ## [1.48.0] - 2026-07-22
 
@@ -138,9 +264,9 @@ fix working**: those specs were passing on an unread page. There is no
 deprecation window, because a deprecation window for "we stopped lying to you"
 is just a longer lie.
 
-Field-verified against a real app (liftclub): `notText` and `noFailedRequests`
-outcomes pass unchanged; the example suite is byte-identical before and after,
-apart from two specs that were already red.
+Field-verified against a production SPA: `notText` and `noFailedRequests`
+outcomes pass unchanged; the example suite is byte-identical before and
+after, apart from two specs that were already red.
 
 ### Fixed
 
@@ -180,9 +306,10 @@ apart from two specs that were already red.
 
 ## [1.37.0]
 
-Liftclub field hardening: silent framework click drops now recover or fail at
-the authored interaction, text contracts tolerate rendered CSS casing, aborted
-suites retain their completed evidence, and browser artifact capture is bounded.
+Production SPA hardening: silent framework click drops now recover or fail at
+the authored interaction, text contracts tolerate rendered CSS casing,
+aborted suites retain their completed evidence, and browser artifact capture
+is bounded.
 
 ### Added
 
@@ -351,9 +478,9 @@ This release makes the next such incident survivable and self-diagnosing.
   `getBoundingClientRect` on agent-browser 0.31.1), but 1.28.x's
   post-scrollIntoView confirmation subtracted `window.scrollY` from the box
   center anyway — flagging every legitimately-scrolled click as
-  "stayed off-viewport" (deterministic, not flaky: liftclub's
-  member_checkout plans grid sits below the fold, so the in-view button at
-  viewport y≈460 with scrollY≈875 computed to center y=-415). Clicks near
+  "stayed off-viewport" (deterministic, not flaky: a checkout grid sat below
+  the fold, so the in-view button at viewport y≈460 with scrollY≈875 computed
+  to center y=-415). Clicks near
   the page top ran at scrollY=0 where subtracting zero is harmless, which
   is why the bug hid in otherwise-green suites. The check now compares the
   viewport-relative center directly against innerWidth/innerHeight.
@@ -374,9 +501,9 @@ This release makes the next such incident survivable and self-diagnosing.
   `AgentBrowserOptions.verifyAfterClick` existed but nothing plumbed it through
   `createBackend`. Dev servers that compile modules on demand (Nuxt/Vite SPA
   routes) routinely need >5s to go network-quiet after a login click even
-  though the page is fine, which failed every authenticated-page click in such
-  projects (observed: 33/40 liftclub specs dying at `submit_login` while their
-  outcomes passed). `cairntrace.config.yml` now accepts:
+  though the page is fine, which failed most authenticated-page clicks in one
+  production SPA suite while their outcomes passed.
+  `cairntrace.config.yml` now accepts:
 
   ```yaml
   browser:

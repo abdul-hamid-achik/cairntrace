@@ -1090,15 +1090,23 @@ export class AgentBrowserAdapter implements BrowserBackend {
     return { ...r, resolvedElement: toResolvedElement(resolved.element) };
   }
 
-  /** The resolved post-click settle budget (click override → config → default). */
-  private resolveClickSettleMs(settleMsOverride?: number): number {
+  /**
+   * Resolve an explicitly-authored post-click networkidle budget.
+   *
+   * A missing value deliberately stays missing: the default same-tab link
+   * delivery probe already bridges the click/navigation handoff by waiting
+   * for URL, document, or DOM evidence. Running networkidle after every
+   * successful click made ordinary buttons fail on otherwise healthy pages
+   * with long-lived requests.
+   */
+  private resolveExplicitClickSettleMs(
+    settleMsOverride?: number,
+  ): number | undefined {
     if (settleMsOverride !== undefined) return settleMsOverride;
+    if (this.opts.postClickSettleMs === undefined) return undefined;
     return Math.max(
       1,
-      Math.round(
-        (this.opts.postClickSettleMs ?? POST_CLICK_NAV_SETTLE_MS) *
-          this.waitScale,
-      ),
+      Math.round(this.opts.postClickSettleMs * this.waitScale),
     );
   }
 
@@ -1165,7 +1173,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private clickProbeEnabled(settleMsOverride?: number): boolean {
     if (this.opts.verifyAfterClick === false) return false;
-    return this.resolveClickSettleMs(settleMsOverride) !== 0;
+    return this.resolveExplicitClickSettleMs(settleMsOverride) !== 0;
   }
 
   /**
@@ -1457,26 +1465,26 @@ export class AgentBrowserAdapter implements BrowserBackend {
   /**
    * Verify-after-click + post-nav settle.
    *
-   * Two concerns that are easy to miss until a spec actually fails on them
-   * (liftclub member_checkout, 2026-07-02):
+   * Two concerns that are easy to miss until a production spec fails on them:
    *
-   *   1. agent-browser's `click` returns exit 0 even when the click never
-   *      reached the app's handler (verified on 0.26–0.27: CDP reports
-   *      success on the gesture, but the page never navigates). The
-   *      verify-after-click step captures the URL pre/post and surfaces a
-   *      clear failure when the click was expected to navigate but didn't.
-   *      Same-page clicks (most form clicks) are unaffected.
+   *   1. agent-browser's `click` returns exit 0 even when a same-tab link
+   *      never reached the app's handler (verified on 0.26–0.27: CDP reports
+   *      success on the gesture, but the page never navigates). The upstream
+   *      link-delivery guard captures URL/document/DOM evidence and retries
+   *      one dropped link click before failing clearly. Ordinary buttons do
+   *      not receive that retry.
    *
-   *   2. When the click *does* land and the app issues a hard
-   *      `window.location.assign(...)`, the next spec step's `wait` is a
-   *      fresh execa subprocess reconnecting to the daemon with zero
-   *      handoff (no in-process page handle). Folding a short networkidle
-   *      wait into the click step's own invocation bridges that race.
+   *   2. For same-tab links, the upstream delivery probe waits for URL,
+   *      document, or DOM evidence before this method runs. That confirmation
+   *      is the default handoff to the next spec step. A networkidle wait is
+   *      added only when the click/spec or browser config authors an explicit
+   *      positive settle budget; long-lived app requests must not turn an
+   *      already-delivered navigation into a false click failure.
    *
    * Both `opts.verifyAfterClick=false` and a resolved click-level `settleMs: 0`
-   * disable BOTH effects — the networkidle fold here AND the link-delivery
-   * probe upstream (see `clickProbeEnabled`) — because each is the author
-   * declaring they handle post-click waiting themselves.
+   * disable BOTH effects — an explicitly-requested networkidle fold here AND
+   * the link-delivery probe upstream (see `clickProbeEnabled`) — because each
+   * is the author declaring they handle post-click waiting themselves.
    */
   private async verifyAndSettleAfterClick(
     r: InvocationResult,
@@ -1490,8 +1498,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ? { ...r, resolvedElement: toResolvedElement(resolved) }
         : r;
     }
-    const settleMs = this.resolveClickSettleMs(settleMsOverride);
-    if (settleMs === 0) {
+    const settleMs = this.resolveExplicitClickSettleMs(settleMsOverride);
+    if (settleMs === undefined || settleMs === 0) {
       return resolved
         ? { ...r, resolvedElement: toResolvedElement(resolved) }
         : r;
@@ -1509,8 +1517,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
       settleMs,
       settleStartedAt,
     );
-    // A click that ran for 700ms+ then a wait that timed out is the exact
-    // shape of the liftclub failure; surface a short, honest message at the
+    // A click that ran for 700ms+ then a wait that timed out is a known
+    // navigation failure shape; surface a short, honest message at the
     // click step instead of letting the next step's wait hang for ~60s.
     // (We never fail a click just because the URL didn't change — many
     // clicks legitimately stay on the same page; we *do* fail a click whose
@@ -1550,8 +1558,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
   private async detectOffViewportAfterScroll(
     ref: string,
   ): Promise<string | undefined> {
-    // A one-shot box read races two real-world effects (both observed as
-    // intermittent liftclub member_checkout failures):
+    // A one-shot box read races two effects observed in production:
     //   1. CSS `scroll-behavior: smooth` animates scrollIntoView over
     //      several hundred ms — the read fires mid-travel.
     //   2. Async sections above the target collapse/expand when their data
@@ -1595,9 +1602,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // `get box` returns VIEWPORT-relative coordinates (verified against
     // getBoundingClientRect on agent-browser 0.31.1: identical y at
     // scrollY=816) — do NOT subtract scroll here. The original subtraction
-    // double-counted the scroll and flagged every legitimately-scrolled
-    // click as off-viewport (deterministic liftclub member_checkout
-    // failure: in-view button at viewport y≈460, scrollY≈875 → cy=-415).
+    // double-counted the scroll and flagged every legitimately-scrolled click
+    // as off-viewport (in-view button at viewport y≈460, scrollY≈875 →
+    // cy=-415).
     // It went unnoticed because clicks near the page top ran at scrollY=0,
     // where subtracting zero is harmless.
     const cx = box.x + box.width / 2;
@@ -1664,8 +1671,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * shape (prototype value setter + bubbling input/change events, so
    * React/Vue value trackers observe the change) — because agent-browser's
    * keystroke `fill` reports ✓ Done against these inputs while the value
-   * stays empty (verified against agent-browser 0.31.1; liftclub PAR-Q,
-   * round-2 TODO item 4).
+   * stays empty (verified against agent-browser 0.31.1).
    *
    * Returns a completed InvocationResult when the fill was handled (or
    * definitively failed) here, and `undefined` to fall through to the normal
@@ -1935,19 +1941,7 @@ const WAIT_SLICE_MS = 5_000;
  */
 const WAIT_SLICE_FLOOR_MS = 250;
 
-/**
- * Default max time the verify-after-click settle is willing to wait
- * (override per adapter via `opts.postClickSettleMs`, per project via the
- * config `browser.postClickSettleMs`). Tuned short enough to fail fast on
- * the liftclub-style hang (click that never lands → page never settles →
- * wait-step timeout 60s later) and long enough that a production SPA's
- * post-navigation fetch burst can complete without being cut off. Dev-mode
- * servers that compile modules on demand routinely need more — raise the
- * config knob there instead of disabling the guard. The same value is the
- * explicit `--timeout` passed to `agent-browser wait --load networkidle`,
- * so the daemon's own deadline matches the wrapper's hard kill.
- */
-const POST_CLICK_NAV_SETTLE_MS = 5_000;
+/** agent-browser's native networkidle transition uses a ~500ms quiet window. */
 const NETWORK_IDLE_BASE_WINDOW_MS = 500;
 
 /** Link clicks should synchronously schedule SPA navigation; keep retry cheap. */
@@ -2469,8 +2463,8 @@ function linkClickProbeScript(opts: {
  * the value natively inside the same eval (see
  * `scrollAndFillDateishSelector`). The prototype value setter bypasses
  * framework-patched instance descriptors (React) and the bubbling
- * input/change events feed framework value trackers — the exact shape the
- * liftclub PAR-Q specs carried as an eval workaround before this landed.
+ * input/change events feed framework value trackers — the same shape that
+ * production specs previously carried as an eval workaround.
  * Returns `{ dateish: false }` for ordinary targets and `null` when the
  * element is missing or the probe itself failed (both fall through to the
  * normal `fill` invocation, whose own diagnostics are better).
@@ -2719,7 +2713,7 @@ function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
  * Accessible-name matching semantics (dogfood P0 #3): whole-name,
  * whitespace-normalized, case-insensitive by default; `exact: true` keeps the
  * case comparison. Substring matching is deliberately NOT supported — it let
- * `name: Cobrar` silently bind to "Cobrar plan".
+ * `name: Pay` silently bind to "Pay for plan".
  */
 function nameMatches(
   elName: string | undefined,

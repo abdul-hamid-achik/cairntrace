@@ -1,7 +1,78 @@
 import type { Spec } from "../schema/spec.v1";
 import type { RunResult } from "../schema/run.v1";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createArtifactRedactor } from "./redaction";
+
+const CODE_MATCHES_START = "<!-- cairntrace:code-matches:start -->";
+const CODE_MATCHES_END = "<!-- cairntrace:code-matches:end -->";
+
+function codeMatchesLines(runDir: string): string[] {
+  const investigatePath = join(runDir, "investigate.json");
+  if (!existsSync(investigatePath)) return [];
+
+  try {
+    const inv = createArtifactRedactor(undefined).value(
+      JSON.parse(readFileSync(investigatePath, "utf-8")),
+    );
+    const matches: Array<{
+      file?: string;
+      line?: number;
+      score?: number;
+    }> = inv?.codeMatches ?? [];
+    if (matches.length === 0) return [];
+
+    const lines = [
+      CODE_MATCHES_START,
+      "## Code Matches",
+      "From `cairn investigate` — ranked `file:line` candidates responsible for the failure:",
+      "",
+    ];
+    for (const match of matches) {
+      const score =
+        typeof match.score === "number"
+          ? ` (score: ${match.score.toFixed(2)})`
+          : "";
+      lines.push(`- ${match.file ?? "(unknown)"}:${match.line ?? 0}${score}`);
+    }
+    lines.push(
+      "",
+      'Annotate these symbols with: `codemap annotate <symbol> --source cairntrace --note "<run-id> failed here"`',
+      CODE_MATCHES_END,
+    );
+    return lines;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Refresh only the generated code-match section after `cairn investigate`.
+ * This preserves the original run narrative without needing to parse the
+ * source spec again (which may have moved or require project config).
+ */
+export function refreshAgentContextCodeMatches(runDir: string): boolean {
+  const contextPath = join(runDir, "agent_context.md");
+  if (!existsSync(contextPath)) return false;
+
+  const current = readFileSync(contextPath, "utf8");
+  const markedSection = new RegExp(
+    `\\n?${CODE_MATCHES_START}[\\s\\S]*?${CODE_MATCHES_END}\\n?`,
+  );
+  let base = current.replace(markedSection, "\n");
+
+  // Compatibility with contexts rendered before the section markers existed.
+  const legacyStart = base.indexOf("\n## Code Matches\n");
+  if (legacyStart >= 0) base = base.slice(0, legacyStart);
+
+  const lines = codeMatchesLines(runDir);
+  const updated =
+    lines.length > 0
+      ? `${base.trimEnd()}\n\n${lines.join("\n")}\n`
+      : `${base.trimEnd()}\n`;
+  writeFileSync(contextPath, updated);
+  return true;
+}
 
 /**
  * Render the agent-neutral run context (plan §13 `agent_context.md`).
@@ -139,44 +210,8 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
       `${result.spec.path}`,
   );
 
-  // Code Matches — if `cairn investigate` produced an investigate.json,
-  // surface the file:line candidates here so agents can jump to the code.
-  const investigatePath = join(result.runDir, "investigate.json");
-  if (existsSync(investigatePath)) {
-    try {
-      const inv = JSON.parse(readFileSync(investigatePath, "utf-8"));
-      const matches: Array<{
-        file?: string;
-        line?: number;
-        score?: number;
-        snippet?: string;
-      }> = inv?.codeMatches ?? [];
-      if (matches.length > 0) {
-        lines.push(
-          "",
-          "## Code Matches",
-          "From `cairn investigate` — ranked `file:line` candidates responsible for the failure:",
-          "",
-        );
-        for (const m of matches) {
-          const score =
-            typeof m.score === "number"
-              ? ` (score: ${m.score.toFixed(2)})`
-              : "";
-          const snippet = m.snippet ? `: ${m.snippet}` : "";
-          lines.push(
-            `- ${m.file ?? "(unknown)"}:${m.line ?? 0}${score}${snippet}`,
-          );
-        }
-        lines.push(
-          "",
-          'Annotate these symbols with: `codemap annotate <symbol> --source cairntrace --note "<run-id> failed here"`',
-        );
-      }
-    } catch {
-      // investigate.json is malformed or incomplete — skip silently
-    }
-  }
+  const matches = codeMatchesLines(result.runDir);
+  if (matches.length > 0) lines.push("", ...matches);
 
   return lines.join("\n") + "\n";
 }

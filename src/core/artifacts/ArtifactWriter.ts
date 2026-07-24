@@ -62,6 +62,8 @@ export interface RunEvent {
     | "artifact.eval"
     | "artifact.monitor"
     | "artifact.video"
+    | "artifact.stash"
+    | "artifact.retention"
     | "viewport.set"
     | "precondition.run"
     | "services.docker.start"
@@ -524,6 +526,7 @@ function inferArtifactKind(relative: string): string {
     "events.ndjson": "event-log",
     "replay.json": "replay",
     "spec.resolved.yml": "resolved-spec",
+    "stash-receipt.json": "stash-receipt",
   };
   if (exact[portable]) return exact[portable]!;
   if (portable.startsWith("run.")) return "run";

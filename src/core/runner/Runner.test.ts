@@ -78,6 +78,56 @@ function withoutNativeRequest(backend: MockBrowserBackend): BrowserBackend {
 }
 
 describe("runSpec e2e (mock backend)", () => {
+  it("skips pruning when archiveToStash has no archive adapter", async () => {
+    const projectDir = join(workDir, "retention-fail-closed");
+    const isolatedArtifacts = join(projectDir, "runs");
+    await makeDir(projectDir, { recursive: true });
+    await writeFile(
+      join(projectDir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local: {}
+retention:
+  enabled: true
+  keepRuns: 1
+  keepFailedRuns: 0
+  archiveToStash: true
+`,
+    );
+    const specPath = await writeSpecIn(
+      projectDir,
+      "retention",
+      `version: 1
+name: retention_guard
+intent: configured archives must exist before pruning
+outcomes:
+  - id: clean
+    description: console stays clean
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: /
+`,
+    );
+
+    const first = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot: isolatedArtifacts,
+    });
+    const second = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot: isolatedArtifacts,
+    });
+
+    expect((await stat(first.runDir)).isDirectory()).toBe(true);
+    expect((await stat(second.runDir)).isDirectory()).toBe(true);
+    expect(
+      await readFile(join(second.runDir, "events.ndjson"), "utf8"),
+    ).toContain("no archive adapter was provided; pruning was skipped");
+  });
+
   it("applies CAIRN_WAIT_SCALE over the environment config", async () => {
     const projectDir = join(workDir, "wait-scale-runner");
     await makeDir(projectDir, { recursive: true });
@@ -2176,9 +2226,10 @@ steps:
     open: /
 `,
     );
-    const backend = new VideoMockBackend();
+    const backend = new OrderedVideoMockBackend();
     const result = await runSpec({ specPath, backend, artifactRoot });
     expect(result.status).toBe("passed");
+    expect(backend.captureStartOrder).toEqual(["video", "trace"]);
     expect(backend.startVideoCalls).toBe(1);
     expect(backend.lastVideoOpts).toEqual({ slowMo: 500, speed: 0.5 });
 
@@ -2221,6 +2272,37 @@ steps:
       slowMo: undefined,
       speed: undefined,
     });
+  });
+
+  it("honors command-level video capture and timing overrides", async () => {
+    const specPath = await writeSpec(
+      "video-command-override",
+      `version: 1
+name: video_command_override
+intent: audit can force video without editing the behavioral spec
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: nav
+    open: /
+`,
+    );
+    const backend = new VideoMockBackend();
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      captureOverride: { video: "always" },
+      videoOptions: { slowMo: 250, speed: 0.75 },
+    });
+
+    expect(result.status).toBe("passed");
+    expect(backend.startVideoCalls).toBe(1);
+    expect(backend.lastVideoOpts).toEqual({ slowMo: 250, speed: 0.75 });
+    expect(result.artifacts.video).toBe("videos/mock-video.webm");
   });
 });
 
@@ -2553,6 +2635,26 @@ class VideoMockBackend extends MockBrowserBackend {
   }
 }
 
+class OrderedVideoMockBackend extends VideoMockBackend {
+  captureStartOrder: string[] = [];
+
+  override async startVideo(opts?: {
+    slowMo?: number;
+    speed?: number;
+  }): Promise<void> {
+    this.captureStartOrder.push("video");
+    await super.startVideo(opts);
+  }
+
+  async startTrace(): Promise<void> {
+    this.captureStartOrder.push("trace");
+  }
+
+  async stopTrace(path: string): Promise<{ ok: boolean; path: string }> {
+    return { ok: false, path };
+  }
+}
+
 function resetClipMocks() {
   vi.mocked(isVidtraceAvailable).mockClear();
   vi.mocked(isVidtraceAvailable).mockResolvedValue({
@@ -2683,7 +2785,8 @@ steps:
     const parsed = await parseSpec(specPath);
     const ctx = renderAgentContext(parsed.spec, result);
     expect(ctx).toContain("## Code Matches");
-    expect(ctx).toContain("src/auth/login.ts:42 (score: 0.89): handleSubmit");
+    expect(ctx).toContain("src/auth/login.ts:42 (score: 0.89)");
+    expect(ctx).not.toContain("handleSubmit");
     expect(ctx).toContain("src/router.ts:15 (score: 0.72)");
     expect(ctx).toContain("codemap annotate");
   });

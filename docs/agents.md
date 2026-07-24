@@ -38,8 +38,8 @@ After a failed run, the right sequence is:
 
 ```text
 cairn context latest          # the agent-narrative post-mortem
-cairn_diff <baseline> <run>   # what changed in the DOM, network, console
-diagnostics/failure.md        # when context is too dense
+cairn diff <baseline> <run>   # what changed in the DOM, network, console
+diagnostics/<step>.json       # structured browser state for a failed step
 outcomes/<id>.md              # the failing outcome + its evidence
 ```
 
@@ -61,7 +61,9 @@ This is deliberate. The contract hash, the verifier vocabulary, the step vocabul
 
 - New step kind: open an issue first. The step vocabulary is closed by design.
 - New verifier: same. Use `script:` until the new shape lands.
-- New capture mode: see how `artifacts.capture.video` evolved (see [video-screenshot-fallback](/video-screenshot-fallback)).
+- New capture mode: start with the current backend contract in
+  [Video capture](/video) and add tests for both supported and unsupported
+  backends.
 - New backend: implement the `BrowserBackend` interface, register in `cairntrace.config.yml`, ship a smoke spec under `specs/`.
 
 If the extension is small enough to fit inside an `eval:` step or a `script:` verifier, do that first.

@@ -16,6 +16,9 @@ Reports the current state of the configured services environment (docker, seed f
 When `services:` is configured, `cairn run` starts the environment once, runs the spec pool, then tears it down. The phases:
 
 ```yaml
+version: 1
+environments:
+  local: {}
 services:
   docker:
     command: "docker compose up -d"
@@ -53,15 +56,16 @@ services:
     autoStash: always
     capture: [tmux, docker, seed]
     tags: [services, myapp]
-teardown:
-  - "tmux kill-session -t myapp"
-  - "docker compose down"
+  teardown:
+    - "tmux kill-session -t myapp"
+    - "docker compose down"
 ```
 
 - **docker** — `command` runs once; `reuseExisting: true` skips if the readiness check already passes. `readinessCheck` gates startup; `healthcheck` polls until green or `retries` is exhausted.
 - **seed** — runs after docker is healthy. Freshness is tracked at `~/.cairntrace/services/<project>.seed.json` with a three-layer check (fingerprint + TTL + optional data-level command). A fresh-enough seed is reused; otherwise the seed command re-runs. Optional `postCommands` always run after that decision (skip or complete) — use them for lightweight fixture ensure scripts the bulk import does not ship.
 - **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`. On reuse, missing windows are created and idle panes (shell prompt, no running service) are re-launched; busy panes are left alone. If docker was freshly started this run, the whole session is recreated so app processes reconnect to new containers. Cairn waits for the interactive shell before `send-keys` and clears pane history first so `readyOn` text cannot match stale scrollback.
-- **stash** — optionally stashes session artifacts (tmux panes, docker logs, seed output) to fcheap.
+- **stash** — optionally saves session artifacts (tmux panes, docker logs, seed
+  output) in the local file.cheap vault. It does not upload or replicate them.
 - **teardown** — after the last spec. When tmux reuse is on (the default), cairn leaves the session alive and also skips `docker compose down` so infra the live panes need is not torn out from under them. With `tmux.reuseExisting: false`, full teardown runs (tmux kill + docker down).
 
 ## Skipping and per-environment overrides
@@ -74,15 +78,25 @@ cairn run flows/x.yml --services-dry-run       # print the plan, do not execute
 Per-environment overrides replace `--no-services` for remote envs:
 
 ```yaml
+version: 1
+services:
+  tmux:
+    session: myapp
+    windows:
+      - name: web
+        command: "bun run dev"
 environments:
   dev:
     services: false          # disable all services (app is already deployed remotely)
   staging:
     services:                # partial block deep-merges over the top-level one
-      tmux:
-        session: myapp-staging
+      seed:
+        command: "bun run seed:staging"
+        ttlSeconds: 3600
     secrets:                 # an env-level secrets block REPLACES the top-level one
       provider: tvault
+      tvault:
+        project: myapp-staging
 ```
 
 A partial `services:` block deep-merges over the top-level one. An env-level `secrets:` block replaces the top-level one entirely.

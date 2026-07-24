@@ -16,9 +16,22 @@ import { type ClipOptions } from "../cli/commands/clip";
 import { resolveDiscoverUrl } from "../cli/commands/discover";
 import { resolveSnapshotUrl } from "../cli/commands/snapshot";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
+import { resolvePlaywrightChecks } from "../cli/commands/doctor";
 import { buildExplain } from "../cli/commands/explain";
+import {
+  auditResultExitCode,
+  auditSpec,
+  investigateRunRef,
+} from "../cli/commands/investigate";
 import { validateConfigFile } from "../cli/commands/config/validate";
-import { isFcheapAvailable } from "../cli/commands/stash";
+import { isFcheapAvailable, stashDirectory } from "../cli/commands/stash";
+import {
+  parseFcheapInfoOutput,
+  parseFcheapListOutput,
+  parseFcheapRestoreOutput,
+  parseFcheapSearchOutput,
+} from "../cli/commands/fcheapContract";
+import { resolveFcheapBinary, runFcheap } from "../cli/commands/fcheapClient";
 import { selectSpecsByBlastRadius } from "../cli/commands/run";
 import {
   resolveArtifactRoot,
@@ -49,9 +62,12 @@ import { healSpec, healVerify } from "../core/healer/Healer";
 import { collectLocatorInventory } from "../core/snapshot/locatorInventory";
 import { parseSpec } from "../core/parser/parseSpec";
 import { runSpec } from "../core/runner/Runner";
+import { createArtifactRedactor } from "../core/artifacts/redaction";
 import { DocsResultSchema, DocsTopicSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
 import { HealResultSchema } from "../core/schema/heal.v1";
+import { AuditResultSchema } from "../core/schema/audit.v1";
+import { InvestigateResultSchema } from "../core/schema/investigate.v1";
 import {
   ConfigValidateResultSchema,
   DiscoveryActionResultSchema,
@@ -62,6 +78,9 @@ import {
   DiscoverySnapshotResultSchema,
   DiscoverySuggestResultSchema,
   ServicesStatusResultSchema,
+  StashInfoResultSchema,
+  StashRestoreResultSchema,
+  StashToolErrorSchema,
 } from "../core/schema/mcp.v1";
 import {
   buildRunNextActions,
@@ -70,7 +89,27 @@ import {
 } from "../core/schema/run.v1";
 import { LocatorSchema, SpecSchema } from "../core/schema/spec.v1";
 import { VerifierSchema } from "../core/schema/verifier.v1";
+import { SafeStashIdSchema } from "../core/schema/stash.v1";
 import { CAIRN_VERSION as VERSION } from "../cli/version";
+
+function stashMcpError(input: z.input<typeof StashToolErrorSchema>): {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent: Record<string, unknown>;
+  isError: true;
+} {
+  const redactor = createArtifactRedactor(undefined);
+  const error = StashToolErrorSchema.parse(redactor.value(input));
+  return {
+    content: [
+      {
+        type: "text",
+        text: `${error.message}\nNext: ${error.hint}`,
+      },
+    ],
+    structuredContent: error,
+    isError: true,
+  };
+}
 
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this
@@ -147,7 +186,8 @@ export function buildMcpServer(): McpServer {
     "cairn_doctor",
     {
       title: "Health check",
-      description: "Verify node, bun, agent-browser, and artifact root.",
+      description:
+        "Verify runtimes, browser backends, and optional local integrations.",
       inputSchema: {},
     },
     async () => {
@@ -922,10 +962,10 @@ export function buildMcpServer(): McpServer {
     {
       title: "Stash a run to fcheap",
       description:
-        "Save a run directory to the fcheap stash vault for persistence, " +
-        "sharing, and cross-run search. Requires fcheap on $PATH.",
+        "Save a run directory to the local file.cheap vault for persistence " +
+        "beyond Cairntrace retention and cross-run search. Requires fcheap on $PATH.",
       inputSchema: {
-        runId: z.string().describe("Run id, 'latest', or 'previous'"),
+        runId: z.string().min(1).describe("Run id, 'latest', or 'previous'"),
         artifactRoot: z
           .string()
           .optional()
@@ -950,39 +990,50 @@ export function buildMcpServer(): McpServer {
         artifactRoot ? { artifactRoot } : {},
       );
       const runDir = await resolveRunRef(runId, root);
-      // Capture stdout from the stash command by calling the function directly
-      const r = await execa(
-        "fcheap",
-        [
-          "save",
-          runDir,
-          "--tool",
-          "cairntrace",
-          ...(tag ?? []).flatMap((t) => ["--tag", t]),
-          "--json",
-        ],
-        { reject: false, timeout: 60_000 },
-      );
-      if (r.exitCode !== 0) {
+      const resolvedRunId = basename(runDir);
+      const saved = await stashDirectory(runDir, {
+        tool: "cairntrace",
+        tags: tag ?? [],
+      });
+      if (!saved.ok || !saved.stashId) {
         return {
-          content: [{ type: "text", text: `fcheap save failed: ${r.stderr}` }],
+          content: [
+            {
+              type: "text",
+              text: `fcheap save failed: ${saved.error ?? "missing stash id"}`,
+            },
+          ],
+          structuredContent: {
+            runId: resolvedRunId,
+            runDir,
+            tags: tag ?? [],
+            ...(saved.stashId ? { stashId: saved.stashId } : {}),
+            ...(saved.status ? { status: saved.status } : {}),
+            ...(saved.failures?.length ? { failures: saved.failures } : {}),
+            error: saved.error ?? "missing stash id",
+          },
           isError: true,
         };
       }
-      const data = JSON.parse(r.stdout);
       return {
         content: [
           {
             type: "text",
-            text: `Stashed run ${runId} → ${data.stashId ?? data.id ?? "(unknown)"}`,
+            text: saved.warning
+              ? `Stashed run ${resolvedRunId} → ${saved.stashId} with post-save failures: ${saved.warning}`
+              : `Stashed run ${resolvedRunId} → ${saved.stashId}`,
           },
         ],
         structuredContent: {
-          stashId: data.stashId ?? data.id,
-          runId,
+          stashId: saved.stashId,
+          runId: resolvedRunId,
           runDir,
           tags: tag ?? [],
+          ...(saved.status ? { status: saved.status } : {}),
+          ...(saved.failures?.length ? { failures: saved.failures } : {}),
+          ...(saved.warning ? { warning: saved.warning } : {}),
         },
+        ...(saved.warning ? { isError: true } : {}),
       };
     },
   );
@@ -1014,23 +1065,28 @@ export function buildMcpServer(): McpServer {
       const args = ["list", "--json"];
       if (tag) args.push("--tag", tag);
       if (tool) args.push("--tool", tool);
-      const r = await execa("fcheap", args, {
-        reject: false,
-        timeout: 60_000,
-      });
-      if (r.exitCode !== 0) {
+      const r = await runFcheap(args);
+      if (!r.ok) {
         return {
           content: [{ type: "text", text: `fcheap list failed: ${r.stderr}` }],
           isError: true,
         };
       }
-      const stashes = JSON.parse(r.stdout);
+      let stashes;
+      try {
+        stashes = parseFcheapListOutput(r.stdout);
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: (error as Error).message }],
+          isError: true,
+        };
+      }
       return {
         content: [
           {
             type: "text",
             text:
-              Array.isArray(stashes) && stashes.length > 0
+              stashes.length > 0
                 ? stashes
                     .map(
                       (s: { id: string; tool?: string; tags?: string[] }) =>
@@ -1043,6 +1099,155 @@ export function buildMcpServer(): McpServer {
           },
         ],
         structuredContent: { stashes },
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_stash_info",
+    {
+      title: "Inspect a stashed run",
+      description:
+        "Read and validate one local file.cheap v0.30 stash manifest, including its file inventory and provenance metadata.",
+      inputSchema: {
+        stashId: SafeStashIdSchema.describe("The local file.cheap stash ID"),
+      },
+      outputSchema: StashInfoResultSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ stashId }) => {
+      const r = await runFcheap(["info", stashId], { json: true });
+      if (!r.ok) {
+        return stashMcpError({
+          code:
+            r.exitCode === -1 ? "FCHEAP_UNAVAILABLE" : "FCHEAP_COMMAND_FAILED",
+          command: "info",
+          message:
+            r.stderr ||
+            `file.cheap info exited with status ${String(r.exitCode)}`,
+          hint:
+            r.exitCode === -1
+              ? "Install file.cheap with `brew install --no-quarantine abdul-hamid-achik/tap/fcheap`, or set FCHEAP_BIN."
+              : "Confirm the ID with cairn_stash_list, then retry cairn_stash_info.",
+          stashId,
+        });
+      }
+
+      try {
+        const info = StashInfoResultSchema.parse(
+          createArtifactRedactor(undefined).value(
+            parseFcheapInfoOutput(r.stdout),
+          ),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Stash ${info.id}: ${info.fileCount} file(s), ${info.sizeBytes} bytes`,
+            },
+          ],
+          structuredContent: info,
+        };
+      } catch (error) {
+        return stashMcpError({
+          code: "FCHEAP_INVALID_RESPONSE",
+          command: "info",
+          message: (error as Error).message,
+          hint: "Upgrade file.cheap to v0.30 or newer and retry; Cairntrace rejected an invalid info response.",
+          stashId,
+        });
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_stash_restore",
+    {
+      title: "Restore a stashed run",
+      description:
+        "Restore one local file.cheap v0.30 stash, validate the structured receipt, and require hash verification to pass.",
+      inputSchema: {
+        stashId: SafeStashIdSchema.describe("The local file.cheap stash ID"),
+        to: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            "Target directory; omit to let file.cheap create a private temporary directory",
+          ),
+      },
+      outputSchema: StashRestoreResultSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async ({ stashId, to }) => {
+      const args = ["restore", stashId];
+      if (to) args.push("--to", to);
+      const r = await runFcheap(args, { json: true });
+
+      let restored;
+      try {
+        restored = StashRestoreResultSchema.parse(
+          createArtifactRedactor(undefined).value(
+            parseFcheapRestoreOutput(r.stdout),
+          ),
+        );
+      } catch (error) {
+        return stashMcpError({
+          code:
+            r.exitCode === -1
+              ? "FCHEAP_UNAVAILABLE"
+              : r.ok
+                ? "FCHEAP_INVALID_RESPONSE"
+                : "FCHEAP_COMMAND_FAILED",
+          command: "restore",
+          message: !r.ok && r.stderr ? r.stderr : (error as Error).message,
+          hint:
+            r.exitCode === -1
+              ? "Install file.cheap with `brew install --no-quarantine abdul-hamid-achik/tap/fcheap`, or set FCHEAP_BIN."
+              : r.ok
+                ? "Upgrade file.cheap to v0.30 or newer and retry; Cairntrace rejected an invalid restore response."
+                : "Confirm the stash exists with cairn_stash_info and choose a writable, non-overlapping target directory.",
+          stashId,
+        });
+      }
+
+      if (!r.ok || !restored.verified) {
+        return stashMcpError({
+          code: restored.verified
+            ? "FCHEAP_COMMAND_FAILED"
+            : "FCHEAP_RESTORE_UNVERIFIED",
+          command: "restore",
+          message: restored.verified
+            ? r.stderr ||
+              `file.cheap restore exited with status ${String(r.exitCode)}`
+            : `Restored ${restored.fileCount} file(s), but integrity verification failed.`,
+          hint: restored.verified
+            ? "Inspect the restore receipt and target, then retry with a fresh target directory."
+            : "Treat the restored directory as forensic-only; inspect `restore.mismatches` and retry from a known-good stash.",
+          stashId,
+          restore: restored,
+        });
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Restored ${restored.stashId} to ${restored.restoredTo}; ${restored.fileCount} file(s) verified`,
+          },
+        ],
+        structuredContent: restored,
       };
     },
   );
@@ -1081,11 +1286,8 @@ export function buildMcpServer(): McpServer {
       const args = ["search", query, "--json"];
       if (mode) args.push("--mode", mode);
       if (limit) args.push("--limit", String(limit));
-      const r = await execa("fcheap", args, {
-        reject: false,
-        timeout: 60_000,
-      });
-      if (r.exitCode !== 0) {
+      const r = await runFcheap(args);
+      if (!r.ok) {
         return {
           content: [
             { type: "text", text: `fcheap search failed: ${r.stderr}` },
@@ -1093,23 +1295,25 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-      const results = JSON.parse(r.stdout);
+      let results;
+      try {
+        results = parseFcheapSearchOutput(r.stdout);
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: (error as Error).message }],
+          isError: true,
+        };
+      }
       return {
         content: [
           {
             type: "text",
             text:
-              Array.isArray(results) && results.length > 0
+              results.length > 0
                 ? results
                     .map(
-                      (s: {
-                        stashId: string;
-                        snippet: string;
-                        score?: number;
-                      }) =>
-                        `- ${s.stashId}${
-                          s.score ? ` (${s.score.toFixed(2)})` : ""
-                        }: ${s.snippet}`,
+                      (s) =>
+                        `- ${s.stashId} (${s.score.toFixed(2)}): ${s.snippet}`,
                     )
                     .join("\n")
                 : `(no results for "${query}")`,
@@ -1131,7 +1335,7 @@ export function buildMcpServer(): McpServer {
         "to cut named clips. Clips are moved into the run directory so they " +
         "are relative to run artifacts. Requires vidtrace on $PATH.",
       inputSchema: {
-        runId: z.string().describe("Run id, 'latest', or 'previous'"),
+        runId: z.string().min(1).describe("Run id, 'latest', or 'previous'"),
         labels: z
           .array(z.string())
           .describe("Clip labels as name=start-end (e.g. 'issue=0:18-3:40')"),
@@ -1243,7 +1447,6 @@ export function buildMcpServer(): McpServer {
 
       let stashId: string | undefined;
       if (opts.stash) {
-        const { stashDirectory } = await import("../cli/commands/stash");
         const stashResult = await stashDirectory(runDir, {
           tags: [...(opts.tags ?? []), "vidtrace-clip", "mcp"],
           tool: "cairntrace",
@@ -1278,103 +1481,100 @@ export function buildMcpServer(): McpServer {
     {
       title: "Investigate a run for code matches",
       description:
-        "Stash a run directory to fcheap and run fcheap connect (vecgrep) to " +
-        "find file:line code candidates responsible for the failure. " +
-        "Requires fcheap + vecgrep on $PATH.",
+        "Stash a run directory to file.cheap and optionally connect it to a " +
+        "codebase for file:line candidates. Connection requires vecgrep.",
       inputSchema: {
         runId: z.string().describe("Run id, 'latest', or 'previous'"),
         codebase: z
           .string()
-          .describe("Absolute path to the codebase to search"),
-        mode: z
+          .optional()
+          .describe(
+            "Codebase to search; implies connect. Relative paths resolve from the server cwd.",
+          ),
+        connect: z
+          .boolean()
+          .optional()
+          .describe(
+            "Connect after stashing; uses investigate.codebaseDir when codebase is omitted",
+          ),
+        clips: z
+          .boolean()
+          .optional()
+          .describe(
+            "Stash videos/clips instead of the full run when available",
+          ),
+        artifactRoot: z
           .string()
           .optional()
-          .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
-        limit: z.number().optional().describe("Max code matches (default 10)"),
+          .describe("Override the run artifact root"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml path"),
+        query: z
+          .string()
+          .optional()
+          .describe("Override the query extracted from the stashed run"),
+        mode: z
+          .enum(["semantic", "keyword", "hybrid"])
+          .optional()
+          .describe("vecgrep mode (default: config or hybrid)"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max code matches (default: config or 10)"),
+        index: z
+          .boolean()
+          .optional()
+          .describe("Build or refresh the vecgrep index before connecting"),
       },
+      outputSchema: InvestigateResultSchema,
     },
     async (args) => {
-      const { runId, codebase } = args as {
-        runId: string;
-        codebase: string;
-        mode?: string;
-        limit?: number;
-      };
-
-      const root = await resolveArtifactRoot();
-      let runDir: string;
+      let candidate: unknown;
       try {
-        runDir = await resolveRunRef(runId, root);
-      } catch {
-        return {
-          content: [{ type: "text", text: `Run "${runId}" not found` }],
-          isError: true,
+        candidate = await investigateRunRef(args.runId, {
+          codebase: args.codebase,
+          connect: args.connect,
+          clips: args.clips,
+          artifactRoot: args.artifactRoot,
+          config: args.config,
+          query: args.query,
+          mode: args.mode,
+          limit: args.limit,
+          index: args.index,
+        });
+      } catch (error) {
+        candidate = {
+          $schema: "urn:cairntrace.dev:investigate:v1",
+          version: "1",
+          runId: args.runId,
+          runDir: "",
+          codeMatches: [],
+          error: (error as Error).message,
         };
       }
-
-      // Stash the run
-      const stashR = await execa(
-        "fcheap",
-        ["save", runDir, "--tool", "cairntrace", "--json"],
-        { reject: false, timeout: 60_000 },
-      );
-      if (stashR.exitCode !== 0) {
-        return {
-          content: [
-            { type: "text", text: `fcheap save failed: ${stashR.stderr}` },
-          ],
-          isError: true,
-        };
-      }
-
-      const stashData = JSON.parse(stashR.stdout);
-      const stashId = stashData.stashId ?? stashData.id ?? stashData.path;
-
-      // Connect to codebase
-      const connectArgs = ["connect", stashId, codebase, "--json"];
-      if (args.mode) connectArgs.push("--mode", args.mode);
-      if (args.limit) connectArgs.push("--limit", String(args.limit));
-
-      const connectR = await execa("fcheap", connectArgs, {
-        reject: false,
-        timeout: 120_000,
-      });
-      if (connectR.exitCode !== 0) {
-        return {
-          content: [
-            { type: "text", text: `fcheap connect failed: ${connectR.stderr}` },
-          ],
-          isError: true,
-        };
-      }
-
-      const matches = JSON.parse(connectR.stdout);
-      const codeMatches = Array.isArray(matches)
-        ? matches
-        : (matches?.matches ?? []);
-
+      const result = InvestigateResultSchema.parse(candidate);
       return {
         content: [
           {
             type: "text",
-            text:
-              codeMatches.length > 0
-                ? codeMatches
+            text: result.error
+              ? result.error
+              : result.codeMatches.length > 0
+                ? result.codeMatches
                     .map(
-                      (m: { file?: string; line?: number; score?: number }) =>
-                        `- ${m.file ?? "?"}:${m.line ?? 0}${
-                          m.score ? ` (${m.score.toFixed(2)})` : ""
-                        }`,
+                      (match) =>
+                        `- ${match.file}:${match.line} (${match.score.toFixed(2)})`,
                     )
                     .join("\n")
-                : "(no code matches found)",
+                : `Stashed run ${result.runId} as ${result.stashId ?? "(unknown)"}`,
           },
         ],
-        structuredContent: {
-          runId,
-          stashId,
-          codeMatches: codeMatches,
-        },
+        structuredContent: result as unknown as Record<string, unknown>,
+        ...(result.error || result.warnings?.length ? { isError: true } : {}),
       };
     },
   );
@@ -1387,61 +1587,89 @@ export function buildMcpServer(): McpServer {
       title: "Audit a spec end-to-end (run + video + vidtrace + code matches)",
       description:
         "Run a spec with video recording, extract vidtrace evidence from " +
-        "the recording, stash to fcheap, and run fcheap connect to find " +
-        "code responsible for failures. Requires playwright + fcheap + vecgrep. " +
-        "vidtrace is optional (skipped if not installed).",
+        "the recording, and optionally connect the evidence to a codebase. " +
+        "Playwright is required; file.cheap/vecgrep are required only when " +
+        "connecting. vidtrace is optional.",
       inputSchema: {
-        specPath: z.string().describe("Path to the spec YAML file"),
+        specPath: z.string().min(1).describe("Path to the spec YAML file"),
         codebase: z
           .string()
-          .describe("Absolute path to the codebase to search"),
+          .optional()
+          .describe(
+            "Codebase to search; implies connect. Relative paths resolve from the server cwd.",
+          ),
+        connect: z
+          .boolean()
+          .optional()
+          .describe(
+            "Connect after stashing; uses investigate.codebaseDir when omitted",
+          ),
+        artifactRoot: z.string().optional().describe("Override artifact root"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml path"),
         speed: z
           .number()
+          .min(0.25)
+          .max(4)
           .optional()
           .describe("Video playback speed 0.25-4.0 (default: none)"),
         slowMo: z
           .number()
+          .min(0)
+          .max(5_000)
           .optional()
           .describe("Delay in ms between actions during recording (0-5000)"),
         mode: z
-          .string()
+          .enum(["semantic", "keyword", "hybrid"])
           .optional()
-          .describe("vecgrep mode: semantic, keyword, or hybrid (default)"),
-        limit: z.number().optional().describe("Max code matches (default 10)"),
+          .describe("vecgrep mode (default: config or hybrid)"),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max code matches (default: config or 10)"),
+        index: z
+          .boolean()
+          .optional()
+          .describe("Build or refresh the vecgrep index before connecting"),
         env: z.string().optional().describe("Environment name override"),
         coldStart: z
           .boolean()
           .optional()
           .describe("Clear browser state before running (default: true)"),
       },
+      outputSchema: AuditResultSchema,
     },
     async (args) => {
-      const specPath = args.specPath as string;
-      const codebase = args.codebase as string;
-
-      const { auditCommand } = await import("../cli/commands/investigate");
-      const opts: Record<string, unknown> = {
-        codebase,
-        connect: true,
-        coldStart: args.coldStart ?? true,
-      };
-      if (args.speed !== undefined) opts.speed = args.speed;
-      if (args.slowMo !== undefined) opts.slowMo = args.slowMo;
-      if (args.mode !== undefined) opts.mode = args.mode;
-      if (args.limit !== undefined) opts.limit = args.limit;
-      if (args.env !== undefined) opts.env = args.env;
-
-      // The audit command writes to stdout; we capture it by running with json format
-      opts.json = true;
-
-      await auditCommand(specPath, opts as never);
+      const result = AuditResultSchema.parse(
+        await auditSpec(args.specPath, {
+          codebase: args.codebase,
+          connect: args.connect,
+          artifactRoot: args.artifactRoot,
+          config: args.config,
+          speed: args.speed,
+          slowMo: args.slowMo,
+          mode: args.mode,
+          limit: args.limit,
+          index: args.index,
+          env: args.env,
+          coldStart: args.coldStart ?? true,
+        }),
+      );
       return {
         content: [
           {
             type: "text",
-            text: "Audit complete. See run artifacts for video, vidtrace evidence, and code matches.",
+            text: result.error
+              ? result.error
+              : `Audit ${result.runId ?? result.specPath}: ${result.codeMatches.length} code match(es)`,
           },
         ],
+        structuredContent: result as unknown as Record<string, unknown>,
+        ...(auditResultExitCode(result) !== 0 ? { isError: true } : {}),
       };
     },
   );
@@ -2662,29 +2890,38 @@ async function runDoctorChecks(): Promise<
   const checks: Array<{ name: string; ok: boolean; detail: string }> = [
     { name: "node", ok: true, detail: `node ${process.versions.node}` },
   ];
-  for (const [name, args] of [
-    ["bun", ["--version"]],
-    ["agent-browser", ["--version"]],
-    ["fcheap", ["--version"]],
-    ["vecgrep", ["version"]],
-    ["vidtrace", ["version"]],
-    ["codemap", ["version"]],
-    ["tvault", ["--version"]],
+  for (const [name, command, args] of [
+    ["bun", "bun", ["--version"]],
+    ["agent-browser", "agent-browser", ["--version"]],
+    ["fcheap", resolveFcheapBinary(), ["--version"]],
+    ["vecgrep", "vecgrep", ["version"]],
+    ["vidtrace", "vidtrace", ["version"]],
+    ["monitor", "monitor", ["--version"]],
+    ["ffmpeg", "ffmpeg", ["-version"]],
+    ["codemap", "codemap", ["version"]],
+    ["tvault", "tvault", ["--version"]],
   ] as const) {
     try {
-      const r = await execa(name, args, { reject: false });
+      const r = await execa(command, args, { reject: false });
       checks.push({
         name,
         ok: r.exitCode === 0,
         detail:
           r.exitCode === 0
-            ? `${name} ${typeof r.stdout === "string" ? r.stdout.trim() : ""}`
+            ? `${name} ${
+                typeof r.stdout === "string"
+                  ? name === "ffmpeg"
+                    ? (r.stdout.trim().split("\n")[0] ?? "")
+                    : r.stdout.trim()
+                  : ""
+              }`
             : `${name} not on $PATH`,
       });
     } catch {
       checks.push({ name, ok: false, detail: `${name} not on $PATH` });
     }
   }
+  checks.push(...(await resolvePlaywrightChecks()));
   return checks;
 }
 

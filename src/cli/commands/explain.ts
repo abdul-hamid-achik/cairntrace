@@ -149,7 +149,7 @@ export function buildExplain(): ExplainResult {
             name: "--label",
             type: "string",
             description:
-              "Stamp free-form cohort labels onto each run.json as key=value (repeatable). Used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit, suite=opg-14827-ab).",
+              "Stamp free-form cohort labels onto each run.json as key=value (repeatable). Used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit, suite=answer-change-ab).",
           },
           {
             name: "--before",
@@ -309,7 +309,7 @@ export function buildExplain(): ExplainResult {
             name: "--keep",
             type: "number",
             description:
-              "Keep the newest N runs per spec (default: config retention.keepRuns, else 10)",
+              "Keep the newest N runs per spec (default: config retention.keepRuns, else 3)",
           },
           {
             name: "--all",
@@ -901,20 +901,20 @@ export function buildExplain(): ExplainResult {
         summary:
           "Stash a run to fcheap and find code responsible for failures via vecgrep",
         synopsis:
-          "cairn investigate <run-id> [--codebase <dir>] [--connect] [--query <q>] [--mode semantic|keyword|hybrid] [--limit <n>] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+          "cairn investigate <run-id> [--codebase <dir>] [--connect] [--query <q>] [--clips] [--mode semantic|keyword|hybrid] [--limit <n>] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
         flags: [
           {
             name: "--codebase",
             type: "string",
             description:
-              "Codebase directory to search with fcheap connect (vecgrep)",
+              "Codebase directory to search; passing it implies --connect",
           },
           {
             name: "--connect",
             type: "boolean",
             default: false,
             description:
-              "Run fcheap connect to find code matches after stashing",
+              "Connect after stashing; uses investigate.codebaseDir when codebase is omitted",
           },
           {
             name: "--query",
@@ -922,15 +922,22 @@ export function buildExplain(): ExplainResult {
             description: "Override the auto-extracted search query for vecgrep",
           },
           {
+            name: "--clips",
+            type: "boolean",
+            default: false,
+            description:
+              "Stash videos/clips instead of the full run when available",
+          },
+          {
             name: "--mode",
             type: "string",
-            description: "vecgrep search mode: semantic | keyword | hybrid",
+            description:
+              "vecgrep search mode: semantic | keyword | hybrid (default: config or hybrid)",
           },
           {
             name: "--limit",
             type: "number",
-            default: 10,
-            description: "Max code matches to return",
+            description: "Max code matches (default: config or 10)",
           },
           {
             name: "--artifact-root",
@@ -952,28 +959,29 @@ export function buildExplain(): ExplainResult {
         ],
         exitCodes: {
           "0": "success (code matches returned or run stashed without --connect)",
-          "2": "fcheap/vecgrep not installed or run not found",
+          "2": "run resolution, file.cheap process, or JSON contract failure",
         },
+        outputSchema: "urn:cairntrace.dev:investigate:v1",
       },
       {
         name: "audit",
         summary:
           "Run a spec with video, extract vidtrace evidence, and find code matches",
         synopsis:
-          "cairn audit <spec> [--codebase <dir>] [--connect] [--speed <0.25-4.0>] [--slow-mo <ms>] [--mode semantic|keyword|hybrid] [--limit <n>] [--env <name>] [--cold-start] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
+          "cairn audit <spec> [--codebase <dir>] [--connect] [--speed <0.25-4.0>] [--slow-mo <ms>] [--mode semantic|keyword|hybrid] [--limit <n>] [--env <name>] [--no-cold-start] [--artifact-root <path>] [--config <path>] [--format json|yaml|md]",
         flags: [
           {
             name: "--codebase",
             type: "string",
             description:
-              "Codebase directory to search with fcheap connect (vecgrep)",
+              "Codebase directory to search; passing it implies --connect",
           },
           {
             name: "--connect",
             type: "boolean",
             default: false,
             description:
-              "Run fcheap connect to find code matches after stashing",
+              "Connect after stashing; uses investigate.codebaseDir when codebase is omitted",
           },
           {
             name: "--speed",
@@ -990,13 +998,13 @@ export function buildExplain(): ExplainResult {
           {
             name: "--mode",
             type: "string",
-            description: "vecgrep search mode: semantic | keyword | hybrid",
+            description:
+              "vecgrep search mode: semantic | keyword | hybrid (default: config or hybrid)",
           },
           {
             name: "--limit",
             type: "number",
-            default: 10,
-            description: "Max code matches to return",
+            description: "Max code matches (default: config or 10)",
           },
           {
             name: "--env",
@@ -1004,10 +1012,11 @@ export function buildExplain(): ExplainResult {
             description: "Environment override",
           },
           {
-            name: "--cold-start",
+            name: "--no-cold-start",
             type: "boolean",
             default: false,
-            description: "Force fresh browser profile",
+            description:
+              "Reuse existing browser state instead of audit's default cold start",
           },
           {
             name: "--artifact-root",
@@ -1028,9 +1037,11 @@ export function buildExplain(): ExplainResult {
           },
         ],
         exitCodes: {
-          "0": "success",
-          "2": "run failed or fcheap/vecgrep/vidtrace not installed",
+          "0": "audit passed (optional vidtrace warnings may still be present)",
+          "1": "behavioral spec failure",
+          "2": "run setup, contract, or required integration failure",
         },
+        outputSchema: "urn:cairntrace.dev:audit:v1",
       },
       {
         name: "clip",
@@ -1247,9 +1258,9 @@ export function buildExplain(): ExplainResult {
         id: "click",
         kind: "interaction",
         summary:
-          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Optional click.until retries at most four clicks until selectorGone|selector|text|notText holds. Optional sibling settleMs overrides post-click network-idle settling. Agent-browser precedence is click > spec > browser.postClickSettleMs > 5000; Playwright honors explicit click/spec values; 0 skips the extra settle",
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Agent-browser confirms same-tab link delivery by default without network-idle. Optional click.until retries at most four clicks until selectorGone|selector|text|notText holds. A positive sibling/spec settleMs or browser.postClickSettleMs opts into network-idle; click/spec values take precedence and 0 skips both the settle and link probe",
         yamlExample:
-          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: role, role: button, name: Cobrar, nth: 1 }\n    settleMs: 0",
+          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: role, role: button, name: Pay, nth: 1 }\n    settleMs: 0",
       },
       {
         id: "hover",
@@ -1720,7 +1731,7 @@ export function buildExplain(): ExplainResult {
       defaultBackend: "agent-browser",
       report: {
         defaultTheme: "cairn",
-        themes: ["cairn", "graphite", "midnight", "contrast"],
+        themes: ["cairn", "slate", "midnight", "contrast"],
         artifacts: ["report.html", "report.json"],
       },
       capture: {
@@ -1738,7 +1749,7 @@ export function buildExplain(): ExplainResult {
           slowMo:
             "Delay in ms between Playwright actions (0–5000) so fast clicks are visible in the recording",
           speed:
-            "Playback speed multiplier (0.25–4.0); values < 1 slow down via ffmpeg atempo post-processing",
+            "Playback speed multiplier (0.25–4.0); values < 1 slow the video via ffmpeg setpts post-processing",
         },
       },
     },

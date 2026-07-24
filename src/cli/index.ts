@@ -614,7 +614,7 @@ addFormatFlags(
     )
     .option(
       "--codebase <dir>",
-      "codebase directory to search with fcheap connect (vecgrep)",
+      "codebase directory to search with fcheap connect (relative to cwd)",
     )
     .option(
       "--connect",
@@ -626,10 +626,16 @@ addFormatFlags(
       "override the auto-extracted search query for vecgrep",
     )
     .option(
-      "--mode <mode>",
-      "vecgrep search mode: semantic | keyword | hybrid (default: hybrid)",
+      "--clips",
+      "stash videos/clips instead of the full run when that directory exists",
+      false,
     )
-    .option("--limit <n>", "max code matches to return", "10")
+    .option(
+      "--mode <mode>",
+      "vecgrep search mode: semantic | keyword | hybrid (default: config or hybrid)",
+    )
+    .option("--limit <n>", "max code matches to return (default: config or 10)")
+    .option("--index", "build or refresh the vecgrep index before connecting")
     .option("--artifact-root <path>", "override artifact root directory")
     .option(
       "--config <path>",
@@ -647,7 +653,7 @@ addFormatFlags(
     )
     .option(
       "--codebase <dir>",
-      "codebase directory to search with fcheap connect (vecgrep)",
+      "codebase directory to search with fcheap connect (relative to cwd)",
     )
     .option(
       "--connect",
@@ -655,9 +661,18 @@ addFormatFlags(
       false,
     )
     .option("--mode <mode>", "vecgrep search mode: semantic | keyword | hybrid")
-    .option("--limit <n>", "max code matches to return", "10")
+    .option("--limit <n>", "max code matches to return (default: config or 10)")
+    .option("--index", "build or refresh the vecgrep index before connecting")
+    .option(
+      "--speed <multiplier>",
+      "recorded video playback speed from 0.25 to 4",
+    )
+    .option(
+      "--slow-mo <ms>",
+      "delay between recorded browser actions from 0 to 5000ms",
+    )
     .option("--env <name>", "environment override")
-    .option("--cold-start", "force fresh browser profile")
+    .option("--no-cold-start", "reuse existing browser state for this audit")
     .option("--artifact-root <path>", "override artifact root directory")
     .option(
       "--config <path>",

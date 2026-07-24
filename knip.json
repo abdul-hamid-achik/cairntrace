@@ -13,8 +13,8 @@
   "ignoreBinaries": [
     "pgrep",
     "ffmpeg",
+    "ffprobe",
     "codemap",
-    "fcheap",
     "vidtrace",
     "tvault",
     "tmux"

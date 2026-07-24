@@ -9,31 +9,47 @@ Every `cairn run` writes a self-contained **artifact pack** to a directory on di
 
 ## Where artifacts land
 
-`<run-dir>` defaults to `~/.cairntrace/runs/<spec-base-name>-<YYYY-MM-DDTHH-MM-SS>-<short-id>/`. Override with `--artifact-root <path>` or set `artifactRoot` in `cairntrace.config.yml`.
+`<run-dir>` defaults to
+`~/.cairntrace/runs/<ISO-timestamp>_<spec-name>_<6-hex>/`; colons and the
+timestamp's decimal point are replaced with hyphens for filesystem safety.
+Override the root with `--artifact-root <path>` or set `artifactRoot` in
+`cairntrace.config.yml`.
 
 ```
-run/my-spec-2026-06-29T18-22-04-c5a3/
+2026-06-29T18-22-04-000Z_my-spec_c5a3f9/
 ├── run.json              # machine-readable run record
 ├── run.yaml              # same shape as run.json
 ├── run.md                # human-readable narrative
 ├── report.html           # standalone, themed HTML report
 ├── report.json           # machine-readable, used by dashboards
 ├── agent_context.md      # the post-mortem agent context
+├── artifact-manifest.json # path, kind, size, and digest for written artifacts
 ├── spec.resolved.yml     # the spec after ${baseUrl}/${env.X}/${vars.X} substitution
 ├── replay.json           # exact-replay manifest (SPEC §7.3): the `cairn run` command, backend, env, viewport, capture policy, redacted env KEY NAMES, cairn version
+├── stash-receipt.json    # local file.cheap receipt (only after auto-stash)
 ├── events.ndjson         # full event stream
 ├── outcomes/
+│   ├── results.json      # outcome index (also written as YAML and Markdown)
 │   ├── <id>.md           # rendered outcome + evidence (every outcome)
 │   └── <id>.raw.json     # full return value (only for `script:` outcomes)
 ├── snapshots/            # accessibility snapshots per step (when enabled)
 ├── screenshots/          # viewport PNGs per step (when enabled)
-├── console/              # console.ndjson + errors.ndjson (when enabled)
-├── network/              # requests.ndjson (when enabled)
-├── frames/frames.ndjson  # per-step frame markers (when recording)
-└── raw/                  # any backend-provided raw artifacts (PTY logs, video, etc.)
+├── console/              # console.ndjson + errors.ndjson
+├── network/              # requests.ndjson + failed_requests.ndjson
+├── requests/             # assigned request-step responses
+├── evals/                # assigned eval-step results
+├── downloads/            # files saved by download steps
+├── transforms/           # files produced by transform steps
+├── diagnostics/          # per-step JSON and optional process summaries
+├── traces/               # backend trace ZIP (when retained by policy)
+└── videos/               # Playwright WebM, clips, and audit vidtrace output
 ```
 
-The pack is **self-contained** — moving it elsewhere loses no information. The two files any agent must learn to read are `agent_context.md` (narrative) and `outcomes/<id>.md` (per-outcome evidence). `report.json` is the same data as `run.json` plus per-outcome render metadata.
+The pack is **self-contained** — moving it elsewhere loses no information. The
+two files any agent must learn to read are `agent_context.md` (narrative) and
+`outcomes/<id>.md` (per-outcome evidence). `report.json` is a presentation
+envelope that embeds the run plus rendered summaries, artifact links, theme,
+and reproduction metadata.
 
 Optional `labels` on `run.json` (from `cairn run --label key=value`) let `cairn stats --group-by` build A/B cohorts across many packs without inventing a separate benchmark format.
 
@@ -41,30 +57,52 @@ Optional `labels` on `run.json` (from `cairn run --label key=value`) let `cairn 
 
 ```jsonc
 {
-  "spec": { "name": "my-spec", "path": "..." },
-  "status": "passed",            // "passed" | "failed" | "errored" | "cold-start-gate" | "lint" | ...
-  "contractHash": "sha256:...",  // hash over intent + outcomes
+  "$schema": "urn:cairntrace.dev:run:v1",
+  "version": "1",
+  "runId": "2026-06-29T18-22-04-000Z_my-spec_c5a3f9",
+  "runDir": "/artifact/root/2026-06-29T18-22-04-000Z_my-spec_c5a3f9",
+  "spec": {
+    "name": "my-spec",
+    "path": "/project/flows/my-spec.yml",
+    "contractHash": "sha256:..."
+  },
+  "environment": "local",
+  "backend": "agent-browser",
+  "coldStart": true,
+  "status": "passed", // "passed" | "failed" | "errored"
+  "summary": "1/1 outcomes passed",
   "startedAt": "2026-...",
+  "endedAt": "2026-...",
   "durationMs": 4231,
-  "stepResults": [
-    { "kind": "open", "status": "ok", "ordinal": 1, "durationMs": 412 }
-  ],
   "outcomes": [
     {
       "id": "results-narrowed",
-      "verifier": "count",
       "status": "passed",
-      "evidence": "count=7 (expected 7)",
-      "value": 7,
-      "expected": 7
+      "evidence": "outcomes/results-narrowed.md"
     }
   ],
-  "captures": { },
-  "requests": { }
+  "steps": [
+    {
+      "id": "open-results",
+      "status": "passed",
+      "durationMs": 412,
+      "artifacts": ["snapshots/001_open-results.txt"]
+    }
+  ],
+  "artifacts": {
+    "report": "report.html",
+    "reportJson": "report.json",
+    "agentContext": "agent_context.md",
+    "events": "events.ndjson",
+    "manifest": "artifact-manifest.json"
+  },
+  "exitCode": 0
 }
 ```
 
-`run.yaml` is the same shape in YAML for humans who prefer it. `run.md` is the same data rendered as Markdown — it is what `cairn context latest` returns by default.
+`run.yaml` is the same shape in YAML for humans who prefer it. `run.md` is the
+same data rendered as Markdown. `cairn context latest` prints
+`agent_context.md`, not `run.md`.
 
 ## What `agent_context.md` is for
 
@@ -75,16 +113,26 @@ When a run fails, the agent context is the post-mortem the next agent should rea
 3. The last successful snapshot title (`Last good state`).
 4. The console and network errors in chronological order, capped at ~50 lines each.
 5. A diff against the most recent passing run of the same spec when one exists.
+6. After `cairn investigate`, ranked Code Matches as `file:line` pointers and
+   scores. Raw source snippets stay out of the compact handoff.
 
-The agent context is capped — kept under ~16 KB so it fits in any model context window. Detailed DOM diffs, full HAR exports, and per-step frame data live in the dir but not in `agent_context.md`.
+The agent context is capped — kept under ~16 KB so it fits in any model
+context window. Detailed snapshots, per-step diagnostics, network/console
+streams, traces, and video remain in the run directory but not in
+`agent_context.md`.
 
 ## `report.html`
 
-Self-contained HTML — no external CSS, no JS, no fonts. Print-friendly, themed through the project config (`cairntrace.config.yml > report.theme`), redacted of all secret material. The HTML report is what you email to a non-agent teammate who needs to see what happened.
+Self-contained HTML with inline CSS and a small inline theme-switch script; it
+loads no external CSS, JavaScript, or fonts. It is print-friendly, themed
+through the project config (`cairntrace.config.yml > report.theme`), and passes
+through the text/JSON redactor. Review any linked binary artifacts separately
+before sharing the report directory.
 
 ## What `cairn run --format json` prints vs what the artifact pack holds
 
-- `--format json` prints the same data as `report.json`, plus a top-level `runDir` pointing at the on-disk pack.
+- `--format json` prints the same run document written to `run.json`, including
+  the top-level `runDir`.
 - The pack is the durable record. The stdout JSON is a convenience for shell pipelines.
 
 ## Outcome files
@@ -94,15 +142,24 @@ Every outcome always writes `outcomes/<id>.md`. The body is always:
 - The verifier and parameters.
 - A rendered description of what was checked.
 - The evidence as a short block — page text, network call summary, console line, count value, file metadata, etc.
-- For `script:` outcomes, a `outcomes/<id>.raw.json` sidecar holds the full return value (not redacted).
+- For `script:` outcomes, an `outcomes/<id>.raw.json` sidecar holds the full
+  return value after applying the same text/JSON redaction as the rest of the
+  pack.
 
 The `.md` is what shows up in `report.html` and what an agent sees first. The `.raw.json` is for you, not for the agent.
 
-## Frames and screenshots
+## Screenshots, traces, and video
 
-Per-step screenshots are off by default (`artifacts.screenshots: 'on-failure'` is the typical setting). When enabled, they live under `screenshots/<step-ordinal>.png`. The video fallback, when active, lives under `videos/<backend>-timelapse.mp4` — see [video-screenshot-fallback](/video-screenshot-fallback) for the proposal.
+Per-step screenshots default to `on-failure`. Configure them under
+`artifacts.capture.screenshots`; retained files use
+`screenshots/<step-ordinal>_<step-id>.png`. Step timing and status are recorded
+in `events.ndjson` and `run.json`.
 
-`frames/frames.ndjson` is a per-step marker stream — one entry per step with timing, status, and a pointer to the screenshot. Used by `cairn studio` and any `replay --tui` flow.
+Trace archives use `traces/<backend>-trace.zip` when enabled and retained by
+the capture policy. Native video recording is currently Playwright-only and
+uses `videos/playwright-video.webm`. Agent-browser records a warning event
+when video is requested; it does not synthesize a video from screenshots.
+See [Video capture](/video) for backend-specific behavior.
 
 ## Interrupted batch runs
 
@@ -118,28 +175,47 @@ newest interrupted run is kept up to the cap but older ones age out. Stale
 `aborted-<timestamp>-<pid>.json` summaries are swept under the same cap. An
 explicit `cairn clean --all` removes everything.
 
-## What never lands in an artifact pack
+## Redaction boundary
 
-The redaction layer catches these on the way out. If you see one anyway, that's a bug — file an issue.
+The redactor runs before Cairntrace writes its own text or structured JSON. It
+replaces registered literal secrets with `[redacted]`, replaces values under
+sensitive keys (`authorization`, `cookie`, `token`, `secret`, `password`,
+`api_key`, …), scrubs `Authorization`/`Cookie`/`Set-Cookie` header lines, and
+removes values from common token-bearing query parameters. Values resolved
+from TinyVault and literal values in the spec's `redaction.values` are
+registered automatically. This covers Cairntrace-authored run records,
+reports, event streams, network and console text, request/eval captures,
+`investigate.json`, and outcome sidecars.
 
-- `Authorization` headers (any scheme).
-- `Cookie`, `Set-Cookie`, and `Cookie:` request lines.
-- Bearer tokens, API keys, basic-auth credentials.
-- Postgres / MySQL connection strings.
-- AWS / GCP access keys.
-- Anything you list in the spec's `redaction:` block (literal `values`, plus `headers`/`queryParams`/`storageKeys`), and anything whose key matches the built-in sensitive-key heuristic (`authorization`, `cookie`, `token`, `secret`, `password`, `api_key`, …).
+Producer-owned files are outside that content-redaction boundary:
 
-The redactor scrubs on the way out — literal secret values are replaced with `[redacted]`, sensitive keys are zeroed, and `Authorization`/`Cookie` header lines and token-bearing query params are stripped via built-in patterns. It applies to every captured field: `network/` bodies, console messages, even `eval`/`script` return values.
+- Screenshots and videos can show secrets or personal data rendered in the UI.
+- Downloads and transform outputs retain whatever data the source file contains.
+- Trace archives can embed page state, DOM content, network resources, and
+  storage captured by the browser backend.
+- After vidtrace extraction, Cairntrace redacts `.json`, `.txt`, `.srt`,
+  `.tsv`, `.vtt`, `.md`, and `.csv` files under `videos/vidtrace/`. Extracted
+  frames and other images remain uninspected binary evidence.
+
+Treat the entire run directory as sensitive even when its text files are
+redacted. Prefer `on-failure`/`never` capture policies for evidence you do not
+need, and review binary files before sharing or stashing the pack.
 
 ## Sharing an artifact pack
 
-A run dir is a directory. Compress it (`tar -czf my-spec-run.tgz run/my-spec-2026-...`) and you can:
+A run dir is a directory. Compress it
+(`tar -czf my-spec-run.tgz 2026-..._my-spec_<6-hex>/`) and you can:
 
 - Email it to a teammate — `report.html` opens in any browser.
-- Host it on the local-first stash (`cairn stash save <run-id> --tag <label>`).
+- Save it in the local file.cheap vault
+  (`cairn stash save <run-id> --tag <label>`). Stashing does not upload or
+  replicate it.
 - Hand it to a repair bot. The repair engine reads the agent context and proposes step rewrites against `spec.yml`.
 
-Anywhere the directory is mounted, the data is self-describing. Nothing required to read it other than a markdown viewer.
+Anywhere the directory is mounted, the data is self-describing. Nothing is
+required to read the text evidence other than a Markdown viewer. Transfer it
+only through a channel appropriate for its potentially sensitive binary
+contents.
 
 ## See also
 

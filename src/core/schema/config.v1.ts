@@ -119,7 +119,7 @@ export type RetentionConfig = z.infer<typeof RetentionConfigSchema>;
 
 export const ReportThemeNameSchema = z.enum([
   "cairn",
-  "graphite",
+  "slate",
   "midnight",
   "contrast",
 ]);
@@ -455,7 +455,7 @@ export const ServicesStashConfigSchema = z
      * run has at least one failed outcome) | never (default).
      */
     autoStash: z.enum(["always", "on-failure", "never"]).default("never"),
-    /** Tags applied to every services stash (e.g. [graphite, services]). */
+    /** Tags applied to every services stash (e.g. [sample-app, services]). */
     tags: z.array(z.string()).optional(),
     /**
      * What to capture: tmux (pane captures for each window), docker (compose
@@ -563,20 +563,16 @@ export const ClipConfigSchema = z
 export type ClipConfig = z.infer<typeof ClipConfigSchema>;
 
 /**
- * Browser-backend tuning knobs (agent-browser adapter). Project-level so a
- * repo whose dev server is slow to go network-quiet (on-demand module
- * compilation, SPA-mode routes) can widen the post-click settle without
- * every spec author knowing about it.
+ * Browser-backend tuning knobs for the agent-browser adapter.
  */
 export const BrowserConfigSchema = z
   .object({
     /**
-     * Fold a networkidle settle into every click and fail the click step
-     * when it times out (wedge protection). Default: true. Prefer raising
-     * `postClickSettleMs` over disabling this.
+     * Confirm same-tab link delivery from URL, document, or DOM evidence.
+     * Default: true.
      */
     verifyAfterClick: z.boolean().optional(),
-    /** Budget in ms for the post-click settle. Default 5000. */
+    /** Opt-in project-level budget in ms for post-click networkidle settling. */
     postClickSettleMs: z.number().int().positive().optional(),
     /**
      * agent-browser provider (`-p`): `ios` (Mobile Safari via Appium), or a
@@ -597,6 +593,8 @@ export const InvestigateConfigSchema = z
     mode: z.enum(["semantic", "keyword", "hybrid"]).optional(),
     /** Max code matches to return from fcheap connect. */
     limit: z.number().int().positive().optional(),
+    /** Build or refresh the vecgrep index before connecting. */
+    index: z.boolean().default(false),
     /** Auto-investigate failed runs after they complete (best-effort). */
     autoInvestigate: z.enum(["on-failure", "never"]).default("never"),
   })

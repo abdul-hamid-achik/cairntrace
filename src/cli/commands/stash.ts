@@ -1,108 +1,50 @@
-import { execa } from "execa";
+import { basename } from "node:path";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { log } from "../logger";
 import type { OutputFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { expandSymbolQuery } from "./codemap.js";
+import {
+  FcheapContractError,
+  parseFcheapInfoOutput,
+  parseFcheapListOutput,
+  parseFcheapRestoreOutput,
+  parseFcheapSaveOutput,
+  parseFcheapSearchOutput,
+  type FcheapInfo,
+  type FcheapListItem,
+  type FcheapRestoreResult,
+  type FcheapSearchResult,
+} from "./fcheapContract.js";
+import { runFcheap } from "./fcheapClient.js";
+import { ArtifactWriter } from "../../core/artifacts/ArtifactWriter.js";
+import { createArtifactRedactor } from "../../core/artifacts/redaction.js";
+import {
+  StashReceiptSchema,
+  type StashReceipt,
+} from "../../core/schema/stash.v1.js";
 
-/* ---------------------------------------------------------------------------
- * fcheap shell-out wrapper
- *
- * All fcheap commands support --json output. We parse stdout and return the
- * structured data. If fcheap isn't installed, we return a clear error.
- * ------------------------------------------------------------------------- */
-
-interface FcheapResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-async function runFcheap(
-  args: string[],
-  opts: { json?: boolean } = {},
-): Promise<FcheapResult> {
-  const fullArgs = opts.json ? [...args, "--json"] : args;
-  try {
-    const r = await execa("fcheap", fullArgs, {
-      reject: false,
-      timeout: 60_000,
-    });
-    return {
-      ok: r.exitCode === 0,
-      stdout: typeof r.stdout === "string" ? r.stdout : "",
-      stderr: typeof r.stderr === "string" ? r.stderr : "",
-      exitCode: r.exitCode ?? -1,
-    };
-  } catch (e) {
-    const err = e as Error & { code?: string };
-    if (err.code === "ENOENT" || err.message?.includes("ENOENT")) {
-      return {
-        ok: false,
-        stdout: "",
-        stderr:
-          "fcheap not found on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
-        exitCode: -1,
-      };
-    }
-    return {
-      ok: false,
-      stdout: "",
-      stderr: err.message,
-      exitCode: -1,
-    };
-  }
-}
-
-function parseJson<T>(stdout: string): T | undefined {
-  try {
-    return JSON.parse(stdout) as T;
-  } catch {
-    return undefined;
-  }
-}
+export { isFcheapAvailable } from "./fcheapClient.js";
 
 /* ---------------------------------------------------------------------------
  * Stash types
  * ------------------------------------------------------------------------- */
 
 export interface StashSaveResult {
+  runId: string;
   stashId: string;
   path: string;
   tags: string[];
   tool: string;
   source?: string;
+  status?: "saved" | "saved_with_failures";
+  failures?: Array<{ id: string; stage: string; error: string }>;
 }
 
-export interface StashListItem {
-  id: string;
-  name?: string;
-  tool?: string;
-  tags?: string[];
-  createdAt?: string;
-  sizeBytes?: number;
-  fileCount?: number;
-}
-
-export interface StashInfo {
-  id: string;
-  name?: string;
-  tool?: string;
-  source?: string;
-  tags?: string[];
-  createdAt?: string;
-  sizeBytes?: number;
-  files?: Array<{ path: string; size?: number }>;
-}
-
-export interface StashSearchResult {
-  stashId: string;
-  snippet: string;
-  score?: number;
-  file?: string;
-}
+export type StashListItem = FcheapListItem;
+export type StashInfo = FcheapInfo;
+export type StashSearchResult = FcheapSearchResult;
 
 /* ---------------------------------------------------------------------------
  * Stash commands
@@ -137,42 +79,39 @@ export async function stashSaveCommand(
   });
 
   const runDir = await resolveRunRef(runRef, root);
-  const runId =
-    runRef === "latest" || runRef === "previous"
-      ? (runDir.split("/").pop() ?? runRef)
-      : runRef;
+  const runId = basename(runDir);
 
   // Derive spec name from run.json if available for a default tag.
   const tags = opts.tag ?? [];
   const tool = opts.tool ?? "cairntrace";
 
-  const args = [
-    "save",
-    runDir,
-    "--tool",
+  const saved = await stashDirectory(runDir, {
     tool,
-    ...tags.flatMap((t) => ["--tag", t]),
-  ];
-  if (opts.source) {
-    args.push("--source", opts.source);
+    tags,
+    ...(opts.source ? { source: opts.source } : {}),
+  });
+  if (!saved.ok || !saved.stashId) {
+    process.stderr.write(
+      `cairn stash save: ${saved.error ?? "fcheap failed without a stash receipt"}\n`,
+    );
+    process.exitCode = 2;
+    return;
   }
-
-  const r = await runFcheap(args, { json: true });
-
-  if (!r.ok) {
-    process.stderr.write(`cairn stash save: ${r.stderr || "fcheap failed"}\n`);
-    process.exit(2);
-  }
-
-  const data = parseJson<StashSaveResult>(r.stdout);
   const result: StashSaveResult = {
-    stashId: data?.stashId ?? data?.path ?? "(unknown)",
+    runId,
+    stashId: saved.stashId,
     path: runDir,
     tags,
     tool,
     ...(opts.source ? { source: opts.source } : {}),
+    ...(saved.status ? { status: saved.status } : {}),
+    ...(saved.failures?.length ? { failures: saved.failures } : {}),
   };
 
+  if (saved.warning) {
+    process.stderr.write(`cairn stash save: warning: ${saved.warning}\n`);
+    process.exitCode = 2;
+  }
   process.stdout.write(
     emit(format, result, () => stashSaveMarkdown(result, runId)),
   );
@@ -188,6 +127,10 @@ function stashSaveMarkdown(r: StashSaveResult, runId: string): string {
     `- tool: ${r.tool}`,
     ...(r.tags.length > 0 ? [`- tags: ${r.tags.join(", ")}`] : []),
     ...(r.source ? [`- source: ${r.source}`] : []),
+    ...(r.status ? [`- status: ${r.status}`] : []),
+    ...(r.failures ?? []).map(
+      (failure) => `- ${failure.stage} failed: ${failure.error}`,
+    ),
   ].join("\n");
 }
 
@@ -218,7 +161,13 @@ export async function stashListCommand(opts: StashListOptions): Promise<void> {
     process.exit(2);
   }
 
-  const items = parseJson<StashListItem[]>(r.stdout) ?? [];
+  let items: StashListItem[];
+  try {
+    items = parseFcheapListOutput(r.stdout);
+  } catch (error) {
+    process.stderr.write(`cairn stash list: ${(error as Error).message}\n`);
+    process.exit(2);
+  }
   const result = { stashes: items };
 
   process.stdout.write(emit(format, result, () => stashListMarkdown(items)));
@@ -233,9 +182,7 @@ function stashListMarkdown(items: StashListItem[]): string {
     ...items.map((s) => {
       const tags = s.tags?.length ? ` [${s.tags.join(", ")}]` : "";
       const tool = s.tool ? ` (${s.tool})` : "";
-      const size = s.sizeBytes
-        ? ` — ${(s.sizeBytes / 1024).toFixed(1)} KB`
-        : "";
+      const size = ` — ${(s.sizeBytes / 1024).toFixed(1)} KB`;
       return `- ${s.id}${tool}${tags}${size}`;
     }),
   ];
@@ -266,9 +213,13 @@ export async function stashInfoCommand(
     process.exit(2);
   }
 
-  const info = parseJson<StashInfo>(r.stdout) ?? {
-    id: stashId,
-  };
+  let info: StashInfo;
+  try {
+    info = parseFcheapInfoOutput(r.stdout);
+  } catch (error) {
+    process.stderr.write(`cairn stash info: ${(error as Error).message}\n`);
+    process.exit(2);
+  }
 
   process.stdout.write(emit(format, info, () => stashInfoMarkdown(info)));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
@@ -280,17 +231,17 @@ function stashInfoMarkdown(info: StashInfo): string {
     "",
     ...(info.name ? [`- name: ${info.name}`] : []),
     ...(info.tool ? [`- tool: ${info.tool}`] : []),
-    ...(info.source ? [`- source: ${info.source}`] : []),
-    ...(info.tags?.length ? [`- tags: ${info.tags.join(", ")}`] : []),
-    ...(info.createdAt ? [`- created: ${info.createdAt}`] : []),
-    ...(info.sizeBytes
-      ? [`- size: ${(info.sizeBytes / 1024).toFixed(1)} KB`]
-      : []),
+    ...(info.sourcePath ? [`- source path: ${info.sourcePath}`] : []),
+    ...(info.source ? [`- provenance source: ${info.source}`] : []),
+    ...(info.tags.length ? [`- tags: ${info.tags.join(", ")}`] : []),
+    `- created: ${info.createdAt}`,
+    `- files: ${info.fileCount}`,
+    `- size: ${(info.sizeBytes / 1024).toFixed(1)} KB`,
   ];
   if (info.files?.length) {
     lines.push("", "## Files", "");
     for (const f of info.files) {
-      lines.push(`- ${f.path}${f.size ? ` (${f.size} bytes)` : ""}`);
+      lines.push(`- ${f.path} (${f.size} bytes)`);
     }
   }
   return lines.join("\n");
@@ -319,33 +270,43 @@ export async function stashRestoreCommand(
 
   const r = await runFcheap(args, { json: true });
 
-  if (!r.ok) {
+  let result: FcheapRestoreResult;
+  try {
+    result = parseFcheapRestoreOutput(r.stdout);
+  } catch (error) {
     process.stderr.write(
-      `cairn stash restore: ${r.stderr || "fcheap failed"}\n`,
+      `cairn stash restore: ${
+        !r.ok && r.stderr ? r.stderr : (error as Error).message
+      }\n`,
     );
     process.exit(2);
   }
-
-  const data = parseJson<{ path?: string; stashId?: string }>(r.stdout);
-  const result = {
-    stashId,
-    restoredTo: data?.path ?? opts.to ?? "(unknown)",
-  };
 
   process.stdout.write(
     emit(format, result, () => stashRestoreMarkdown(result)),
   );
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+  if (!r.ok) {
+    process.stderr.write(
+      `cairn stash restore: ${
+        r.stderr || `verification failed with status ${result.status}`
+      }\n`,
+    );
+    process.exitCode = 2;
+  }
 }
 
-function stashRestoreMarkdown(r: {
-  stashId: string;
-  restoredTo: string;
-}): string {
+function stashRestoreMarkdown(r: FcheapRestoreResult): string {
   return [
     `# Restored stash ${r.stashId}`,
     "",
     `- restoredTo: ${r.restoredTo}`,
+    `- files: ${r.fileCount}`,
+    `- verified: ${r.verified}`,
+    `- status: ${r.status}`,
+    ...(r.mismatches.length > 0
+      ? [`- mismatches: ${r.mismatches.join(", ")}`]
+      : []),
   ].join("\n");
 }
 /* ----- search (FEATURES item 5: codemap-seeded symbol search) ----- */
@@ -379,28 +340,12 @@ export interface StashSearchDeps {
 const defaultFcheapExec: NonNullable<StashSearchDeps["fcheapExec"]> = async (
   args,
 ) => {
-  try {
-    const r = await execa("fcheap", [...args, "--json"], {
-      reject: false,
-      timeout: 60_000,
-    });
-    return {
-      exitCode: r.exitCode ?? -1,
-      stdout: typeof r.stdout === "string" ? r.stdout : "",
-      stderr: typeof r.stderr === "string" ? r.stderr : "",
-    };
-  } catch (e) {
-    const err = e as Error & { code?: string };
-    if (err.code === "ENOENT" || err.message?.includes("ENOENT")) {
-      return {
-        exitCode: -1,
-        stdout: "",
-        stderr:
-          "fcheap not found on $PATH. Install: brew install --no-quarantine abdul-hamid-achik/tap/fcheap",
-      };
-    }
-    return { exitCode: -1, stdout: "", stderr: err.message };
-  }
+  const result = await runFcheap(args, { json: true });
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
 };
 
 export interface StashSearchOutcome {
@@ -442,8 +387,17 @@ export async function searchStashesForSymbol(
       error: r.stderr || "fcheap failed",
     };
   }
-  const results = parseJson<StashSearchResult[]>(r.stdout) ?? [];
-  return { query: symbol, expandedTerms, results };
+  try {
+    const results = parseFcheapSearchOutput(r.stdout);
+    return { query: symbol, expandedTerms, results };
+  } catch (error) {
+    return {
+      query: symbol,
+      expandedTerms,
+      results: [],
+      error: (error as Error).message,
+    };
+  }
 }
 
 /**
@@ -492,7 +446,7 @@ function stashSearchMarkdown(r: {
     `# Stash search: "${r.query}"`,
     "",
     ...r.results.map((s) => {
-      const score = s.score ? ` (score: ${s.score.toFixed(2)})` : "";
+      const score = ` (score: ${s.score.toFixed(2)})`;
       const file = s.file ? ` in ${s.file}` : "";
       return `- ${s.stashId}${file}${score}: ${s.snippet}`;
     }),
@@ -507,6 +461,15 @@ function stashSearchMarkdown(r: {
  * object instead of throwing. Used by the services lifecycle to persist
  * session artifacts (tmux captures, docker logs, seed output) after a run.
  */
+export interface StashDirectoryResult {
+  ok: boolean;
+  stashId?: string;
+  status?: "saved" | "saved_with_failures";
+  failures?: Array<{ id: string; stage: string; error: string }>;
+  warning?: string;
+  error?: string;
+}
+
 export async function stashDirectory(
   dir: string,
   opts: {
@@ -515,7 +478,7 @@ export async function stashDirectory(
     tags?: string[];
     source?: string;
   } = {},
-): Promise<{ ok: boolean; stashId?: string; error?: string }> {
+): Promise<StashDirectoryResult> {
   const tool = opts.tool ?? "cairntrace";
   const args = [
     "save",
@@ -527,11 +490,40 @@ export async function stashDirectory(
     ...(opts.source ? ["--source", opts.source] : []),
   ];
   const r = await runFcheap(args, { json: true });
-  if (!r.ok) {
-    return { ok: false, error: r.stderr || "fcheap failed" };
+  try {
+    const receipt = parseFcheapSaveOutput(r.stdout);
+    const receiptFields = {
+      stashId: receipt.stashId,
+      ...(receipt.status ? { status: receipt.status } : {}),
+      ...(receipt.failed?.length ? { failures: receipt.failed } : {}),
+    };
+    if (!r.ok && receipt.status !== "saved_with_failures") {
+      return {
+        ok: false,
+        ...receiptFields,
+        error: r.stderr || "fcheap failed after emitting a save receipt",
+      };
+    }
+    const warning =
+      receipt.status === "saved_with_failures"
+        ? r.stderr ||
+          `stash saved with ${receipt.failed?.length ?? 0} failed post-save operation(s)`
+        : undefined;
+    return {
+      ok: true,
+      ...receiptFields,
+      ...(warning ? { warning } : {}),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: !r.ok
+        ? r.stderr || (error as Error).message
+        : error instanceof FcheapContractError
+          ? error.message
+          : `Invalid fcheap save response: ${(error as Error).message}`,
+    };
   }
-  const data = parseJson<StashSaveResult>(r.stdout);
-  return { ok: true, stashId: data?.stashId ?? data?.path };
 }
 
 /* ----- auto-stash (called from Runner/run.ts) ----- */
@@ -549,42 +541,91 @@ export async function maybeAutoStash(
     stashOnFailure?: boolean;
     configStash?: { enabled?: boolean; autoStash?: string; tags?: string[] };
   },
-): Promise<void> {
+): Promise<StashDirectoryResult | undefined> {
   const shouldStash =
     opts.stashOnFailure ||
     (opts.configStash?.enabled && opts.configStash.autoStash === "on-failure");
 
-  if (!shouldStash) return;
+  if (!shouldStash) return undefined;
 
   const tags = [specName, ...(opts.configStash?.tags ?? [])];
-
-  const r = await runFcheap(
-    [
-      "save",
-      runDir,
-      "--tool",
-      "cairntrace",
-      ...tags.flatMap((t) => ["--tag", t]),
-    ],
-    { json: true },
-  );
-
-  if (r.ok) {
-    const data = parseJson<StashSaveResult>(r.stdout);
-    log.scope("stash").info(`auto-stashed run ${runId}`, {
-      stashId: data?.stashId ?? "(unknown)",
-    });
-  } else {
-    log.scope("stash").warn(`auto-stash failed (non-fatal): ${r.stderr}`);
+  const result = await stashDirectory(runDir, {
+    tool: "cairntrace",
+    tags,
+  });
+  if (!result.ok) {
+    log
+      .scope("stash")
+      .warn(`auto-stash failed (non-fatal): ${result.error ?? "unknown"}`);
+    return result;
   }
+  if (result.warning) {
+    log.scope("stash").warn(`auto-stash warning: ${result.warning}`);
+  }
+  try {
+    await writeAutoStashReceipt(runDir, result);
+  } catch (error) {
+    log
+      .scope("stash")
+      .warn(
+        `auto-stash receipt was not written (non-fatal): ${(error as Error).message}`,
+      );
+  }
+  const logSafeStashId = result.stashId
+    ? createArtifactRedactor(undefined).text(result.stashId)
+    : undefined;
+  log
+    .scope("stash")
+    .info(`auto-stashed run ${runId}`, { stashId: logSafeStashId });
+  return result;
+}
+
+/**
+ * Add the local post-save receipt without reopening or changing run.json,
+ * reports, or any semantic result field. The file and event contain only the
+ * safe stash identifier plus bounded status metadata. The manifest is rebuilt
+ * so its checksummed inventory remains truthful after this append-only
+ * enrichment.
+ */
+export async function writeAutoStashReceipt(
+  runDir: string,
+  result: StashDirectoryResult,
+  now: () => Date = () => new Date(),
+): Promise<StashReceipt> {
+  if (!result.ok || !result.stashId) {
+    throw new Error("a successful stash id is required");
+  }
+
+  const receipt = StashReceiptSchema.parse({
+    $schema: "urn:cairntrace.dev:stash-receipt:v1",
+    version: "1",
+    stashId: result.stashId,
+    status: result.status ?? "saved",
+    postSaveFailureCount: result.failures?.length ?? 0,
+    recordedAt: now().toISOString(),
+  });
+  const redactor = createArtifactRedactor(undefined);
+  if (redactor.text(receipt.stashId) !== receipt.stashId) {
+    throw new Error(
+      "stash id intersects active secret redaction; recovery receipt was not written",
+    );
+  }
+  const writer = new ArtifactWriter(runDir, redactor);
+  await writer.writeJson("stash-receipt.json", receipt, "stash-receipt");
+  await writer.appendEvent({
+    ts: receipt.recordedAt,
+    type: "artifact.stash",
+    action: "auto-stash",
+    receipt: "stash-receipt.json",
+    stashId: receipt.stashId,
+    status: receipt.status,
+    postSaveFailureCount: receipt.postSaveFailureCount,
+  });
+  await writer.writeManifest();
+  return receipt;
 }
 
 /* ----- fcheap availability check ----- */
-
-export async function isFcheapAvailable(): Promise<boolean> {
-  const r = await runFcheap(["--version"]);
-  return r.ok;
-}
 
 /* ----- format helper (unused but keeps the import for type-safety) ----- */
 

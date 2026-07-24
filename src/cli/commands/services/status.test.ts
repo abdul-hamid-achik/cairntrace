@@ -46,19 +46,19 @@ describe("cairn services status — getServicesStatus", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n  seed:\n    command: yarn demo-import\n    ttlSeconds: 3600\n  tmux:\n    session: graphite\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n        readyOn:\n          url: http://localhost:8080\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n  seed:\n    command: yarn demo-import\n    ttlSeconds: 3600\n  tmux:\n    session: sample-app\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n        readyOn:\n          url: http://localhost:8080\n",
     );
     const result = await getServicesStatus({ config: configPath });
     expect(result.hasServices).toBe(true);
-    expect(result.project).toBe("graphite");
+    expect(result.project).toBe("sample-app");
     expect(result.docker.configured).toBe(true);
     expect(result.docker.running).toBe(false); // docker isn't actually running
     expect(result.seed.configured).toBe(true);
     expect(result.seed.ttlSeconds).toBe(3600);
     expect(result.seed.expired).toBe(true); // no seed state file
     expect(result.tmux.configured).toBe(true);
-    expect(result.tmux.session).toBe("graphite");
-    // sessionExists depends on whether a real tmux session named "graphite" exists,
+    expect(result.tmux.session).toBe("sample-app");
+    // sessionExists depends on whether a real tmux session named "sample-app" exists,
     // so we just check the field is a boolean — don't assert false
     expect(typeof result.tmux.sessionExists).toBe("boolean");
   });
@@ -117,7 +117,7 @@ describe("cairn services status — servicesStatusCommand", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n    cwd: /tmp\n    reuseExisting: true\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n    freshnessCheck: mongosh --eval 'db.count()'\n  tmux:\n    session: graphite\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n    cwd: /tmp\n    reuseExisting: true\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n    freshnessCheck: mongosh --eval 'db.count()'\n  tmux:\n    session: sample-app\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
     );
     await servicesStatusCommand({ config: configPath });
     const output = stdoutSpy.mock.calls.map((c) => c[0]).join("");
@@ -128,7 +128,7 @@ describe("cairn services status — servicesStatusCommand", () => {
     expect(output).toContain("expired:");
     expect(output).toContain("freshnessCheck:");
     expect(output).toContain("## tmux");
-    expect(output).toContain("session: graphite");
+    expect(output).toContain("session: sample-app");
   });
 
   it("renders not-configured sections when services block exists but individual phases are absent", async () => {
@@ -169,19 +169,19 @@ describe("cairn services status — renderMarkdown coverage", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: graphite\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: sample-app\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
     );
     await servicesStatusCommand({ config: configPath });
     const output = stdoutSpy.mock.calls.map((c) => c[0]).join("");
     expect(output).toContain("## tmux");
-    expect(output).toContain("session: graphite");
+    expect(output).toContain("session: sample-app");
   });
 
   it("renders markdown with warnings section when errors exist", async () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: nonexistent-session-test\n    windows:\n      - name: web\n        cwd: .\n        command: yarn start\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: nonexistent-session-test\n    windows:\n      - name: web\n        cwd: .\n        command: yarn start\n",
     );
     await servicesStatusCommand({ config: configPath });
     const output = stdoutSpy.mock.calls.map((c) => c[0]).join("");
@@ -197,7 +197,7 @@ describe("cairn services status — error handling branches", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n    cwd: /nonexistent-docker-path\n  tmux:\n    session: graphite\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  docker:\n    command: docker compose up -d\n    cwd: /nonexistent-docker-path\n  tmux:\n    session: sample-app\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
     );
     const result = await getServicesStatus({ config: configPath });
     expect(result.docker.configured).toBe(true);
@@ -210,7 +210,7 @@ describe("cairn services status — error handling branches", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n",
     );
     const result = await getServicesStatus({ config: configPath });
     expect(result.seed.configured).toBe(true);
@@ -221,7 +221,7 @@ describe("cairn services status — error handling branches", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: nonexistent-session-test\n    windows:\n      - name: web\n        cwd: .\n        command: yarn start\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  tmux:\n    session: nonexistent-session-test\n    windows:\n      - name: web\n        cwd: .\n        command: yarn start\n",
     );
     const result = await getServicesStatus({ config: configPath });
     expect(result.tmux.configured).toBe(true);
@@ -240,7 +240,7 @@ describe("cairn services status — error handling branches", () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
       configPath,
-      "version: 1\nproject: graphite\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n  tmux:\n    session: graphite\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
+      "version: 1\nproject: sample-app\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  seed:\n    command: yarn seed\n    ttlSeconds: 3600\n  tmux:\n    session: sample-app\n    windows:\n      - name: web-app\n        cwd: web-app\n        command: yarn serve\n",
     );
     await servicesStatusCommand({ config: configPath });
     const output = stdoutSpy.mock.calls.map((c) => c[0]).join("");

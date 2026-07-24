@@ -43,6 +43,7 @@ import { isInteractive, makeInteractiveListener } from "../progress";
 import { log, reconfigureWithConfig } from "../logger";
 import { getTvaultEnv, tvaultArgs } from "./secrets";
 import { maybeAutoStash, stashDirectory } from "./stash";
+import { investigateRunDirectory } from "./investigate";
 import { defaultCodemapDeps, maybeAutoAnnotateRun } from "./annotate";
 import type { CodemapDeps } from "./annotate";
 import { codemapReview, codemapSemantic } from "./codemap";
@@ -110,7 +111,7 @@ export interface RunCommandOptions {
   tag?: string[];
   /**
    * Repeatable `--label key=value`: free-form cohort labels stamped into each
-   * run.json (e.g. path=rabbit, suite=opg-14827-ab). Consumed by `cairn stats`.
+   * run.json (e.g. path=rabbit, suite=answer-change-ab). Consumed by `cairn stats`.
    */
   label?: string[];
   /**
@@ -138,8 +139,13 @@ async function archiveRun(
 ): Promise<void> {
   const r = await stashDirectory(runDir, { tool: "cairntrace", tags });
   // Throw on archive failure so pruneRuns retains the run on disk (move,
-  // not copy-and-lose). The caller never sees this — pruneRuns catches it.
-  if (!r.ok) throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
+  // not copy-and-lose). Log before throwing because pruneRuns catches the
+  // exception by design to keep the active run from failing.
+  if (!r.ok) {
+    const message = `fcheap archive failed: ${r.error ?? "unknown"}`;
+    runLog.warn(`${message}; retained ${runDir}`);
+    throw new Error(message);
+  }
 }
 
 /** Scoped logger for the run command's lifecycle/errors. */
@@ -440,7 +446,7 @@ export async function runCommand(
  * once. Returns undefined when there is no config, no `webServer`, or
  * `--no-web-server` was passed. Throws (fatal) on a boot/setup failure.
  */
-async function maybeStartWebServer(
+export async function maybeStartWebServer(
   firstSpec: string,
   opts: RunCommandOptions,
   onSpawn: (terminateSync: () => void) => void,
@@ -502,7 +508,7 @@ function isTruthyEnv(value: string | undefined): boolean {
  * discovery as webServer/services). Returns undefined when there is no
  * config or no `browser` block — backends then use their built-in defaults.
  */
-async function resolveBrowserConfig(
+export async function resolveBrowserConfig(
   firstSpec: string,
   opts: RunCommandOptions,
 ): Promise<BrowserConfig | undefined> {
@@ -526,7 +532,7 @@ async function resolveBrowserConfig(
  * is no config, no `services`, or `--no-services` was passed. Throws (fatal)
  * on a boot failure.
  */
-async function maybeStartServices(
+export async function maybeStartServices(
   firstSpec: string,
   opts: RunCommandOptions,
   onSpawn: (terminateSync: () => void) => void,
@@ -644,19 +650,7 @@ async function runSingle(
       return 2;
     }
 
-    // Auto-stash failed runs to fcheap (best-effort, never fatal).
-    if (result.status !== "passed") {
-      await maybeAutoStash(result.runDir, result.runId, result.spec.name, {
-        stashOnFailure: opts.stashOnFailure ?? false,
-      });
-    }
-
-    // Auto-annotate runs into codemap (best-effort, never fatal).
-    // Pass + fail: emits one annotation per run with run context.
-    await maybeAutoAnnotateRun(
-      result,
-      await resolveAnnotateOpts(specPath, opts),
-    );
+    await runPostRunIntegrations(result, specPath, opts);
 
     if (!interactive) {
       process.stdout.write(emit(format, result, renderRunMarkdown));
@@ -788,18 +782,7 @@ async function runBatch(
               }/${r.outcomes.length} outcomes)\n`,
             );
           }
-          // Auto-stash failed runs to fcheap (best-effort, never fatal).
-          if (r.status !== "passed") {
-            await maybeAutoStash(r.runDir, r.runId, r.spec.name, {
-              stashOnFailure: opts.stashOnFailure ?? false,
-            });
-          }
-          // Auto-annotate runs into codemap (best-effort, never fatal).
-          // Pass + fail: emits one annotation per run with run context.
-          await maybeAutoAnnotateRun(
-            r,
-            await resolveAnnotateOpts(specPath, opts),
-          );
+          await runPostRunIntegrations(r, specPath, opts);
           return r;
         } catch (e) {
           // Synthesize an errored RunResult so the batch survives.
@@ -1000,7 +983,7 @@ export async function maybeInjectTvaultSecrets(
   }
 }
 
-function backendOpts(
+export function backendOpts(
   opts: RunCommandOptions,
   browser?: BrowserConfig,
 ): Parameters<typeof createBackend>[0] {
@@ -1023,6 +1006,115 @@ function backendOpts(
 }
 function colorEnabled(): boolean {
   return log.color && process.env.TERM !== "dumb";
+}
+
+interface FailureAutomationConfig {
+  stash?: {
+    enabled?: boolean;
+    autoStash?: string;
+    tags?: string[];
+  };
+  investigate?: {
+    autoInvestigate?: "on-failure" | "never";
+    codebase?: string;
+    mode?: "semantic" | "keyword" | "hybrid";
+    limit?: number;
+    index?: boolean;
+  };
+}
+
+async function resolveFailureAutomation(
+  specPath: string,
+  opts: RunCommandOptions,
+): Promise<FailureAutomationConfig> {
+  try {
+    const specAbs = isAbsolutePath(specPath)
+      ? specPath
+      : resolve(process.cwd(), specPath);
+    const ctx = await resolveSpecRuntimeContext(specAbs, {
+      ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+      ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      ...(opts.var ? { vars: parseVarFlags(opts.var) } : {}),
+    });
+    const investigate = ctx.config?.investigate;
+    const configuredCodebase = investigate?.codebaseDir;
+    const codebase = configuredCodebase
+      ? isAbsolutePath(configuredCodebase)
+        ? configuredCodebase
+        : resolve(
+            ctx.configPath ? dirname(ctx.configPath) : dirname(specAbs),
+            configuredCodebase,
+          )
+      : undefined;
+    return {
+      ...(ctx.config?.stash ? { stash: ctx.config.stash } : {}),
+      ...(investigate
+        ? {
+            investigate: {
+              autoInvestigate: investigate.autoInvestigate,
+              ...(codebase ? { codebase } : {}),
+              ...(investigate.mode ? { mode: investigate.mode } : {}),
+              ...(investigate.limit ? { limit: investigate.limit } : {}),
+              ...(investigate.index ? { index: true } : {}),
+            },
+          }
+        : {}),
+    };
+  } catch {
+    // The normal run path owns config errors. Post-run integrations remain
+    // best-effort and must not change a completed run's verdict.
+    return {};
+  }
+}
+
+async function runPostRunIntegrations(
+  result: RunResult,
+  specPath: string,
+  opts: RunCommandOptions,
+): Promise<void> {
+  if (result.status !== "passed") {
+    const automation = await resolveFailureAutomation(specPath, opts);
+    const stashReceipt = await maybeAutoStash(
+      result.runDir,
+      result.runId,
+      result.spec.name,
+      {
+        stashOnFailure: opts.stashOnFailure ?? false,
+        ...(automation.stash ? { configStash: automation.stash } : {}),
+      },
+    );
+
+    if (automation.investigate?.autoInvestigate === "on-failure") {
+      if (!automation.investigate.codebase) {
+        runLog.warn(
+          "auto-investigate skipped: investigate.codebaseDir is required",
+        );
+      } else {
+        const investigation = await investigateRunDirectory(
+          result.runDir,
+          result.runId,
+          {
+            connect: true,
+            codebase: automation.investigate.codebase,
+            mode: automation.investigate.mode ?? "hybrid",
+            limit: automation.investigate.limit ?? 10,
+            index: automation.investigate.index ?? false,
+            ...(stashReceipt?.ok && stashReceipt.stashId
+              ? { stashId: stashReceipt.stashId }
+              : {}),
+          },
+        );
+        if (investigation.error) {
+          runLog.warn(
+            `auto-investigate failed (non-fatal): ${investigation.error}`,
+          );
+        }
+      }
+    }
+  }
+
+  // Pass + fail: emits one annotation per run with run context.
+  await maybeAutoAnnotateRun(result, await resolveAnnotateOpts(specPath, opts));
 }
 
 /**

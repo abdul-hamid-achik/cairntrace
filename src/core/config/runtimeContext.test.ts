@@ -297,7 +297,7 @@ services:
     command: yarn seed
     ttlSeconds: 3600
   tmux:
-    session: graphite
+    session: sample-app
     windows:
       - name: web
         cwd: web-app
@@ -332,7 +332,7 @@ steps: []
     expect(ctx.services?.docker?.command).toBe("docker compose up -d");
     expect(ctx.services?.seed?.command).toBe("echo skip-seed");
     expect(ctx.services?.seed?.ttlSeconds).toBe(0);
-    expect(ctx.services?.tmux?.session).toBe("graphite");
+    expect(ctx.services?.tmux?.session).toBe("sample-app");
   });
 
   it("applies env secrets override over top-level", async () => {

@@ -1,6 +1,6 @@
 # Secrets
 
-`cairn secrets` checks the [TinyVault](https://github.com/abdul-hamid-achik/tinyvault) secrets provider and lists the secret keys a project exposes. It is the diagnostic for the `secrets.provider: tvault` config block — it never prints secret *values*, only metadata, so it is safe in CI logs.
+`cairn secrets` checks the [TinyVault](https://github.com/abdul-hamid-achik/tinyvault) secrets provider and lists the secret keys a project exposes. It is the diagnostic for the `secrets.provider: tvault` config block — the command never prints secret *values*, only metadata.
 
 ## `cairn secrets`
 
@@ -21,25 +21,44 @@ TinyVault supports two modes, mirrored from the config `tvault:` block:
 
 ```yaml
 # cairntrace.config.yml
+version: 1
+environments:
+  local: {}
 secrets:
   provider: tvault
-tvault:
-  project: my-app            # direct mode
-  # OR inheritance mode:
-  # group: payments
-  # env: prod
+  required: [API_KEY]
+  tvault:
+    project: my-app          # direct mode
+    # OR use inheritance mode instead:
+    # group: payments
+    # env: prod
 ```
 
-When `secrets.provider: tvault` is set, the run path injects vault secrets into the seed command's env the first time it needs them. `cairn secrets` lets you verify the wiring and see *which* keys are available before a run depends on them.
+When `secrets.provider: tvault` is set, `cairn run` resolves the selected vault
+before parsing the spec, registers every returned value with the artifact
+redactor, and injects missing keys into the run environment. The services
+lifecycle also makes those values available to seed commands. Existing shell
+environment variables take precedence. `cairn secrets` lets you verify the
+wiring and see *which* keys are available before a run depends on them.
 
 ## What it does not do
 
-- It never prints secret values — only key names and counts. Values flow directly into the seed/run environment via `tvault run`, never through cairntrace's stdout or artifacts.
-- It is not the path that injects secrets at run time; that is `runWithTvault` (`tvault run --project <name> -- <command>`), called by the services lifecycle when seeding. `cairn secrets` is the read-only status check.
+- The status command never prints secret values — only key names and counts.
+  Runtime resolution injects values into the seed/run environment and
+  registers them with Cairntrace's text/JSON redactor.
+- `cairn secrets` is only the read-only status check; secret injection happens
+  inside `cairn run` and the services lifecycle.
+
+The text/JSON redactor does not inspect producer-owned binary files. A
+screenshot or video can show a secret rendered by the app; a download,
+transform, or trace can retain sensitive bytes. Keep run directories private
+and review binary captures before sharing or stashing them.
 
 ## Availability
 
-`tvault` must be on `$PATH`. `cairn doctor` flags it — a missing `tvault` means `secrets.provider: tvault` will be unavailable and the seed command runs without vault secrets (or fails, depending on whether the seed needs them).
+`tvault` must be on `$PATH`. `cairn doctor` flags it. If a run selects
+`secrets.provider: tvault` and the vault cannot be resolved, the run fails
+before browser execution instead of continuing with missing secrets.
 
 ## See also
 

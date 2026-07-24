@@ -42,6 +42,9 @@ Reads `investigate.json` from a run directory and annotates each code match into
 
 ```yaml
 # cairntrace.config.yml
+version: 1
+environments:
+  local: {}
 annotate:
   enabled: true
   autoAnnotate: on-run    # on-run (pass+fail) | on-investigate | never

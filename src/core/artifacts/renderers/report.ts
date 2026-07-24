@@ -110,9 +110,9 @@ export const REPORT_THEMES: Record<ReportThemeName, ReportThemeDefinition> = {
       codeBg: "#dfeae6",
     },
   },
-  graphite: {
-    name: "graphite",
-    label: "Graphite",
+  slate: {
+    name: "slate",
+    label: "Slate",
     colors: {
       background: "#1d2224",
       surface: "#f3f5f2",

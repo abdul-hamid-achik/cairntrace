@@ -182,17 +182,30 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         ].join("\n"),
       },
       {
-        title: "config-backed open path",
+        title: "config-backed spec",
         language: "yaml",
         code: [
           "# flows/table-import.yml",
+          "version: 1",
+          "name: table_import",
+          "intent: Admin can open a configured connection.",
           "vars:",
           "  connectionPath: /connection/from-spec",
           "  testUser: player-${worker.index}-${run.token}",
+          "outcomes:",
+          "  - id: connection_opened",
+          "    description: the configured connection is visible",
+          '    verify: { url: { matches: "/connection/" } }',
           "steps:",
           '  - open: "${vars.connectionPath}"',
-          "",
+        ].join("\n"),
+      },
+      {
+        title: "config variables for the spec",
+        language: "yaml",
+        code: [
           "# cairntrace.config.yml",
+          "version: 1",
           "environments:",
           "  local:",
           "    baseUrl: http://localhost:8080",
@@ -230,7 +243,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Click Settling",
-        body: "Agent-browser clicks fold in a network-idle settle by default, with click-step `settleMs` → top-level spec `settleMs` → config `browser.postClickSettleMs` → 5000ms precedence. Playwright honors explicit click/spec values and otherwise keeps its native action/navigation waits. Set `settleMs: 0` to skip the extra settle; `browser.verifyAfterClick: false` disables the agent-browser guard globally. `click.until` is for delivery confirmation: `{ until: { selectorGone: '#editor', timeoutMs: 12000 } }` retries the click with backoff, at most four total clicks. `environments.<env>.waitScale`/`CAIRN_WAIT_SCALE` multiplies waits, settles, and the network-idle quiet window.",
+        body: "Agent-browser confirms same-tab link delivery from URL, document, or DOM evidence by default without an implicit network-idle wait. A positive click-step or top-level spec `settleMs`, or config `browser.postClickSettleMs`, explicitly adds network-idle settling; click/spec values take precedence over config. Playwright honors explicit click/spec values and otherwise keeps its native action/navigation waits. Set `settleMs: 0` to skip both the extra settle and the link-delivery probe at that scope; `browser.verifyAfterClick: false` disables the agent-browser guard globally. `click.until` is for authored effect confirmation: `{ until: { selectorGone: '#editor', timeoutMs: 12000 } }` retries the click with backoff, at most four total clicks. `environments.<env>.waitScale`/`CAIRN_WAIT_SCALE` multiplies authored waits, settles, and the network-idle quiet window.",
       },
       {
         title: "Request Steps",
@@ -450,15 +463,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Core Files",
-        body: "Run directories include `run.{json,yaml,md}`, `report.html`, `report.json`, `agent_context.md`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, network logs, traces, and videos. If a multi-spec run receives SIGINT/SIGTERM, completed run directories are retained and a strict `aborted-<timestamp>-<pid>.json` partial batch summary is written at the artifact root before teardown.",
+        body: "Run directories include `run.{json,yaml,md}`, `report.html`, `report.json`, `agent_context.md`, `artifact-manifest.json`, `replay.json`, `events.ndjson`, `spec.resolved.yml`, per-outcome evidence, snapshots, screenshots, console logs, network logs, traces, and videos. A successful automatic stash also adds `stash-receipt.json`. If a multi-spec run receives SIGINT/SIGTERM, completed run directories are retained and a strict `aborted-<timestamp>-<pid>.json` partial batch summary is written at the artifact root before teardown.",
       },
       {
         title: "Traces And Videos",
-        body: "Traces follow `artifacts.capture.trace` (default `on-failure` — the trace zip is deleted on passing runs). Videos follow `artifacts.capture.video` (default `never` — opt in with `always` or `on-failure`). Videos are saved as `videos/<backend>-video.webm`; the Playwright backend supports video natively via context-level `recordVideo`. When steps execute too quickly to audit, configure `artifacts.video.slowMo` (delay in ms between actions) and `artifacts.video.speed` (playback speed multiplier, 0.25–4; values < 1 slow down via ffmpeg post-processing). Videos are ideal for audit: feed them to vidtrace for timestamped evidence extraction.",
+        body: "Traces follow `artifacts.capture.trace` (default `on-failure` — the trace zip is deleted on passing runs). Videos follow `artifacts.capture.video` (default `never` — opt in with `always` or `on-failure`). Videos are saved as `videos/<backend>-video.webm`; the Playwright backend supports video natively via context-level `recordVideo`. `cairn audit` writes optional vidtrace output under the same run's `videos/vidtrace/`. Playwright WebM is video-only, so audit creates a disposable silent-audio copy only when Whisper extraction needs one, then removes it. Extracted text formats are redacted after extraction; frames/images are not. When steps execute too quickly to audit, configure `artifacts.video.slowMo` and `artifacts.video.speed`.",
       },
       {
         title: "Reports",
-        body: "`report.html` is self-contained and print-friendly for sharing or saving as PDF. It summarizes status, timing, outcomes, steps, and artifact links. `report.json` exposes the same redacted report model for custom renderers, including selected theme tokens and built-in theme definitions. Configure styling with `report.theme: cairn|graphite|midnight|contrast` and `report.colors` in `cairntrace.config.yml`; there is no separate report theme config file.",
+        body: "`report.html` is self-contained and print-friendly for sharing or saving as PDF. It summarizes status, timing, outcomes, steps, and artifact links. `report.json` exposes the same redacted report model for custom renderers, including selected theme tokens and built-in theme definitions. Configure styling with `report.theme: cairn|slate|midnight|contrast` and `report.colors` in `cairntrace.config.yml`; there is no separate report theme config file.",
       },
       {
         title: "Downloads And Diagnostics",
@@ -466,7 +479,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Agent Handoff",
-        body: "Use `cairn context latest` or MCP `cairn_context` to hand an agent the compact markdown summary instead of flooding context with every raw artifact. The CLI resolves `latest` inside `--artifact-root`, config `artifactRoot`, or the global default, in that order.",
+        body: "Use `cairn context latest` or MCP `cairn_context` to hand an agent the compact markdown summary instead of flooding context with every raw artifact. After investigation, its generated Code Matches section includes ranked `file:line` pointers and scores but deliberately omits raw source snippets; the redacted `investigate.json` remains the detailed structured result. The CLI resolves `latest` inside `--artifact-root`, config `artifactRoot`, or the global default, in that order.",
+      },
+      {
+        title: "Redaction Boundary",
+        body: "Cairntrace redacts Cairntrace-authored text and structured JSON before writing them: reports, run records, event streams, network and console text, eval/request values, investigation results, and outcome sidecars use the configured literal-value scrubber plus sensitive-key/header heuristics. Producer-owned files usually bypass that layer: screenshots/videos can show rendered secrets, while downloads/transforms/traces preserve source content. Audit adds a post-extraction pass for vidtrace `.json`, `.txt`, `.srt`, `.tsv`, `.vtt`, `.md`, and `.csv`; extracted frames/images remain uninspected. Treat the run directory as sensitive and review producer-owned output before sharing or stashing it.",
       },
     ],
     examples: [
@@ -537,7 +554,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Post-click Settling",
-        body: "On agent-browser, `browser.verifyAfterClick` defaults to true and folds a network-idle settle into clicks. Its budget is click-step `settleMs` → spec-root `settleMs` → `browser.postClickSettleMs` → 5000ms. Playwright honors explicit click/spec values and otherwise keeps native waits. A resolved `settleMs: 0` skips the extra settle. Per-environment `waitScale` (or `CAIRN_WAIT_SCALE`) multiplies authored waits/settles and extends the fixed ~500ms network-idle quiet window on both backends.",
+        body: "On agent-browser, `browser.verifyAfterClick` defaults to true and confirms same-tab link delivery without an implicit network-idle wait. Positive click/spec `settleMs` values or `browser.postClickSettleMs` opt into network-idle settling; click/spec values take precedence over config. Playwright honors explicit click/spec values and otherwise keeps native waits. A resolved `settleMs: 0` skips both the extra settle and the link-delivery probe. Per-environment `waitScale` (or `CAIRN_WAIT_SCALE`) multiplies authored waits/settles and extends the fixed ~500ms network-idle quiet window when one is requested.",
       },
       {
         title: "Playwright",
@@ -576,9 +593,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "webServer block (cairntrace.config.yml)",
         language: "yaml",
         code: [
+          "version: 1",
           "environments:",
           "  local: { baseUrl: http://127.0.0.1:3000 }",
-          "  ci: { baseUrl: http://localhost:${env.APP_PORT} }",
+          '  ci: { baseUrl: "http://localhost:${env.APP_PORT}" }',
           "webServer:",
           "  build: bun run build           # once, skipped when a server is reused",
           "  command: node .output/server/index.mjs",
@@ -600,7 +618,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Overview",
-        body: "Cairntrace run directories are self-contained: run.json, agent_context.md, events.ndjson, screenshots, snapshots, traces, and videos. Stashing them to fcheap persists them beyond retention cleanup, makes them searchable across runs, and enables the investigate pipeline (Phase 3: fcheap connect → vecgrep → code matches).",
+        body: "Cairntrace run directories are self-contained: run.json, agent_context.md, events.ndjson, screenshots, snapshots, traces, and videos. Stashing them to file.cheap persists them beyond retention cleanup, makes them searchable across runs on this machine, and enables the investigate pipeline (Phase 3: fcheap connect → vecgrep → code matches). The local vault is not uploaded or replicated automatically.",
       },
       {
         title: "CLI Commands",
@@ -608,15 +626,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Auto-Stash On Failure",
-        body: "Pass `--stash-on-failure` to `cairn run` to automatically stash any run that doesn't pass. The stash is tagged with the spec name. This is best-effort: if fcheap isn't installed, the flag is silently ignored and the run continues normally. You can also enable this via config: `stash: { enabled: true, autoStash: on-failure }` in cairntrace.config.yml.",
+        body: "Pass `--stash-on-failure` to `cairn run` to automatically stash any run that doesn't pass. The stash is tagged with the spec name. This is best-effort: if fcheap isn't installed, Cairntrace logs a warning and the run continues normally. After a successful or partial save, the local run gains a redacted `stash-receipt.json`, an `artifact.stash` event, and a refreshed artifact manifest. The receipt excludes paths, stderr, tags, and failure messages and does not change the finalized run result. Because the save happens first, Cairntrace does not recursively add this local receipt to the already-created stash. If the active redactor would alter the stash ID, Cairntrace fails closed and writes neither an unusable receipt nor a misleading event. You can also enable this via config: `stash: { enabled: true, autoStash: on-failure }` in cairntrace.config.yml.",
       },
       {
         title: "Config",
-        body: "Enable stash integration in cairntrace.config.yml:\n```yaml\nstash:\n  enabled: true\n  autoStash: on-failure   # or never (default)\n  tags: [regression, audit]\n```\nWhen autoStash is on-failure, every failed run is automatically stashed with the spec name and configured tags.",
+        body: "Enable stash integration in cairntrace.config.yml:\n```yaml\nversion: 1\nenvironments:\n  local: {}\nstash:\n  enabled: true\n  autoStash: on-failure   # or never (default)\n  tags: [regression, audit]\n```\nWhen autoStash is on-failure, every failed run is automatically stashed with the spec name and configured tags.",
       },
       {
         title: "MCP Tools",
-        body: "Three MCP tools mirror the CLI: `cairn_stash_save` (stash a run by runId), `cairn_stash_list` (list stashes, optional tag/tool filter), `cairn_stash_search` (search across all stashed runs). All return structured JSON and degrade gracefully when fcheap isn't installed.",
+        body: "Five MCP tools mirror the CLI: `cairn_stash_save` (stash a run by runId), `cairn_stash_list` (list stashes, optional tag/tool filter), `cairn_stash_info` (validated manifest metadata), `cairn_stash_restore` (restore with required hash verification), and `cairn_stash_search` (search across all stashed runs). Save results expose the resolved `runId` and file.cheap identifier as `stashId`. Info and restore declare output schemas and validate file.cheap v0.30 JSON. Operational failures return stable structured error codes and hints; an unverified restore preserves its receipt under `structuredContent.restore`.",
       },
       {
         title: "DX Workflow",
@@ -629,7 +647,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         language: "bash",
         code: [
           "# stash the latest run",
-          "cairn stash save latest --tag OPG-15061",
+          "cairn stash save latest --tag blank-row-regression",
           "",
           "# list all stashes tagged with a spec name",
           "cairn stash list --tag login_flow",
@@ -657,7 +675,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
   investigate: {
     title: "Investigate & Audit (fcheap connect + vecgrep + vidtrace)",
     summary:
-      "Connect a failed run to the codebase responsible: stash run artifacts, run fcheap connect (vecgrep) to surface file:line candidates, and optionally run vidtrace extract on the run video for timestamped evidence. Requires fcheap + vecgrep on $PATH.",
+      "Connect a failed run to the codebase responsible: stash run artifacts, run fcheap connect (vecgrep) to surface file:line candidates, and optionally extract timestamped video evidence with vidtrace. Investigate requires fcheap; connection also requires vecgrep. Audit can run without either integration.",
     sections: [
       {
         title: "Overview",
@@ -665,23 +683,23 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "cairn investigate",
-        body: "`cairn investigate <run-id> --codebase <dir>` stashes the run, runs fcheap connect, and prints code matches. Accepts `--mode semantic|keyword|hybrid` (default: hybrid), `--limit <n>` (default: 10), `--connect` (default: true, use --no-connect to skip), `--use-clips` (default: true, use --no-use-clips to skip; prefer a vidtrace clip stash if one is linked to the run), and `--keep-stash` (keep the fcheap stash after investigate). All output supports `--format json|yaml|md`. Run-id accepts 'latest', 'previous', or a concrete run ID.",
+        body: "`cairn investigate <run-id>` always stashes the resolved run, so it requires fcheap. Passing `--codebase <dir>` implies `--connect`; passing `--connect` alone uses `investigate.codebaseDir` from config. An explicit CLI codebase path resolves from the current working directory, while configured `codebaseDir` resolves from the directory containing the config file. `--index` asks file.cheap to build or refresh the vecgrep index before connecting. `--query` overrides the extracted query, `--clips` prefers `videos/clips/` when present, and `--mode`/`--limit` override config defaults. Contract or subprocess failures include `error` and exit 2.",
       },
       {
         title: "cairn audit",
-        body: "`cairn audit <spec-yaml> --codebase <dir>` is a convenience wrapper that: (1) runs the spec with `--backend playwright --cold-start` and video recording enabled, (2) runs `vidtrace extract` on the resulting video to produce timestamped evidence, (3) stashes the run + vidtrace evidence to fcheap, (4) runs `fcheap connect` to find code matches. Accepts `--speed <0.25-4.0>` and `--slow-mo <ms>` for video control. Requires vidtrace on $PATH for the video extraction step.",
+        body: "`cairn audit <spec-yaml>` uses the normal configured web-server, services, and TinyVault lifecycle, then forces a cold Playwright run with video capture even when the spec's video policy is `never`. Optional vidtrace output stays under `videos/vidtrace/`; a disposable silent-audio copy bridges Playwright's video-only WebM to Whisper and is removed afterward. Cairntrace redacts extracted vidtrace text formats; frames/images still require review. The browser audit itself does not require file.cheap or vecgrep. It stashes/connects only when requested, or auto-stashes a failed run when explicitly configured. `--index` refreshes vecgrep before connection; `--no-cold-start` reuses browser state.",
       },
       {
         title: "Code Matches",
-        body: "Each code match contains: `file` (relative path), `line` (line number), `score` (0.0–1.0 similarity), `snippet` (surrounding code). Matches are written to the run's `agent_context.md` under a '## Code Matches' section, giving agents a direct pointer to the code responsible. The matches also appear in `investigate.json` in the run directory.",
+        body: "Each detailed code match in the redacted `investigate.json` contains `file`, `line`, `score`, and the surrounding `snippet`. The generated `agent_context.md` Code Matches section intentionally includes only ranked `file:line` pointers and scores, not raw source snippets, so the compact handoff does not duplicate source text.",
       },
       {
         title: "Config",
-        body: "Configure investigate defaults in cairntrace.config.yml:\n```yaml\ninvestigate:\n  codebase: ./src          # default codebase path\n  mode: hybrid             # semantic | keyword | hybrid\n  limit: 10                # max code matches\n  keepStash: false         # keep fcheap stash after investigate\n  useClips: true           # prefer vidtrace clip stashes for connect\n```",
+        body: "Configure investigate defaults in cairntrace.config.yml:\n```yaml\nversion: 1\nenvironments:\n  local: {}\ninvestigate:\n  codebaseDir: ./src       # resolved from the config directory\n  mode: hybrid             # semantic | keyword | hybrid\n  limit: 10                # max code matches\n  index: false             # build/refresh vecgrep before connecting\n  autoInvestigate: never   # on-failure | never\n```\nExplicit `--codebase` paths resolve from the current working directory; relative `codebaseDir` values resolve from the config file. When auto-investigation and config auto-stash are both enabled, Cairntrace reuses the validated stash receipt instead of saving the run twice.",
       },
       {
         title: "MCP Tools",
-        body: "`cairn_investigate` mirrors the CLI: takes runId, codebase (optional, uses config default), mode, limit, keepStash, useClips. Returns structured code matches. `cairn_audit` mirrors the audit wrapper: takes spec path, codebase, speed, slowMo, mode, limit. Both degrade gracefully when fcheap/vecgrep/vidtrace aren't installed.",
+        body: "`cairn_investigate` and `cairn_audit` call the same shared pipelines as the CLI and return the same structured results without writing command output into MCP stdio. They declare and validate `urn:cairntrace.dev:investigate:v1` and `urn:cairntrace.dev:audit:v1` MCP output schemas, including error-shaped results. Both accept optional config/artifact-root overrides. Required-stage failures set `isError`; optional vidtrace failures remain visible in `warnings`.",
       },
       {
         title: "DX Workflow",
@@ -699,8 +717,8 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "# with specific search mode and limit",
           "cairn investigate latest --codebase ~/projects/myapp --mode semantic --limit 5",
           "",
-          "# skip using vidtrace clips (use full video stash instead)",
-          "cairn investigate latest --codebase ~/projects/myapp --no-use-clips",
+          "# override the evidence-derived query and prefer existing clips",
+          'cairn investigate latest --codebase ~/projects/myapp --query "login redirect" --clips',
         ].join("\n"),
       },
       {
@@ -710,8 +728,8 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "# run spec with video, extract evidence, connect to code",
           "cairn audit flows/login.yml --codebase ~/projects/myapp --speed 0.5",
           "",
-          "# keep the fcheap stash for later analysis",
-          "cairn audit flows/login.yml --codebase ~/projects/myapp --keep-stash",
+          "# make interactions easier to inspect in the recording",
+          "cairn audit flows/login.yml --codebase ~/projects/myapp --slow-mo 250",
         ].join("\n"),
       },
     ],
@@ -720,11 +738,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
   clip: {
     title: "Clip Run Videos (vidtrace integration)",
     summary:
-      "Cut named clips from a Cairntrace run video using vidtrace. Useful for isolating distinct bugs or interesting moments from a long session so they can be stashed, shared, or fed back into cairn investigate for targeted code search.",
+      "Cut named clips from a Cairntrace run video using vidtrace. Useful for isolating distinct bugs or interesting moments so they can be kept in the local stash, explicitly transferred after review, or fed into cairn investigate.",
     sections: [
       {
         title: "Overview",
-        body: "Cairntrace records a full video of every run when `artifacts.capture.video` is `always` or `on-failure`. The `cairn clip` command calls `vidtrace clip cut` on that video, producing named `.mp4` clips from timestamp ranges. Clips are moved into `<runDir>/videos/clips/` so they stay relative to the run artifacts. When `--stash` is passed, the clips are also stashed to fcheap and the stash ID is returned.",
+        body: "Cairntrace records a full video of every run when `artifacts.capture.video` is `always` or `on-failure`. The `cairn clip` command calls `vidtrace clip cut` on that video, producing named `.mp4` clips from timestamp ranges. Clips are moved into `<runDir>/videos/clips/` so they stay relative to the run artifacts. When `--stash` is passed, the clips are saved in the local file.cheap vault and the stash ID is returned; no upload or replication occurs.",
       },
       {
         title: "cairn clip",
@@ -732,11 +750,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Auto-clip on failure",
-        body: "Specs can declare `artifacts.clips` points so the runner automatically cuts clips after a failed run. Each clip needs a `label`, `start`, and `end`. The runner only auto-cuts when a video was captured and `vidtrace` is available. Failures are logged but do not fail the run itself.",
+        body: "Specs can declare `artifacts.clipPoints` so the runner automatically cuts clips after a failed run. Each point needs a `label`, `start`, and `end`. Clip points are spec-level behavior, not project config. The runner only auto-cuts when a video was captured and `vidtrace` is available. Failures are logged but do not fail the run itself.",
       },
       {
         title: "Spec config",
-        body: "Declare clip points in the spec or cairntrace.config.yml:\n```yaml\nartifacts:\n  capture:\n    video: on-failure\n  clips:\n    - label: issue1-blank-row\n      start: 0:18\n      end: 3:40\n    - label: issue2-blank-cells\n      start: 3:40\n      end: 4:05\n```",
+        body: "Declare clip points under the spec's `artifacts` block:\n```yaml\nartifacts:\n  capture:\n    video: on-failure\n  clipPoints:\n    - label: issue1-blank-row\n      start: 0:18\n      end: 3:40\n    - label: issue2-blank-cells\n      start: 3:40\n      end: 4:05\n```\nProject config may set `clips.tags`, but runtime clip points belong in the spec.",
       },
       {
         title: "MCP Tool",
@@ -753,7 +771,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "  --label issue2-blank-cells=3:40-4:05 \\",
           "  --label issue3-date-errors=6:34-11:09 \\",
           "  --label issue4-email-rejected=14:50-16:14 \\",
-          "  --stash --tag intel --tag graphite \\",
+          "  --stash --tag intel --tag sample-app \\",
           "  --json",
         ].join("\n"),
       },
@@ -764,7 +782,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "artifacts:",
           "  capture:",
           "    video: on-failure",
-          "  clips:",
+          "  clipPoints:",
           "    - label: login-spinner",
           "      start: 0:10",
           "      end: 0:25",
@@ -795,7 +813,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config",
-        body: "Configure annotate integration in cairntrace.config.yml:\n```yaml\nannotate:\n  enabled: true\n  autoAnnotate: on-run   # on-run (pass+fail) | on-investigate | never\n  source: cairntrace      # default source label\n```",
+        body: "Configure annotate integration in cairntrace.config.yml:\n```yaml\nversion: 1\nenvironments:\n  local: {}\nannotate:\n  enabled: true\n  autoAnnotate: on-run   # on-run (pass+fail) | on-investigate | never\n  source: cairntrace      # default source label\n```",
       },
       {
         title: "MCP Tool",
@@ -815,7 +833,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           'cairn annotate "src/auth/login.ts:42" --note "login_flow fails: redirect to /error instead of /dashboard"',
           "",
           "# with JSON data from the investigate result",
-          'cairn annotate "src/auth/login.ts:42" --note "failed run OPG-15061" --data \'{"runId":"...","score":0.89}\'',
+          'cairn annotate "src/auth/login.ts:42" --note "failed blank-row regression" --data \'{"runId":"...","score":0.89}\'',
         ].join("\n"),
       },
       {
@@ -832,15 +850,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
   secrets: {
     title: "Secrets (TinyVault)",
     summary:
-      "Use TinyVault as a secrets provider for authenticated specs. Secret values never enter the AI context — tvault injects them into the subprocess environment at run time. Supports direct project mode and environment-group inheritance mode.",
+      "Use TinyVault as a secrets provider for authenticated specs. Cairntrace resolves secrets into the run environment and registers their values with the artifact redactor. Supports direct project mode and environment-group inheritance mode.",
     sections: [
       {
         title: "Overview",
-        body: "Authenticated specs need credentials (API keys, database URLs, session tokens). TinyVault stores them encrypted locally and injects them into subprocess environments via `tvault run`. Cairntrace integrates with tvault as a config-level secrets provider, so spec authors never hardcode secrets and agent_context.md never exposes them.",
+        body: "Authenticated specs need credentials (API keys, database URLs, session tokens). TinyVault stores them encrypted locally. Cairntrace resolves the configured project or group before browser execution, injects missing keys into the run environment, and registers every returned value with the artifact redactor so spec authors do not hardcode secrets.",
       },
       {
         title: "Two modes: project vs group/env",
-        body: "TinyVault supports two ways to resolve secrets:\n\n**Direct mode** — point at a specific tvault project:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    project: myapp-test\n```\n\n**Inheritance mode** — point at a group + environment, and missing keys fall back to the base environment at read time:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    group: myapp\n    env: preview\n```\nThis is useful when preview/staging inherit most keys from production but override a few. The group must be created in tvault first (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`). Inheritance is resolve-time — no values are duplicated across projects.",
+        body: "TinyVault supports two ways to resolve secrets. The following blocks are fragments for the `secrets:` key inside a complete v1 config.\n\n**Direct mode** — point at a specific tvault project:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    project: myapp-test\n```\n\n**Inheritance mode** — point at a group + environment, and missing keys fall back to the base environment at read time:\n```yaml\nsecrets:\n  provider: tvault\n  tvault:\n    group: myapp\n    env: preview\n```\nThis is useful when preview/staging inherit most keys from production but override a few. The group must be created in tvault first (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`). Inheritance is resolve-time — no values are duplicated across projects.",
       },
       {
         title: "cairn secrets",
@@ -848,11 +866,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config",
-        body: "Enable tvault as the secrets provider in cairntrace.config.yml. Use either `project` (direct) or `group` + `env` (inheritance) — not both:\n```yaml\nsecrets:\n  provider: tvault\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    # OR:\n    # group: myapp\n    # env: preview\n```\nWhen provider is tvault, `cairn run` injects all project/group secrets as environment variables before the spec executes. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
+        body: "Enable tvault as the secrets provider in cairntrace.config.yml. Use either `project` (direct) or `group` + `env` (inheritance) — not both:\n```yaml\nversion: 1\nenvironments:\n  local: {}\nsecrets:\n  provider: tvault\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    # OR:\n    # group: myapp\n    # env: preview\n```\nWhen provider is tvault, `cairn run` injects all project/group secrets as environment variables before the spec executes. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
       },
       {
         title: "MCP Tool",
-        body: "`cairn_secrets_status` mirrors the CLI: takes an optional `project` or `group`+`env`, returns tvault installation status and the list of secret keys. Values are never returned — only key names. For actual secret injection in commands, use TinyVault's own MCP tools (`vault_run_with_secrets`).",
+        body: "`cairn_secrets_status` mirrors the read-only CLI preflight: it takes an optional `project` or `group`+`env`, returns tvault installation status and the list of secret keys, and never returns values. Actual browser-run injection happens in `cairn run` from the selected `secrets` config.",
       },
       {
         title: "DX Workflow",
@@ -860,7 +878,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Security",
-        body: "Secret values are NEVER written to artifacts: not in agent_context.md, not in events.ndjson, not in run.json. The ArtifactWriter redacts Authorization, Cookie, and Set-Cookie headers. tvault's own output redaction also catches any secret values that leak into command output. This is defense-in-depth: even if a spec captures a response header, the artifact is redacted.",
+        body: "Cairntrace registers resolved TinyVault values with the artifact redactor. Text and JSON artifacts, including `agent_context.md`, `events.ndjson`, run records, reports, and response evidence, scrub those literals along with sensitive keys and Authorization/Cookie headers. Binary artifacts are outside that boundary: screenshots and videos can show secrets or personal data rendered by the app, while downloads, transforms, and traces can preserve sensitive bytes. Keep run directories private and review binary captures before sharing or stashing them.",
       },
     ],
     examples: [
@@ -931,11 +949,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Secrets Integration",
-        body: "When `secrets.provider: tvault` is set, the seed command runs with tvault secrets injected into its environment. The `${MONGO_SOURCE_PASSWORD}` and `${ES_SOURCE_PASSWORD}` placeholders in the seed command are resolved from tvault — secret values never appear in the spec YAML, config file, or agent context.",
+        body: "When `secrets.provider: tvault` is set, the seed command runs with tvault secrets injected into its environment. The `${MONGO_SOURCE_PASSWORD}` and `${ES_SOURCE_PASSWORD}` placeholders in the seed command are resolved at runtime rather than stored in the spec or config. Cairntrace registers resolved values with the text/JSON redactor, but producer-owned binary captures still require review before sharing.",
       },
       {
         title: "Session Stash (fcheap)",
-        body: "The `services.stash` block optionally saves the session artifacts (tmux pane captures, docker logs, seed output) to fcheap after teardown. Set `enabled: true` (default false) and choose which phases to capture with `capture: [tmux, docker, seed]` (default all). `tags: [services, graphite]` adds searchable tags. `autoStash: always` stashes on every stop; `on-failure` (default) only when the run has failures. This is best-effort — if fcheap isn't installed, stashing is silently skipped. Stashed artifacts persist beyond retention cleanup and are searchable via `cairn stash search`.",
+        body: "The `services.stash` block optionally saves the session artifacts (tmux pane captures, docker logs, seed output) to fcheap after teardown. Set `enabled: true` (default false) and choose which phases to capture with `capture: [tmux, docker, seed]` (default all). `tags: [services, sample-app]` adds searchable tags. `autoStash: always` stashes on every stop; `on-failure` (default) only when the run has failures. This is best-effort — if fcheap isn't installed, stashing is silently skipped. Stashed artifacts persist beyond retention cleanup and are searchable via `cairn stash search`.",
       },
       {
         title: "Services Status",
@@ -947,7 +965,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Per-Environment Services",
-        body: "The `services` and `secrets` blocks can be overridden per-environment inside `environments.<name>`. This lets you run the full local stack (docker + seed + tmux) for `local`, but skip all services for `dev` or `test` where the app is already deployed remotely:\n\n```yaml\nservices:\n  docker:\n    command: docker compose up -d\n  seed:\n    command: yarn seed\n    ttlSeconds: 21600\n  tmux:\n    session: myapp\n    windows: [...]\n\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\n  dev:\n    baseUrl: https://dev.example.com\n    services: false   # no docker/seed/tmux — app is remote\n  test:\n    baseUrl: https://test.example.com\n    services: false\n    secrets:\n      provider: tvault\n      tvault:\n        project: test-project  # different secrets for test env\n```\n\nWhen `services: false`, `cairn run --env dev` skips the entire services lifecycle (no docker, no seed, no tmux) — no need for `--no-services` or `--services-dry-run`. When a partial `services:` block is given, it deep-merges over the top-level one (e.g. override just the seed command, keep docker and tmux). The env-level `secrets:` block replaces the top-level one entirely.",
+        body: "The `services` and `secrets` blocks can be overridden per-environment inside `environments.<name>`. This lets you run the full local stack (docker + seed + tmux) for `local`, but skip all services for `dev` or `test` where the app is already deployed remotely:\n\n```yaml\nversion: 1\nservices:\n  docker:\n    command: docker compose up -d\n  seed:\n    command: bun run seed\n    ttlSeconds: 21600\n  tmux:\n    session: myapp\n    windows:\n      - name: web\n        command: bun run dev\n\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\n  dev:\n    baseUrl: https://dev.example.com\n    services: false   # no docker/seed/tmux — app is remote\n  test:\n    baseUrl: https://test.example.com\n    services: false\n    secrets:\n      provider: tvault\n      tvault:\n        project: test-project  # different secrets for test env\n```\n\nWhen `services: false`, `cairn run --env dev` skips the entire services lifecycle (no docker, no seed, no tmux) — no need for `--no-services` or `--services-dry-run`. When a partial `services:` block is given, it deep-merges over the top-level one (e.g. override just the seed command, keep docker and tmux). The env-level `secrets:` block replaces the top-level one entirely.",
       },
       {
         title: "Lifecycle Events",
@@ -959,12 +977,15 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "full services block (cairntrace.config.yml)",
         language: "yaml",
         code: [
-          "project: graphite",
+          "version: 1",
+          "project: sample-app",
+          "environments:",
+          "  local: {}",
           "secrets:",
           "  provider: tvault",
           "  required: [MONGO_SOURCE_PASSWORD, ES_SOURCE_PASSWORD]",
           "  tvault:",
-          "    project: graphite",
+          "    project: sample-app",
           "services:",
           "  docker:",
           "    command: docker compose up -d",
@@ -986,7 +1007,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    ttlSeconds: 21600",
           "    freshnessCheck: mongosh --quiet --eval 'db.something.countDocuments()' mongodb://localhost:27017/test",
           "  tmux:",
-          "    session: graphite",
+          "    session: sample-app",
           "    readyTimeoutMs: 90000",
           "    options:",
           '      - { key: mouse, value: "on" }',
@@ -1022,9 +1043,9 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
           "    enabled: true",
           "    capture: [tmux, docker, seed]",
           "    autoStash: always",
-          "    tags: [services, graphite]",
+          "    tags: [services, sample-app]",
           "  teardown:",
-          "    - tmux kill-session -t graphite",
+          "    - tmux kill-session -t sample-app",
           "    - docker compose down",
         ].join("\n"),
       },
@@ -1052,6 +1073,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "per-environment services (local vs dev)",
         language: "yaml",
         code: [
+          "version: 1",
           "services:",
           "  docker:",
           "    command: docker compose up -d",

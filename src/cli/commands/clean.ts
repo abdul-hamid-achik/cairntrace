@@ -108,6 +108,12 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
 
   process.stdout.write(emit(format, report, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+  if (report.archiveFailures.length > 0) {
+    cleanLog.warn(
+      `${report.archiveFailures.length} run archive(s) failed; source directories were retained`,
+    );
+    process.exitCode = 2;
+  }
 }
 
 function toMarkdown(r: CleanReport): string {
@@ -121,6 +127,15 @@ function toMarkdown(r: CleanReport): string {
     for (const id of r.removed.slice(0, 20)) lines.push(`  - ${id}`);
     if (r.removed.length > 20) {
       lines.push(`  …and ${r.removed.length - 20} more`);
+    }
+  }
+  if (r.archiveFailures.length > 0) {
+    lines.push("", "Archive failures (retained on disk):");
+    for (const failure of r.archiveFailures.slice(0, 20)) {
+      lines.push(`  - ${failure.runId}: ${failure.error}`);
+    }
+    if (r.archiveFailures.length > 20) {
+      lines.push(`  …and ${r.archiveFailures.length - 20} more`);
     }
   }
   return lines.join("\n");

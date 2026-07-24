@@ -35,7 +35,9 @@ Inspect `screenshots/` (when artifacts are enabled) or run with `--headed` to se
 
 A 4xx or 5xx in the network log tripped the always-on health check:
 
-- The 200 OK you saw was for the navigate, but a follow-up fetch (analytics, telemetry, auth-refresh) failed. Look at `network/network.har`.
+- The 200 OK you saw was for the navigation, but a follow-up fetch (analytics,
+  telemetry, auth refresh) failed. Look at `network/failed_requests.ndjson`;
+  `network/requests.ndjson` has the complete captured request stream.
 - The cookie/session expired. Re-auth and retry.
 
 If the failing request is a third party (analytics, telemetry), your spec is reporting on someone else's bug. Either fix the third party or accept the failure mode in the spec by relaxing `noFailedRequests: true` to a narrower outcome.
@@ -90,7 +92,7 @@ If the contract changed *intentionally*, this is correct. If it changed by accid
 The CLI couldn't connect to `agent-browser` or Playwright. Common causes:
 
 - The chosen backend isn't on `$PATH`. Run `cairn doctor --format md` to see which it expects.
-- The browser version doesn't match the playwright version. Run `npx playwright install chromium`.
+- The browser version doesn't match the Playwright version. Run `bunx playwright install chromium`.
 - The agent-browser service isn't running. Start it per its docs.
 
 ## "Sealed environment: env X is reserved"
@@ -108,10 +110,19 @@ redaction:
 
 Vault (tvault) secrets are registered automatically and scrubbed regardless of key name. Redaction is literal-value replacement, not regex — add the full secret string to `redaction.values`.
 
+This applies to Cairntrace-authored text and structured JSON. Audit also
+post-processes supported vidtrace text formats, but it does not rewrite
+producer-owned binary files: screenshots/videos may show whatever the page
+renders, downloads/transforms preserve their source bytes, and browser traces
+or extracted frames can embed page state. If the leak is in one of those
+artifacts, remove that run from any shared location, narrow the capture policy,
+and rerun after hiding or replacing the sensitive UI/data.
+
 ## Performance: the spec takes minutes to run
 
-- Too many network captures? Set `artifacts.network: on-failure` instead of `always`.
-- Too many screenshots? Set `artifacts.screenshots: on-failure`.
+- Too many network captures? Set `artifacts.capture.network: on-failure`
+  instead of `always`.
+- Too many screenshots? Set `artifacts.capture.screenshots: on-failure`.
 - Cold-start spinning up several services? Set `services.docker.reuseExisting: true`.
 - `wait: { load: networkidle }` waiting for an SPA with persistent polling? Switch to `load` and add `slowMo` per step.
 
@@ -136,7 +147,8 @@ still run. If the page is genuinely wedged it fails on its next interaction.
 ## Common misconfigurations
 
 - Forgot to set `artifactRoot`. Artifacts land in `~/.cairntrace/runs` by default, not your project's test output dir.
-- Set `artifacts.screenshots: 'always'` for a spec that takes 200 steps. Disk fill. Set it to `'on-failure'` until you know what you're capturing.
+- Set `artifacts.capture.screenshots: always` for a spec that takes 200 steps.
+  Disk fill. Set it to `on-failure` until you know what you're capturing.
 - Two specs share a session resume name but expect different sessions. Resume names are project-scoped; namespace them per-spec.
 
 ## Getting help
@@ -145,7 +157,8 @@ If none of the above fits:
 
 1. Run `cairn doctor --format md` — surfaces environment-level issues first.
 2. Read `agent_context.md` from the failing run dir — gives the runner's narrative of what went wrong.
-3. Look at `diagnostics/failure.md` — the structured failure summary.
+3. Read the failed step's `diagnostics/<step-ordinal>_<step-id>.json` when it
+   exists — it contains the structured page state captured at failure.
 4. File an issue with the failing run dir attached as a `.tgz`. Reports without the artifact pack are hard to triage.
 
 ## See also

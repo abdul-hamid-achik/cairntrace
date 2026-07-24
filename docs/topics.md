@@ -9,7 +9,8 @@ A grab-bag of pages on topics that don't fit cleanly under [Steps](/steps), [Ver
 
 ## Available topics
 
-- [Video recording fallback](/video-screenshot-fallback) — proposed: stitch per-step screenshots into a timelapse video when the native recorder is unavailable.
+- [Video capture](/video) — record native Playwright WebM evidence and use
+  screenshots with backends that do not support recording.
 - [Process monitoring](/monitor) — sample the browser process tree with `--monitor`; the `monitor` step and `process` verifier turn "the spec got slow" into an assertable budget.
 - [Services lifecycle](/services) — the config-driven docker/seed/tmux environment `cairn run` owns, and when to disable it per environment.
 

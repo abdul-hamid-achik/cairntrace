@@ -1,7 +1,44 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { chromium } from "playwright";
 import { PlaywrightAdapter } from "./PlaywrightAdapter";
+
+describe("PlaywrightAdapter video", () => {
+  it("finalizes the context before saving a native recording", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-video-test-"));
+    const output = join(dir, "recording.webm");
+    const adapter = new PlaywrightAdapter();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      await adapter.startVideo();
+      expect(
+        await adapter.runStep({
+          open: "data:text/html,<main>video smoke</main>",
+        }),
+      ).toMatchObject({ ok: true });
+
+      const result = await Promise.race([
+        adapter.stopVideo(output),
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error("stopVideo did not finalize within 10s")),
+            10_000,
+          );
+        }),
+      ]);
+      expect(result).toEqual({ ok: true, path: output });
+      expect((await stat(output)).size).toBeGreaterThan(0);
+    } finally {
+      if (deadline) clearTimeout(deadline);
+      await adapter.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
 
 describe("PlaywrightAdapter request", () => {
   afterEach(() => {

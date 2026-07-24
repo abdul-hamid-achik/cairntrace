@@ -18,7 +18,7 @@ export interface BackendOptions {
   device?: string;
   /** Config `browser.verifyAfterClick` (agent-browser only). Default true. */
   verifyAfterClick?: boolean;
-  /** Config `browser.postClickSettleMs` (agent-browser only). Default 5000. */
+  /** Config opt-in networkidle budget (agent-browser only). Unset by default. */
   postClickSettleMs?: number;
 }
 

@@ -1284,7 +1284,7 @@ export async function captureTmuxPane(
 
 /**
  * True if a teardown command would kill the given tmux session (e.g.
- * `tmux kill-session -t graphite`). Used to skip such teardown when the
+ * `tmux kill-session -t sample-app`). Used to skip such teardown when the
  * session is in reuse mode (cairn owns its lifecycle and leaves it alive).
  */
 function killsTmuxSession(cmd: string, session: string): boolean {

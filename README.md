@@ -71,8 +71,8 @@ agent-browser --version
 ```
 
 Playwright is optional. Install its Chromium browser only if you plan to run
-with `--backend playwright`, inspect Playwright traces, or export specs to
-`@playwright/test`:
+with `--backend playwright`, inspect Playwright traces, or execute exported
+`@playwright/test` specs:
 
 ```bash
 bunx playwright install chromium
@@ -104,7 +104,9 @@ cairn doctor
 
 If `cairn doctor` reports `bun` or `agent-browser` missing, confirm those
 commands work in the same shell and that their install directories are on
-`$PATH`.
+`$PATH`. For Playwright, doctor reports the package and Chromium separately:
+run `bun install` for `playwright-package`, or
+`bunx playwright install chromium` for `playwright-chromium`.
 
 ## 5-Minute Demo
 
@@ -384,9 +386,9 @@ services:
     autoStash: always
     capture: [tmux, docker, seed]
     tags: [services, myapp]
-teardown:
-  - "tmux kill-session -t myapp"
-  - "docker compose down"
+  teardown:
+    - "tmux kill-session -t myapp"
+    - "docker compose down"
 ```
 
 Seed freshness is tracked at `~/.cairntrace/services/<project>.seed.json`
@@ -404,13 +406,13 @@ defaultEnvironment: local
 retention:
   keepRuns: 20 # newest N runs per spec; pruned after every run
 report:
-  theme: cairn # cairn | graphite | midnight | contrast
+  theme: cairn # cairn | slate | midnight | contrast
   colors:
     accent: "#0f766e"
     surface: "#fbfdf9"
 browser:
-  verifyAfterClick: true
-  postClickSettleMs: 20000
+  verifyAfterClick: true # same-tab link delivery guard (default: true)
+  postClickSettleMs: 20000 # opt in to network-idle after every click
 environments:
   local:
     baseUrl: http://localhost:${env.APP_PORT} # ${env.X} works in config text
@@ -423,11 +425,13 @@ environments:
 Specs can also set a top-level `viewport: { width, height }`, which wins over
 the environment's.
 
-On agent-browser, post-click network-idle settling uses the narrowest override:
-the click step's sibling `settleMs`, top-level spec `settleMs`, config
-`browser.postClickSettleMs`, then 5000 ms. Playwright honors explicit click/spec
-values and otherwise keeps its native action/navigation waits. Use `settleMs: 0`
-to skip the extra settle without disabling click verification for every flow.
+On agent-browser, same-tab links confirm URL, document, or DOM delivery by
+default without waiting for network-idle. A positive click-step or top-level
+spec `settleMs`, or config `browser.postClickSettleMs`, explicitly adds a
+network-idle wait; click/spec values take precedence over config. Playwright
+honors explicit click/spec values and otherwise keeps its native
+action/navigation waits. Use `settleMs: 0` to skip both the extra settle and
+the link-delivery probe at that scope.
 
 **Per-environment services & secrets.** The `services` and `secrets` blocks
 can be overridden per-environment inside `environments.<name>`. This lets you
@@ -435,6 +439,7 @@ run the full local stack (docker + seed + tmux) for `local`, but skip all
 services for `dev` or `test` where the app is already deployed remotely:
 
 ```yaml
+version: 1
 environments:
   local:
     baseUrl: http://localhost:8080
@@ -478,6 +483,9 @@ run.json | run.yaml | run.md
 report.html
 report.json
 agent_context.md
+artifact-manifest.json
+replay.json
+stash-receipt.json  # only after automatic stash
 events.ndjson
 spec.resolved.yml
 outcomes/<outcome-id>.md
@@ -507,6 +515,14 @@ configuration file.
 `latest`/`previous` inside `--artifact-root`, config `artifactRoot`, or the
 global default, in that order.
 
+Cairntrace-authored text and JSON artifacts are redacted before they are
+written. Producer-owned outputs are not content-inspected: screenshots and
+videos can show secrets or personal data, downloads/transforms/traces retain
+their original content. Audit adds a post-extraction redaction pass for
+vidtrace text formats, but extracted frames/images remain uninspected. Treat
+the run directory as sensitive and review producer-owned captures before
+sharing or stashing it.
+
 Disk usage is bounded by `retention.keepRuns` in the config (pruned after
 every run) and by `cairn clean [--keep N | --all]`. Traces follow the
 `artifacts.capture.trace` policy — the `on-failure` default deletes the trace
@@ -521,8 +537,9 @@ recording to `vidtrace extract` for timestamped evidence extraction.
 ### Stash Integration (fcheap)
 
 Cairntrace run directories are self-contained — perfect for stashing to
-[fcheap](https://github.com/abdul-hamid-achik/file.cheap) for persistence,
-sharing, and cross-run search. Requires `fcheap` on `$PATH`.
+[file.cheap](https://file.cheap) for persistence beyond Cairntrace retention
+and cross-run search on the current machine. The local vault is not uploaded
+or replicated automatically. Requires `fcheap` on `$PATH`.
 
 ```bash
 # Stash the latest run
@@ -548,15 +565,24 @@ Or enable via config:
 
 ```yaml
 # cairntrace.config.yml
+version: 1
+environments:
+  local: {}
 stash:
   enabled: true
   autoStash: on-failure   # or never (default)
   tags: [regression, audit]
 ```
 
-The MCP server exposes `cairn_stash_save`, `cairn_stash_list`, and
-`cairn_stash_search` tools that mirror the CLI. All degrade gracefully when
-fcheap isn't installed.
+Successful auto-stash writes a redacted `stash-receipt.json`, appends an
+`artifact.stash` event, and refreshes the local artifact manifest without
+changing the finalized run result. The receipt excludes paths, stderr, and
+failure messages.
+
+The MCP server exposes `cairn_stash_save`, `cairn_stash_list`,
+`cairn_stash_info`, `cairn_stash_restore`, and `cairn_stash_search`. Info and
+restore validate file.cheap v0.30 output. An unverified restore is a structured
+tool error that keeps the restore receipt for forensic review.
 
 ### Investigate & Audit (fcheap connect + vecgrep + vidtrace)
 
@@ -571,6 +597,12 @@ Requires `fcheap` and `vecgrep` on `$PATH`.
 
 # With specific search mode and limit
 ./bin/cairn investigate latest --codebase ~/projects/myapp --mode semantic --limit 5
+
+# Build or refresh the vecgrep index before connecting
+./bin/cairn investigate latest --codebase ~/projects/myapp --index
+
+# Stash without connecting
+./bin/cairn investigate latest
 ```
 
 `cairn audit` is a convenience wrapper that runs a spec with video, extracts
@@ -579,22 +611,35 @@ recording, and connects it to the codebase — all in one command:
 
 ```bash
 # Run spec with video, extract evidence, connect to code
-./bin/cairn audit flows/login.yml --codebase ~/projects/myapp --speed 0.5
+./bin/cairn audit flows/login.yml --codebase ~/projects/myapp --slow-mo 250 --speed 0.75
 ```
+
+`audit` forces Playwright video capture and a cold browser by default. Passing
+`--codebase` implies connection; `--connect` without a codebase uses the
+configured default. Explicit CLI codebase paths resolve from the current
+working directory; a relative configured `codebaseDir` resolves from the
+config file. The browser audit does not require file.cheap or vecgrep unless
+you request connection or enable failed-run auto-stash in config.
 
 Configure defaults via config:
 
 ```yaml
 # cairntrace.config.yml
+version: 1
+environments:
+  local: {}
 investigate:
-  codebase: ./src          # default codebase path
+  codebaseDir: ./src       # default for `--connect`
   mode: hybrid             # semantic | keyword | hybrid
   limit: 10                # max code matches
-  keepStash: false         # keep fcheap stash after investigate
+  index: false             # build/refresh vecgrep before connecting
+  autoInvestigate: never   # on-failure | never
 ```
 
 The MCP server exposes `cairn_investigate` and `cairn_audit` tools that mirror
-the CLI. Both degrade gracefully when fcheap/vecgrep/vidtrace aren't installed.
+the CLI. `investigate` needs file.cheap to save its input; `audit` can run
+without it when stash and connection are not requested. Vidtrace remains
+optional.
 
 ### Annotate & Secrets (codemap + TinyVault)
 
@@ -633,17 +678,25 @@ available to a target — values are never printed. Requires `tvault` on
 ./bin/cairn secrets --group mygroup --env test
 ```
 
-Configure defaults via config:
+Configure annotation and secret-provider defaults via config. The codebase
+searched by codemap remains an explicit `--codebase` argument to
+`cairn investigate`:
 
 ```yaml
 # cairntrace.config.yml
-codemap:
+version: 1
+environments:
+  local: {}
+annotate:
   enabled: true
-  path: ~/projects/myapp   # default codebase path for annotate
+  autoAnnotate: on-run
+  source: cairntrace
 
 secrets:
-  provider: tvault          # tvault | none
-  project: myapp-test       # default vault project
+  provider: tvault          # env | tvault
+  required: [API_KEY]
+  tvault:
+    project: myapp-test     # direct mode
 ```
 
 The MCP server exposes `cairn_annotate` and `cairn_secrets_status` tools that
@@ -674,8 +727,8 @@ Common commands:
 | `cairn stash info <stash-id>` | Show detailed metadata and file list for a stash. |
 | `cairn stash restore <stash-id>` | Restore a stash to a directory (`--to <dir>`). |
 | `cairn stash search <query>` | Search across all stashed runs. Supports `--mode keyword\|semantic\|hybrid` and `--limit`. |
-| `cairn investigate <run-id>` | Stash a run and run `fcheap connect` to find code responsible for failures. Supports `--codebase`, `--mode`, `--limit`, `--keep-stash`. |
-| `cairn audit <spec>` | Run a spec with video, extract vidtrace evidence, and connect to code. Supports `--codebase`, `--speed`, `--slow-mo`, `--mode`, `--limit`. |
+| `cairn investigate <run-id>` | Stash a run and optionally run `fcheap connect` to find code responsible for failures. `--codebase` implies connect; supports `--connect`, `--query`, `--clips`, `--mode`, `--limit`, and `--index`. |
+| `cairn audit <spec>` | Run a cold Playwright audit with forced video capture, optional vidtrace extraction, and optional code connection. Supports `--codebase`, `--connect`, `--index`, `--speed`, `--slow-mo`, `--mode`, `--limit`, and `--no-cold-start`. |
 | `cairn clip <run-ref>` | Cut named clips from a run video using vidtrace. Supports repeatable `--label name=start-end`, `--out`, `--name`, `--reencode`, `--stash`, `--tag`. |
 | `cairn annotate <symbol>` | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`. |
 | `cairn secrets` | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed). |
@@ -737,8 +790,9 @@ The MCP server exposes these tools:
 `cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
 `cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
 `cairn_config_validate`, `cairn_services_status`, `cairn_stash_save`,
-`cairn_stash_list`, `cairn_stash_search`, `cairn_investigate`, `cairn_audit`,
-`cairn_clip`, `cairn_annotate`, `cairn_secrets_status`, and the nine
+`cairn_stash_list`, `cairn_stash_info`, `cairn_stash_restore`,
+`cairn_stash_search`, `cairn_investigate`, `cairn_audit`, `cairn_clip`,
+`cairn_annotate`, `cairn_secrets_status`, and the nine
 `cairn_discover_*` tools (`open`, `snapshot`, `interact`, `navigate`,
 `inventory`, `suggest`, `export`, `close`, `list`) that drive a stateful
 browser session to explore, record, and export a spec.

@@ -11,7 +11,7 @@ A side-by-side for the two spec runners under [the-lacanians](https://www.thelac
 | **Agent interface** | CLI + MCP server + artifact pack | CLI + MCP server + artifact pack |
 | **Closed verifiers** | `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process` | same |
 | **Cold-start contract** | required; login/checkpoint/preconditions | required; login/checkpoint/preconditions |
-| **Artifact format** | `run.{json,yaml,md}`, `report.html`, `outcomes/<id>.md`, `screenshots/`, `network/`, `console/`, `spec.resolved.yml` | same shape, plus `frames/frames.ndjson` and `raw/pty.raw.log` |
+| **Artifact format** | `run.{json,yaml,md}`, `report.html`, `outcomes/<id>.md`, `screenshots/`, `network/`, `console/`, `spec.resolved.yml` | its own run pack, including terminal-only `frames/frames.ndjson` and `raw/pty.raw.log` |
 | **MCP tools** | `cairn_*` mirrors every CLI verb | `glyph_*` mirrors every CLI verb |
 
 ## Where they diverge
@@ -23,12 +23,15 @@ A side-by-side for the two spec runners under [the-lacanians](https://www.thelac
 | **Locator strategy** | Semantic locators (`role|label|text`) with `data-testid` fallback | Screen regions + cell coords; SGR/colors/OSC 8/hyperlinks parsed |
 | **Hydration waits** | `open: { waitUntil: networkidle }` | not applicable — terminals hydrate synchronously |
 | **Mouse input** | Playwright `click`/`hover` | DEC mouse + SGR mouse; emits explicit `MouseClick` step type |
-| **Video capture** | optional `.webm` (Playwright only); stub for agent-browser (`video-screenshot-fallback`) | `frames/frames.ndjson` per step + scriptable replay via `replay --tui` |
+| **Video capture** | optional `.webm` with Playwright; agent-browser does not record video | terminal frames scrubbed with `glyph replay <run> --tui` (not browser video) |
 
 ## What is shared by design
 
 - **The contract hash.** Both runners mint a hash over `intent + outcomes` and refuse silent edits. Both expose `cairn spec verify --stamp` / `glyph spec verify --stamp` for re-stamping.
-- **The artifact pack.** Same file shapes — what differs is the inside of `screens/` and `frames/` — so an agent that reads one format reads the other without code change.
+- **The artifact-pack pattern.** Both keep a structured run record, event
+  stream, outcome evidence, and agent context. Backend-specific evidence is
+  intentionally different: Cairntrace writes browser snapshots/screenshots;
+  Glyphrun writes terminal screens, frames, and PTY logs.
 - **The MCP shape.** Same `*_explain`, `*_spec_verify`, `*_run`, `*_context` tools, in the same order. An agent that learned one learned the other.
 - **The repair engine.** Both runners read failed-artifact packs and propose step rewrites that preserve the contract hash. The repair proposals are suggestions, not approvals.
 
@@ -41,7 +44,8 @@ A side-by-side for the two spec runners under [the-lacanians](https://www.thelac
 ## What will not merge
 
 - The browsers and terminals do not share a VM model. cairntrace's accessibility-tree snapshots would be meaningless against glyphrun's cell model. We are not going to invent a common abstraction that one of them wants and the other doesn't.
-- Repair proposals, the contract hash, and the artifact pack stay cross-compatible because they are *contracts*, not implementations. That's the whole reason both projects ship from the same org.
+- Repair proposals and contract hashes follow the same design principles, but
+  their schemas and backend-specific artifacts are versioned by each project.
 
 ## Suggested reading
 
