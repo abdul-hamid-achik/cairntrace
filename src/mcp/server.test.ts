@@ -1,6 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile as readTextFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
@@ -299,6 +306,70 @@ steps:
     const runSc = RunResultSchema.parse(r.structuredContent);
     expect(Array.isArray(runSc.nextActions)).toBe(true);
     await c.close();
+  });
+
+  it("cairn_run scopes TinyVault values without mutating process.env", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "cairntrace-mcp-tvault-"));
+    const bin = join(fixture, "bin");
+    const calls = join(fixture, "tvault-calls.txt");
+    await mkdir(bin);
+    const fakeTvault = join(bin, "tvault");
+    await writeFile(
+      fakeTvault,
+      "#!/bin/sh\n" +
+        "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'tvault test'; exit 0; fi\n" +
+        'printf \'%s\\n\' "$*" >> "$TVAULT_CALLS"\n' +
+        "printf '%s\\n' '{\"MCP_SCOPED_SECRET\":\"mcp-secret-value\"}'\n",
+    );
+    await chmod(fakeTvault, 0o755);
+    const configPath = join(fixture, "cairntrace.config.yml");
+    const specPath = join(fixture, "mcp-tvault.yml");
+    await writeFile(
+      configPath,
+      "version: 1\ndefaultEnvironment: local\nenvironments: { local: {} }\nsecrets:\n  provider: tvault\n  tvault: { project: mcp-project, identity: mcp-reader }\n",
+    );
+    await writeFile(
+      specPath,
+      "version: 1\nname: mcp_tvault_scope\nintent: MCP run has a scoped secret.\noutcomes:\n  - id: clean\n    description: Mock console remains clean.\n    verify: { console: { errorsMax: 0 } }\nsteps:\n  - open: 'data:text/html,${env.MCP_SCOPED_SECRET}'\n",
+    );
+    const previousPath = process.env.PATH;
+    const previousCalls = process.env.TVAULT_CALLS;
+    delete process.env.MCP_SCOPED_SECRET;
+    process.env.PATH = `${bin}:${previousPath ?? ""}`;
+    process.env.TVAULT_CALLS = calls;
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_run",
+        arguments: {
+          path: specPath,
+          mock: true,
+          artifactRoot: join(fixture, "runs"),
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(process.env.MCP_SCOPED_SECRET).toBeUndefined();
+      expect(await readTextFile(calls, "utf8")).toContain(
+        "--identity mcp-reader",
+      );
+      expect(await readTextFile(calls, "utf8")).toContain(
+        "--only MCP_SCOPED_SECRET",
+      );
+      const run = RunResultSchema.parse(result.structuredContent);
+      const resolved = await readTextFile(
+        join(run.runDir, "spec.resolved.yml"),
+        "utf8",
+      );
+      expect(resolved).toContain("[redacted]");
+      expect(resolved).not.toContain("mcp-secret-value");
+    } finally {
+      await c.close();
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousCalls === undefined) delete process.env.TVAULT_CALLS;
+      else process.env.TVAULT_CALLS = previousCalls;
+      await rm(fixture, { recursive: true, force: true });
+    }
   });
 
   it("cairn_spec_verify resolves config vars before validation", async () => {

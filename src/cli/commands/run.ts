@@ -9,11 +9,11 @@ import {
   resolve,
 } from "node:path";
 import { execa } from "execa";
-import { registerSecretValues } from "../../core/artifacts/redaction";
 import { addEnospcHint } from "../../core/artifacts/retention";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
+import { targetChildEnvWithSelectedTvaultKeys } from "../../core/processEnv";
 import { ContractHashMismatchError } from "../../core/parser/parseSpec";
 import { runPool } from "../../core/runner/pool";
 import { runSpec } from "../../core/runner/Runner";
@@ -41,7 +41,8 @@ import {
 import { emit, resolveFormat } from "../format";
 import { isInteractive, makeInteractiveListener } from "../progress";
 import { log, reconfigureWithConfig } from "../logger";
-import { getTvaultEnv, tvaultArgs } from "./secrets";
+import { resolveScopedSecrets, type ScopedSecrets } from "./secrets";
+import { publishRunDirectory } from "./publish";
 import { maybeAutoStash, stashDirectory } from "./stash";
 import { investigateRunDirectory } from "./investigate";
 import { defaultCodemapDeps, maybeAutoAnnotateRun } from "./annotate";
@@ -148,6 +149,15 @@ async function archiveRun(
   }
 }
 
+async function publishRun(
+  runDir: string,
+  runId: string,
+  _tags: string[],
+  retentionDays: number,
+): Promise<void> {
+  await publishRunDirectory(runDir, runId, { retentionDays });
+}
+
 /** Scoped logger for the run command's lifecycle/errors. */
 const runLog = log.scope("run");
 
@@ -176,7 +186,12 @@ export function parseVarFlags(
 export async function runHookCommands(
   phase: "before" | "after",
   commands: string[] | undefined,
-  opts: { fatal?: boolean; cwd?: string } = {},
+  opts: {
+    fatal?: boolean;
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    selectedTvaultKeys?: Iterable<string>;
+  } = {},
 ): Promise<void> {
   const list = (commands ?? []).map((c) => c.trim()).filter(Boolean);
   if (list.length === 0) return;
@@ -188,7 +203,10 @@ export async function runHookCommands(
       const r = await execa(command, {
         shell: true,
         cwd,
-        env: process.env,
+        env: targetChildEnvWithSelectedTvaultKeys(
+          opts.env ?? process.env,
+          opts.selectedTvaultKeys ?? [],
+        ),
         // Path-flip + service restart scripts are short; long builds should
         // use services preCommands instead. 10 min ceiling for slow boots.
         timeout: 600_000,
@@ -306,14 +324,12 @@ export async function runCommand(
     }
   }
 
-  // Propagate --env to CAIRN_TVAULT_ENV as early as possible — before the
-  // webServer, services, and secret-injection phases — so config-level
-  // `${env.CAIRN_TVAULT_ENV:-local}` placeholders resolve to the same tvault
-  // env everywhere (the seed/docker/tmux phases run before secret injection).
-  // The caller can still decouple them by exporting CAIRN_TVAULT_ENV in the
-  // shell.
-  if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
-    process.env.CAIRN_TVAULT_ENV = opts.env;
+  let scopedSecrets: ScopedSecrets;
+  try {
+    scopedSecrets = await maybeInjectTvaultSecrets(expandedSpecs[0]!, opts);
+  } catch (e) {
+    runLog.error((e as Error).message);
+    process.exit(2);
   }
 
   // Bring up the configured webServer (if any) once for the whole invocation,
@@ -344,6 +360,7 @@ export async function runCommand(
     svcHandle = await maybeStartServices(
       expandedSpecs[0]!,
       opts,
+      scopedSecrets,
       (terminateSync) => {
         untrackSvc = trackServices({ terminateSync });
       },
@@ -357,18 +374,6 @@ export async function runCommand(
     process.exit(2);
   }
 
-  // Inject tvault secrets into process.env so that `${env.SECRET_KEY}`
-  // placeholders in specs resolve to the actual secret values.
-  // This runs once for the whole invocation, before any spec executes.
-  // Errors are fatal because a missing required secret would just fail later
-  // in a more confusing way.
-  try {
-    await maybeInjectTvaultSecrets(expandedSpecs[0]!, opts);
-  } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
-  }
-
   // Project-level browser tuning (config `browser:` block) applied to every
   // backend this invocation constructs. Resolved once, same scope as
   // webServer/services. Best-effort: no config → undefined → adapter defaults.
@@ -377,7 +382,10 @@ export async function runCommand(
   // Domain hooks (e.g. tools/set-answer-change-path.sh temporal) run AFTER
   // services+secrets so they can restart tmux panes, and BEFORE the first spec.
   try {
-    await runHookCommands("before", opts.before);
+    await runHookCommands("before", opts.before, {
+      env: scopedSecrets.childEnv,
+      selectedTvaultKeys: scopedSecrets.selectedKeys,
+    });
   } catch (e) {
     runLog.error((e as Error).message);
     if (svcHandle) {
@@ -397,19 +405,30 @@ export async function runCommand(
   try {
     exitCode =
       expandedSpecs.length === 1 && parallel === 1
-        ? await runSingle(expandedSpecs[0]!, opts, svcHandle?.events, browser)
+        ? await runSingle(
+            expandedSpecs[0]!,
+            opts,
+            svcHandle?.events,
+            browser,
+            scopedSecrets,
+          )
         : await runBatch(
             expandedSpecs,
             parallel,
             opts,
             svcHandle?.events,
             browser,
+            scopedSecrets,
           );
   } finally {
     // after hooks run while services are still up (can query mongo/tmux).
     // Best-effort: log failures, keep the suite exit code.
     try {
-      await runHookCommands("after", opts.after, { fatal: false });
+      await runHookCommands("after", opts.after, {
+        fatal: false,
+        env: scopedSecrets.childEnv,
+        selectedTvaultKeys: scopedSecrets.selectedKeys,
+      });
     } catch (e) {
       runLog.warn(`after hook: ${(e as Error).message}`);
     }
@@ -535,6 +554,7 @@ export async function resolveBrowserConfig(
 export async function maybeStartServices(
   firstSpec: string,
   opts: RunCommandOptions,
+  scopedSecrets: ScopedSecrets,
   onSpawn: (terminateSync: () => void) => void,
 ): Promise<ServicesHandle | undefined> {
   if (opts.services === false) return undefined; // --no-services
@@ -549,6 +569,7 @@ export async function maybeStartServices(
     ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),
     ...(Object.keys(vars).length > 0 ? { vars } : {}),
+    env: scopedSecrets.env,
   });
   const cfg = ctx.services;
   if (!cfg) return undefined;
@@ -594,7 +615,9 @@ export async function maybeStartServices(
     coldStart,
     project,
     onSpawn,
-    ...(ctx.secrets ? { secrets: ctx.secrets } : {}),
+    env: scopedSecrets.childEnv,
+    selectedTvaultKeys: scopedSecrets.selectedKeys,
+    secretValues: scopedSecrets.secretValues,
     // Lifecycle narration + live subprocess output route through the logger
     // (leveled, always stderr). info lines + raw streaming show on an
     // interactive TTY (default info); --quiet/json suppresses them.
@@ -610,6 +633,7 @@ async function runSingle(
   opts: RunCommandOptions,
   servicesEvents?: ServicesHandle["events"],
   browser?: BrowserConfig,
+  scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts, browser));
@@ -634,6 +658,14 @@ async function runSingle(
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
       ...(Object.keys(vars).length > 0 ? { vars } : {}),
       ...(Object.keys(labels).length > 0 ? { labels } : {}),
+      ...(scopedSecrets
+        ? {
+            env: scopedSecrets.env,
+            childEnv: scopedSecrets.childEnv,
+            secretValues: scopedSecrets.secretValues,
+            selectedTvaultKeys: scopedSecrets.selectedKeys,
+          }
+        : {}),
       ...(servicesEvents !== undefined && servicesEvents.length > 0
         ? { servicesEvents }
         : {}),
@@ -641,6 +673,7 @@ async function runSingle(
       ...(opts.monitor ? { monitor: opts.monitor } : {}),
       ...(listener ? { listener } : {}),
       onArchiveRun: archiveRun,
+      onPublishRun: publishRun,
     });
     exitCode = result.exitCode;
     if (!(await stampIfGreen(opts, [result]))) {
@@ -674,9 +707,6 @@ async function runSingle(
 
 /* ----- multi-spec path ----- */
 
-// BatchRunResult is the v1 wire schema in src/core/schema/runBatch.v1.ts.
-// Re-export for convenience so callers don't need to know the file path.
-export type { BatchRunResult } from "../../core/schema/runBatch.v1";
 import type { BatchRunResult } from "../../core/schema/runBatch.v1";
 
 async function runBatch(
@@ -685,6 +715,7 @@ async function runBatch(
   opts: RunCommandOptions,
   servicesEvents?: ServicesHandle["events"],
   browser?: BrowserConfig,
+  scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const interactive = format === "md" && isInteractive();
@@ -758,12 +789,21 @@ async function runBatch(
             ...(opts.config !== undefined ? { configPath: opts.config } : {}),
             ...(Object.keys(vars).length > 0 ? { vars } : {}),
             ...(Object.keys(labels).length > 0 ? { labels } : {}),
+            ...(scopedSecrets
+              ? {
+                  env: scopedSecrets.env,
+                  childEnv: scopedSecrets.childEnv,
+                  secretValues: scopedSecrets.secretValues,
+                  selectedTvaultKeys: scopedSecrets.selectedKeys,
+                }
+              : {}),
             ...(servicesEvents !== undefined && servicesEvents.length > 0
               ? { servicesEvents }
               : {}),
             workerIndex,
             ...(opts.monitor ? { monitor: opts.monitor } : {}),
             onArchiveRun: archiveRun,
+            onPublishRun: publishRun,
           });
           // runSpec returns only after run.json/report.json/manifest are durable.
           // Record immediately, before best-effort annotation/stash work, so a
@@ -898,89 +938,35 @@ async function resolveBatchArtifactRoot(
 }
 
 /**
- * When `secrets.provider: tvault` is configured, resolve the tvault project
- * name (substituting `${env.X:-default}` from process.env) and inject all
- * secrets from that project into process.env. This makes them available to
- * `${env.SECRET_KEY}` placeholders in specs via parseSpec's substitute().
- *
- * Without this, tvault secrets were only injected into the seed command's env
- * (resolveSeedEnv in services.ts), not into the spec execution path.
+ * Resolve an invocation-scoped TinyVault environment. This intentionally keeps
+ * values out of process.env; callers pass the returned map only to runSpec and
+ * the explicitly authorized child processes that need it.
  */
 export async function maybeInjectTvaultSecrets(
   firstSpec: string,
   opts: RunCommandOptions,
-): Promise<void> {
+): Promise<ScopedSecrets> {
   const firstSpecAbs = isAbsolutePath(firstSpec)
     ? firstSpec
     : resolve(process.cwd(), firstSpec);
   const vars = parseVarFlags(opts.var);
 
-  // When --env <name> is passed, propagate it to CAIRN_TVAULT_ENV so that
-  // config-level `${env.CAIRN_TVAULT_ENV:-local}` resolves to the cairn env
-  // name automatically — unless the caller explicitly set CAIRN_TVAULT_ENV
-  // to decouple the two.
-  if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
-    process.env.CAIRN_TVAULT_ENV = opts.env;
-  }
-
-  const ctx = await resolveSpecRuntimeContext(firstSpecAbs, {
-    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+  const scoped = await resolveScopedSecrets(firstSpecAbs, {
+    ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),
     ...(Object.keys(vars).length > 0 ? { vars } : {}),
   });
-  const secrets = ctx.secrets;
-  if (!secrets || secrets.provider !== "tvault" || !secrets.tvault) return;
-
-  const tvaultCfg = secrets.tvault;
-  const { target } = tvaultArgs(tvaultCfg);
-  const result = await getTvaultEnv(tvaultCfg);
-  if (!result.ok) {
-    throw new Error(
-      `tvault secrets injection failed: ${result.error ?? "unknown error"}`,
-    );
-  }
-
-  // Every value pulled from the vault is sensitive regardless of its key name
-  // (e.g. MONGO_URI, DATABASE_URL). Register them so the artifact redactor
-  // scrubs their plaintext from resolved specs, run.json, report.html, etc.
-  registerSecretValues(Object.values(result.env));
-
-  // Inject all tvault secrets into process.env. Existing env vars are NOT
-  // overwritten — the caller's shell env takes precedence (e.g. when running
-  // inside `tvault run -- cairn run ...`, the secrets are already in env).
-  let injected = 0;
-  const shadowed: string[] = [];
-  for (const [key, value] of Object.entries(result.env)) {
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
-      injected++;
-    } else if (process.env[key] !== value) {
-      shadowed.push(key);
-    }
-  }
-
-  if (shadowed.length > 0) {
+  if (scoped.shadowedKeys.length > 0) {
     runLog.warn(
-      `tvault "${target}" secrets shadowed by existing env vars (bun .env auto-load or shell): ${shadowed.join(", ")}. Remove these from .env or unset them to use tvault values.`,
+      `tvault "${scoped.target}" secrets shadowed by existing env vars: ${scoped.shadowedKeys.join(", ")}`,
     );
   }
-
-  // Also inject into the required list — fail fast if any required key is
-  // still missing (not in tvault and not in the shell env).
-  if (secrets.required) {
-    const missing = secrets.required.filter(
-      (k) => process.env[k] === undefined || process.env[k] === "",
+  if (scoped.injectedKeys.length > 0) {
+    runLog.info(
+      `prepared ${scoped.injectedKeys.length} scoped secrets from tvault "${scoped.target}"`,
     );
-    if (missing.length > 0) {
-      throw new Error(
-        `tvault "${target}" is missing required secrets: ${missing.join(", ")}`,
-      );
-    }
   }
-
-  if (injected > 0) {
-    runLog.info(`injected ${injected} secrets from tvault "${target}"`);
-  }
+  return scoped;
 }
 
 export function backendOpts(

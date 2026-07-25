@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
+import { targetChildEnv } from "../../core/processEnv";
 import {
   parseSnapshot,
   type SnapshotElement,
@@ -1880,6 +1881,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       reject: false,
       cwd: this.opts.cwd,
       timeout: timeoutMs,
+      env: targetChildEnv(process.env),
     });
     if (result.timedOut) {
       // Set the flag AFTER composing the result so the retry guard's
@@ -2028,6 +2030,7 @@ function childPidsSync(pid: number): number[] {
     const r = spawnSync("pgrep", ["-P", String(pid)], {
       encoding: "utf8",
       timeout: 2_000,
+      env: targetChildEnv(process.env),
     });
     if (typeof r.stdout !== "string") return [];
     return r.stdout

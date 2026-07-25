@@ -32,6 +32,7 @@ import {
   parseFcheapSearchOutput,
 } from "../cli/commands/fcheapContract";
 import { resolveFcheapBinary, runFcheap } from "../cli/commands/fcheapClient";
+import { getTvaultKeys, resolveScopedSecrets } from "../cli/commands/secrets";
 import { selectSpecsByBlastRadius } from "../cli/commands/run";
 import {
   resolveArtifactRoot,
@@ -291,6 +292,10 @@ export function buildMcpServer(): McpServer {
         session: `cairntrace-mcp-${process.pid}`,
       });
       try {
+        const scopedSecrets = await resolveScopedSecrets(
+          path,
+          env !== undefined ? { environmentOverride: env } : undefined,
+        );
         const result = await runSpec({
           specPath: path,
           backend,
@@ -300,6 +305,10 @@ export function buildMcpServer(): McpServer {
           ...(labels !== undefined && Object.keys(labels).length > 0
             ? { labels }
             : {}),
+          env: scopedSecrets.env,
+          childEnv: scopedSecrets.childEnv,
+          secretValues: scopedSecrets.secretValues,
+          selectedTvaultKeys: scopedSecrets.selectedKeys,
         });
         return {
           content: [{ type: "text", text: summarizeRun(result) }],
@@ -1843,47 +1852,21 @@ export function buildMcpServer(): McpServer {
       const hasEnv = !!env;
 
       if (tvaultOk && hasProject && !hasGroup && !hasEnv) {
-        try {
-          const r = await execa(
-            "tvault",
-            ["list", "--project", project, "--json", "--names-only"],
-            { reject: false, timeout: 10_000 },
-          );
-          if (r.exitCode === 0) {
-            const data = JSON.parse(r.stdout);
-            result.target = project;
-            result.keys = Array.isArray(data)
-              ? data
-                  .map((k: string | { key?: string }) =>
-                    typeof k === "string" ? k : (k.key ?? ""),
-                  )
-                  .filter(Boolean)
-              : (data?.secrets?.map((s: { key: string }) => s.key) ?? []);
-          } else {
-            result.error = r.stderr || "tvault list failed";
-          }
-        } catch (e) {
-          result.error = (e as Error).message;
-        }
+        const listed = await getTvaultKeys(
+          { project },
+          { skipAvailabilityCheck: true },
+        );
+        result.target = project;
+        result.keys = listed.keys;
+        result.error = listed.error;
       } else if (tvaultOk && hasGroup && hasEnv && !hasProject) {
-        // Group mode: tvault list doesn't support --group/--env.
-        // Use tvault env to get resolved keys (values discarded).
-        try {
-          const r = await execa(
-            "tvault",
-            ["env", "--group", group, "--env", env, "--format", "json"],
-            { reject: false, timeout: 10_000 },
-          );
-          if (r.exitCode === 0) {
-            const data = JSON.parse(r.stdout);
-            result.target = `${group}/${env}`;
-            result.keys = Object.keys(data).toSorted();
-          } else {
-            result.error = r.stderr || "tvault env failed";
-          }
-        } catch (e) {
-          result.error = (e as Error).message;
-        }
+        const listed = await getTvaultKeys(
+          { group, env },
+          { skipAvailabilityCheck: true },
+        );
+        result.target = `${group}/${env}`;
+        result.keys = listed.keys;
+        result.error = listed.error;
       } else if (tvaultOk && (hasProject || hasGroup || hasEnv)) {
         result.error = "specify either project or both group+env — not both";
       } else if (tvaultOk) {

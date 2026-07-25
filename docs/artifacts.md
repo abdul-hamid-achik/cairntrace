@@ -201,6 +201,16 @@ Treat the entire run directory as sensitive even when its text files are
 redacted. Prefer `on-failure`/`never` capture policies for evidence you do not
 need, and review binary files before sharing or stashing the pack.
 
+## Bounded remote publication
+
+`retention.publish.enabled` can move a pruned, complete run to the private
+file.cheap service. Cairntrace creates one deterministic mode-0600 `.tar.gz`,
+rejects links and special files, enforces the 2 MiB remote limit, and invokes
+`fcheap publish` with fixed producer metadata. `retentionDays` defaults to
+seven and is bounded to 1–31 days. The local run is removed only after the
+server-verified receipt matches the package SHA-256, size, kind, and producer.
+The publisher token is isolated from browsers, targets, hooks, and services.
+
 ## Sharing an artifact pack
 
 A run dir is a directory. Compress it

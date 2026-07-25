@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { fcheapPublisherEnv, targetChildEnv } from "../../core/processEnv";
 
 export interface FcheapProcessResult {
   ok: boolean;
@@ -10,6 +11,8 @@ export interface FcheapProcessResult {
 export interface FcheapProcessOptions {
   json?: boolean;
   timeoutMs?: number;
+  /** Explicit child environment. Defaults to a credential-stripped map. */
+  env?: NodeJS.ProcessEnv;
 }
 
 const FCHEAP_INSTALL_HINT =
@@ -36,10 +39,16 @@ export async function runFcheap(
   opts: FcheapProcessOptions = {},
 ): Promise<FcheapProcessResult> {
   const fullArgs = opts.json ? [...args, "--json"] : args;
+  const requestedEnv = opts.env ?? process.env;
+  const env =
+    args[0] === "publish" && opts.env
+      ? fcheapPublisherEnv(requestedEnv)
+      : targetChildEnv(requestedEnv);
   try {
-    const result = await execa(resolveFcheapBinary(), fullArgs, {
+    const result = await execa(resolveFcheapBinary(env), fullArgs, {
       reject: false,
       timeout: opts.timeoutMs ?? 60_000,
+      env,
     });
     return {
       ok: result.exitCode === 0,

@@ -24,7 +24,11 @@ const testClock = { now: 1_700_000_000_000 };
 
 // Track execa calls: both `execa(cmd, args[], opts)` (tmux/docker) and
 // `execa(command, optsObject)` (runShellWithTimeout for docker/seed commands).
-const execaCalls: { cmd: string; args: string[] }[] = [];
+const execaCalls: {
+  cmd: string;
+  args: string[];
+  opts?: Record<string, unknown>;
+}[] = [];
 
 // Track shell command calls (runShell from webServer + runShellWithTimeout
 // via execa with shell:true). Keyed by the command string.
@@ -53,31 +57,37 @@ let seedStateReadResult: { shouldRun: boolean; reason: string } | undefined;
 vi.mock("execa", () => ({
   // Non-async so a streaming child (thenable + .stdout/.stderr streams) can be
   // returned directly without being re-wrapped in a Promise.
-  execa: vi.fn((cmd: string, argsOrOpts: unknown) => {
-    // Two call patterns:
-    // 1. execa("tmux", ["kill-session", ...], { opts }) — args is an array
-    // 2. execa("docker compose up -d", { shell: true, cwd, env, ... }) — opts is an object
-    if (Array.isArray(argsOrOpts)) {
-      // tmux/docker call: execa(cmd, argsArray, optsObject)
-      const args = argsOrOpts as string[];
-      execaCalls.push({ cmd, args });
-      return execaImpl
-        ? execaImpl(cmd, args)
-        : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
-    }
-    // Shell call: execa(command, { shell: true, cwd, env, timeout?, ... })
-    const opts = (argsOrOpts as Record<string, unknown>) ?? {};
-    shellCalls.push({
-      command: cmd,
-      opts: { cwd: opts.cwd as string | undefined },
-    });
-    shellOptsCalls.push({ command: cmd, opts });
-    return shellChildImpl
-      ? shellChildImpl(cmd, argsOrOpts)
-      : shellImpl
-        ? shellImpl(cmd, argsOrOpts)
-        : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
-  }),
+  execa: vi.fn(
+    (
+      cmd: string,
+      argsOrOpts: unknown,
+      commandOpts?: Record<string, unknown>,
+    ) => {
+      // Two call patterns:
+      // 1. execa("tmux", ["kill-session", ...], { opts }) — args is an array
+      // 2. execa("docker compose up -d", { shell: true, cwd, env, ... }) — opts is an object
+      if (Array.isArray(argsOrOpts)) {
+        // tmux/docker call: execa(cmd, argsArray, optsObject)
+        const args = argsOrOpts as string[];
+        execaCalls.push({ cmd, args, opts: commandOpts });
+        return execaImpl
+          ? execaImpl(cmd, args)
+          : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      }
+      // Shell call: execa(command, { shell: true, cwd, env, timeout?, ... })
+      const opts = (argsOrOpts as Record<string, unknown>) ?? {};
+      shellCalls.push({
+        command: cmd,
+        opts: { cwd: opts.cwd as string | undefined },
+      });
+      shellOptsCalls.push({ command: cmd, opts });
+      return shellChildImpl
+        ? shellChildImpl(cmd, argsOrOpts)
+        : shellImpl
+          ? shellImpl(cmd, argsOrOpts)
+          : Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+    },
+  ),
 }));
 
 vi.mock("./webServer", () => ({
@@ -95,34 +105,6 @@ vi.mock("./webServer", () => ({
     // Advance the virtual clock so Date.now()-based wait loops terminate.
     testClock.now += ms;
   }),
-}));
-
-// Configurable tvault mock implementation (reset per-test).
-let tvaultImpl:
-  | ((cfg: {
-      project?: string;
-      group?: string;
-      env?: string;
-    }) => Promise<{ ok: boolean; env: Record<string, string>; error?: string }>)
-  | undefined;
-
-vi.mock("../../cli/commands/secrets", () => ({
-  getTvaultEnv: vi.fn(
-    async (cfg: { project?: string; group?: string; env?: string }) => {
-      if (tvaultImpl) return tvaultImpl(cfg);
-      return { ok: true, env: {} };
-    },
-  ),
-  tvaultArgs: vi.fn(
-    (cfg: { project?: string; group?: string; env?: string }) => {
-      if (cfg.project)
-        return { args: ["--project", cfg.project], target: cfg.project };
-      return {
-        args: ["--group", cfg.group!, "--env", cfg.env!],
-        target: `${cfg.group}/${cfg.env}`,
-      };
-    },
-  ),
 }));
 
 vi.mock("./seedState", () => ({
@@ -186,7 +168,6 @@ beforeEach(async () => {
   shellChildImpl = undefined;
   probeOnceImpl = undefined;
   seedStateReadResult = undefined;
-  tvaultImpl = undefined;
   stashImpl = undefined;
   stashCalls = [];
   startedHandles = [];
@@ -739,6 +720,44 @@ describe("startServices — seed phase", () => {
         { configDir: dir, project: "test", coldStart: false },
       ),
     ).rejects.toThrow(/seed command failed/);
+  });
+
+  it("redacts scoped seed secrets from streamed output and failure diagnostics", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    shellImpl = async () => ({
+      exitCode: 2,
+      stdout: "seed token=seed-secret-value",
+      stderr: "failed with seed-secret-value",
+    });
+    const output: string[] = [];
+
+    await expect(
+      startServices(
+        { seed: { command: "yarn seed" } },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          env: { DATABASE_URL: "seed-secret-value" },
+          secretValues: ["seed-secret-value"],
+          onOutput: (chunk) => output.push(chunk),
+        },
+      ),
+    ).rejects.toThrow(/\[redacted\]/);
+
+    await expect(
+      startServices(
+        { seed: { command: "yarn seed" } },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          env: { DATABASE_URL: "seed-secret-value" },
+          secretValues: ["seed-secret-value"],
+        },
+      ),
+    ).rejects.not.toThrow(/seed-secret-value/);
+    expect(output.join("\n")).not.toContain("seed-secret-value");
   });
 });
 
@@ -1820,18 +1839,26 @@ describe("startServices — seed env injection", () => {
     const handle = track(
       await startServices(
         { seed: { command: "yarn seed", env: { CUSTOM_VAR: "hello" } } },
-        { configDir: dir, project: "test", coldStart: false },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          env: {
+            FILECHEAP_INGEST_TOKEN: "publisher-only",
+          },
+        },
       ),
     );
 
     expect(capturedEnv).toBeDefined();
     expect(capturedEnv!.CUSTOM_VAR).toBe("hello");
+    expect(capturedEnv!.FILECHEAP_INGEST_TOKEN).toBeUndefined();
     void handle;
   });
 });
 
 describe("startServices — tvault integration", () => {
-  it("injects tvault secrets into seed env when secrets.provider is tvault", async () => {
+  it("uses the invocation-scoped secrets for the seed environment", async () => {
     seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
     let capturedEnv: Record<string, string | undefined> | undefined;
 
@@ -1840,14 +1867,6 @@ describe("startServices — tvault integration", () => {
       return { exitCode: 0, stdout: "", stderr: "" };
     };
 
-    tvaultImpl = async () => ({
-      ok: true,
-      env: {
-        MONGO_SOURCE_PASSWORD: "super-secret",
-        ES_SOURCE_PASSWORD: "es-secret",
-      },
-    });
-
     const handle = track(
       await startServices(
         { seed: { command: "yarn seed", ttlSeconds: 3600 } },
@@ -1855,9 +1874,9 @@ describe("startServices — tvault integration", () => {
           configDir: dir,
           project: "test",
           coldStart: false,
-          secrets: {
-            provider: "tvault",
-            tvault: { project: "sample-app" },
+          env: {
+            MONGO_SOURCE_PASSWORD: "super-secret",
+            ES_SOURCE_PASSWORD: "es-secret",
           },
         },
       ),
@@ -1869,14 +1888,8 @@ describe("startServices — tvault integration", () => {
     void handle;
   });
 
-  it("throws ServicesError when tvault fails to provide secrets", async () => {
+  it("does not fetch a full TinyVault project when no scoped keys were supplied", async () => {
     seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
-
-    tvaultImpl = async () => ({
-      ok: false,
-      env: {},
-      error: "vault is locked",
-    });
 
     await expect(
       startServices(
@@ -1885,13 +1898,9 @@ describe("startServices — tvault integration", () => {
           configDir: dir,
           project: "test",
           coldStart: false,
-          secrets: {
-            provider: "tvault",
-            tvault: { project: "sample-app" },
-          },
         },
       ),
-    ).rejects.toThrow(/tvault secrets for seed.*vault is locked/);
+    ).resolves.toBeDefined();
   });
 
   it("skips tvault when secrets.provider is not tvault", async () => {
@@ -1901,13 +1910,6 @@ describe("startServices — tvault integration", () => {
     shellImpl = async (_command, opts) => {
       capturedEnv = (opts as { env?: Record<string, string | undefined> }).env;
       return { exitCode: 0, stdout: "", stderr: "" };
-    };
-
-    // Ensure tvault is not called
-    let tvaultCalled = false;
-    tvaultImpl = async () => {
-      tvaultCalled = true;
-      return { ok: true, env: {} };
     };
 
     const handle = track(
@@ -1923,9 +1925,7 @@ describe("startServices — tvault integration", () => {
     );
 
     expect(capturedEnv).toBeDefined();
-    // Should not have any tvault-injected secrets
     expect(capturedEnv!.MONGO_SOURCE_PASSWORD).toBeUndefined();
-    expect(tvaultCalled).toBe(false);
     void handle;
   });
 });
@@ -2374,6 +2374,53 @@ describe("startServices — tmux session options and env", () => {
     const keys = setEnvCalls.map((c) => c.args[3]);
     expect(keys).toContain("NODE_ENV");
     expect(keys).toContain("LOG_LEVEL");
+    void handle;
+  });
+
+  it("creates tmux without the publisher-only file.cheap credential", async () => {
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "ready", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 2000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "ready" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: true,
+          env: {
+            PATH: process.env.PATH,
+            FILECHEAP_INGEST_TOKEN: "publisher-only",
+          },
+        },
+      ),
+    );
+
+    const create = execaCalls.find(
+      (call) => call.cmd === "tmux" && call.args[0] === "new-session",
+    );
+    expect(create?.opts?.env).toMatchObject({ PATH: process.env.PATH });
+    expect(
+      (create?.opts?.env as Record<string, string | undefined> | undefined)
+        ?.FILECHEAP_INGEST_TOKEN,
+    ).toBeUndefined();
     void handle;
   });
 

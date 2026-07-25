@@ -63,6 +63,33 @@ describe("AgentBrowserAdapter", () => {
     expect(secondArgv).not.toContain("find");
   });
 
+  it("does not expose the file.cheap ingest credential to agent-browser", async () => {
+    const previous = process.env.FILECHEAP_INGEST_TOKEN;
+    process.env.FILECHEAP_INGEST_TOKEN = "publisher-only";
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: "ok",
+      stderr: "",
+    });
+    try {
+      const adapter = new AgentBrowserAdapter({ session: "protected-env" });
+      await adapter.runStep({ open: "https://example.com" });
+    } finally {
+      if (previous === undefined) delete process.env.FILECHEAP_INGEST_TOKEN;
+      else process.env.FILECHEAP_INGEST_TOKEN = previous;
+    }
+
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.not.objectContaining({
+          FILECHEAP_INGEST_TOKEN: expect.anything(),
+        }),
+      }),
+    );
+  });
+
   it("pre-scrolls selector hovers before calling top-level hover", async () => {
     execaMock.mockResolvedValue({
       exitCode: 0,

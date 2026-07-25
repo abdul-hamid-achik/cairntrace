@@ -38,6 +38,7 @@ environments:                         # required — at least one environment
 
 secrets:                              # default secrets block (an env-level secrets replaces it)
   provider: tvault                    # env | tvault
+  keys: [API_KEY, DB_URL]             # selected TinyVault values for this invocation
   required: [API_KEY, DB_URL]         # fail the run if these are unset/empty
   tvault:                             # required when provider: tvault
     project: my-app                    # direct mode — OR —
@@ -47,6 +48,7 @@ secrets:                              # default secrets block (an env-level secr
 retention:
   keepRuns: 10                        # prune to newest N runs/spec after every run
   keepFailedRuns: 10                  # newest N failed/errored runs survive pruning anyway (default: 10)
+  publish: { enabled: true, retentionDays: 7 } # explicit remote archive before pruning
 
 report:
   theme: cairn                        # cairn | slate | midnight | contrast
@@ -128,7 +130,7 @@ The active environment is `--env <name>`, else `defaultEnvironment`, else `local
 For every `${baseUrl}`, `${env.X}`, `${vars.X}`, or `${secrets.X}` in a spec:
 
 - `${baseUrl}` → the active environment's `baseUrl`.
-- `${env.X}` → `process.env` (with tvault secrets injected when `secrets.provider: tvault`). `${env.X:-default}` resolves a default expression when the var is missing or empty; nested placeholders inside the default work.
+- `${env.X}` → the invocation environment. With `secrets.provider: tvault`, only `secrets.keys`, `secrets.required`, and names referenced in the root spec or its imported actions are resolved; they never mutate global `process.env`. `${env.X:-default}` resolves a default expression when the var is missing or empty; nested placeholders inside the default work.
 - `${vars.X}` → merged vars, in priority order: CLI `--var key=value` (highest) > spec `vars:` > `environments.<env>.vars`.
 - `${secrets.X}` → the secrets bag (env or tvault-resolved).
 

@@ -12,7 +12,6 @@ import type {
   TmuxSessionOption,
   TmuxWindow,
 } from "../schema/config.v1";
-import type { SecretsConfig, TvaultConfig } from "../schema/config.v1";
 import {
   isTruthyEnv,
   probeOnce,
@@ -22,6 +21,8 @@ import {
   type SpawnOpts,
 } from "./webServer";
 import { SeedStateStore } from "./seedState";
+import { createArtifactRedactor } from "../artifacts/redaction";
+import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
 
 /**
  * Multi-service environment lifecycle for `cairn run`:
@@ -40,8 +41,12 @@ export interface StartServicesContext {
   coldStart?: boolean;
   /** Project name (from config) — used for seed state file naming. */
   project: string;
-  /** Secrets config for tvault injection into the seed command. */
-  secrets?: SecretsConfig;
+  /** Invocation-scoped environment; never copied into process.env. */
+  env?: NodeJS.ProcessEnv;
+  /** Explicit TinyVault names that may retain a `TVAULT_` prefix in targets. */
+  selectedTvaultKeys?: Iterable<string>;
+  /** Literal vault values used exclusively to redact service diagnostics. */
+  secretValues?: Iterable<string>;
   /** Optional narrator for interactive runs (stderr lifecycle lines). */
   log?: (message: string) => void;
   /** Optional live streamer for service command output (interactive runs). */
@@ -114,6 +119,16 @@ const DEFAULT_HC_TIMEOUT_S = 10;
 /** Interactive shells that mean "service is not running in this pane". */
 const TMUX_IDLE_SHELL_RE =
   /^(zsh|bash|fish|sh|dash|ksh|tcsh|csh|-zsh|-bash|-fish)$/i;
+
+function targetEnv(
+  ctx: StartServicesContext,
+  overrides: Record<string, string | undefined> = {},
+): NodeJS.ProcessEnv {
+  return targetChildEnvWithSelectedTvaultKeys(
+    { ...(ctx.env ?? process.env), ...overrides },
+    ctx.selectedTvaultKeys ?? [],
+  );
+}
 
 /**
  * Start the full services lifecycle. Each phase is optional — only the
@@ -234,7 +249,10 @@ export async function startServices(
         }
         try {
           ctx.log?.(`services: teardown (${cmd})`);
-          await runShell(cmd, { cwd: ctx.configDir, env: process.env });
+          await runShell(cmd, {
+            cwd: ctx.configDir,
+            env: targetEnv(ctx),
+          });
         } catch {
           // teardown is best-effort, never fatal
         }
@@ -310,7 +328,10 @@ async function teardownStartedPhases(
     }
     try {
       ctx.log?.(`services: teardown (${cmd})`);
-      await runShell(cmd, { cwd: ctx.configDir, env: process.env });
+      await runShell(cmd, {
+        cwd: ctx.configDir,
+        env: targetEnv(ctx),
+      });
     } catch {
       // teardown is best-effort, never fatal
     }
@@ -371,7 +392,7 @@ async function startDocker(
 ): Promise<void> {
   const reuse = cfg.reuseExisting ?? !coldStart;
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
-  const env = { ...process.env, ...cfg.env };
+  const env = targetEnv(ctx, cfg.env);
   const timeout = cfg.readyTimeoutMs ?? DEFAULT_DOCKER_TIMEOUT_MS;
   // Snapshot before any compose command so cold-start re-runs of
   // `compose up` against already-running containers don't look like a refresh.
@@ -514,10 +535,11 @@ async function startSeed(
   const check = store.checkFreshness(ctx.project, cfg, state);
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
   const env = await resolveSeedEnv(cfg, ctx);
+  const redactor = createArtifactRedactor(undefined, env, ctx.secretValues);
   const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
   if (!check.shouldRun) {
-    ctx.log?.(`services: seed — skipping (${check.reason})`);
+    ctx.log?.(redactor.text(`services: seed — skipping (${check.reason})`));
     emit("seed", "skip", check.reason);
     await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
     return;
@@ -525,8 +547,10 @@ async function startSeed(
 
   // If the fingerprint + TTL pass but freshnessCheck is configured, run it.
   if (check.reason === "freshness-check-pending" && cfg.freshnessCheck) {
-    ctx.log?.(`services: seed — freshness check (${cfg.freshnessCheck})`);
-    emit("seed", "freshness-check", cfg.freshnessCheck);
+    ctx.log?.(
+      redactor.text(`services: seed — freshness check (${cfg.freshnessCheck})`),
+    );
+    emit("seed", "freshness-check", redactor.text(cfg.freshnessCheck));
     const fr = await runShellWithTimeout(
       cfg.freshnessCheck,
       { cwd, env },
@@ -542,7 +566,9 @@ async function startSeed(
       return;
     }
     ctx.log?.(
-      `services: seed — freshness check failed (exit ${fr.exitCode}), re-seeding`,
+      redactor.text(
+        `services: seed — freshness check failed (exit ${fr.exitCode}), re-seeding`,
+      ),
     );
     emit(
       "seed",
@@ -554,17 +580,15 @@ async function startSeed(
     );
   }
 
-  ctx.log?.(`services: seed — running (${cfg.command})`);
-  emit("seed", "start", cfg.command);
-  const onChunk = ctx.onOutput
-    ? (_s: "stdout" | "stderr", chunk: string) => ctx.onOutput!(chunk)
-    : undefined;
-  const r = await runShellWithTimeout(
-    cfg.command,
-    { cwd, env },
-    timeout,
-    onChunk,
-  );
+  ctx.log?.(redactor.text(`services: seed — running (${cfg.command})`));
+  emit("seed", "start", redactor.text(cfg.command));
+  const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
+  // Redact the complete stream before forwarding it. Redacting individual
+  // chunks could expose a value split across chunk boundaries.
+  if (ctx.onOutput) {
+    if (r.stdout) ctx.onOutput(redactor.text(r.stdout));
+    if (r.stderr) ctx.onOutput(redactor.text(r.stderr));
+  }
 
   // Record the result regardless of exit code (failed seeds are tracked too).
   await store.recordRun(ctx.project, cfg, r.exitCode);
@@ -572,13 +596,15 @@ async function startSeed(
   if (r.exitCode !== 0) {
     emit("seed", "fail", `exit ${r.exitCode}`, { exitCode: r.exitCode });
     throw new ServicesError(
-      `seed command failed (exit ${r.exitCode}): ${cfg.command}\n` +
-        tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+      redactor.text(
+        `seed command failed (exit ${r.exitCode}): ${cfg.command}\n` +
+          tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+      ),
     );
   }
   ctx.log?.("services: seed — complete");
   emit("seed", "complete", "seed complete");
-  await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
+  await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit, redactor);
 }
 
 /**
@@ -590,13 +616,14 @@ async function runSeedPostCommands(
   opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
   ctx: StartServicesContext,
   emit: EmitFn,
+  redactor = createArtifactRedactor(undefined, opts.env, ctx.secretValues),
 ): Promise<void> {
   const commands = cfg.postCommands ?? [];
   if (commands.length === 0) return;
 
   for (const command of commands) {
-    ctx.log?.(`services: seed — postCommand (${command})`);
-    emit("seed", "start", `postCommand: ${command}`);
+    ctx.log?.(redactor.text(`services: seed — postCommand (${command})`));
+    emit("seed", "start", redactor.text(`postCommand: ${command}`));
     const r = await runShellWithTimeout(
       command,
       { cwd: opts.cwd, env: opts.env },
@@ -607,57 +634,28 @@ async function runSeedPostCommands(
         exitCode: r.exitCode,
       });
       throw new ServicesError(
-        `seed postCommand failed (exit ${r.exitCode}): ${command}\n` +
-          tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+        redactor.text(
+          `seed postCommand failed (exit ${r.exitCode}): ${command}\n` +
+            tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+        ),
       );
     }
-    emit("seed", "complete", `postCommand ok: ${command}`);
+    emit("seed", "complete", redactor.text(`postCommand ok: ${command}`));
   }
 }
 
 /**
- * Resolve env for the seed command: process.env + cfg.env + tvault secrets.
- * This is where `getTvaultEnv` finally gets called from the run path.
+ * Resolve the already-authorized child environment plus seed overrides. The
+ * CLI resolves a selected TinyVault key set before lifecycle startup; seed
+ * must never widen that scope by fetching an entire vault project itself.
  */
 async function resolveSeedEnv(
   cfg: SeedConfig,
   ctx: StartServicesContext,
 ): Promise<NodeJS.ProcessEnv> {
-  let env: NodeJS.ProcessEnv = { ...process.env, ...cfg.env };
-
-  if (ctx.secrets?.provider === "tvault" && ctx.secrets.tvault) {
-    const tvaultCfg = ctx.secrets.tvault;
-    // Lazy import to avoid circular dependency (secrets.ts imports execa, not runner code).
-    const { tvaultArgs } = await import("../../cli/commands/secrets");
-    const { target } = tvaultArgs(tvaultCfg);
-    const tvaultResult = await getTvaultEnvSafe(tvaultCfg);
-    if (!tvaultResult.ok) {
-      throw new ServicesError(`tvault secrets for seed: ${tvaultResult.error}`);
-    }
-    env = { ...env, ...tvaultResult.env };
-    ctx.log?.(
-      `services: seed — injected ${Object.keys(tvaultResult.env).length} secrets from tvault "${target}"`,
-    );
-  }
+  const env = targetEnv(ctx, cfg.env);
 
   return env;
-}
-
-/**
- * Safe wrapper around `getTvaultEnv` that doesn't expose secret values.
- * Delegates to the secrets module but keeps the import lazy to avoid a
- * circular dependency (secrets.ts imports execa, not runner code).
- */
-async function getTvaultEnvSafe(
-  cfg: TvaultConfig,
-): Promise<{ ok: boolean; env: Record<string, string>; error?: string }> {
-  try {
-    // Dynamic import to avoid circular dependency.
-    const { getTvaultEnv } = await import("../../cli/commands/secrets");
-    return await getTvaultEnv(cfg);
-  } catch (e) {
-    return { ok: false, env: {}, error: (e as Error).message };
-  }
 }
 
 /* ----- Phase 3: tmux ----- */
@@ -741,6 +739,10 @@ async function startTmux(
   await execa("tmux", newSessionArgs, {
     reject: false,
     timeout: 5_000,
+    // A tmux server inherits this environment exactly once. Use the same
+    // narrow target scope as docker/seed so publisher credentials never leak
+    // into long-lived service panes.
+    env: targetEnv(ctx, cfg.env),
   });
 
   // Apply session-level options.
@@ -891,7 +893,7 @@ async function waitForAllTmuxWindows(
   for (const win of cfg.windows) {
     if (!win.healthcheck) continue;
     emit("tmux", "healthcheck", `checking ${win.name}`, { window: win.name });
-    const winEnv = { ...process.env, ...cfg.env, ...win.env };
+    const winEnv = targetEnv(ctx, { ...cfg.env, ...win.env });
     const hcResult = await runHealthcheck(
       win.healthcheck,
       { cwd: resolveCwd(win.cwd, ctx.configDir), env: winEnv },
@@ -1015,7 +1017,7 @@ async function sendWindowCommands(
       try {
         const probe = await runShell(pre.skipIf, {
           cwd: resolveCwd(win.cwd, ctx.configDir),
-          env: process.env,
+          env: targetEnv(ctx, win.env),
         });
         if (probe.exitCode === 0) {
           ctx.log?.(

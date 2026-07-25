@@ -21,6 +21,8 @@ export interface RuntimeContextOptions {
   cwd?: string;
   /** Forwarded to loadConfig: substitute for `${env.X}` unset with no default. */
   envRef?: (name: string) => string;
+  /** Scoped environment used for config interpolation. Defaults to process.env. */
+  env?: Record<string, string | undefined>;
 }
 
 export interface SpecRuntimeContext {
@@ -55,11 +57,10 @@ export async function resolveSpecRuntimeContext(
   const absSpecPath = isAbsolute(specPath)
     ? specPath
     : resolve(opts.cwd ?? process.cwd(), specPath);
-  const loaded = await loadConfig(
-    absSpecPath,
-    opts.configPath,
-    opts.envRef ? { envRef: opts.envRef } : {},
-  );
+  const loaded = await loadConfig(absSpecPath, opts.configPath, {
+    ...(opts.envRef ? { envRef: opts.envRef } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
+  });
   const specSettings = await peekSpecSettings(absSpecPath);
   const envName =
     opts.envOverride ??

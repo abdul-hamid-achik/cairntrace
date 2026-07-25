@@ -345,8 +345,9 @@ environments:
     baseUrl: http://localhost:8080
 secrets:
   provider: tvault
+  keys: [MONGO_PASSWORD, ES_PASSWORD] # optional explicit allowlist
   required: [MONGO_PASSWORD, ES_PASSWORD]
-  tvault: { project: myapp }
+  tvault: { project: myapp, identity: ci-reader }
 services:
   docker:
     command: "docker compose up -d"
@@ -400,6 +401,18 @@ config environment vars < top-level spec `vars:` < repeatable CLI
 `--var key=value`. Built-ins `${worker.index}` and `${run.token}` can derive
 isolated users or tenants for realtime/stateful backends.
 
+TinyVault secrets are resolved once into an invocation-scoped environment.
+Cairntrace requests only explicit `secrets.keys`, `secrets.required`, and keys
+referenced as `${env.NAME}` or `${secrets.NAME}` in the root spec or imported
+actions; it never exports an entire project to discover a value. They are
+available to spec substitution,
+preconditions, hooks, and the seed child process, but are never written into
+Cairntrace's global `process.env`. Target children do not inherit `TVAULT_*`
+client controls (unless that exact key is explicitly selected). The MCP
+`cairn_run` tool uses the same scope. `tvault.identity` is forwarded to the
+selected-key value-resolution command; `cairn secrets` lists key names through
+TinyVault metadata commands and never resolves plaintext values.
+
 ```yaml
 version: 1
 defaultEnvironment: local
@@ -445,11 +458,11 @@ environments:
     baseUrl: http://localhost:8080
   dev:
     baseUrl: https://dev.example.com
-    services: false   # no docker/seed/tmux — app is remote
+    services: false # no docker/seed/tmux — app is remote
   test:
     baseUrl: https://test.example.com
     services: false
-    secrets:           # different tvault project for test env
+    secrets: # different tvault project for test env
       provider: tvault
       tvault: { project: test-project }
 ```
@@ -570,7 +583,7 @@ environments:
   local: {}
 stash:
   enabled: true
-  autoStash: on-failure   # or never (default)
+  autoStash: on-failure # or never (default)
   tags: [regression, audit]
 ```
 
@@ -583,6 +596,40 @@ The MCP server exposes `cairn_stash_save`, `cairn_stash_list`,
 `cairn_stash_info`, `cairn_stash_restore`, and `cairn_stash_search`. Info and
 restore validate file.cheap v0.30 output. An unverified restore is a structured
 tool error that keeps the restore receipt for forensic review.
+
+### Explicit remote publication
+
+Local fcheap stashes and `ArtifactRefV1` records are not uploads. To publish a
+pruned run to a remote fcheap provider, opt in explicitly:
+
+```yaml
+retention:
+  keepRuns: 3
+  publish: { enabled: true, retentionDays: 7 }
+```
+
+When enabled, Cairntrace rejects links and special files, packages the complete
+run directory into a mode-0600 temporary `.tar.gz`, and calls `fcheap publish`
+with that one regular file plus its content type, kind, and producer metadata.
+`retentionDays` is required to remain between 1 and 31 days and defaults to
+seven; Cairntrace passes the resulting fixed expiry to file.cheap so demo
+evidence cannot become an unbounded remote-retention leak.
+The compressed archive must fit file.cheap's 2 MiB upload limit (Cairntrace also
+bounds source input to 64 MiB); otherwise the local run is retained. Pruning is
+authorized only after the strict `filecheap-publish/1` receipt reports
+`server-sha256`, its SHA-256 and size match the exact archive bytes, and its
+credential-free ArtifactRef is the canonical private `fcheap-cloud` URI for the
+returned artifact with kind `cairntrace.run`.
+
+`FILECHEAP_INGEST_TOKEN` is publisher-only: Cairntrace removes it from browser,
+seed, hook, precondition, and ordinary fcheap child environments. The explicit
+`fcheap publish` process receives only a small operating-system execution
+allowlist, `FILECHEAP_ARTIFACT_SERVICE_URL`, and the ingest token; unrelated
+database, Vercel, Blob, TinyVault, and application values are not forwarded.
+Supply the token through the invoking environment, never Cairntrace config.
+Signed URLs and administrator credentials are neither accepted nor printed. A
+missing publish-capable fcheap binary, invalid receipt, unsafe/oversized
+archive, or any publication failure retains the complete local run.
 
 ### Investigate & Audit (fcheap connect + vecgrep + vidtrace)
 
@@ -629,11 +676,11 @@ version: 1
 environments:
   local: {}
 investigate:
-  codebaseDir: ./src       # default for `--connect`
-  mode: hybrid             # semantic | keyword | hybrid
-  limit: 10                # max code matches
-  index: false             # build/refresh vecgrep before connecting
-  autoInvestigate: never   # on-failure | never
+  codebaseDir: ./src # default for `--connect`
+  mode: hybrid # semantic | keyword | hybrid
+  limit: 10 # max code matches
+  index: false # build/refresh vecgrep before connecting
+  autoInvestigate: never # on-failure | never
 ```
 
 The MCP server exposes `cairn_investigate` and `cairn_audit` tools that mirror
@@ -693,10 +740,11 @@ annotate:
   source: cairntrace
 
 secrets:
-  provider: tvault          # env | tvault
+  provider: tvault # env | tvault
+  keys: [API_KEY] # explicit values a seed/hook may require
   required: [API_KEY]
   tvault:
-    project: myapp-test     # direct mode
+    project: myapp-test # direct mode
 ```
 
 The MCP server exposes `cairn_annotate` and `cairn_secrets_status` tools that
@@ -706,35 +754,35 @@ mirror the CLI. Both degrade gracefully when codemap/tvault aren't installed.
 
 Common commands:
 
-| Command | Purpose |
-| --- | --- |
-| `cairn run <spec...>` | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. |
-| `cairn clean` | Prune old run directories (`--keep N` per spec, or `--all`; honors `--config` and `--artifact-root`). |
-| `cairn spec verify <spec>` | Lint a spec and optionally stamp `contractHash` with `--stamp`. |
-| `cairn spec heal <spec>` | Run a spec and propose locator-drift fixes. Add `--apply` to write them. |
-| `cairn snapshot <url>` | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`. |
-| `cairn discover <url>` | Inspect a page and return the full accessibility tree + locator inventory. Supports `--roles`, `--testids`, `--env`, `--headed`, `--mock`, `--backend`, `--config`. |
-| `cairn docs [topic]` | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, or `discovery`. |
-| `cairn explain` | Return the current agent-facing command, step, verifier, and rule surface. |
-| `cairn diff <runA> <runB>` | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`. |
-| `cairn checkpoint list/show/delete` | Manage saved browser-state checkpoints. |
-| `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session. |
-| `cairn login <name> --url <url>` | Open a headed login flow and save a checkpoint. |
-| `cairn export playwright <spec\|dir>` | Emit `@playwright/test` `.spec.ts`/`.spec.js` (`--lang`, `--out-dir`, `--project`, `--config`/`--env`/`--var`, coverage report). |
-| `cairn import playwright <file>` | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines. |
-| `cairn stash save <run-id>` | Stash a run directory to the fcheap vault for persistence and search. Supports `--tag`, `--tool`, `--source`. |
-| `cairn stash list` | List stashes, optionally filtered by `--tag` or `--tool`. |
-| `cairn stash info <stash-id>` | Show detailed metadata and file list for a stash. |
-| `cairn stash restore <stash-id>` | Restore a stash to a directory (`--to <dir>`). |
-| `cairn stash search <query>` | Search across all stashed runs. Supports `--mode keyword\|semantic\|hybrid` and `--limit`. |
-| `cairn investigate <run-id>` | Stash a run and optionally run `fcheap connect` to find code responsible for failures. `--codebase` implies connect; supports `--connect`, `--query`, `--clips`, `--mode`, `--limit`, and `--index`. |
-| `cairn audit <spec>` | Run a cold Playwright audit with forced video capture, optional vidtrace extraction, and optional code connection. Supports `--codebase`, `--connect`, `--index`, `--speed`, `--slow-mo`, `--mode`, `--limit`, and `--no-cold-start`. |
-| `cairn clip <run-ref>` | Cut named clips from a run video using vidtrace. Supports repeatable `--label name=start-end`, `--out`, `--name`, `--reencode`, `--stash`, `--tag`. |
-| `cairn annotate <symbol>` | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`. |
-| `cairn secrets` | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed). |
-| `cairn config validate` | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid. |
-| `cairn services status` | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session). Supports `--config`, `--project`. |
-| `cairn mcp` | Start the MCP server on stdio. |
+| Command                                        | Purpose                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cairn run <spec...>`                          | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. |
+| `cairn clean`                                  | Prune old run directories (`--keep N` per spec, or `--all`; honors `--config` and `--artifact-root`).                                                                                                                                                                                                              |
+| `cairn spec verify <spec>`                     | Lint a spec and optionally stamp `contractHash` with `--stamp`.                                                                                                                                                                                                                                                    |
+| `cairn spec heal <spec>`                       | Run a spec and propose locator-drift fixes. Add `--apply` to write them.                                                                                                                                                                                                                                           |
+| `cairn snapshot <url>`                         | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`.                                                                                                                                                                                                    |
+| `cairn discover <url>`                         | Inspect a page and return the full accessibility tree + locator inventory. Supports `--roles`, `--testids`, `--env`, `--headed`, `--mock`, `--backend`, `--config`.                                                                                                                                                |
+| `cairn docs [topic]`                           | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, or `discovery`.                                                                                                  |
+| `cairn explain`                                | Return the current agent-facing command, step, verifier, and rule surface.                                                                                                                                                                                                                                         |
+| `cairn diff <runA> <runB>`                     | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`.                                                                                                                                                                                                              |
+| `cairn checkpoint list/show/delete`            | Manage saved browser-state checkpoints.                                                                                                                                                                                                                                                                            |
+| `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session.                                                                                                                                                                                                                                                               |
+| `cairn login <name> --url <url>`               | Open a headed login flow and save a checkpoint.                                                                                                                                                                                                                                                                    |
+| `cairn export playwright <spec\|dir>`          | Emit `@playwright/test` `.spec.ts`/`.spec.js` (`--lang`, `--out-dir`, `--project`, `--config`/`--env`/`--var`, coverage report).                                                                                                                                                                                   |
+| `cairn import playwright <file>`               | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines.                                                                                                                                                                                              |
+| `cairn stash save <run-id>`                    | Stash a run directory to the fcheap vault for persistence and search. Supports `--tag`, `--tool`, `--source`.                                                                                                                                                                                                      |
+| `cairn stash list`                             | List stashes, optionally filtered by `--tag` or `--tool`.                                                                                                                                                                                                                                                          |
+| `cairn stash info <stash-id>`                  | Show detailed metadata and file list for a stash.                                                                                                                                                                                                                                                                  |
+| `cairn stash restore <stash-id>`               | Restore a stash to a directory (`--to <dir>`).                                                                                                                                                                                                                                                                     |
+| `cairn stash search <query>`                   | Search across all stashed runs. Supports `--mode keyword\|semantic\|hybrid` and `--limit`.                                                                                                                                                                                                                         |
+| `cairn investigate <run-id>`                   | Stash a run and optionally run `fcheap connect` to find code responsible for failures. `--codebase` implies connect; supports `--connect`, `--query`, `--clips`, `--mode`, `--limit`, and `--index`.                                                                                                               |
+| `cairn audit <spec>`                           | Run a cold Playwright audit with forced video capture, optional vidtrace extraction, and optional code connection. Supports `--codebase`, `--connect`, `--index`, `--speed`, `--slow-mo`, `--mode`, `--limit`, and `--no-cold-start`.                                                                              |
+| `cairn clip <run-ref>`                         | Cut named clips from a run video using vidtrace. Supports repeatable `--label name=start-end`, `--out`, `--name`, `--reencode`, `--stash`, `--tag`.                                                                                                                                                                |
+| `cairn annotate <symbol>`                      | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`.                                                                                                                                                                                                |
+| `cairn secrets`                                | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed).                                                                                                                                                                                         |
+| `cairn config validate`                        | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid.                                                                                                                                                                     |
+| `cairn services status`                        | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session). Supports `--config`, `--project`.                                                                                                                                                              |
+| `cairn mcp`                                    | Start the MCP server on stdio.                                                                                                                                                                                                                                                                                     |
 
 Structured output is available on commands wired with format flags:
 
@@ -753,15 +801,15 @@ Commands with structured output today: `run`, `doctor`, `clean`, `explain`,
 
 Stable exit codes:
 
-| Code | Meaning |
-| --- | --- |
-| 0 | success |
-| 1 | outcome failure |
-| 2 | errored |
-| 3 | cold-start gate |
-| 4 | lint failure |
-| 5 | heal made no progress |
-| 6 | contract-hash mismatch |
+| Code | Meaning                |
+| ---- | ---------------------- |
+| 0    | success                |
+| 1    | outcome failure        |
+| 2    | errored                |
+| 3    | cold-start gate        |
+| 4    | lint failure           |
+| 5    | heal made no progress  |
+| 6    | contract-hash mismatch |
 
 ## MCP Integration
 
@@ -849,7 +897,7 @@ separate so the core stays deterministic and testable.
   Playwright actions and assertions to Cairntrace YAML, preserving TODO
   comments for unmapped lines that need human review.
 - **Playwright export:** `cairn export playwright <spec|dir> [--lang js|ts]
-  [--out-dir <dir>] [--project] [--config <path>] [--env <name>] [--var k=v]`
+[--out-dir <dir>] [--project] [--config <path>] [--env <name>] [--var k=v]`
   emits `@playwright/test` `.spec.ts` or `.spec.js` with a coverage report
   (skips for constructs that cannot translate). `--config`/`--env`/`--var`
   resolve `${vars.*}`/`baseUrl` like `spec verify`; secrets and `${run.token}`

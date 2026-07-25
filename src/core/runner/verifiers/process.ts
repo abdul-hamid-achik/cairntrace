@@ -1,5 +1,4 @@
 import type { ProcessVerifier } from "../../schema/verifier.v1";
-import type { ProcessMetricsSummary } from "../../monitor/processSampler";
 import type { VerifierContext, VerifierEvaluation } from "./types";
 
 function bytesToMb(bytes: number): number {
@@ -130,6 +129,3 @@ export async function evaluateProcess(
     actual: failures.join("; "),
   };
 }
-
-/** Re-exported so the dispatcher can pass the summary type without import churn. */
-export type { ProcessMetricsSummary };

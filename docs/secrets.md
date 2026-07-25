@@ -26,6 +26,7 @@ environments:
   local: {}
 secrets:
   provider: tvault
+  keys: [API_KEY]          # explicit values this invocation may resolve
   required: [API_KEY]
   tvault:
     project: my-app          # direct mode
@@ -34,20 +35,25 @@ secrets:
     # env: prod
 ```
 
-When `secrets.provider: tvault` is set, `cairn run` resolves the selected vault
-before parsing the spec, registers every returned value with the artifact
-redactor, and injects missing keys into the run environment. The services
-lifecycle also makes those values available to seed commands. Existing shell
+When `secrets.provider: tvault` is set, `cairn run` resolves only explicit
+`keys`, `required`, and names referenced as `${env.NAME}` or `${secrets.NAME}`
+in the root spec or its imported actions. It never exports a whole vault
+project to discover values. The
+selected values are invocation-scoped (not copied into Cairntrace's global
+environment), registered with the artifact redactor, and made available to
+spec substitution, preconditions, hooks, and seed commands. Existing shell
 environment variables take precedence. `cairn secrets` lets you verify the
 wiring and see *which* keys are available before a run depends on them.
 
 ## What it does not do
 
 - The status command never prints secret values — only key names and counts.
-  Runtime resolution injects values into the seed/run environment and
-  registers them with Cairntrace's text/JSON redactor.
+  Runtime resolution registers selected values with Cairntrace's text/JSON
+  redactor without mutating global `process.env`.
 - `cairn secrets` is only the read-only status check; secret injection happens
-  inside `cairn run` and the services lifecycle.
+  inside `cairn run` and the services lifecycle. Publisher-only
+  `FILECHEAP_INGEST_TOKEN` and TinyVault client controls do not cross into
+  browser, target, hook, seed, or tmux child processes.
 
 The text/JSON redactor does not inspect producer-owned binary files. A
 screenshot or video can show a secret rendered by the app; a download,

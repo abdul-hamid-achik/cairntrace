@@ -142,7 +142,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Viewport And Retention",
-        body: "Set the browser viewport per environment (`environments.<env>.viewport: { width, height }`) or per spec (top-level `viewport:`); spec wins. High-latency environments can set `environments.<env>.waitScale: 3` (overridden by `CAIRN_WAIT_SCALE`) to multiply wait/settle budgets and the 500ms network-idle quiet window. Bound artifact disk usage with `retention`: `keepRuns` (newest N runs per spec, pruned after every run — default 3 when no `retention` block is set; `retention: { enabled: false }` keeps everything) and `archiveToStash: true` (archives pruned run dirs to fcheap before deletion — best-effort; if the archive fails the run is retained on disk so no artifacts are lost). `cairn clean [--keep N | --all]` prunes manually with the same defaults. Traces follow `artifacts.capture.trace` — the on-failure default deletes the trace zip on passing runs. Videos follow `artifacts.capture.video` (default `never`) — opt in with `always` or `on-failure` for audit-grade recordings.",
+        body: "Set the browser viewport per environment (`environments.<env>.viewport: { width, height }`) or per spec (top-level `viewport:`); spec wins. High-latency environments can set `environments.<env>.waitScale: 3` (overridden by `CAIRN_WAIT_SCALE`) to multiply wait/settle budgets and the 500ms network-idle quiet window. Bound artifact disk usage with `retention`: `keepRuns` (newest N runs per spec, pruned after every run — default 3 when no `retention` block is set; `retention: { enabled: false }` keeps everything), `archiveToStash: true` (archives pruned run dirs to fcheap before deletion — best-effort; if the archive fails the run is retained), and explicit `publish: { enabled: true, retentionDays: 7 }` (packages a bounded complete run for private file.cheap publication; deletion waits for a byte-matching `server-sha256` receipt). `cairn clean [--keep N | --all]` prunes manually with the same defaults. Traces follow `artifacts.capture.trace` — the on-failure default deletes the trace zip on passing runs. Videos follow `artifacts.capture.video` (default `never`) — opt in with `always` or `on-failure` for audit-grade recordings.",
       },
       {
         title: "Logging",
@@ -850,11 +850,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
   secrets: {
     title: "Secrets (TinyVault)",
     summary:
-      "Use TinyVault as a secrets provider for authenticated specs. Cairntrace resolves secrets into the run environment and registers their values with the artifact redactor. Supports direct project mode and environment-group inheritance mode.",
+      "Use TinyVault as a selected-key provider for authenticated specs. Cairntrace keeps values invocation-scoped, registers them with the artifact redactor, and supports direct project mode and environment-group inheritance mode.",
     sections: [
       {
         title: "Overview",
-        body: "Authenticated specs need credentials (API keys, database URLs, session tokens). TinyVault stores them encrypted locally. Cairntrace resolves the configured project or group before browser execution, injects missing keys into the run environment, and registers every returned value with the artifact redactor so spec authors do not hardcode secrets.",
+        body: "Authenticated specs need credentials (API keys, database URLs, session tokens). TinyVault stores them encrypted locally. Cairntrace resolves only `keys`, `required`, and root-spec/imported-action placeholder names from the configured project or group, keeps them in an invocation-scoped environment instead of global `process.env`, and registers every selected value with the artifact redactor so spec authors do not hardcode secrets.",
       },
       {
         title: "Two modes: project vs group/env",
@@ -866,7 +866,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config",
-        body: "Enable tvault as the secrets provider in cairntrace.config.yml. Use either `project` (direct) or `group` + `env` (inheritance) — not both:\n```yaml\nversion: 1\nenvironments:\n  local: {}\nsecrets:\n  provider: tvault\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    # OR:\n    # group: myapp\n    # env: preview\n```\nWhen provider is tvault, `cairn run` injects all project/group secrets as environment variables before the spec executes. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
+        body: "Enable tvault as the secrets provider in cairntrace.config.yml. Use either `project` (direct) or `group` + `env` (inheritance) — not both:\n```yaml\nversion: 1\nenvironments:\n  local: {}\nsecrets:\n  provider: tvault\n  keys: [API_KEY, DATABASE_URL]\n  required: [API_KEY, DATABASE_URL]\n  tvault:\n    project: myapp-test\n    # OR:\n    # group: myapp\n    # env: preview\n```\nCairntrace resolves only `keys`, `required`, and keys referenced in root-spec/imported-action placeholders; it never exports the full project. The `required` list is checked before the run starts — missing keys fail fast with a clear error.",
       },
       {
         title: "MCP Tool",
@@ -874,11 +874,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "DX Workflow",
-        body: "The typical workflow:\n1. Store secrets in tvault (`tvault set API_KEY ...`)\n2. Optionally create an environment group (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`)\n3. Configure `secrets.provider: tvault` in cairntrace.config.yml with either `project` or `group`+`env`\n4. `cairn secrets --project myapp-test` (or `--group myapp --env preview`) verifies keys exist\n5. `cairn run flows/auth.yml --cold-start` runs the spec with secrets injected\n\nThe spec YAML uses `${env.SECRET_KEY}` placeholders — never hardcoded values.",
+        body: "The typical workflow:\n1. Store secrets in tvault (`tvault set API_KEY ...`)\n2. Optionally create an environment group (`tvault env group create myapp --env production=myapp --env preview=myapp-preview`)\n3. Configure `secrets.provider: tvault` in cairntrace.config.yml with either `project` or `group`+`env`, then declare `keys`/`required`\n4. `cairn secrets --project myapp-test` (or `--group myapp --env preview`) verifies keys exist\n5. `cairn run flows/auth.yml --cold-start` runs the spec with only its selected secrets injected\n\nThe spec YAML uses `${env.SECRET_KEY}` placeholders — never hardcoded values.",
       },
       {
         title: "Security",
-        body: "Cairntrace registers resolved TinyVault values with the artifact redactor. Text and JSON artifacts, including `agent_context.md`, `events.ndjson`, run records, reports, and response evidence, scrub those literals along with sensitive keys and Authorization/Cookie headers. Binary artifacts are outside that boundary: screenshots and videos can show secrets or personal data rendered by the app, while downloads, transforms, and traces can preserve sensitive bytes. Keep run directories private and review binary captures before sharing or stashing them.",
+        body: "Cairntrace registers resolved TinyVault values with the artifact redactor. Text and JSON artifacts, including `agent_context.md`, `events.ndjson`, run records, reports, and response evidence, scrub those literals along with sensitive keys and Authorization/Cookie headers. Publisher-only `FILECHEAP_INGEST_TOKEN` and TinyVault client controls are removed from browser, target, hook, seed, and tmux child environments. Binary artifacts are outside that boundary: screenshots and videos can show secrets or personal data rendered by the app, while downloads, transforms, and traces can preserve sensitive bytes. Keep run directories private and review binary captures before sharing or stashing them.",
       },
     ],
     examples: [
@@ -925,7 +925,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Conditional Seed",
-        body: "The `seed` step runs a data-import command conditionally based on three layers of freshness: (1) fingerprint — a SHA-256 of the command + env keys (not values, so secret rotation doesn't trigger re-seed); (2) TTL — re-seed if the last run was more than `ttlSeconds` ago; (3) optional `freshnessCheck` — a shell command whose exit 0 means data is fresh. State is tracked in `~/.cairntrace/services/<project>.seed.json`. Set `ttlSeconds: 0` (default) to always re-seed unless `freshnessCheck` passes. `timeoutMs` bounds the seed command (default 300s); set it to `0` to wait indefinitely. Optional `postCommands` always run after the seed decision (whether the heavy import ran or was skipped as fresh) — use them for lightweight fixture ensure scripts the bulk import does not ship. In interactive runs the seed command's stdout/stderr stream live. When `secrets.provider: tvault` is configured, the seed command's env is augmented with tvault secrets — this is where `getTvaultEnv` is actually called from the run path.",
+        body: "The `seed` step runs a data-import command conditionally based on three layers of freshness: (1) fingerprint — a SHA-256 of the command + env keys (not values, so secret rotation doesn't trigger re-seed); (2) TTL — re-seed if the last run was more than `ttlSeconds` ago; (3) optional `freshnessCheck` — a shell command whose exit 0 means data is fresh. State is tracked in `~/.cairntrace/services/<project>.seed.json`. Set `ttlSeconds: 0` (default) to always re-seed unless `freshnessCheck` passes. `timeoutMs` bounds the seed command (default 300s); set it to `0` to wait indefinitely. Optional `postCommands` always run after the seed decision (whether the heavy import ran or was skipped as fresh) — use them for lightweight fixture ensure scripts the bulk import does not ship. Seed output is buffered, redacted as one stream, then forwarded to interactive output so a secret split across chunks cannot leak. When `secrets.provider: tvault` is configured, the seed inherits only the invocation's selected scoped secrets.",
       },
       {
         title: "tmux Phase",

@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { targetChildEnv } from "../../core/processEnv";
 import type {
   APIRequestContext,
   Browser,
@@ -623,7 +624,10 @@ export class PlaywrightAdapter implements BrowserBackend {
           "1M",
           output,
         ],
-        { stdio: ["ignore", "ignore", "ignore"] },
+        {
+          stdio: ["ignore", "ignore", "ignore"],
+          env: targetChildEnv(process.env),
+        },
       );
       proc.on("error", () => resolve(false));
       proc.on("exit", (code) => {
@@ -687,6 +691,7 @@ export class PlaywrightAdapter implements BrowserBackend {
     const args = this.launchArgs();
     this.browser = await chromium.launch({
       headless: !this.opts.headed,
+      env: targetChildEnv(process.env),
       ...(args.length > 0 ? { args } : {}),
       // slowMo adds a delay between Playwright actions when video recording
       // is enabled with slowMo > 0. This makes the video watchable.
@@ -1130,6 +1135,7 @@ export class PlaywrightAdapter implements BrowserBackend {
       {
         stdio: ["pipe", "ignore", "ignore"],
         windowsHide: true,
+        env: targetChildEnv(process.env),
       },
     );
     child.on("error", () => {
@@ -1315,6 +1321,7 @@ function runIsolatedFetch(
     const child = spawn(process.execPath, ["--eval", script], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      env: targetChildEnv(process.env),
     });
     let stdout = "";
     let stderr = "";

@@ -1197,9 +1197,10 @@ export async function auditSpec(
         : {}),
       ...(opts.config !== undefined ? { config: opts.config } : {}),
     };
-    if (opts.env !== undefined && process.env.CAIRN_TVAULT_ENV === undefined) {
-      process.env.CAIRN_TVAULT_ENV = opts.env;
-    }
+    const scopedSecrets = await lifecycle.maybeInjectTvaultSecrets(
+      specPath,
+      runOptions,
+    );
     server = await lifecycle.maybeStartWebServer(
       specPath,
       runOptions,
@@ -1210,11 +1211,11 @@ export async function auditSpec(
     services = await lifecycle.maybeStartServices(
       specPath,
       runOptions,
+      scopedSecrets,
       (terminateSync) => {
         stopTrackingServices = trackServices({ terminateSync });
       },
     );
-    await lifecycle.maybeInjectTvaultSecrets(specPath, runOptions);
     const browser = await lifecycle.resolveBrowserConfig(specPath, runOptions);
     backend = createBackend(
       lifecycle.backendOpts({ ...runOptions, backend: "playwright" }, browser),
@@ -1246,6 +1247,10 @@ export async function auditSpec(
       coldStart,
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      env: scopedSecrets.env,
+      childEnv: scopedSecrets.childEnv,
+      secretValues: scopedSecrets.secretValues,
+      selectedTvaultKeys: scopedSecrets.selectedKeys,
       captureOverride: { video: "always" },
       videoOptions: {
         ...(speed !== undefined ? { speed } : {}),
@@ -1264,6 +1269,10 @@ export async function auditSpec(
             `file.cheap archive failed: ${archived.error ?? "unknown error"}`,
           );
         }
+      },
+      onPublishRun: async (runDir, runId, _tags, retentionDays) => {
+        const { publishRunDirectory } = await import("./publish");
+        await publishRunDirectory(runDir, runId, { retentionDays });
       },
       workerIndex: 0,
     });
@@ -1483,7 +1492,3 @@ function auditMarkdown(r: AuditResult): string {
 
   return lines.join("\n");
 }
-
-/* ----- format helper ----- */
-
-export type { OutputFormat } from "../format";

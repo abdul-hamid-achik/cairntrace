@@ -67,6 +67,12 @@ export type TvaultConfig = z.infer<typeof TvaultConfigSchema>;
 export const SecretsConfigSchema = z
   .object({
     provider: SecretsProviderSchema.default("env"),
+    /**
+     * Explicit TinyVault allowlist. Cairntrace resolves only these keys (plus
+     * keys referenced by `${env.X}` / `${secrets.X}` in the spec), never an
+     * entire project merely to populate a child environment.
+     */
+    keys: z.array(z.string().min(1)).optional(),
     required: z.array(z.string()).optional(),
     /** TinyVault config when provider is tvault. */
     tvault: TvaultConfigSchema.optional(),
@@ -95,6 +101,15 @@ export const RetentionConfigSchema = z
     archiveToStash: z.boolean().default(false),
     /** Tags applied to every run archived by `archiveToStash`. */
     archiveTags: z.array(z.string()).optional(),
+    /** Explicit remote publication before a pruned run is removed. */
+    publish: z
+      .object({
+        enabled: z.boolean().default(false),
+        /** Remote file.cheap retention for published run packages. */
+        retentionDays: z.number().int().min(1).max(31).default(7),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

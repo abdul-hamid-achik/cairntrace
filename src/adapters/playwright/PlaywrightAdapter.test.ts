@@ -916,6 +916,7 @@ describe("PlaywrightAdapter launch", () => {
     expect(launch).toHaveBeenCalledWith({
       headless: true,
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      env: expect.any(Object),
     });
   });
 
@@ -931,6 +932,7 @@ describe("PlaywrightAdapter launch", () => {
     expect(launch).toHaveBeenCalledWith({
       headless: true,
       args: ["--custom-arg"],
+      env: expect.any(Object),
     });
   });
 
@@ -947,7 +949,30 @@ describe("PlaywrightAdapter launch", () => {
     expect(launch).toHaveBeenCalledWith({
       headless: true,
       args: ["--foo", "--bar=baz"],
+      env: expect.any(Object),
     });
+  });
+
+  it("does not expose the file.cheap ingest credential to Chromium", async () => {
+    const previous = process.env.FILECHEAP_INGEST_TOKEN;
+    process.env.FILECHEAP_INGEST_TOKEN = "publisher-only";
+    const launch = vi
+      .spyOn(chromium, "launch")
+      .mockResolvedValue(fakeBrowser() as never);
+    try {
+      const adapter = new PlaywrightAdapter();
+      await ensureBrowser(adapter);
+    } finally {
+      restoreEnv("FILECHEAP_INGEST_TOKEN", previous);
+    }
+
+    expect(launch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.not.objectContaining({
+          FILECHEAP_INGEST_TOKEN: expect.anything(),
+        }),
+      }),
+    );
   });
 });
 

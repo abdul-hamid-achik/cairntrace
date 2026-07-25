@@ -47,6 +47,8 @@ export async function loadConfig(
     /** Called for `${env.X}` with no value and no `:-default`; its return is
      * substituted instead of "" (exporters use this to keep refs late-bound). */
     envRef?: (name: string) => string;
+    /** Environment used for config interpolation. Defaults to process.env. */
+    env?: Record<string, string | undefined>;
   },
 ): Promise<LoadedConfig | undefined> {
   let configPath: string | undefined;
@@ -67,7 +69,7 @@ export async function loadConfig(
   if (!configPath) return undefined;
 
   const text = await readFile(configPath, "utf8");
-  const raw = parseYaml(substituteEnv(text, opts?.envRef));
+  const raw = parseYaml(substituteEnv(text, opts?.envRef, opts?.env));
   const config = ConfigSchema.parse(raw);
   return { config, path: configPath };
 }
@@ -75,11 +77,12 @@ export async function loadConfig(
 function substituteEnv(
   text: string,
   envRef?: (name: string) => string,
+  env: Record<string, string | undefined> = process.env,
 ): string {
   return text.replace(
     /\$\{env\.(\w+)(?::-([^}]+))?\}/g,
     (_match, name: string, fallback?: string) => {
-      const value = process.env[name];
+      const value = env[name];
       // `:-` shell semantics: an empty OR unset env var falls back to the
       // default. Matches the spec-parser placeholder behavior so config and
       // specs resolve `${env.X:-default}` identically.

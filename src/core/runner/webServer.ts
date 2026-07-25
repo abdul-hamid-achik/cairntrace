@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { execa } from "execa";
 import type { WebServerConfig } from "../schema/config.v1";
+import { targetChildEnv } from "../processEnv";
 
 /**
  * `webServer` lifecycle for the whole `cairn run` invocation: build → boot →
@@ -90,7 +91,7 @@ export async function startWebServer(
       ? cfg.cwd
       : resolve(ctx.configDir, cfg.cwd)
     : ctx.configDir;
-  const env = { ...process.env, ...cfg.env };
+  const env = targetChildEnv({ ...process.env, ...cfg.env });
 
   // Reuse / conflict check: is something already answering the readiness URL?
   if (effectiveUrl && (await probeOnce(effectiveUrl))) {

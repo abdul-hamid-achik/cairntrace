@@ -103,7 +103,13 @@ A partial `services:` block deep-merges over the top-level one. An env-level `se
 
 ## TinyVault seeding
 
-`secrets.provider: tvault` injects vault secrets into the seed command's env the first time the run path needs them. The `tvault:` block supports direct (`project`) or inheritance (`group` + `env`) mode. See [Secrets](/secrets) for the status command and the `cairn secrets` diagnostic.
+`secrets.provider: tvault` resolves only the invocation's explicit
+`secrets.keys`, `required`, and root-spec/imported-action placeholder names, then supplies that
+scoped set to the seed command. It never exports a whole project or mutates
+global `process.env`; publisher-only and TinyVault client-control variables
+are removed from service children. The `tvault:` block supports direct
+(`project`) or inheritance (`group` + `env`) mode. See [Secrets](/secrets) for
+the status command and the `cairn secrets` diagnostic.
 
 ## Validation
 

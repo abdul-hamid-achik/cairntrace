@@ -252,8 +252,9 @@ Key rules:
   + recreates; full teardown including docker down runs).
 - `readyTimeoutMs: 0` (docker/tmux) and `timeoutMs: 0` (seed) wait
   **indefinitely** instead of timing out — use for slow first-up image builds
-  or many containers. In interactive (TTY, `--format md`) runs, docker/seed
-  command stdout+stderr stream live to the terminal, and each not-yet-ready
+  or many containers. In interactive (TTY, `--format md`) runs, docker output
+  streams live to the terminal; seed output is buffered and redacted before
+  forwarding so a secret split across chunks cannot leak. Each not-yet-ready
   tmux window's pane tail is streamed every few seconds so a stuck window
   shows its startup logs/errors instead of a blind wait. Non-interactive/CI
   runs stay quiet (the logger's default warn level suppresses info).

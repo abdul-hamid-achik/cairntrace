@@ -78,6 +78,65 @@ function withoutNativeRequest(backend: MockBrowserBackend): BrowserBackend {
 }
 
 describe("runSpec e2e (mock backend)", () => {
+  it("does not expose the file.cheap ingest credential to preconditions", async () => {
+    const specPath = await writeSpec(
+      "protected_precondition_env",
+      `version: 1
+name: protected_precondition_env
+intent: publisher credentials stay outside target setup
+preconditions:
+  commands:
+    - run: 'test -z "$FILECHEAP_INGEST_TOKEN"'
+outcomes:
+  - id: clean
+    description: mock console stays clean
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      env: {
+        PATH: process.env.PATH,
+        FILECHEAP_INGEST_TOKEN: "publisher-only",
+      },
+    });
+
+    expect(result.status).toBe("passed");
+  });
+
+  it("preserves an explicitly selected TinyVault-prefixed value for preconditions", async () => {
+    const specPath = await writeSpec(
+      "selected_tvault_precondition",
+      `version: 1
+name: selected_tvault_precondition
+intent: explicitly selected vault values stay available to setup
+preconditions:
+  commands:
+    - run: 'test "$TVAULT_SELECTED" = "explicit-secret"'
+outcomes:
+  - id: clean
+    description: mock console stays clean
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      env: { TVAULT_SELECTED: "explicit-secret" },
+      childEnv: { TVAULT_SELECTED: "explicit-secret" },
+      selectedTvaultKeys: ["TVAULT_SELECTED"],
+    });
+
+    expect(result.status).toBe("passed");
+  });
+
   it("skips pruning when archiveToStash has no archive adapter", async () => {
     const projectDir = join(workDir, "retention-fail-closed");
     const isolatedArtifacts = join(projectDir, "runs");

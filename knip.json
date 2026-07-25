@@ -16,8 +16,7 @@
     "ffprobe",
     "codemap",
     "vidtrace",
-    "tvault",
-    "tmux"
+    "tvault"
   ],
   "ignoreIssues": {
     "src/core/schema/**": ["exports", "types"],

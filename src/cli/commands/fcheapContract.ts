@@ -6,7 +6,8 @@ export type FcheapContractCommand =
   | "info"
   | "search"
   | "connect"
-  | "restore";
+  | "restore"
+  | "publish";
 
 export class FcheapContractError extends Error {
   readonly command: FcheapContractCommand;
@@ -155,6 +156,76 @@ const RestoreOutputSchema = z
   })
   .passthrough();
 
+export const CAIRNTRACE_PUBLISH_KIND = "cairntrace.run";
+export const CAIRNTRACE_PUBLISH_NATIVE_SCHEMA = "urn:cairntrace.dev:run:v1";
+export const CAIRNTRACE_PUBLISH_ENTRYPOINT = "run.json";
+
+const Sha256DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
+const PortableRemoteIdSchema = z
+  .string()
+  .min(1)
+  .max(160)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+  .refine((value) => value !== "." && value !== "..");
+const ArtifactRefV1Schema = z
+  .object({
+    $schema: z.literal("urn:filecheap.dev:artifact-ref:v1"),
+    version: z.literal(1),
+    provider: z.literal("fcheap-cloud"),
+    uri: NonEmptyStringSchema,
+    artifact_id: PortableRemoteIdSchema,
+    kind: z.literal(CAIRNTRACE_PUBLISH_KIND),
+    producer: z
+      .object({
+        tool: z.literal("cairntrace"),
+        version: z
+          .string()
+          .min(1)
+          .max(64)
+          .regex(/^[A-Za-z0-9][A-Za-z0-9._+-]*$/),
+        native_schema: z.literal(CAIRNTRACE_PUBLISH_NATIVE_SCHEMA),
+        native_id: PortableRemoteIdSchema,
+        entrypoint: z.literal(CAIRNTRACE_PUBLISH_ENTRYPOINT),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.uri !==
+      `fcheap://cloud/vaults/private/artifacts/${value.artifact_id}`
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["uri"],
+        message:
+          "must exactly match the canonical private fcheap-cloud URI for artifact_id",
+      });
+    }
+    try {
+      const parsed = new URL(value.uri);
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+        throw new Error("credentialed or unstable URI");
+      }
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "must be a credential-free stable URI",
+      });
+    }
+  });
+
+const PublishOutputSchema = z
+  .object({
+    version: z.literal("filecheap-publish/1"),
+    artifact_ref: ArtifactRefV1Schema,
+    sha256: Sha256DigestSchema,
+    size_bytes: NonNegativeIntegerSchema,
+    verification: z.literal("server-sha256"),
+    published_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
 export interface FcheapFileEntry {
   path: string;
   size: number;
@@ -245,6 +316,14 @@ export interface FcheapRestoreResult {
   verified: boolean;
   mismatches: string[];
   status: FcheapRestoreStatus;
+}
+
+export interface FcheapPublishResult {
+  artifactRef: z.infer<typeof ArtifactRefV1Schema>;
+  sha256: string;
+  sizeBytes: number;
+  verification: "server-sha256";
+  publishedAt: string;
 }
 
 function parseOutput<TSchema extends z.ZodTypeAny>(
@@ -412,5 +491,17 @@ export function parseFcheapRestoreOutput(stdout: string): FcheapRestoreResult {
     verified: result.verified,
     mismatches: result.mismatches,
     status: result.status,
+  };
+}
+
+/** Parse only a durable remote-publication receipt; pending uploads are invalid. */
+export function parseFcheapPublishOutput(stdout: string): FcheapPublishResult {
+  const result = parseOutput("publish", stdout, PublishOutputSchema);
+  return {
+    artifactRef: result.artifact_ref,
+    sha256: result.sha256,
+    sizeBytes: result.size_bytes,
+    verification: result.verification,
+    publishedAt: result.published_at,
   };
 }

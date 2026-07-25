@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { targetChildEnv } from "../processEnv";
 
 const RESULT_MARKER = "__CAIRNTRACE_RESULT__";
 
@@ -27,6 +28,7 @@ export async function runNodeScript(
     input: JSON.stringify(invocation),
     reject: false,
     all: false,
+    env: targetChildEnv(process.env),
   });
 
   const stdout = String(r.stdout ?? "");

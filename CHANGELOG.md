@@ -5,6 +5,33 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-24
+
+### Added
+
+- `retention.publish` can publish a verified, redacted run package to a
+  private file.cheap destination with explicit producer and native-artifact
+  metadata.
+- TinyVault-backed runs now support an explicit selected-key scope and
+  group/environment inheritance, including values referenced by imported
+  actions.
+
+### Changed
+
+- The file.cheap publisher targets its v0.31 contract and validates both the
+  returned artifact reference and the publication receipt before reporting
+  success.
+- Configuration, service, artifact, and secrets documentation now describes
+  private publication, scoped secret injection, and the resulting run
+  artifacts in English.
+
+### Security
+
+- Long-lived service and tmux processes receive a filtered environment, so the
+  file.cheap ingest token cannot leak into a service pane.
+- Secret values are buffered and redacted before run output or persisted
+  artifacts are written.
+
 ## [2.0.0] - 2026-07-24
 
 ### Breaking

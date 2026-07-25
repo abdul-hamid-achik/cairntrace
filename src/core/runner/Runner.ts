@@ -19,6 +19,7 @@ import {
 } from "../artifacts/redaction";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
+import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
 import { parseSpec } from "../parser/parseSpec";
 import { computeContractHash } from "../contractHash";
 import { evaluateWhen } from "./conditions";
@@ -115,6 +116,12 @@ export interface RunOptions {
   vars?: Record<string, string | number | boolean>;
   /** Override process.env. */
   env?: Record<string, string | undefined>;
+  /** Environment authorized for shell target children; vault controls removed. */
+  childEnv?: Record<string, string | undefined>;
+  /** Explicit TinyVault names that may retain a `TVAULT_` prefix in children. */
+  selectedTvaultKeys?: Iterable<string>;
+  /** Literal values resolved by a scoped secret provider; artifact-only. */
+  secretValues?: Iterable<string>;
   /** Inject a clock for deterministic run ids in tests. */
   now?: () => Date;
   /** Receives progress events during the run. */
@@ -154,6 +161,17 @@ export interface RunOptions {
     tags: string[],
   ) => Promise<void>;
   /**
+   * Explicit remote publication callback. It must validate a server-verified,
+   * credential-free, byte-matching receipt before resolving; pruneRuns keeps
+   * the source on any failure.
+   */
+  onPublishRun?: (
+    runDir: string,
+    runId: string,
+    tags: string[],
+    retentionDays: number,
+  ) => Promise<void>;
+  /**
    * Free-form labels stamped into run.json (`cairn run --label key=value`).
    * Used by `cairn stats --group-by` for A/B cohorts. Optional.
    */
@@ -183,6 +201,10 @@ export interface MonitorConfig {
  * interface, so a MockBrowserBackend works for tests and `--mock` runs.
  */
 export async function runSpec(opts: RunOptions): Promise<RunResult> {
+  const runEnv = targetChildEnvWithSelectedTvaultKeys(
+    opts.env ?? (process.env as Record<string, string | undefined>),
+    opts.selectedTvaultKeys ?? [],
+  );
   const workerIndex = opts.workerIndex ?? 0;
   const runToken = opts.runToken ?? generateRunToken();
   const runtime = await resolveSpecRuntimeContext(opts.specPath, {
@@ -191,6 +213,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       : {}),
     ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
     ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
+    env: runEnv,
   });
   const resolvedVars = resolveRuntimeVars(runtime.vars, {
     workerIndex,
@@ -201,7 +224,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     resolved,
     path: specPath,
   } = await parseSpec(opts.specPath, {
-    ...(opts.env ? { env: opts.env } : {}),
+    env: runEnv,
     vars: resolvedVars,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     runtime: { workerIndex, runToken },
@@ -210,7 +233,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const env = runtime.envName;
   const waitScale = resolveWaitScale(
     runtime.waitScale,
-    opts.env?.["CAIRN_WAIT_SCALE"] ?? process.env["CAIRN_WAIT_SCALE"],
+    runEnv["CAIRN_WAIT_SCALE"],
   );
   opts.backend.setWaitScale(waitScale);
   // The actual backend that ran is authoritative — spec.backend is only
@@ -230,7 +253,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   registerSecretValues(spec.redaction?.values ?? []);
   const redactor = createArtifactRedactor(
     spec.redaction,
-    opts.env ?? (process.env as Record<string, string | undefined>),
+    runEnv,
+    opts.secretValues,
   );
   const writer = new ArtifactWriter(
     runDir,
@@ -265,15 +289,18 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const preconditionCommands = spec.preconditions?.commands ?? [];
   if (preconditionCommands.length > 0) {
     const specDir = dirname(specPath);
-    const preEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      ...Object.fromEntries(
-        Object.entries(spec.preconditions?.env ?? {}).map(([k, v]) => [
-          k,
-          String(v),
-        ]),
-      ),
-    };
+    const preEnv: NodeJS.ProcessEnv = targetChildEnvWithSelectedTvaultKeys(
+      {
+        ...(opts.childEnv ?? runEnv),
+        ...Object.fromEntries(
+          Object.entries(spec.preconditions?.env ?? {}).map(([k, v]) => [
+            k,
+            String(v),
+          ]),
+        ),
+      },
+      opts.selectedTvaultKeys ?? [],
+    );
     for (const [index, command] of preconditionCommands.entries()) {
       const label = command.name ?? `precondition[${index}]`;
       const cwd = command.cwd ? resolve(specDir, command.cwd) : specDir;
@@ -370,7 +397,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
   // Resolves before checkpoint resume so the spec's own setup populates state
   // *after* the wipe.
-  const coldStart = opts.coldStart ?? process.env["CI"] === "true";
+  const coldStart = opts.coldStart ?? runEnv["CI"] === "true";
   if (coldStart) {
     await safe(() => opts.backend.clearBrowserState());
   }
@@ -436,7 +463,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const monitorEnabled =
     opts.monitor !== undefined && opts.monitor !== false
       ? true
-      : isTruthyEnv(process.env["MONITOR"]);
+      : isTruthyEnv(runEnv["MONITOR"]);
   const monitorIntervalMs =
     typeof opts.monitor === "object" && opts.monitor
       ? opts.monitor.intervalMs
@@ -457,7 +484,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     sampler.start();
     // When launched under `monitor run`, surface the target PID so the parent
     // monitor can observe the exact browser process tree.
-    if (isTruthyEnv(process.env["MONITOR"])) {
+    if (isTruthyEnv(runEnv["MONITOR"])) {
       void writer
         .writeJson(
           "diagnostics/target.json",
@@ -1328,7 +1355,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       ? undefined
       : (retention?.keepRuns ?? DEFAULT_KEEP_RUNS);
   if (keepRuns !== undefined) {
-    if (retention?.archiveToStash && !opts.onArchiveRun) {
+    const requiresArchive = retention?.archiveToStash === true;
+    const requiresPublication = retention?.publish?.enabled === true;
+    if (
+      (requiresArchive && !opts.onArchiveRun) ||
+      (requiresPublication && !opts.onPublishRun)
+    ) {
       // Fail closed: deleting without the configured archive callback would
       // violate the user's retention policy. Some callers (for example
       // library/MCP integrations) do not inject the CLI's file.cheap adapter.
@@ -1336,8 +1368,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ts: new Date().toISOString(),
         type: "artifact.retention",
         action: "warning",
-        warning:
-          "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
+        warning: requiresPublication
+          ? "retention.publish.enabled is true but no publication adapter was provided; pruning was skipped"
+          : "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
       });
       return publicResult;
     }
@@ -1346,12 +1379,23 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // archive callback is injected via opts so the core runner doesn't depend
     // on the stash (fcheap) CLI module.
     const onArchive =
-      retention?.archiveToStash && opts.onArchiveRun
-        ? (dir: string, rid: string) =>
-            opts.onArchiveRun!(dir, rid, [
-              ...(retention.archiveTags ?? []),
+      (requiresArchive || requiresPublication) &&
+      (opts.onArchiveRun || opts.onPublishRun)
+        ? async (dir: string, rid: string) => {
+            const tags = [
+              ...(retention?.archiveTags ?? []),
               "retention-archived",
-            ])
+            ];
+            if (requiresArchive) await opts.onArchiveRun!(dir, rid, tags);
+            if (requiresPublication) {
+              await opts.onPublishRun!(
+                dir,
+                rid,
+                tags,
+                retention?.publish?.retentionDays ?? 7,
+              );
+            }
+          }
         : undefined;
     const keepFailedRuns =
       retention?.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS;

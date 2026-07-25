@@ -8,6 +8,7 @@ import { emit, resolveFormat } from "../format";
 import { log, reconfigureWithConfig } from "../logger";
 import { resolveArtifactRootContext } from "../runRefs";
 import { stashDirectory } from "./stash";
+import { publishRunDirectory } from "./publish";
 
 const cleanLog = log.scope("clean");
 
@@ -35,7 +36,9 @@ interface CleanReport extends PruneResult {
  * DEFAULT_KEEP_RUNS (3). Artifact root resolution: --artifact-root > config
  * artifactRoot > ~/.cairntrace/runs. Config discovery walks up from the cwd
  * (same as specs). When config `retention.archiveToStash` is true, pruned
- * runs are archived to fcheap before deletion (best-effort). The
+ * runs are archived to fcheap before deletion. Remote publication is a
+ * separate, explicit `retention.publish.enabled` opt-in and requires a
+ * server-verified, byte-matching fcheap receipt before deletion. The
  * `retention.keepFailedRuns` carve-out (config value, default
  * DEFAULT_KEEP_FAILED_RUNS) also applies here, except `--all` forces it to 0
  * — a full clean means full, no failed-run exemption.
@@ -47,7 +50,11 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
   let keepRunsFromConfig: number | undefined;
   let keepFailedRunsFromConfig: number | undefined;
   let retention:
-    | { archiveToStash?: boolean; archiveTags?: string[] }
+    | {
+        archiveToStash?: boolean;
+        archiveTags?: string[];
+        publish?: { enabled?: boolean; retentionDays?: number };
+      }
     | undefined;
   try {
     const resolved = await resolveArtifactRootContext(opts);
@@ -83,15 +90,25 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     : (keepFailedRunsFromConfig ?? DEFAULT_KEEP_FAILED_RUNS);
 
   const onArchive =
-    retention?.archiveToStash === true
-      ? async (runDir: string, _runId: string) => {
-          const r = await stashDirectory(runDir, {
-            tool: "cairntrace",
-            tags: [...(retention.archiveTags ?? []), "retention-archived"],
-          });
-          // Throw on archive failure so pruneRuns retains the run on disk.
-          if (!r.ok)
-            throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
+    retention?.archiveToStash === true || retention?.publish?.enabled === true
+      ? async (runDir: string, runId: string) => {
+          const tags = [
+            ...(retention?.archiveTags ?? []),
+            "retention-archived",
+          ];
+          if (retention?.archiveToStash) {
+            const r = await stashDirectory(runDir, {
+              tool: "cairntrace",
+              tags,
+            });
+            if (!r.ok)
+              throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
+          }
+          if (retention?.publish?.enabled) {
+            await publishRunDirectory(runDir, runId, {
+              retentionDays: retention.publish.retentionDays ?? 7,
+            });
+          }
         }
       : undefined;
   const pruned = await pruneRuns(artifactRoot, {

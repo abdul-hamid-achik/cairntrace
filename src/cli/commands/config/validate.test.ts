@@ -394,12 +394,14 @@ describe("RetentionConfigSchema defaults", () => {
       keepRuns: 5,
       archiveToStash: true,
       archiveTags: ["regression", "sample-app"],
+      publish: { enabled: true },
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.keepRuns).toBe(5);
       expect(result.data.archiveToStash).toBe(true);
       expect(result.data.archiveTags).toEqual(["regression", "sample-app"]);
+      expect(result.data.publish?.retentionDays).toBe(7);
     }
   });
 
@@ -414,6 +416,19 @@ describe("RetentionConfigSchema defaults", () => {
   it("rejects a non-positive keepRuns", () => {
     const result = RetentionConfigSchema.safeParse({ keepRuns: 0 });
     expect(result.success).toBe(false);
+  });
+
+  it("bounds remote publication retention to 31 days", () => {
+    expect(
+      RetentionConfigSchema.safeParse({
+        publish: { enabled: true, retentionDays: 31 },
+      }).success,
+    ).toBe(true);
+    expect(
+      RetentionConfigSchema.safeParse({
+        publish: { enabled: true, retentionDays: 32 },
+      }).success,
+    ).toBe(false);
   });
 });
 

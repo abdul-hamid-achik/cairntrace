@@ -32,8 +32,9 @@ export function clearRegisteredSecretValues(): void {
 export function createArtifactRedactor(
   config: RedactionConfig | undefined,
   env: Record<string, string | undefined> = process.env,
+  knownSecretValues: Iterable<string> = [],
 ): ArtifactRedactor {
-  const literalSecrets = collectLiteralSecrets(config, env);
+  const literalSecrets = collectLiteralSecrets(config, env, knownSecretValues);
   return {
     value: <T>(input: T): T => redactUnknown(input, literalSecrets) as T,
     text: (input: string): string => redactString(input, literalSecrets),
@@ -80,6 +81,7 @@ function redactUnknown(
 function collectLiteralSecrets(
   config: RedactionConfig | undefined,
   env: Record<string, string | undefined>,
+  knownSecretValues: Iterable<string>,
 ): string[] {
   const values = new Set<string>();
   for (const value of config?.values ?? []) addSecret(values, value);
@@ -90,6 +92,7 @@ function collectLiteralSecrets(
 
   // Vault-injected secrets are sensitive regardless of their key name.
   for (const value of registeredSecretValues) addSecret(values, value);
+  for (const value of knownSecretValues) addSecret(values, value);
 
   return [...values].toSorted((a, b) => b.length - a.length);
 }

@@ -33,11 +33,11 @@ vi.mock("./secrets", async () => {
   const actual = await vi.importActual<typeof import("./secrets")>("./secrets");
   return {
     ...actual,
-    getTvaultEnv: vi.fn(),
+    resolveScopedSecrets: vi.fn(),
     tvaultArgs: actual.tvaultArgs,
   };
 });
-const { getTvaultEnv } = await import("./secrets");
+const { resolveScopedSecrets } = await import("./secrets");
 
 describe("synthesizeErroredResult", () => {
   it("produces a RunResult that parses against the v1 wire schema", () => {
@@ -461,6 +461,18 @@ describe("runHookCommands", () => {
     const { runHookCommands } = await import("./run");
     await expect(runHookCommands("before", undefined)).resolves.toBeUndefined();
     await expect(runHookCommands("before", ["  "])).resolves.toBeUndefined();
+  });
+
+  it("does not expose the file.cheap ingest credential to hooks", async () => {
+    const { runHookCommands } = await import("./run");
+    await expect(
+      runHookCommands("before", ['test -z "$FILECHEAP_INGEST_TOKEN"'], {
+        env: {
+          PATH: process.env.PATH,
+          FILECHEAP_INGEST_TOKEN: "publisher-only",
+        },
+      }),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -1061,7 +1073,7 @@ describe("tvault secrets injection", () => {
   const dirPromise = mkdtemp(join(tmpdir(), "cairntrace-tvault-run-"));
 
   beforeEach(() => {
-    vi.mocked(getTvaultEnv).mockReset();
+    vi.mocked(resolveScopedSecrets).mockReset();
     delete process.env["TVAULT_SECRET_A"];
     delete process.env["TVAULT_SECRET_B"];
   });
@@ -1070,13 +1082,14 @@ describe("tvault secrets injection", () => {
     vi.restoreAllMocks();
   });
 
-  it("injects tvault secrets into process.env for spec placeholders", async () => {
-    vi.mocked(getTvaultEnv).mockResolvedValue({
-      ok: true,
-      env: {
-        TVAULT_SECRET_A: "value-a",
-        TVAULT_SECRET_B: "value-b",
-      },
+  it("returns a scoped secret environment without mutating process.env", async () => {
+    vi.mocked(resolveScopedSecrets).mockResolvedValue({
+      env: { TVAULT_SECRET_A: "value-a", TVAULT_SECRET_B: "value-b" },
+      childEnv: { TVAULT_SECRET_A: "value-a", TVAULT_SECRET_B: "value-b" },
+      secretValues: ["value-a", "value-b"],
+      target: "test-project",
+      injectedKeys: ["TVAULT_SECRET_A", "TVAULT_SECRET_B"],
+      shadowedKeys: [],
     });
 
     const dir = await dirPromise;
@@ -1107,20 +1120,22 @@ steps:
 `,
     );
 
-    await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+    const scoped = await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
       services: false,
     } as RunCommandOptions);
 
-    expect(process.env["TVAULT_SECRET_A"]).toBe("value-a");
-    expect(process.env["TVAULT_SECRET_B"]).toBe("value-b");
-    expect(getTvaultEnv).toHaveBeenCalledWith({ project: "test-project" });
+    expect(scoped.env["TVAULT_SECRET_A"]).toBe("value-a");
+    expect(scoped.secretValues).toEqual(["value-a", "value-b"]);
+    expect(process.env["TVAULT_SECRET_A"]).toBeUndefined();
+    expect(process.env["TVAULT_SECRET_B"]).toBeUndefined();
   });
 
   it("throws when tvault project is missing required secrets", async () => {
-    vi.mocked(getTvaultEnv).mockResolvedValue({
-      ok: true,
-      env: { TVAULT_SECRET_A: "value-a" },
-    });
+    vi.mocked(resolveScopedSecrets).mockRejectedValue(
+      new Error(
+        'tvault "test-project" is missing required secrets: TVAULT_SECRET_B',
+      ),
+    );
 
     const dir = await dirPromise;
     await writeFile(
@@ -1157,6 +1172,13 @@ steps: []
   });
 
   it("does nothing when no tvault secrets are configured", async () => {
+    vi.mocked(resolveScopedSecrets).mockResolvedValue({
+      env: {},
+      childEnv: {},
+      secretValues: [],
+      injectedKeys: [],
+      shadowedKeys: [],
+    });
     const dir = await dirPromise;
     await writeFile(
       join(dir, "cairntrace.config.yml"),
@@ -1180,16 +1202,16 @@ steps: []
     await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
       services: false,
     } as RunCommandOptions);
-
-    expect(getTvaultEnv).not.toHaveBeenCalled();
   });
 
   it("injects tvault secrets from group/env inheritance mode", async () => {
-    vi.mocked(getTvaultEnv).mockResolvedValue({
-      ok: true,
-      env: {
-        TVAULT_SECRET_A: "value-a",
-      },
+    vi.mocked(resolveScopedSecrets).mockResolvedValue({
+      env: { TVAULT_SECRET_A: "value-a" },
+      childEnv: { TVAULT_SECRET_A: "value-a" },
+      secretValues: ["value-a"],
+      target: "myapp/preview",
+      injectedKeys: ["TVAULT_SECRET_A"],
+      shadowedKeys: [],
     });
 
     const dir = await dirPromise;
@@ -1217,15 +1239,12 @@ steps: []
 `,
     );
 
-    await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
+    const scoped = await maybeInjectTvaultSecrets(join(dir, "spec.yml"), {
       services: false,
     } as RunCommandOptions);
 
-    expect(process.env["TVAULT_SECRET_A"]).toBe("value-a");
-    expect(getTvaultEnv).toHaveBeenCalledWith({
-      group: "myapp",
-      env: "preview",
-    });
+    expect(scoped.env["TVAULT_SECRET_A"]).toBe("value-a");
+    expect(process.env["TVAULT_SECRET_A"]).toBeUndefined();
   });
 });
 

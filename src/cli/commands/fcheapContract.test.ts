@@ -7,9 +7,136 @@ import {
   parseFcheapRestoreOutput,
   parseFcheapSaveOutput,
   parseFcheapSearchOutput,
+  parseFcheapPublishOutput,
 } from "./fcheapContract";
 
-describe("file.cheap v0.30 contract adapter", () => {
+describe("file.cheap v0.31 contract adapter", () => {
+  it("accepts only a server-verified private Cairntrace archive receipt", () => {
+    const sha256 = "a".repeat(64);
+    const result = parseFcheapPublishOutput(
+      JSON.stringify({
+        version: "filecheap-publish/1",
+        sha256,
+        size_bytes: 42,
+        verification: "server-sha256",
+        published_at: "2026-07-24T00:00:00Z",
+        artifact_ref: {
+          $schema: "urn:filecheap.dev:artifact-ref:v1",
+          version: 1,
+          provider: "fcheap-cloud",
+          uri: "fcheap://cloud/vaults/private/artifacts/art-123",
+          artifact_id: "art-123",
+          kind: "cairntrace.run",
+          producer: {
+            tool: "cairntrace",
+            version: "2.0.0",
+            native_schema: "urn:cairntrace.dev:run:v1",
+            native_id: "run-123",
+            entrypoint: "run.json",
+          },
+        },
+      }),
+    );
+    expect(result.sha256).toBe(sha256);
+    expect(result.sizeBytes).toBe(42);
+    expect(result.verification).toBe("server-sha256");
+  });
+
+  it.each([
+    {
+      label: "non-final verification",
+      patch: { verification: "pending" },
+    },
+    {
+      label: "prefixed digest",
+      patch: { sha256: `sha256:${"a".repeat(64)}` },
+    },
+    {
+      label: "unknown receipt field",
+      patch: { signed_url: "https://storage.example.test/signed?token=secret" },
+    },
+  ])("rejects $label in a publication receipt", ({ patch }) => {
+    expect(() =>
+      parseFcheapPublishOutput(
+        JSON.stringify({
+          version: "filecheap-publish/1",
+          sha256: "a".repeat(64),
+          size_bytes: 42,
+          verification: "server-sha256",
+          published_at: "2026-07-24T00:00:00Z",
+          artifact_ref: {
+            $schema: "urn:filecheap.dev:artifact-ref:v1",
+            version: 1,
+            provider: "fcheap-cloud",
+            uri: "fcheap://cloud/vaults/private/artifacts/art-123",
+            artifact_id: "art-123",
+            kind: "cairntrace.run",
+            producer: {
+              tool: "cairntrace",
+              version: "2.0.0",
+              native_schema: "urn:cairntrace.dev:run:v1",
+              native_id: "run-123",
+              entrypoint: "run.json",
+            },
+          },
+          ...patch,
+        }),
+      ),
+    ).toThrow(/Invalid fcheap publish JSON/);
+  });
+
+  it("rejects a non-private, signed, or mismatched artifact reference", () => {
+    const receipt = {
+      version: "filecheap-publish/1",
+      sha256: "a".repeat(64),
+      size_bytes: 42,
+      verification: "server-sha256",
+      published_at: "2026-07-24T00:00:00Z",
+      artifact_ref: {
+        $schema: "urn:filecheap.dev:artifact-ref:v1",
+        version: 1,
+        provider: "fcheap-cloud",
+        uri: "fcheap://cloud/vaults/team/artifacts/art-123",
+        artifact_id: "art-123",
+        kind: "cairntrace.run",
+        producer: {
+          tool: "cairntrace",
+          version: "2.0.0",
+          native_schema: "urn:cairntrace.dev:run:v1",
+          native_id: "run-123",
+          entrypoint: "run.json",
+        },
+      },
+    };
+    expect(() => parseFcheapPublishOutput(JSON.stringify(receipt))).toThrow(
+      /Invalid fcheap publish JSON/,
+    );
+    expect(() =>
+      parseFcheapPublishOutput(
+        JSON.stringify({
+          ...receipt,
+          artifact_ref: {
+            ...receipt.artifact_ref,
+            uri: "fcheap://cloud/vaults/private/artifacts/art-123",
+            web_url: "https://file.cheap/artifacts/art-123?token=secret",
+          },
+        }),
+      ),
+    ).toThrow(/Invalid fcheap publish JSON/);
+    expect(() =>
+      parseFcheapPublishOutput(
+        JSON.stringify({
+          ...receipt,
+          artifact_ref: {
+            ...receipt.artifact_ref,
+            uri: "fcheap://cloud/vaults/private/artifacts/art-other",
+            artifact_id: "run-123",
+            kind: "cairntrace.run",
+          },
+        }),
+      ),
+    ).toThrow(/Invalid fcheap publish JSON/);
+  });
   describe("save", () => {
     it("prefers the canonical id and normalizes manifest metadata", () => {
       const result = parseFcheapSaveOutput(
