@@ -5,6 +5,12 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     environment: "node",
     reporters: ["default"],
+    // GitHub's shared runner cannot reliably execute the browser-heavy suites
+    // alongside the runner and CLI suites. One worker keeps per-test timeouts
+    // meaningful instead of making the release gate dependent on host load.
+    ...(process.env.CI
+      ? { poolOptions: { forks: { minForks: 1, maxForks: 1 } } }
+      : {}),
     coverage: {
       provider: "v8",
       include: [

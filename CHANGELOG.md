@@ -32,6 +32,11 @@ All notable changes to cairntrace are documented here. This project adheres to
 - Secret values are buffered and redacted before run output or persisted
   artifacts are written.
 
+### Fixed
+
+- CI runs the browser-heavy verification suite with one worker so its test
+  timeouts reflect product behavior rather than shared-runner contention.
+
 ## [2.0.0] - 2026-07-24
 
 ### Breaking
