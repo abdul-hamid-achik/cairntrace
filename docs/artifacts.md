@@ -205,7 +205,8 @@ need, and review binary files before sharing or stashing the pack.
 
 `retention.publish.enabled` can move a pruned, complete run to the private
 file.cheap service. Cairntrace creates one deterministic mode-0600 `.tar.gz`,
-rejects links and special files, enforces the 2 MiB remote limit, and invokes
+rejects links and special files, enforces the 32 MiB remote limit assigned to
+the `cairntrace` producer, and invokes
 `fcheap publish` with fixed producer metadata. `retentionDays` defaults to
 seven and is bounded to 1–31 days. The local run is removed only after the
 server-verified receipt matches the package SHA-256, size, kind, and producer.

@@ -614,7 +614,8 @@ with that one regular file plus its content type, kind, and producer metadata.
 `retentionDays` is required to remain between 1 and 31 days and defaults to
 seven; Cairntrace passes the resulting fixed expiry to file.cheap so demo
 evidence cannot become an unbounded remote-retention leak.
-The compressed archive must fit file.cheap's 2 MiB upload limit (Cairntrace also
+The compressed archive must fit the Cairntrace producer's 32 MiB file.cheap
+publish quota, itself below file.cheap's 64 MiB global ceiling (Cairntrace also
 bounds source input to 64 MiB); otherwise the local run is retained. Pruning is
 authorized only after the strict `filecheap-publish/1` receipt reports
 `server-sha256`, its SHA-256 and size match the exact archive bytes, and its

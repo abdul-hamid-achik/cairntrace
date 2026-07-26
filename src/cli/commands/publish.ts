@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import { constants, createWriteStream, type BigIntStats } from "node:fs";
+import {
+  constants,
+  createReadStream,
+  createWriteStream,
+  type BigIntStats,
+} from "node:fs";
 import {
   chmod,
   lstat,
@@ -25,7 +30,14 @@ import {
 } from "./fcheapContract";
 import { runFcheap } from "./fcheapClient";
 
-export const MAX_PUBLISH_ARCHIVE_BYTES = 2 * 1024 * 1024;
+/**
+ * The file.cheap publisher quota assigned to the `cairntrace` producer.
+ * file.cheap's global artifact ceiling is 64 MiB, but every producer is
+ * additionally capped by its own server-side `maxSizeBytes`; publishing above
+ * that quota is rejected with 413. Raise this only together with the Cairntrace
+ * entry in FILECHEAP_PUBLISHER_TOKENS.
+ */
+export const MAX_PUBLISH_ARCHIVE_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_REMOTE_RETENTION_DAYS = 7;
 const MAX_PUBLISH_SOURCE_BYTES = 64 * 1024 * 1024;
 const MAX_PUBLISH_ENTRIES = 10_000;
@@ -193,19 +205,28 @@ export async function createRunArchive(
         "run directory changed while its publication archive was being created",
       );
     }
-    const bytes = await readFile(archivePath);
-    if (
-      bytes.length !== compressedBytes ||
-      bytes.length > MAX_PUBLISH_ARCHIVE_BYTES
-    ) {
+    // Digest the finished archive incrementally so memory stays constant even
+    // at the top of the producer quota.
+    const digest = createHash("sha256");
+    let hashedBytes = 0;
+    for await (const chunk of createReadStream(archivePath)) {
+      hashedBytes += (chunk as Buffer).length;
+      if (hashedBytes > MAX_PUBLISH_ARCHIVE_BYTES) {
+        throw new PublicationArchiveError(
+          "run archive changed after it was written",
+        );
+      }
+      digest.update(chunk as Buffer);
+    }
+    if (hashedBytes !== compressedBytes) {
       throw new PublicationArchiveError(
         "run archive changed after it was written",
       );
     }
     return {
       path: archivePath,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-      sizeBytes: bytes.length,
+      sha256: digest.digest("hex"),
+      sizeBytes: hashedBytes,
       cleanup: async () => {
         await rm(tempDir, { recursive: true, force: true });
       },
