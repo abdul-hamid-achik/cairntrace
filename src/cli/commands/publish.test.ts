@@ -125,7 +125,7 @@ describe("remote artifact publication", () => {
     expect(runFcheapMock).not.toHaveBeenCalled();
   });
 
-  it("retains an incompressible run whose archive exceeds two MiB", async () => {
+  it("retains an incompressible run whose archive exceeds the producer quota", async () => {
     const dir = await completedRun("run-large");
     await writeFile(
       join(dir, "evidence.bin"),
