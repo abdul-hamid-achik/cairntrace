@@ -5,6 +5,28 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-07-26
+
+### Fixed
+
+- `wait` conditions using `text` or `notText`, and both `open.waitUntil`
+  readiness waits, were no-ops against the agent-browser backend. The
+  predicate was passed to `agent-browser wait --fn` wrapped in `() => …`,
+  but `--fn` takes an EXPRESSION and tests its result for truthiness — a
+  function object is always truthy, so the wait resolved on its first poll
+  and could never fail or actually wait. A wait for text that appeared
+  nowhere on the page returned "passed" in ~13ms. The predicates are now
+  emitted as bare expressions.
+
+  **This changes behaviour.** Specs that leaned on these waits for
+  synchronisation were getting none, and suites may have been passing on
+  timing alone; a spec that races ahead of the UI will now fail at the
+  wait instead of somewhere further down. Steps that were silently
+  succeeding can also legitimately start failing. Both are the point.
+
+  The Playwright exporter was unaffected — `page.evaluate()` genuinely
+  takes a function.
+
 ## [2.1.0] - 2026-07-24
 
 ### Added

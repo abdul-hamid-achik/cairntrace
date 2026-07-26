@@ -162,6 +162,61 @@ describe("waitConditionToArgv", () => {
     expect(argv[2]).not.toContain("toLowerCase");
     expect(argv[2]).toContain('includes("Saved")');
   });
+
+  // Regression: every --fn payload used to be wrapped in `() => …`.
+  // agent-browser EVALUATES the string and tests the result for truthiness, so
+  // it received a function object — always truthy — and the wait resolved on
+  // its first poll. Text/notText waits and both open.waitUntil readiness waits
+  // silently became no-ops: a wait for text that was nowhere on the page
+  // "passed" in ~13ms. Asserting on the string's shape would not catch a
+  // re-wrap, so evaluate it and check the RESULT type.
+  it("emits --fn payloads that EVALUATE to a boolean, never to a function", () => {
+    const argvs = [
+      waitConditionToArgv({ text: "Welcome" }),
+      waitConditionToArgv({ notText: "Loading..." }),
+      waitConditionToArgv({ text: "Saved", caseSensitive: true }),
+      openReadinessArgv("domcontentloaded"),
+      openReadinessArgv("load"),
+    ];
+
+    for (const argv of argvs) {
+      const index = argv.indexOf("--fn");
+      expect(index).toBeGreaterThanOrEqual(0);
+      const expression = argv[index + 1]!;
+      const evaluate = new Function("document", `return (${expression});`) as (
+        doc: unknown,
+      ) => unknown;
+      const value = evaluate({
+        body: { innerText: "" },
+        readyState: "complete",
+      });
+      expect(typeof value).toBe("boolean");
+    }
+  });
+
+  it("the text predicate actually discriminates on body content", () => {
+    const argv = waitConditionToArgv({ text: "Order  Saved" });
+    const expression = argv[argv.indexOf("--fn") + 1]!;
+    const evaluate = new Function("document", `return (${expression});`) as (
+      doc: unknown,
+    ) => boolean;
+
+    expect(evaluate({ body: { innerText: "The ORDER   saved fine" } })).toBe(
+      true,
+    );
+    expect(evaluate({ body: { innerText: "Nothing to see" } })).toBe(false);
+  });
+
+  it("the notText predicate is true only while the text is absent", () => {
+    const argv = waitConditionToArgv({ notText: "Loading..." });
+    const expression = argv[argv.indexOf("--fn") + 1]!;
+    const evaluate = new Function("document", `return (${expression});`) as (
+      doc: unknown,
+    ) => boolean;
+
+    expect(evaluate({ body: { innerText: "Still loading..." } })).toBe(false);
+    expect(evaluate({ body: { innerText: "Done" } })).toBe(true);
+  });
 });
 
 describe("openReadinessArgv", () => {
@@ -169,7 +224,7 @@ describe("openReadinessArgv", () => {
     expect(openReadinessArgv("domcontentloaded")).toEqual([
       "wait",
       "--fn",
-      "() => document.readyState !== 'loading'",
+      "document.readyState !== 'loading'",
     ]);
   });
 
@@ -177,7 +232,7 @@ describe("openReadinessArgv", () => {
     expect(openReadinessArgv("load")).toEqual([
       "wait",
       "--fn",
-      "() => document.readyState === 'complete'",
+      "document.readyState === 'complete'",
     ]);
   });
 
@@ -193,7 +248,7 @@ describe("openReadinessArgv", () => {
     expect(openReadinessArgv("domcontentloaded", 45000)).toEqual([
       "wait",
       "--fn",
-      "() => document.readyState !== 'loading'",
+      "document.readyState !== 'loading'",
       "--timeout",
       "45000",
     ]);

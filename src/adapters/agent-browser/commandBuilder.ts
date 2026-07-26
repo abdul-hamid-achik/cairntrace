@@ -147,6 +147,15 @@ export function waitStepToArgv(step: WaitStep): string[] {
   return waitConditionToArgv(step.wait);
 }
 
+/**
+ * `--fn` takes an EXPRESSION, not a function: agent-browser evaluates the
+ * string and tests the result for truthiness. Passing `() => <expr>` hands it
+ * a function OBJECT, which is always truthy — so the wait resolves on its
+ * first poll and can never fail. That silently turned every text/notText wait
+ * (and both `open.waitUntil` readiness waits) into a no-op; a wait for a
+ * string that appeared nowhere on the page returned "passed" in ~13ms.
+ * Keep these bare expressions. See waitConditionToArgv's regression tests.
+ */
 export function waitConditionToArgv(w: WaitCondition): string[] {
   const argv = ["wait"];
   if ("text" in w) {
@@ -154,15 +163,15 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
       w.text,
       w.caseSensitive ?? false,
     );
-    argv.push("--fn", `() => ${expression}`);
+    argv.push("--fn", expression);
   } else if ("notText" in w) {
     // agent-browser has no native --notText. Use --fn with a JS predicate.
-    // The function returns truthy when the text is absent from <body>.
+    // The expression is truthy when the text is absent from <body>.
     const expression = bodyTextContainsExpression(
       w.notText,
       w.caseSensitive ?? false,
     );
-    argv.push("--fn", `() => !(${expression})`);
+    argv.push("--fn", `!(${expression})`);
   } else if ("selector" in w) {
     argv.push(w.selector);
     if (w.state !== undefined) argv.push("--state", w.state);
@@ -196,9 +205,9 @@ export function openReadinessArgv(
 ): string[] {
   const argv =
     waitUntil === "domcontentloaded"
-      ? ["wait", "--fn", "() => document.readyState !== 'loading'"]
+      ? ["wait", "--fn", "document.readyState !== 'loading'"]
       : waitUntil === "load"
-        ? ["wait", "--fn", "() => document.readyState === 'complete'"]
+        ? ["wait", "--fn", "document.readyState === 'complete'"]
         : ["wait", "--load", "networkidle"];
   if (timeoutMs !== undefined) argv.push("--timeout", String(timeoutMs));
   return argv;

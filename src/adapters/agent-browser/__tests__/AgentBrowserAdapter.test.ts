@@ -2425,7 +2425,7 @@ describe("open with waitUntil", () => {
     expect(waitArgv).toEqual([
       "wait",
       "--fn",
-      "() => document.readyState !== 'loading'",
+      "document.readyState !== 'loading'",
     ]);
   });
 
@@ -2441,7 +2441,7 @@ describe("open with waitUntil", () => {
     expect(waitArgv).toEqual([
       "wait",
       "--fn",
-      "() => document.readyState === 'complete'",
+      "document.readyState === 'complete'",
       "--timeout",
       "5000",
     ]);
