@@ -85,6 +85,10 @@ addFormatFlags(
     .description("Run one or more behavioral specs")
     .option("--env <name>", "environment override")
     .option("--cold-start", "force fresh browser profile (default: on in CI)")
+    .option(
+      "--progress <mode>",
+      "narration renderer: auto | tty | plain (auto = tty on a terminal, plain when piped)",
+    )
     .option("--headed", "show the browser window", false)
     .option("--mock", "use the in-memory mock backend", false)
     .option("--backend <name>", "agent-browser (default) | playwright | mock")

@@ -39,8 +39,12 @@ import {
   trackWebServer,
 } from "../cleanup";
 import { emit, resolveFormat } from "../format";
-import { isInteractive, makeInteractiveListener } from "../progress";
-import { log, reconfigureWithConfig } from "../logger";
+import {
+  makeProgressListener,
+  resolveProgressMode,
+  type ProgressMode,
+} from "../progress";
+import { log, reconfigureWithConfig, setNarrationDefault } from "../logger";
 import { resolveScopedSecrets, type ScopedSecrets } from "./secrets";
 import { publishRunDirectory } from "./publish";
 import { maybeAutoStash, stashDirectory } from "./stash";
@@ -67,6 +71,12 @@ export interface RunCommandOptions {
   json?: boolean;
   yaml?: boolean;
   md?: boolean;
+  /**
+   * Narration renderer: auto (default) | tty | plain. `tty` is the cursor
+   * renderer (spinner, redrawn lines); `plain` is sequential timestamped
+   * milestones, safe to pipe/tee. `auto` picks by stdout TTY-ness.
+   */
+  progress?: string;
   artifactRoot?: string;
   config?: string;
   parallel?: string;
@@ -638,10 +648,17 @@ async function runSingle(
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts, browser));
   const untrack = trackBackend(backend);
-  const interactive = format === "md" && isInteractive();
-  const listener = interactive
-    ? makeInteractiveListener({ color: colorEnabled() })
+  // Narration mode is an axis of its own (--progress auto|tty|plain): tty is
+  // the cursor renderer, plain is timestamped sequential lines for pipes/CI.
+  // Structured formats (json/yaml) keep stdout for the document and skip
+  // narration entirely, as before.
+  const progressMode: ProgressMode | undefined =
+    format === "md" ? resolveProgressMode(opts.progress) : undefined;
+  const interactive = progressMode === "tty";
+  const listener = progressMode
+    ? makeProgressListener(progressMode, { color: colorEnabled() })
     : undefined;
+  if (progressMode) setNarrationDefault(true);
 
   let exitCode: ExitCode = 2;
   try {
@@ -718,7 +735,25 @@ async function runBatch(
   scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
-  const interactive = format === "md" && isInteractive();
+  const progressMode: ProgressMode | undefined =
+    format === "md" ? resolveProgressMode(opts.progress) : undefined;
+  const interactive = progressMode === "tty";
+  if (progressMode) setNarrationDefault(true);
+  // Bold and colored marks only exist in the tty renderer; plain mode is a
+  // designed sequential format, not tty with codes stripped.
+  const bold = (s: string) => (interactive ? `\x1b[1m${s}\x1b[0m` : s);
+  const statusMark = (status: RunResult["status"]) =>
+    status === "passed"
+      ? interactive
+        ? "\x1b[32m✓\x1b[0m"
+        : "✓"
+      : status === "failed"
+        ? interactive
+          ? "\x1b[31m✗\x1b[0m"
+          : "✗"
+        : interactive
+          ? "\x1b[33m·\x1b[0m"
+          : "·";
   const tStart = Date.now();
   const startedAt = new Date(tStart).toISOString();
   const artifactRoot = await resolveBatchArtifactRoot(specs[0]!, opts);
@@ -747,9 +782,9 @@ async function runBatch(
     }
   });
 
-  if (interactive) {
+  if (progressMode) {
     log.raw(
-      `\x1b[1mRunning\x1b[0m ${specs.length} spec${
+      `${bold("Running")} ${specs.length} spec${
         specs.length === 1 ? "" : "s"
       } (parallel: ${parallel})\n\n`,
     );
@@ -778,17 +813,17 @@ async function runBatch(
         // gets the exact same live narration as a single run; parallel > 1
         // keeps completion lines only (interleaved redraws would corrupt).
         const specListener =
-          interactive && parallel === 1
-            ? makeInteractiveListener({ color: colorEnabled() })
+          progressMode && parallel === 1
+            ? makeProgressListener(progressMode, { color: colorEnabled() })
             : undefined;
-        if (interactive) {
+        if (progressMode) {
           const specLabel =
             specPath
               .split("/")
               .pop()
               ?.replace(/\.ya?ml$/, "") ?? specPath;
           log.raw(
-            `\x1b[1m[${idx + 1}/${specs.length}]\x1b[0m ${specLabel} — starting…\n`,
+            `${bold(`[${idx + 1}/${specs.length}]`)} ${specLabel} — starting…\n`,
           );
         }
         try {
@@ -830,15 +865,9 @@ async function runBatch(
           // Record immediately, before best-effort annotation/stash work, so a
           // signal can index every completed per-spec artifact directory.
           completedByIndex[idx] = r;
-          if (interactive) {
-            const mark =
-              r.status === "passed"
-                ? "\x1b[32m✓\x1b[0m"
-                : r.status === "failed"
-                  ? "\x1b[31m✗\x1b[0m"
-                  : "\x1b[33m·\x1b[0m";
+          if (progressMode) {
             log.raw(
-              `  ${mark} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
+              `  ${statusMark(r.status)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
                 r.outcomes.filter((o) => o.status === "passed").length
               }/${r.outcomes.length} outcomes)\n`,
             );
@@ -848,9 +877,9 @@ async function runBatch(
         } catch (e) {
           // Synthesize an errored RunResult so the batch survives.
           const err = e as Error;
-          if (interactive) {
+          if (progressMode) {
             log.raw(
-              `  \x1b[33m·\x1b[0m [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+              `  ${statusMark("errored")} [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
             );
           }
           const errored = synthesizeErroredResult(specPath, err, {

@@ -50,6 +50,102 @@ export function isInteractive(): boolean {
   return Boolean(process.stdout.isTTY);
 }
 
+export type ProgressMode = "tty" | "plain";
+
+/**
+ * Rendering mode is its own axis, not a side effect of TTY detection: `tty`
+ * is the cursor-redraw renderer (spinner, overwritten lines), `plain` is a
+ * designed sequential renderer (timestamped milestone lines, no control
+ * codes) that is safe to pipe, tee, and diff — not "tty minus colors".
+ * `auto` (the default) picks by stdout, exactly like docker --progress.
+ */
+export function resolveProgressMode(flag?: string): ProgressMode {
+  const requested = flag ?? process.env.CAIRN_PROGRESS;
+  if (requested === "tty" || requested === "plain") return requested;
+  if (requested !== undefined && requested !== "auto") {
+    throw new Error(`--progress expects auto|tty|plain, got "${requested}"`);
+  }
+  // CAIRN_FORCE_TTY predates --progress; honour it as an explicit tty vote.
+  if (process.env.CAIRN_FORCE_TTY === "1") return "tty";
+  return process.stdout.isTTY ? "tty" : "plain";
+}
+
+export function makeProgressListener(
+  mode: ProgressMode,
+  options: { color?: boolean } = {},
+): ProgressListener {
+  return mode === "tty"
+    ? makeInteractiveListener(options)
+    : makePlainListener();
+}
+
+/**
+ * Sequential milestone renderer for pipes, tee, and CI. Every line is
+ * timestamped and final — nothing is redrawn. Short steps report only on
+ * completion; long waits (preconditions, verifier polls) announce themselves
+ * so a many-minute gate is attributable from the log alone.
+ */
+export function makePlainListener(
+  options: { write?: (s: string) => void } = {},
+): ProgressListener {
+  const write = options.write ?? out;
+  const line = (s: string) =>
+    write(`[${new Date().toISOString().slice(11, 19)}] ${s}\n`);
+  return {
+    onRunStart(spec, _runId, runDir, backendName) {
+      line(
+        `run start: ${spec.name} (env=${spec.environment ?? "local"}, backend=${backendName})`,
+      );
+      line(`run dir: ${runDir}`);
+    },
+    onPreconditionStart(name, timeoutMs) {
+      line(`precondition ${name} started (budget ${formatMs(timeoutMs)})`);
+    },
+    onPreconditionFinish(name, exitCode, durationMs) {
+      line(
+        `precondition ${name} ${
+          exitCode === 0 ? "ok" : `failed (exit ${exitCode})`
+        } ${formatMs(durationMs)}`,
+      );
+    },
+    onStepFinish(_idx, stepId, status, durationMs, error) {
+      line(`step ${stepId} ${status} ${formatMs(durationMs)}`);
+      if (status === "failed" && error) {
+        for (const errorLine of summarizeStepError(error)) {
+          write(`  ${errorLine}\n`);
+        }
+      }
+    },
+    onOutcomesStart(total) {
+      line(`outcomes: evaluating ${total}`);
+    },
+    onOutcomeStart(outcome) {
+      line(`outcome ${outcome.id} verifying…`);
+    },
+    onOutcomeFinish(outcome, evaluation) {
+      if (evaluation.skipped) {
+        line(`outcome ${outcome.id} blocked`);
+        return;
+      }
+      line(`outcome ${outcome.id} ${evaluation.passed ? "passed" : "failed"}`);
+      if (!evaluation.passed) {
+        write(`  expected: ${truncate(evaluation.expected, 200)}\n`);
+        write(
+          `  actual:   ${truncate(evaluation.actual.split("\n")[0] ?? "", 200)}\n`,
+        );
+      }
+    },
+    onRunEnd(result) {
+      const passed = result.outcomes.filter(
+        (o) => o.status === "passed",
+      ).length;
+      line(
+        `run ${result.status.toUpperCase()}: ${passed}/${result.outcomes.length} outcomes in ${formatMs(result.durationMs)}`,
+      );
+    },
+  };
+}
+
 /**
  * Build a TTY-aware progress listener for `cairn run`.
  * Returns `null` when the environment doesn't want progress (non-TTY or JSON/YAML mode).

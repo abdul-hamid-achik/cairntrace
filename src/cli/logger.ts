@@ -270,6 +270,8 @@ interface RawLogFlags {
 }
 
 let rawFlags: RawLogFlags = {};
+let lastConfig: LoggingConfig | undefined;
+let narrationActive = false;
 
 /**
  * Store the CLI flags and configure the logger from flags + env (no config).
@@ -289,7 +291,30 @@ export function configureLoggerFromFlags(flags: RawLogFlags): void {
  * that load cairntrace.config.yml (run, clean, …) after their config load.
  */
 export function reconfigureWithConfig(config: LoggingConfig | undefined): void {
-  log.configure(resolveLogConfig({ ...rawFlags, config }));
+  lastConfig = config;
+  log.configure(
+    resolveLogConfig({
+      ...rawFlags,
+      ...(lastConfig ? { config: lastConfig } : {}),
+    }),
+  );
+}
+
+/**
+ * Progress narration (`cairn run` in md format) raises the DEFAULT level
+ * floor to info: milestone lines (services ready, seed skipped) are part of
+ * the narration and must survive a pipe, where the TTY-derived default would
+ * silently drop to warn. Flags, env, and config still win — this only moves
+ * the default. Order-independent with reconfigureWithConfig().
+ */
+export function setNarrationDefault(on: boolean): void {
+  narrationActive = on;
+  log.configure(
+    resolveLogConfig({
+      ...rawFlags,
+      ...(lastConfig ? { config: lastConfig } : {}),
+    }),
+  );
 }
 
 /**
@@ -309,7 +334,9 @@ export function resolveLogConfig(opts: {
   const ci = isCiEnv();
 
   // Default: info on an interactive TTY, warn otherwise (CI / piped / json).
-  let level: LogLevel = tty && !ci ? "info" : "warn";
+  // Active narration raises the floor to info regardless of TTY — see
+  // setNarrationDefault().
+  let level: LogLevel = narrationActive || (tty && !ci) ? "info" : "warn";
   if (opts.config?.level) level = opts.config.level;
   if (opts.verbose) level = "debug";
   if (opts.quiet) level = "warn";

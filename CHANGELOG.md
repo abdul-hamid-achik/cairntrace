@@ -5,6 +5,51 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-28
+
+Output architecture release: the terminal is a view, files are the record.
+Informed by a cross-tool study (BuildKit, Buck2, Turborepo, GitHub Actions,
+Playwright, Cargo) and a DX review of a real 6-spec, multi-hour run.
+
+### Added
+
+- `--progress <auto|tty|plain>` on `cairn run` (also `CAIRN_PROGRESS`).
+  `tty` is the cursor renderer — spinner frames with elapsed time on every
+  in-flight step, precondition, and verifier poll. `plain` is a DESIGNED
+  sequential renderer — timestamped milestone lines, zero control codes,
+  safe to pipe, tee, and diff — not "tty minus colors". `auto` (default)
+  picks by stdout TTY-ness, exactly like docker --progress. The old
+  `CAIRN_FORCE_TTY=1` escape hatch still works as a tty vote.
+
+- Batch runs now narrate. The per-spec progress listener was only ever
+  wired in single-spec mode: a 6-spec batch showed one banner and then
+  total silence until each spec finished, minutes or hours later. With
+  `parallel: 1` each spec now gets a bold `[n/N] name — starting…` banner
+  and the full live narration; higher parallelism keeps completion lines
+  only (interleaved cursor redraws would corrupt each other).
+
+- Preconditions and per-outcome verifier polls announce themselves
+  (`precondition quiesce started (budget 30m)`, `outcome X verifying…`)
+  and report on completion, in both renderers, with `precondition.started`
+  emitted to events.ndjson. A many-minute gate reads as "working, bounded"
+  instead of a dead terminal.
+
+- tmux pane output became a log of record: deltas stream incrementally to
+  `~/.cairntrace/services/<project>-<window>.pane.log` while the terminal
+  gets a ~15s heartbeat. Raw pane streaming used to bury entire runs under
+  service stack traces. The ready-timeout error now carries the last pane
+  lines — it used to throw with zero diagnostic content.
+
+- Narration raises the logger's DEFAULT level floor to info, so services
+  milestones survive a pipe without `CAIRN_LOG_LEVEL` hand-tuning. Flags,
+  env, and config still win.
+
+### Fixed
+
+- Verify scripts receive `ctx.run` (`failedStep`, `lastSuccessfulStep`) and
+  accept `script.timeoutMs` (see 2.3.0 entries); services log lines no
+  longer double their `services:` prefix under the scoped logger.
+
 ## [2.3.0] - 2026-07-28
 
 ### Added
