@@ -1,7 +1,8 @@
 import { execa } from "execa";
+import { createWriteStream, mkdirSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   DockerConfig,
   Healthcheck,
@@ -49,6 +50,8 @@ export interface StartServicesContext {
   secretValues?: Iterable<string>;
   /** Optional narrator for interactive runs (stderr lifecycle lines). */
   log?: (message: string) => void;
+  /** Root for per-window pane logs (default `~/.cairntrace/services`). */
+  serviceLogRoot?: string;
   /** Optional live streamer for service command output (interactive runs). */
   onOutput?: (chunk: string) => void;
   /** Optional structured lifecycle event collector (for events.ndjson). */
@@ -237,18 +240,18 @@ export async function startServices(
           killsTmuxSession(cmd, managedSession)
         ) {
           ctx.log?.(
-            `services: teardown (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
+            `teardown (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
           );
           continue;
         }
         if (phases.tmuxReuse && tearsDownDocker(cmd)) {
           ctx.log?.(
-            `services: teardown (skipped docker down for reuse — tmux services still need infra)`,
+            `teardown (skipped docker down for reuse — tmux services still need infra)`,
           );
           continue;
         }
         try {
-          ctx.log?.(`services: teardown (${cmd})`);
+          ctx.log?.(`teardown (${cmd})`);
           await runShell(cmd, {
             cwd: ctx.configDir,
             env: targetEnv(ctx),
@@ -316,18 +319,18 @@ async function teardownStartedPhases(
       killsTmuxSession(cmd, managedSession)
     ) {
       ctx.log?.(
-        `services: failure-cleanup (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
+        `failure-cleanup (skipped tmux kill for reuse — leaving "${managedSession}" alive)`,
       );
       continue;
     }
     if (phases.tmuxReuse && tearsDownDocker(cmd)) {
       ctx.log?.(
-        `services: failure-cleanup (skipped docker down for reuse — tmux services still need infra)`,
+        `failure-cleanup (skipped docker down for reuse — tmux services still need infra)`,
       );
       continue;
     }
     try {
-      ctx.log?.(`services: teardown (${cmd})`);
+      ctx.log?.(`teardown (${cmd})`);
       await runShell(cmd, {
         cwd: ctx.configDir,
         env: targetEnv(ctx),
@@ -405,7 +408,7 @@ async function startDocker(
     return;
   }
 
-  ctx.log?.(`services: docker (${cfg.command})`);
+  ctx.log?.(`docker (${cfg.command})`);
   emit("docker", "start", cfg.command);
   const onChunk = ctx.onOutput
     ? (_s: "stdout" | "stderr", chunk: string) => ctx.onOutput!(chunk)
@@ -426,7 +429,7 @@ async function startDocker(
 
   // Optional readiness check: a command whose exit 0 means infra is ready.
   if (cfg.readinessCheck) {
-    ctx.log?.(`services: docker — readiness check (${cfg.readinessCheck})`);
+    ctx.log?.(`docker — readiness check (${cfg.readinessCheck})`);
     emit("docker", "readiness-check", cfg.readinessCheck);
     const rc = await runShellWithTimeout(
       cfg.readinessCheck,
@@ -455,7 +458,7 @@ async function startDocker(
     );
     if (!hcResult.healthy) {
       ctx.log?.(
-        `services: docker — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
+        `docker — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
       );
       emit(
         "docker",
@@ -539,7 +542,7 @@ async function startSeed(
   const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
   if (!check.shouldRun) {
-    ctx.log?.(redactor.text(`services: seed — skipping (${check.reason})`));
+    ctx.log?.(redactor.text(`seed — skipping (${check.reason})`));
     emit("seed", "skip", check.reason);
     await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit);
     return;
@@ -547,9 +550,7 @@ async function startSeed(
 
   // If the fingerprint + TTL pass but freshnessCheck is configured, run it.
   if (check.reason === "freshness-check-pending" && cfg.freshnessCheck) {
-    ctx.log?.(
-      redactor.text(`services: seed — freshness check (${cfg.freshnessCheck})`),
-    );
+    ctx.log?.(redactor.text(`seed — freshness check (${cfg.freshnessCheck})`));
     emit("seed", "freshness-check", redactor.text(cfg.freshnessCheck));
     const fr = await runShellWithTimeout(
       cfg.freshnessCheck,
@@ -567,7 +568,7 @@ async function startSeed(
     }
     ctx.log?.(
       redactor.text(
-        `services: seed — freshness check failed (exit ${fr.exitCode}), re-seeding`,
+        `seed — freshness check failed (exit ${fr.exitCode}), re-seeding`,
       ),
     );
     emit(
@@ -580,7 +581,7 @@ async function startSeed(
     );
   }
 
-  ctx.log?.(redactor.text(`services: seed — running (${cfg.command})`));
+  ctx.log?.(redactor.text(`seed — running (${cfg.command})`));
   emit("seed", "start", redactor.text(cfg.command));
   const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
   // Redact the complete stream before forwarding it. Redacting individual
@@ -622,7 +623,7 @@ async function runSeedPostCommands(
   if (commands.length === 0) return;
 
   for (const command of commands) {
-    ctx.log?.(redactor.text(`services: seed — postCommand (${command})`));
+    ctx.log?.(redactor.text(`seed — postCommand (${command})`));
     emit("seed", "start", redactor.text(`postCommand: ${command}`));
     const r = await runShellWithTimeout(
       command,
@@ -688,7 +689,7 @@ async function startTmux(
     const exists = await tmuxSessionExists(cfg.session);
     if (exists && phases.dockerRefreshed) {
       ctx.log?.(
-        `services: tmux — docker was refreshed this run; recreating session "${cfg.session}" so app processes reconnect`,
+        `tmux — docker was refreshed this run; recreating session "${cfg.session}" so app processes reconnect`,
       );
       emit(
         "tmux",
@@ -701,7 +702,7 @@ async function startTmux(
       });
       // fall through to create path
     } else if (exists) {
-      ctx.log?.(`services: tmux — reusing session "${cfg.session}"`);
+      ctx.log?.(`tmux — reusing session "${cfg.session}"`);
       emit("tmux", "reuse", `reusing session "${cfg.session}"`);
       await ensureTmuxWindows(cfg, ctx, emit);
       await waitForAllTmuxWindows(cfg, ctx, emit);
@@ -718,7 +719,7 @@ async function startTmux(
 
   // Create the session with the first window, then add the rest.
   ctx.log?.(
-    `services: tmux — creating session "${cfg.session}" with ${cfg.windows.length} windows`,
+    `tmux — creating session "${cfg.session}" with ${cfg.windows.length} windows`,
   );
   emit(
     "tmux",
@@ -777,9 +778,7 @@ async function startTmux(
     if (await tmuxWindowExists(cfg.session, win.name)) {
       const live = await isTmuxWindowLive(cfg.session, win);
       if (live) continue;
-      ctx.log?.(
-        `services: tmux — "${win.name}" exists but is not live; re-launching`,
-      );
+      ctx.log?.(`tmux — "${win.name}" exists but is not live; re-launching`);
       emit("tmux", "relaunch", `re-launching "${win.name}"`, {
         window: win.name,
       });
@@ -822,7 +821,7 @@ async function ensureTmuxWindows(
   for (const win of cfg.windows) {
     if (!(await tmuxWindowExists(cfg.session, win.name))) {
       ctx.log?.(
-        `services: tmux — window "${win.name}" missing in reused session; creating`,
+        `tmux — window "${win.name}" missing in reused session; creating`,
       );
       emit("tmux", "create-window", `creating missing "${win.name}"`, {
         window: win.name,
@@ -845,16 +844,12 @@ async function ensureTmuxWindows(
 
     const live = await isTmuxWindowLive(cfg.session, win);
     if (live) {
-      ctx.log?.(
-        `services: tmux — "${win.name}" already live; leaving process alone`,
-      );
+      ctx.log?.(`tmux — "${win.name}" already live; leaving process alone`);
       emit("tmux", "skip", `"${win.name}" already live`, { window: win.name });
       continue;
     }
 
-    ctx.log?.(
-      `services: tmux — "${win.name}" not live in reused session; re-launching`,
-    );
+    ctx.log?.(`tmux — "${win.name}" not live in reused session; re-launching`);
     emit("tmux", "relaunch", `re-launching "${win.name}"`, {
       window: win.name,
     });
@@ -877,16 +872,47 @@ async function waitForAllTmuxWindows(
     readyTimeoutMs > 0 ? Date.now() + readyTimeoutMs : Number.POSITIVE_INFINITY;
   for (const win of cfg.windows) {
     if (!win.readyOn) continue;
-    ctx.log?.(`services: tmux — waiting for "${win.name}" to be ready`);
+    // Pane output is a log of record, not terminal content: full deltas
+    // stream to a per-window file while the terminal gets a ~15s heartbeat.
+    // Written incrementally so a killed run still leaves the evidence.
+    const paneLog = join(
+      ctx.serviceLogRoot ?? join(homedir(), ".cairntrace", "services"),
+      `${ctx.project}-${win.name}.pane.log`,
+    );
+    mkdirSync(dirname(paneLog), { recursive: true });
+    const paneStream = createWriteStream(paneLog, { flags: "w" });
+    ctx.log?.(
+      `tmux — waiting for "${win.name}" to be ready (pane log: ${paneLog})`,
+    );
     emit("tmux", "ready-wait", `waiting for "${win.name}"`, {
       window: win.name,
     });
-    await waitForTmuxWindow(
-      cfg.session,
-      win,
-      deadline,
-      ctx.onOutput ? (tail) => ctx.onOutput!(tail) : undefined,
-    );
+    try {
+      await waitForTmuxWindow(cfg.session, win, deadline, {
+        onDelta: (delta) =>
+          paneStream.write(delta.endsWith("\n") ? delta : `${delta}\n`),
+        ...(ctx.log
+          ? {
+              onHeartbeat: (elapsedMs: number, newLines: number) =>
+                ctx.log?.(
+                  `tmux — "${win.name}" still starting after ${Math.round(
+                    elapsedMs / 1000,
+                  )}s (${
+                    newLines > 0
+                      ? `+${newLines} pane lines captured`
+                      : "pane idle"
+                  })`,
+                ),
+            }
+          : {}),
+      });
+    } finally {
+      // Flush before proceeding: a reader (or the process exiting on error)
+      // must find every captured delta on disk.
+      await new Promise<void>((resolveEnd) => {
+        paneStream.end(() => resolveEnd());
+      });
+    }
     emit("tmux", "ready", `"${win.name}" ready`, { window: win.name });
   }
 
@@ -902,7 +928,7 @@ async function waitForAllTmuxWindows(
     );
     if (!hcResult.healthy) {
       ctx.log?.(
-        `services: tmux/${win.name} — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
+        `tmux/${win.name} — healthcheck WARNING: unhealthy after ${hcResult.consecutiveFailures} failures`,
       );
       emit("tmux", "healthcheck", `unhealthy: ${win.name}`, {
         window: win.name,
@@ -914,7 +940,7 @@ async function waitForAllTmuxWindows(
     }
   }
 
-  ctx.log?.(`services: tmux — session "${cfg.session}" ready`);
+  ctx.log?.(`tmux — session "${cfg.session}" ready`);
   emit("tmux", "ready", `session "${cfg.session}" ready`);
 }
 
@@ -1021,22 +1047,22 @@ async function sendWindowCommands(
         });
         if (probe.exitCode === 0) {
           ctx.log?.(
-            `services: tmux — ${win.name}: pre-command skipped, skipIf passed (${pre.run})`,
+            `tmux — ${win.name}: pre-command skipped, skipIf passed (${pre.run})`,
           );
           continue;
         }
         ctx.log?.(
-          `services: tmux — ${win.name}: skipIf exited ${probe.exitCode} — running pre-command`,
+          `tmux — ${win.name}: skipIf exited ${probe.exitCode} — running pre-command`,
         );
       } catch (e) {
         ctx.log?.(
-          `services: tmux — ${win.name}: skipIf probe failed (${(e as Error).message}) — running pre-command`,
+          `tmux — ${win.name}: skipIf probe failed (${(e as Error).message}) — running pre-command`,
         );
       }
     }
     // Ensure the shell is accepting input (direnv may have just reloaded).
     await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
-    ctx.log?.(`services: tmux — ${win.name}: pre-command (${pre.run})`);
+    ctx.log?.(`tmux — ${win.name}: pre-command (${pre.run})`);
     await sendTmuxCommand(session, win.name, pre.run);
     // Wait until the pre-command exits and the shell is idle again before
     // sending the next one / main command. Long deadline: cold `yarn build` /
@@ -1067,7 +1093,7 @@ async function sendMainCommandWithRetry(
     await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
     if (attempt > 1) {
       ctx.log?.(
-        `services: tmux — ${win.name}: re-sending command (attempt ${attempt}/${TMUX_COMMAND_SEND_ATTEMPTS})`,
+        `tmux — ${win.name}: re-sending command (attempt ${attempt}/${TMUX_COMMAND_SEND_ATTEMPTS})`,
       );
     }
     await sendTmuxCommand(session, win.name, win.command);
@@ -1082,7 +1108,7 @@ async function sendMainCommandWithRetry(
     }
   }
   ctx.log?.(
-    `services: tmux — ${win.name}: command may not have started (pane still idle after ${TMUX_COMMAND_SEND_ATTEMPTS} sends); continuing to ready wait`,
+    `tmux — ${win.name}: command may not have started (pane still idle after ${TMUX_COMMAND_SEND_ATTEMPTS} sends); continuing to ready wait`,
   );
 }
 
@@ -1121,7 +1147,7 @@ async function waitForTmuxShellReady(
     await sleep(POLL_MS);
   }
   ctx.log?.(
-    `services: tmux — "${window}" shell not confirmed idle within ${timeoutMs}ms; sending keys anyway`,
+    `tmux — "${window}" shell not confirmed idle within ${timeoutMs}ms; sending keys anyway`,
   );
 }
 
@@ -1213,11 +1239,23 @@ async function waitForTmuxWindow(
   session: string,
   win: TmuxWindow,
   deadline: number,
-  onStall?: (paneTail: string) => void,
+  hooks?: {
+    /** Full pane delta — the log of record, never the terminal. */
+    onDelta?: (delta: string) => void;
+    /** Bounded proof-of-life line for the terminal, every ~15s. */
+    onHeartbeat?: (elapsedMs: number, newLines: number) => void;
+  },
 ): Promise<void> {
   if (!win.readyOn) return;
+  const startedAt = Date.now();
   let lastStall = 0;
+  let lastBeat = Date.now();
+  let linesSinceBeat = 0;
   let lastCapture = "";
+  // Rolling tail for the timeout error: a tmux window that never became
+  // ready used to throw with ZERO captured output — the one moment the pane
+  // content matters most (docker/seed failures already tail theirs).
+  const recent: string[] = [];
   for (;;) {
     // Check URL readiness.
     if (win.readyOn.url) {
@@ -1235,14 +1273,19 @@ async function waitForTmuxWindow(
       throw new ServicesError(
         `tmux window "${win.name}" did not become ready within deadline` +
           (win.readyOn.url ? ` (url: ${win.readyOn.url})` : "") +
-          (win.readyOn.text ? ` (text: "${win.readyOn.text}")` : ""),
+          (win.readyOn.text ? ` (text: "${win.readyOn.text}")` : "") +
+          (recent.length > 0
+            ? `\n--- last pane output ("${win.name}") ---\n${recent
+                .slice(-40)
+                .join("\n")}`
+            : ""),
       );
     }
-    // Stream the pane as a live tail: capture a wide scrollback and emit only
-    // the NEW lines since the last capture, so an indefinite wait shows real
-    // progress (build/startup output) instead of re-printing the same block
-    // every interval. Idle windows (server up, no new output) emit nothing.
-    if (onStall && Date.now() - lastStall >= TMUX_STALL_INTERVAL_MS) {
+    // Capture the pane's NEW lines since the last look. The delta goes to the
+    // log of record (hooks.onDelta → a file); the terminal only gets a short
+    // heartbeat. Streaming raw pane content to the terminal buried entire
+    // runs under Go stack traces and 30-line request dumps.
+    if (Date.now() - lastStall >= TMUX_STALL_INTERVAL_MS) {
       lastStall = Date.now();
       const tail = await captureTmuxPane(session, win.name, 500);
       if (tail && tail !== lastCapture) {
@@ -1252,9 +1295,20 @@ async function waitForTmuxWindow(
             : lastCapture
               ? tailText(tail, 15)
               : tailText(tail, 20);
-        if (delta.trim()) onStall(delta);
+        if (delta.trim()) {
+          hooks?.onDelta?.(delta);
+          const deltaLines = delta.split("\n").filter((l) => l.trim());
+          linesSinceBeat += deltaLines.length;
+          recent.push(...deltaLines);
+          if (recent.length > 80) recent.splice(0, recent.length - 80);
+        }
         lastCapture = tail;
       }
+    }
+    if (hooks?.onHeartbeat && Date.now() - lastBeat >= 15_000) {
+      hooks.onHeartbeat(Date.now() - startedAt, linesSinceBeat);
+      lastBeat = Date.now();
+      linesSinceBeat = 0;
     }
     await sleep(POLL_MS);
   }
@@ -1436,17 +1490,13 @@ async function stashServicesArtifacts(
     });
     if (result.ok) {
       ctx.log?.(
-        `services: stashed ${phases.artifacts.length} artifacts to fcheap → ${result.stashId ?? "(unknown)"}`,
+        `stashed ${phases.artifacts.length} artifacts to fcheap → ${result.stashId ?? "(unknown)"}`,
       );
     } else {
-      ctx.log?.(
-        `services: stash to fcheap failed (non-fatal): ${result.error}`,
-      );
+      ctx.log?.(`stash to fcheap failed (non-fatal): ${result.error}`);
     }
   } catch (e) {
-    ctx.log?.(
-      `services: stash to fcheap failed (non-fatal): ${(e as Error).message}`,
-    );
+    ctx.log?.(`stash to fcheap failed (non-fatal): ${(e as Error).message}`);
   }
 }
 
@@ -1489,7 +1539,7 @@ async function runHealthcheck(
   // Wait for the start period before the first check.
   if (startPeriodMs > 0) {
     ctx.log?.(
-      `services: ${label} — healthcheck waiting ${cfg.startPeriodSeconds ?? 0}s before first check`,
+      `${label} — healthcheck waiting ${cfg.startPeriodSeconds ?? 0}s before first check`,
     );
     await sleep(startPeriodMs);
   }
@@ -1500,7 +1550,7 @@ async function runHealthcheck(
       await sleep(intervalMs);
     }
     ctx.log?.(
-      `services: ${label} — healthcheck attempt ${attempt + 1}/${retries} (${cfg.command})`,
+      `${label} — healthcheck attempt ${attempt + 1}/${retries} (${cfg.command})`,
     );
     const r = await runShellWithTimeout(cfg.command, opts, timeoutMs);
     if (r.exitCode === 0) {
@@ -1508,7 +1558,7 @@ async function runHealthcheck(
     }
     consecutiveFailures++;
     ctx.log?.(
-      `services: ${label} — healthcheck attempt ${attempt + 1} failed (exit ${r.exitCode})`,
+      `${label} — healthcheck attempt ${attempt + 1} failed (exit ${r.exitCode})`,
     );
   }
 

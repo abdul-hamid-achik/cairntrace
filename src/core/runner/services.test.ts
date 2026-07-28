@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
@@ -476,6 +476,7 @@ describe("startServices — indefinite wait + live output", () => {
       return probes > 1;
     };
     const streamed: string[] = [];
+    const paneLogRoot = await mkdtemp(join(tmpdir(), "cairn-pane-logs-"));
 
     const handle = track(
       await startServices(
@@ -497,6 +498,7 @@ describe("startServices — indefinite wait + live output", () => {
           configDir: dir,
           project: "test",
           coldStart: false,
+          serviceLogRoot: paneLogRoot,
           onOutput: (c) => {
             streamed.push(c);
           },
@@ -504,8 +506,15 @@ describe("startServices — indefinite wait + live output", () => {
       ),
     );
     expect(handle.startedByUs).toBe(true);
-    // The pane tail should have been streamed at least once.
-    expect(streamed.join("")).toContain("Starting dev server");
+    // Pane output is a log of record, not terminal content: the delta lands
+    // in the per-window pane log, and the raw flood never reaches onOutput
+    // (streaming Go stack traces to the terminal buried entire runs).
+    const paneLog = await readFile(
+      join(paneLogRoot, "test-web-app.pane.log"),
+      "utf8",
+    );
+    expect(paneLog).toContain("Starting dev server");
+    expect(streamed.join("")).not.toContain("Starting dev server");
   });
 
   it("does not hang on tmux deadline when readyTimeoutMs is 0 (indefinite)", async () => {

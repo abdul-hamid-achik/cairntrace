@@ -771,6 +771,26 @@ async function runBatch(
           session: `${sessionRoot}-w${workerIndex}`,
         });
         const untrack = trackBackend(backend);
+        // The per-spec progress listener (spinner, precondition/step/outcome
+        // markers) was only ever wired in runSingle: a 6-spec batch showed a
+        // banner and then NOTHING until each spec finished, minutes or hours
+        // later. With one worker there is no cursor contention, so the batch
+        // gets the exact same live narration as a single run; parallel > 1
+        // keeps completion lines only (interleaved redraws would corrupt).
+        const specListener =
+          interactive && parallel === 1
+            ? makeInteractiveListener({ color: colorEnabled() })
+            : undefined;
+        if (interactive) {
+          const specLabel =
+            specPath
+              .split("/")
+              .pop()
+              ?.replace(/\.ya?ml$/, "") ?? specPath;
+          log.raw(
+            `\x1b[1m[${idx + 1}/${specs.length}]\x1b[0m ${specLabel} — starting…\n`,
+          );
+        }
         try {
           const vars = parseVarFlags(opts.var);
           const labels = parseLabelFlags(opts.label);
@@ -802,6 +822,7 @@ async function runBatch(
               : {}),
             workerIndex,
             ...(opts.monitor ? { monitor: opts.monitor } : {}),
+            ...(specListener ? { listener: specListener } : {}),
             onArchiveRun: archiveRun,
             onPublishRun: publishRun,
           });
