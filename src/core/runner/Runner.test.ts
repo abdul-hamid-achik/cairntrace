@@ -2365,6 +2365,85 @@ steps:
   });
 });
 
+describe("runSpec — onRunStart environment argument", () => {
+  // Regression: the progress header used to render `spec.environment` (the
+  // spec's own unresolved default), so `cairn run spec.yml --env do` still
+  // showed `env=local` when the spec declared `environment: local`. The
+  // listener must receive the environment the run actually resolved to —
+  // config default → spec default → `--env` override, in that precedence —
+  // as its own argument, distinct from `spec.environment`.
+  it("passes the resolved --env override, not the spec's own environment default", async () => {
+    const specPath = await writeSpec(
+      "env_header_override",
+      `version: 1
+name: env_header_override
+intent: onRunStart must reflect the resolved --env, not the spec default
+environment: staging
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    let seen:
+      | { specEnvironment: string | undefined; resolvedEnvironment: string }
+      | undefined;
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      environmentOverride: "do",
+      listener: {
+        onRunStart(spec, _runId, _runDir, _backendName, environment) {
+          seen = {
+            specEnvironment: spec.environment,
+            resolvedEnvironment: environment,
+          };
+        },
+      },
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.environment).toBe("do");
+    expect(seen).toBeDefined();
+    expect(seen!.resolvedEnvironment).toBe("do");
+    // Prove the two are genuinely different fields, not a coincidental match.
+    expect(seen!.specEnvironment).toBe("staging");
+  });
+
+  it("falls back to the spec's own environment when there is no --env override", async () => {
+    const specPath = await writeSpec(
+      "env_header_default",
+      `version: 1
+name: env_header_default
+intent: onRunStart reflects the spec default when nothing overrides it
+environment: staging
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    let resolvedEnvironment: string | undefined;
+    await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      listener: {
+        onRunStart(_spec, _runId, _runDir, _backendName, environment) {
+          resolvedEnvironment = environment;
+        },
+      },
+    });
+
+    expect(resolvedEnvironment).toBe("staging");
+  });
+});
+
 describe("runSpec failure reason + contractHash (features 1 + nice-to-have)", () => {
   it("populates summary and omits failure on a passing run", async () => {
     const specPath = await writeSpec(

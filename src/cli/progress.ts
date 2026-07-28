@@ -97,9 +97,9 @@ export function makePlainListener(
     onStepStart(_idx, step) {
       currentWhen = "when" in step ? step.when : undefined;
     },
-    onRunStart(spec, _runId, runDir, backendName) {
+    onRunStart(spec, _runId, runDir, backendName, environment) {
       line(
-        `run start: ${spec.name} (env=${spec.environment ?? "local"}, backend=${backendName})`,
+        `run start: ${spec.name} (env=${environment}, backend=${backendName})`,
       );
       line(`run dir: ${runDir}`);
     },
@@ -208,9 +208,9 @@ export function makeInteractiveListener(
   }
 
   return {
-    onRunStart(spec, runId, runDir, backendName) {
+    onRunStart(spec, runId, runDir, backendName, environment) {
       out(
-        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${spec.environment ?? "local"}, backend=${backendName})${c.reset}\n`,
+        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${environment}, backend=${backendName})${c.reset}\n`,
       );
       out(`${c.dim}Run id:${c.reset} ${runId}\n`);
       out(`${c.dim}Run dir:${c.reset} ${runDir}\n\n`);

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  makeInteractiveListener,
   makePlainListener,
   resolveProgressMode,
   summarizeStepError,
@@ -73,6 +74,44 @@ describe("makePlainListener", () => {
     // eslint-disable-next-line no-control-regex
     expect(text).not.toMatch(/\x1b\[/);
     expect(lines[0]).toMatch(/^\[\d\d:\d\d:\d\d\] /);
+  });
+});
+
+describe("onRunStart env header", () => {
+  // Regression: the header used to render `spec.environment` — the spec's
+  // own unresolved default — even when `--env` overrode it, so `cairn run
+  // spec.yml --env do` still printed `(env=local, ...)`. It must show the
+  // environment the run actually resolved to (Runner.ts passes it as the
+  // 5th onRunStart argument), independent of what the spec itself declares.
+  const spec = { name: "answer_change", environment: "local" } as never;
+
+  it("plain listener: shows the resolved environment, not spec.environment", () => {
+    const lines: string[] = [];
+    const listener = makePlainListener({ write: (s) => lines.push(s) });
+    listener.onRunStart?.(spec, "run_1", "/tmp/run_1", "agent-browser", "do");
+    const text = lines.join("");
+    expect(text).toContain(
+      "run start: answer_change (env=do, backend=agent-browser)",
+    );
+    expect(text).not.toContain("env=local");
+  });
+
+  it("interactive listener: shows the resolved environment, not spec.environment", () => {
+    const written: string[] = [];
+    const listener = makeInteractiveListener({ color: false });
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string) => {
+      written.push(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      listener.onRunStart?.(spec, "run_1", "/tmp/run_1", "agent-browser", "do");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    const text = written.join("");
+    expect(text).toContain("(env=do, backend=agent-browser)");
+    expect(text).not.toContain("env=local");
   });
 });
 

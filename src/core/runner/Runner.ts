@@ -89,6 +89,13 @@ export interface ProgressListener {
     runId: string,
     runDir: string,
     backendName: string,
+    /**
+     * The environment the run actually resolved to (config default, spec
+     * `environment:`, or `--env` override — in that precedence). Not the
+     * same as `spec.environment`: that field is only the spec's own
+     * unresolved default and ignores a CLI `--env` override.
+     */
+    environment: string,
   ): void;
   onPreconditionStart?(name: string, timeoutMs: number): void;
   onPreconditionFinish?(
@@ -284,7 +291,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     runId,
     spec: spec.name,
   });
-  opts.listener?.onRunStart?.(spec, runId, runDir, backendName);
+  opts.listener?.onRunStart?.(spec, runId, runDir, backendName, env);
 
   // Execute spec preconditions (setup/reset shell commands) BEFORE any browser
   // interaction. Until v1.48 the schema accepted `preconditions.commands` but
