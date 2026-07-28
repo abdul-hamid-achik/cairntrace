@@ -3102,4 +3102,135 @@ steps:
     expect(captured).not.toContain("supersecret-eval-token");
     expect(captured).toContain("[redacted]");
   });
+
+  it("emits precondition.started before the blocking command runs", async () => {
+    const specPath = await writeSpec(
+      "precondition_liveness",
+      `version: 1
+name: precondition_liveness
+intent: a long quiesce poll must be attributable from events.ndjson alone
+preconditions:
+  commands:
+    - name: slow_gate
+      run: "sleep 0.2"
+      timeoutMs: 5000
+outcomes:
+  - id: clean
+    description: mock console stays clean
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("passed");
+    const events = (
+      await readFile(join(result.runDir, "events.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const startedIdx = events.findIndex(
+      (e) => e.type === "precondition.started" && e.name === "slow_gate",
+    );
+    const finishedIdx = events.findIndex(
+      (e) => e.type === "precondition.run" && e.name === "slow_gate",
+    );
+    expect(startedIdx).toBeGreaterThanOrEqual(0);
+    expect(finishedIdx).toBeGreaterThan(startedIdx);
+    expect(events[startedIdx]).toMatchObject({ timeoutMs: 5000 });
+  });
+
+  it("hands verify scripts the failed step so they can bail instead of polling", async () => {
+    const specPath = await writeSpec(
+      "verify_sees_failed_step",
+      `version: 1
+name: verify_sees_failed_step
+intent: a verifier polling for a side effect of a step that never ran can stop immediately
+outcomes:
+  - id: run_state_visible
+    description: node script receives failedStep and lastSuccessfulStep
+    verify:
+      script:
+        runtime: node
+        run: |
+          return {
+            ok: ctx.run.failedStep === "doomed" && ctx.run.lastSuccessfulStep === "fine",
+            evidence: ctx.run,
+          };
+steps:
+  - id: fine
+    open: /
+  - id: doomed
+    click:
+      by: role
+      role: button
+      name: Submit
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    // failNextStep is one-shot for the next runStep; arm it only when the
+    // click arrives so the open step before it succeeds.
+    const arming = new Proxy(backend, {
+      get(target, prop) {
+        if (prop === "runStep") {
+          return (step: Parameters<MockBrowserBackend["runStep"]>[0]) => {
+            if ("click" in step) {
+              target.failNextStep("selector 'button[name=Submit]' not found");
+            }
+            return target.runStep(step);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as BrowserBackend;
+    const result = await runSpec({ specPath, backend: arming, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    const outcome = result.outcomes.find((o) => o.id === "run_state_visible");
+    expect(outcome?.status).toBe("passed");
+  });
+
+  it("kills a node verify script that exceeds its timeoutMs", async () => {
+    const specPath = await writeSpec(
+      "verify_node_timeout",
+      `version: 1
+name: verify_node_timeout
+intent: an unbounded verifier poll cannot outlive its declared budget
+outcomes:
+  - id: bounded
+    description: node script is killed at its budget
+    verify:
+      script:
+        runtime: node
+        timeoutMs: 400
+        run: |
+          await new Promise((r) => setTimeout(r, 60000));
+          return { ok: true, evidence: "never reached" };
+steps: []
+`,
+    );
+
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+    });
+
+    expect(result.status).toBe("failed");
+    const outcome = result.outcomes.find((o) => o.id === "bounded");
+    expect(outcome?.status).toBe("failed");
+    const evidence = await readFile(
+      join(result.runDir, outcome!.evidence!),
+      "utf8",
+    );
+    expect(evidence).toContain("timeout");
+  });
 });

@@ -5,6 +5,30 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-28
+
+### Added
+
+- Verify scripts (`script.runtime: node` and `browser`) now receive the run's
+  step state as `ctx.run` / `run`: `{ failedStep, lastSuccessfulStep }`.
+  Outcomes still always evaluate — that is the contract — but a verifier that
+  polls for a side effect of a step that never ran can now bail in
+  milliseconds instead of spending its whole completion window waiting for an
+  event nothing will ever emit. A real suite burned 3×20 minutes exactly this
+  way before this existed.
+
+- `script.timeoutMs` on the script verifier. `runtime: node` scripts ran with
+  NO bound at all — nothing above them could cap a buggy or over-patient
+  poll. When set, the child is killed past the budget and the outcome fails
+  with an explicit timeout message. Browser scripts were already bounded by
+  the backend's evaluate timeout; the field is ignored there.
+
+- `precondition.started` event in `events.ndjson`, emitted before each
+  precondition command runs (with its `timeoutMs`). `precondition.run` is a
+  post-mortem record of a blocking call: a 25-minute quiesce poll used to
+  leave the event stream silent for its whole budget, indistinguishable from
+  a dead run. The started twin bounds the mystery to one named command.
+
 ## [2.2.0] - 2026-07-26
 
 ### Fixed

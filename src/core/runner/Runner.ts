@@ -305,6 +305,15 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       const label = command.name ?? `precondition[${index}]`;
       const cwd = command.cwd ? resolve(specDir, command.cwd) : specDir;
       const startedAtMs = Date.now();
+      // precondition.run is a post-mortem event: a long quiesce poll used to
+      // leave events.ndjson silent for its whole budget, indistinguishable
+      // from a dead run. The started twin bounds the mystery to one command.
+      await writer.appendEvent({
+        ts: new Date(startedAtMs).toISOString(),
+        type: "precondition.started",
+        name: label,
+        timeoutMs: command.timeoutMs ?? 120_000,
+      });
       const result = await execa(command.run, {
         shell: true,
         cwd,

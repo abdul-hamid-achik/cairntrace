@@ -338,6 +338,14 @@ export const ScriptVerifierSchema = z
           .optional(),
         run: z.string().min(1).optional(),
         file: z.string().min(1).optional(),
+        /**
+         * Hard budget for `runtime: node` scripts, which otherwise run
+         * unbounded — a verifier that polls for an external side effect can
+         * spend whatever completion window it implements internally, and
+         * nothing above it caps a bug. Browser scripts are already bounded
+         * by the backend's evaluate timeout; this field is ignored there.
+         */
+        timeoutMs: z.number().int().positive().optional(),
       })
       .strict()
       .refine(

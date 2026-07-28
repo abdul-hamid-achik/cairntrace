@@ -76,6 +76,9 @@ async function evaluateNodeScript(
   const result = await runNodeScript({
     ...(file ? { file } : {}),
     ...(verifier.script.run ? { source: verifier.script.run } : {}),
+    ...(verifier.script.timeoutMs
+      ? { timeoutMs: verifier.script.timeoutMs }
+      : {}),
     cwd: ctx.specDir,
     entryNames: ["verify"],
     ctx: {
@@ -84,6 +87,7 @@ async function evaluateNodeScript(
       vars: ctx.vars ?? {},
       runDir: ctx.runDir,
       specDir: ctx.specDir,
+      run: runStateForScripts(ctx),
     },
   });
 
@@ -168,6 +172,7 @@ function buildScript(
   const fixtures = JSON.stringify(resolveRuntimeFixtures(verifier, ctx));
   const artifacts = JSON.stringify(ctx.artifacts ?? {});
   const vars = JSON.stringify(ctx.vars ?? {});
+  const run = JSON.stringify(runStateForScripts(ctx));
   // The user's `run` body should `return { ok, evidence }`. We wrap it in a
   // function call so the body can use `return` statements; agent-browser's
   // `eval` then auto-stringifies the returned object as JSON.
@@ -176,11 +181,28 @@ function buildScript(
     `  const fixtures = ${fixtures};`,
     `  const artifacts = ${artifacts};`,
     `  const vars = ${vars};`,
+    `  const run = ${run};`,
     `  return (function(){`,
     source,
     `  })();`,
     `})()`,
   ].join("\n");
+}
+
+/**
+ * The slice of run state scripts may act on. Outcomes always evaluate — that
+ * is the contract — but a verifier that polls for a side effect of a step
+ * that never ran should be able to fail in milliseconds instead of spending
+ * its whole completion budget waiting for an event nothing will ever emit.
+ */
+function runStateForScripts(ctx: VerifierContext): {
+  failedStep: string | null;
+  lastSuccessfulStep: string | null;
+} {
+  return {
+    failedStep: ctx.failedStep ?? null,
+    lastSuccessfulStep: ctx.lastSuccessfulStep ?? null,
+  };
 }
 
 function resolveRuntimeFixtures(

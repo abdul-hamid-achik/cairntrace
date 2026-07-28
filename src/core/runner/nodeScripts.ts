@@ -9,6 +9,8 @@ export interface NodeScriptInvocation {
   ctx: unknown;
   cwd?: string;
   entryNames: string[];
+  /** Kill the child past this budget. Absent = unbounded (legacy behavior). */
+  timeoutMs?: number;
 }
 
 export interface NodeScriptResult {
@@ -29,12 +31,25 @@ export async function runNodeScript(
     reject: false,
     all: false,
     env: targetChildEnv(process.env),
+    ...(invocation.timeoutMs ? { timeout: invocation.timeoutMs } : {}),
   });
 
   const stdout = String(r.stdout ?? "");
   const stderr = String(r.stderr ?? "");
   const exitCode =
     typeof r.exitCode === "number" ? r.exitCode : r.failed ? 1 : 0;
+  if (r.timedOut) {
+    return {
+      ok: false,
+      error: {
+        message: `node script exceeded its ${invocation.timeoutMs}ms timeout and was killed`,
+        stack: stderr || stdout,
+      },
+      stdout,
+      stderr,
+      exitCode,
+    };
+  }
   const markerIdx = stdout.lastIndexOf(RESULT_MARKER);
   if (markerIdx < 0) {
     return {

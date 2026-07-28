@@ -65,6 +65,7 @@ export interface RunEvent {
     | "artifact.stash"
     | "artifact.retention"
     | "viewport.set"
+    | "precondition.started"
     | "precondition.run"
     | "services.docker.start"
     | "services.docker.reuse"
