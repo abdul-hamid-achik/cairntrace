@@ -5,6 +5,21 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-28
+
+### Added
+
+- `cairn logs [ref]` — discovery and replay for the files of record a run
+  leaves behind (à la `docker buildx history logs`). Bare `cairn logs`
+  lists recent runs newest-first with their verdict (or "in progress /
+  interrupted" when run.json has not landed — a live run is visible, not
+  invisible). `cairn logs <ref>` shows one run's files with sizes;
+  `--events` replays events.ndjson verbatim to stdout, tee-able;
+  `--services` lists the captured tmux pane logs and `--service <window>`
+  streams one, matched by the tmux window name the operator actually
+  knows. `ref` accepts a run name, absolute path, `latest`, or `previous`
+  — the same grammar stash and investigate use.
+
 ## [2.4.0] - 2026-07-28
 
 Output architecture release: the terminal is a view, files are the record.

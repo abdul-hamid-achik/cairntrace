@@ -7,6 +7,7 @@ import { listCheckpointsCommand } from "./commands/checkpoint/list";
 import { showCheckpointCommand } from "./commands/checkpoint/show";
 import { contextCommand } from "./commands/context";
 import { diffCommand } from "./commands/diff";
+import { logsCommand } from "./commands/logs";
 import { statsCommand } from "./commands/stats";
 import { doctorCommand } from "./commands/doctor";
 import { docsCommand, DOC_TOPICS } from "./commands/docs";
@@ -342,6 +343,21 @@ addFormatFlags(
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     ),
 ).action((opts) => statsCommand(opts));
+
+program
+  .command("logs [ref]")
+  .description(
+    "List runs and replay their files of record (events.ndjson, service pane logs). ref: run name | latest | previous",
+  )
+  .option("--config <path>", "path to cairntrace.config.yml")
+  .option("--artifact-root <dir>", "override the runs root")
+  .option("--events", "stream the run's events.ndjson to stdout")
+  .option("--services", "list captured tmux pane logs")
+  .option(
+    "--service <window>",
+    "stream one tmux window's captured pane log to stdout",
+  )
+  .action((ref: string | undefined, opts) => logsCommand(ref, opts));
 
 program
   .command("mcp")
