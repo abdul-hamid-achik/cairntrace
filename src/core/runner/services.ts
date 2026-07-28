@@ -50,6 +50,13 @@ export interface StartServicesContext {
   secretValues?: Iterable<string>;
   /** Optional narrator for interactive runs (stderr lifecycle lines). */
   log?: (message: string) => void;
+  /**
+   * Optional narrator for sub-milestone play-by-play (readiness/healthcheck
+   * command echoes, tmux scaffolding, retry narration) — the detail behind
+   * each `log` milestone. Routed to DEBUG level by the CLI (--verbose /
+   * CAIRN_LOG_LEVEL=debug); silent by default. Same optionality as `log`.
+   */
+  logDetail?: (message: string) => void;
   /** Root for per-window pane logs (default `~/.cairntrace/services`). */
   serviceLogRoot?: string;
   /** Optional live streamer for service command output (interactive runs). */
@@ -429,7 +436,7 @@ async function startDocker(
 
   // Optional readiness check: a command whose exit 0 means infra is ready.
   if (cfg.readinessCheck) {
-    ctx.log?.(`docker — readiness check (${cfg.readinessCheck})`);
+    ctx.logDetail?.(`docker — readiness check (${cfg.readinessCheck})`);
     emit("docker", "readiness-check", cfg.readinessCheck);
     const rc = await runShellWithTimeout(
       cfg.readinessCheck,
@@ -550,7 +557,9 @@ async function startSeed(
 
   // If the fingerprint + TTL pass but freshnessCheck is configured, run it.
   if (check.reason === "freshness-check-pending" && cfg.freshnessCheck) {
-    ctx.log?.(redactor.text(`seed — freshness check (${cfg.freshnessCheck})`));
+    ctx.logDetail?.(
+      redactor.text(`seed — freshness check (${cfg.freshnessCheck})`),
+    );
     emit("seed", "freshness-check", redactor.text(cfg.freshnessCheck));
     const fr = await runShellWithTimeout(
       cfg.freshnessCheck,
@@ -623,7 +632,7 @@ async function runSeedPostCommands(
   if (commands.length === 0) return;
 
   for (const command of commands) {
-    ctx.log?.(redactor.text(`seed — postCommand (${command})`));
+    ctx.logDetail?.(redactor.text(`seed — postCommand (${command})`));
     emit("seed", "start", redactor.text(`postCommand: ${command}`));
     const r = await runShellWithTimeout(
       command,
@@ -718,7 +727,7 @@ async function startTmux(
   });
 
   // Create the session with the first window, then add the rest.
-  ctx.log?.(
+  ctx.logDetail?.(
     `tmux — creating session "${cfg.session}" with ${cfg.windows.length} windows`,
   );
   emit(
@@ -778,7 +787,9 @@ async function startTmux(
     if (await tmuxWindowExists(cfg.session, win.name)) {
       const live = await isTmuxWindowLive(cfg.session, win);
       if (live) continue;
-      ctx.log?.(`tmux — "${win.name}" exists but is not live; re-launching`);
+      ctx.logDetail?.(
+        `tmux — "${win.name}" exists but is not live; re-launching`,
+      );
       emit("tmux", "relaunch", `re-launching "${win.name}"`, {
         window: win.name,
       });
@@ -881,7 +892,7 @@ async function waitForAllTmuxWindows(
     );
     mkdirSync(dirname(paneLog), { recursive: true });
     const paneStream = createWriteStream(paneLog, { flags: "w" });
-    ctx.log?.(
+    ctx.logDetail?.(
       `tmux — waiting for "${win.name}" to be ready (pane log: ${paneLog})`,
     );
     emit("tmux", "ready-wait", `waiting for "${win.name}"`, {
@@ -1051,7 +1062,7 @@ async function sendWindowCommands(
           );
           continue;
         }
-        ctx.log?.(
+        ctx.logDetail?.(
           `tmux — ${win.name}: skipIf exited ${probe.exitCode} — running pre-command`,
         );
       } catch (e) {
@@ -1092,7 +1103,7 @@ async function sendMainCommandWithRetry(
   for (let attempt = 1; attempt <= TMUX_COMMAND_SEND_ATTEMPTS; attempt++) {
     await waitForTmuxShellReady(session, win.name, ctx, TMUX_SHELL_READY_MS);
     if (attempt > 1) {
-      ctx.log?.(
+      ctx.logDetail?.(
         `tmux — ${win.name}: re-sending command (attempt ${attempt}/${TMUX_COMMAND_SEND_ATTEMPTS})`,
       );
     }
@@ -1538,7 +1549,7 @@ async function runHealthcheck(
 
   // Wait for the start period before the first check.
   if (startPeriodMs > 0) {
-    ctx.log?.(
+    ctx.logDetail?.(
       `${label} — healthcheck waiting ${cfg.startPeriodSeconds ?? 0}s before first check`,
     );
     await sleep(startPeriodMs);
@@ -1549,7 +1560,7 @@ async function runHealthcheck(
     if (attempt > 0) {
       await sleep(intervalMs);
     }
-    ctx.log?.(
+    ctx.logDetail?.(
       `${label} — healthcheck attempt ${attempt + 1}/${retries} (${cfg.command})`,
     );
     const r = await runShellWithTimeout(cfg.command, opts, timeoutMs);
@@ -1557,7 +1568,7 @@ async function runHealthcheck(
       return { healthy: true, consecutiveFailures: 0 };
     }
     consecutiveFailures++;
-    ctx.log?.(
+    ctx.logDetail?.(
       `${label} — healthcheck attempt ${attempt + 1} failed (exit ${r.exitCode})`,
     );
   }

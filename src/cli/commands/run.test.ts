@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -23,6 +24,7 @@ import {
   selectSpecsByBlastRadius,
   selectSpecsByTags,
   specMatchesTags,
+  summarizeStartingSpecs,
   synthesizeErroredResult,
   type RunCommandOptions,
 } from "./run";
@@ -173,6 +175,53 @@ describe("expandSpecArgs", () => {
     await expect(
       expandSpecArgs(["_explicit.yml", "missing.yml"], dir),
     ).resolves.toEqual(["_explicit.yml", "missing.yml"]);
+  });
+});
+
+describe("summarizeStartingSpecs", () => {
+  it("adds the common parent dir (relative to cwd) when specs share one", () => {
+    expect(
+      summarizeStartingSpecs(
+        ["/repo/flows/answer-change/a.yml", "/repo/flows/answer-change/b.yml"],
+        "/repo",
+      ),
+    ).toBe("starting 2 specs (flows/answer-change)");
+  });
+
+  it("resolves relative spec args against cwd before computing the common dir", () => {
+    expect(
+      summarizeStartingSpecs(
+        ["flows/answer-change/a.yml", "flows/answer-change/b.yml"],
+        "/repo",
+      ),
+    ).toBe("starting 2 specs (flows/answer-change)");
+  });
+
+  it("uses singular 'spec' for a single path", () => {
+    expect(summarizeStartingSpecs(["/repo/flows/x.yml"], "/repo")).toBe(
+      "starting 1 spec (flows)",
+    );
+  });
+
+  it("uses the deepest dir common to all specs when nesting differs", () => {
+    expect(
+      summarizeStartingSpecs(
+        ["/repo/flows/a.yml", "/repo/flows/sub/b.yml"],
+        "/repo",
+      ),
+    ).toBe("starting 2 specs (flows)");
+  });
+
+  it("omits the parenthetical when the common dir IS cwd", () => {
+    expect(
+      summarizeStartingSpecs(["/repo/a.yml", "/repo/b.yml"], "/repo"),
+    ).toBe("starting 2 specs");
+  });
+
+  it("omits the parenthetical when specs share no directory beyond the filesystem root", () => {
+    expect(summarizeStartingSpecs(["/a/x.yml", "/b/y.yml"], "/repo")).toBe(
+      "starting 2 specs",
+    );
   });
 });
 
@@ -439,6 +488,48 @@ steps:
     expect(stderr).toContain("seed: ");
     // The truncation should add "..." for commands over 80 chars
     expect(stderr).toContain("...");
+  });
+});
+
+describe("run opening line (end-to-end via CLI)", () => {
+  const binCairn = join(process.cwd(), "bin", "cairn");
+
+  it("compacts the opening line to a count + common dir, keeping full paths at debug", async () => {
+    // realpath: on macOS, `os.tmpdir()` lives under a `/var` → `/private/var`
+    // symlink; the child process's `process.cwd()` reports the resolved
+    // form. Resolving up front keeps our expected paths and the child's
+    // view of its own cwd textually identical.
+    const dir = await realpath(
+      await mkdtemp(join(tmpdir(), "cairntrace-starting-line-")),
+    );
+    const a = join(dir, "flows", "answer-change", "a.yml");
+    const b = join(dir, "flows", "answer-change", "b.yml");
+
+    const result = await execa(
+      binCairn,
+      ["run", a, b, "--verbose", "--format", "json"],
+      { cwd: dir, reject: false },
+    );
+
+    expect(result.stderr).toContain("starting 2 specs (flows/answer-change)");
+    // --verbose (debug level) still surfaces the full absolute path list.
+    expect(result.stderr).toContain(`starting: ${a}, ${b}`);
+  });
+
+  it("shows only the compact line (no full path list) at info level without --verbose", async () => {
+    const dir = await realpath(
+      await mkdtemp(join(tmpdir(), "cairntrace-starting-line-")),
+    );
+    const a = join(dir, "flows", "a.yml");
+
+    const result = await execa(binCairn, ["run", a, "--format", "json"], {
+      cwd: dir,
+      reject: false,
+      env: { ...process.env, CAIRN_LOG_LEVEL: "info" },
+    });
+
+    expect(result.stderr).toContain("starting 1 spec (flows)");
+    expect(result.stderr).not.toContain(`starting: ${a}`);
   });
 });
 

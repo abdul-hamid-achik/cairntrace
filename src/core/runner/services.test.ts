@@ -3312,12 +3312,13 @@ describe("startServices — lifecycle events", () => {
 });
 
 describe("startServices — ctx.log callback coverage", () => {
-  it("calls ctx.log for docker healthcheck success when log is provided", async () => {
+  it("routes docker healthcheck success narration to ctx.logDetail, not ctx.log", async () => {
     execaImpl = async (cmd) => {
       if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     const logs: string[] = [];
+    const details: string[] = [];
     shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
 
     const handle = track(
@@ -3334,21 +3335,27 @@ describe("startServices — ctx.log callback coverage", () => {
           project: "test",
           coldStart: false,
           log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
         },
       ),
     );
 
-    // The healthcheck success should produce a log line
-    expect(logs.some((l) => l.includes("healthcheck"))).toBe(true);
+    // The per-attempt narration is play-by-play — it goes to logDetail
+    // (DEBUG), not the default-visible log.
+    expect(details.some((l) => l.includes("healthcheck attempt 1"))).toBe(true);
+    // A passing healthcheck has no milestone of its own on ctx.log (only the
+    // final "docker — ready" line, unrelated to "healthcheck").
+    expect(logs.some((l) => l.includes("healthcheck"))).toBe(false);
     expect(handle.startedByUs).toBe(true);
   });
 
-  it("calls ctx.log for docker healthcheck failure attempts when log is provided", async () => {
+  it("routes docker healthcheck attempt narration to logDetail but keeps the final WARNING on log", async () => {
     execaImpl = async (cmd) => {
       if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     const logs: string[] = [];
+    const details: string[] = [];
     shellImpl = async (command: string) => {
       if (command.startsWith("curl"))
         return { exitCode: 1, stdout: "", stderr: "refused" };
@@ -3374,19 +3381,27 @@ describe("startServices — ctx.log callback coverage", () => {
           project: "test",
           coldStart: false,
           log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
         },
       ),
     );
 
-    // The healthcheck failure should produce log lines for attempts
-    expect(logs.some((l) => l.includes("healthcheck attempt 1"))).toBe(true);
-    expect(logs.some((l) => l.includes("healthcheck attempt 1 failed"))).toBe(
-      true,
-    );
+    // Per-attempt narration is play-by-play — demoted to logDetail.
+    expect(details.some((l) => l.includes("healthcheck attempt 1"))).toBe(true);
+    expect(
+      details.some((l) => l.includes("healthcheck attempt 1 failed")),
+    ).toBe(true);
+    // The aggregate outcome is a real warning — stays on ctx.log, unchanged.
+    expect(
+      logs.some(
+        (l) => l.includes("healthcheck WARNING") && l.includes("2 failures"),
+      ),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("healthcheck attempt"))).toBe(false);
     expect(handle.startedByUs).toBe(true);
   });
 
-  it("calls ctx.log for tmux window healthcheck when log is provided", async () => {
+  it("routes tmux window healthcheck attempt narration to logDetail", async () => {
     execaImpl = async (cmd, args) => {
       if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
       if (cmd === "tmux" && args[0] === "has-session")
@@ -3396,6 +3411,7 @@ describe("startServices — ctx.log callback coverage", () => {
       return { exitCode: 0, stdout: "", stderr: "" };
     };
     const logs: string[] = [];
+    const details: string[] = [];
     shellImpl = async (command: string) => {
       if (command.startsWith("curl -sf http://localhost:8080/healthz"))
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -3427,12 +3443,14 @@ describe("startServices — ctx.log callback coverage", () => {
           project: "test",
           coldStart: true,
           log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
         },
       ),
     );
 
-    // The tmux window healthcheck should produce a log line
-    expect(logs.some((l) => l.includes("healthcheck"))).toBe(true);
+    // The tmux window healthcheck attempt narration goes to logDetail.
+    expect(details.some((l) => l.includes("healthcheck attempt 1"))).toBe(true);
+    expect(logs.some((l) => l.includes("healthcheck"))).toBe(false);
     expect(handle.startedByUs).toBe(true);
   });
 
@@ -3634,6 +3652,225 @@ describe("startServices — ctx.log callback coverage", () => {
       true,
     );
     expect(handle.startedByUs).toBe(false);
+  });
+});
+
+describe("startServices — logDetail routing (play-by-play demoted from log)", () => {
+  it("routes the docker readiness check command echo to logDetail, keeping milestones on log", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+    const logs: string[] = [];
+    const details: string[] = [];
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            readinessCheck: "nc -z localhost 27017",
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
+        },
+      ),
+    );
+
+    expect(
+      details.some((l) => l.includes("readiness check (nc -z localhost 27017")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("readiness check"))).toBe(false);
+    // The milestone still lands on log.
+    expect(logs.some((l) => l.includes("services: docker — ready"))).toBe(true);
+    expect(handle.startedByUs).toBe(true);
+  });
+
+  it("routes the seed freshnessCheck command dump and postCommand echoes to logDetail", async () => {
+    seedStateReadResult = {
+      shouldRun: true,
+      reason: "freshness-check-pending",
+    };
+    shellImpl = async (command: string) => {
+      if (command === "mongosh --eval 'db.count()'")
+        return { exitCode: 1, stdout: "", stderr: "stale" };
+      return { exitCode: 0, stdout: "ok", stderr: "" };
+    };
+    const logs: string[] = [];
+    const details: string[] = [];
+
+    await track(
+      await startServices(
+        {
+          seed: {
+            command: "yarn seed",
+            ttlSeconds: 3600,
+            freshnessCheck: "mongosh --eval 'db.count()'",
+            postCommands: ["echo ensure-fixture"],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
+        },
+      ),
+    );
+
+    expect(
+      details.some((l) => l.includes("seed — freshness check (mongosh --eval")),
+    ).toBe(true);
+    expect(
+      details.some((l) =>
+        l.includes("seed — postCommand (echo ensure-fixture"),
+      ),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("freshness check ("))).toBe(false);
+    expect(logs.some((l) => l.includes("postCommand ("))).toBe(false);
+    // The seed command echo and completion milestone are unaffected.
+    expect(logs.some((l) => l.includes("seed — running (yarn seed"))).toBe(
+      true,
+    );
+    expect(logs.some((l) => l.includes("services: seed — complete"))).toBe(
+      true,
+    );
+  });
+
+  it("routes tmux session/window creation scaffolding and the ready-wait line to logDetail", async () => {
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return { exitCode: 0, stdout: "listening on", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const logs: string[] = [];
+    const details: string[] = [];
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "yarn start",
+                readyOn: { text: "listening on" },
+              },
+              {
+                name: "api",
+                command: "yarn dev",
+                readyOn: { text: "listening on" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
+        },
+      ),
+    );
+
+    expect(
+      details.some((l) =>
+        l.includes('creating session "test-sess" with 2 windows'),
+      ),
+    ).toBe(true);
+    expect(
+      details.some((l) =>
+        l.includes('waiting for "web" to be ready (pane log:'),
+      ),
+    ).toBe(true);
+    expect(
+      details.some((l) =>
+        l.includes('waiting for "api" to be ready (pane log:'),
+      ),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("creating session"))).toBe(false);
+    expect(logs.some((l) => l.includes("waiting for"))).toBe(false);
+    // The final session-ready milestone stays on log.
+    expect(logs.some((l) => l.includes('session "test-sess" ready'))).toBe(
+      true,
+    );
+    expect(handle.startedByUs).toBe(true);
+  });
+
+  it("routes tmux relaunch, re-send, and skipIf narration to logDetail", async () => {
+    // Session exists, window is an idle shell with stale ready text in
+    // scrollback — the reuse-heal "exists but is not live" path — and the
+    // pre-command has a skipIf that returns non-zero (must run it).
+    execaImpl = async (cmd, args) => {
+      const base = tmuxBaseImpl(cmd, args);
+      if (base) return base;
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "", stderr: "" }; // window missing → create path
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return {
+          exitCode: 0,
+          stdout: "warehouse listening on 9061\n(old crash)",
+          stderr: "",
+        };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async (command: string) => {
+      if (command === "probe-stale")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const logs: string[] = [];
+    const details: string[] = [];
+
+    await track(
+      await startServices(
+        {
+          tmux: {
+            session: "cairn-sample-app",
+            reuseExisting: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "warehouse",
+                command: "go run .",
+                preCommands: [{ run: "go build", skipIf: "probe-stale" }],
+                readyOn: { text: "warehouse listening on" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (msg: string) => logs.push(msg),
+          logDetail: (msg: string) => details.push(msg),
+        },
+      ),
+    );
+
+    expect(
+      details.some((l) => l.includes("skipIf exited 1 — running pre-command")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("skipIf exited"))).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   dirname,
   isAbsolute as isAbsolutePath,
   join,
+  relative,
   resolve,
 } from "node:path";
 import { execa } from "execa";
@@ -253,8 +254,11 @@ export async function runCommand(
   // browser). A wedged environment (dead docker socket, thrashing swap,
   // locked secret agent) can stall the later phases for minutes with no
   // other output; this line makes such hangs localizable from the log
-  // instead of presenting as a 0-byte mystery.
-  runLog.info(`starting: ${specs.join(", ")}`);
+  // instead of presenting as a 0-byte mystery. Kept compact by default (a
+  // batch of absolute paths used to print every one of them); the full list
+  // is still one --verbose away.
+  runLog.info(summarizeStartingSpecs(specs, process.cwd()));
+  runLog.debug(`starting: ${specs.join(", ")}`);
   const parallel = Math.max(1, Number(opts.parallel ?? "1"));
   let expandedSpecs: string[];
 
@@ -632,6 +636,10 @@ export async function maybeStartServices(
     // (leveled, always stderr). info lines + raw streaming show on an
     // interactive TTY (default info); --quiet/json suppresses them.
     log: (m: string) => log.scope("services").info(m),
+    // Play-by-play behind each milestone (readiness/healthcheck command
+    // echoes, tmux scaffolding, retry narration) — DEBUG only, visible with
+    // --verbose / CAIRN_LOG_LEVEL=debug.
+    logDetail: (m: string) => log.scope("services").debug(m),
     onOutput: (c: string) => log.raw(c),
   });
 }
@@ -1201,6 +1209,51 @@ function emitErroredResult(result: RunResult, format: string): void {
     const failed = result.steps.find((s) => s.status === "failed");
     runLog.error(failed?.error ?? "run errored");
   }
+}
+
+/**
+ * Compact form of the opening "starting: ..." line: a count plus (when the
+ * specs share a directory) that directory relative to `cwd`, e.g.
+ * `starting 6 specs (flows/answer-change)`. Falls back to just the count
+ * when there's no useful shared directory (single spec with nothing to add,
+ * or specs scattered with only the filesystem root in common). The full
+ * absolute path list is still logged separately at debug level.
+ */
+export function summarizeStartingSpecs(specs: string[], cwd: string): string {
+  const count = specs.length;
+  const noun = count === 1 ? "spec" : "specs";
+  const common = commonParentDirRelative(specs, cwd);
+  return common
+    ? `starting ${count} ${noun} (${common})`
+    : `starting ${count} ${noun}`;
+}
+
+/**
+ * The deepest directory common to every spec path's parent, expressed
+ * relative to `cwd`. Returns undefined when there's nothing to show: no
+ * specs, the common directory IS `cwd`, or the only shared ancestor is `/`.
+ */
+function commonParentDirRelative(
+  specs: string[],
+  cwd: string,
+): string | undefined {
+  if (specs.length === 0) return undefined;
+  const segLists = specs.map((p) => {
+    const abs = isAbsolutePath(p) ? p : resolve(cwd, p);
+    return dirname(abs)
+      .split("/")
+      .filter((s) => s.length > 0);
+  });
+  let common = segLists[0]!;
+  for (const segs of segLists.slice(1)) {
+    let i = 0;
+    while (i < common.length && i < segs.length && common[i] === segs[i]) i++;
+    common = common.slice(0, i);
+    if (common.length === 0) break;
+  }
+  if (common.length === 0) return undefined;
+  const rel = relative(cwd, `/${common.join("/")}`);
+  return rel === "" ? undefined : rel;
 }
 
 export async function expandSpecArgs(
