@@ -70,6 +70,22 @@ export function makeInteractiveListener(
       out(`${c.dim}Run dir:${c.reset} ${runDir}\n\n`);
     },
 
+    onPreconditionStart(name, timeoutMs) {
+      // A quiesce-style precondition can legitimately block for many minutes;
+      // without this line the terminal is indistinguishable from a dead run.
+      out(
+        `  ${c.dim}▸ precondition ${name} (budget ${formatMs(timeoutMs)})…${c.reset}`,
+      );
+    },
+
+    onPreconditionFinish(name, exitCode, durationMs) {
+      const mark =
+        exitCode === 0 ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
+      out(
+        `\r${c.clearEOL}  ${mark} precondition ${name} ${c.dim}${formatMs(durationMs)}${c.reset}\n`,
+      );
+    },
+
     onStepStart(_idx, _step, stepId) {
       stepCount++;
       // Print start marker; the finish callback will overwrite this line.

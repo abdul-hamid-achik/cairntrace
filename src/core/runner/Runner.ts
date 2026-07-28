@@ -90,6 +90,12 @@ export interface ProgressListener {
     runDir: string,
     backendName: string,
   ): void;
+  onPreconditionStart?(name: string, timeoutMs: number): void;
+  onPreconditionFinish?(
+    name: string,
+    exitCode: number | undefined,
+    durationMs: number,
+  ): void;
   onStepStart?(idx: number, step: Step, stepId: string): void;
   onStepFinish?(
     idx: number,
@@ -314,6 +320,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         name: label,
         timeoutMs: command.timeoutMs ?? 120_000,
       });
+      opts.listener?.onPreconditionStart?.(label, command.timeoutMs ?? 120_000);
       const result = await execa(command.run, {
         shell: true,
         cwd,
@@ -331,6 +338,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         durationMs: Date.now() - startedAtMs,
         output: output.slice(0, 4000),
       });
+      opts.listener?.onPreconditionFinish?.(
+        label,
+        result.exitCode,
+        Date.now() - startedAtMs,
+      );
       if (result.exitCode !== 0) {
         throw new Error(
           `Precondition "${label}" failed (exit ${result.exitCode}): ${output.slice(0, 500)}`,
