@@ -790,10 +790,13 @@ async function runBatch(
     );
   }
 
-  // Each worker gets its own session id so parallel runs don't share an
-  // agent-browser session (which would cross-contaminate cookies, storage,
-  // and network logs across specs). Playwright/Mock ignore the field but
-  // it's harmless for them.
+  // Each SPEC gets its own session id — not just each worker. A per-worker
+  // session reused the same agent-browser daemon across every spec in the
+  // batch, so a daemon that wedged during spec 1 poisoned the rest: a real
+  // 6-spec run lost specs 2-4 to 16-minute cascades of 60s eval timeouts
+  // against a zombie daemon (2026-07-28). Per-spec sessions mean a fresh
+  // daemon and browser per spec; the worker index stays in the name so
+  // parallel workers still can't collide.
   const sessionRoot = `cairntrace-${process.pid}`;
   let results: RunResult[];
   try {
@@ -803,7 +806,7 @@ async function runBatch(
       async (specPath, idx, workerIndex) => {
         const backend = createBackend({
           ...backendOpts(opts, browser),
-          session: `${sessionRoot}-w${workerIndex}`,
+          session: `${sessionRoot}-w${workerIndex}-s${idx}`,
         });
         const untrack = trackBackend(backend);
         // The per-spec progress listener (spinner, precondition/step/outcome
