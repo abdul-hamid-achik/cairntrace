@@ -43,10 +43,16 @@ export async function evaluateOutcomes(
   outcomes: Outcome[],
   backend: BrowserBackend,
   ctx: VerifierContext,
+  hooks?: {
+    onStart?(outcome: Outcome): void;
+    onFinish?(outcome: Outcome, evaluation: VerifierEvaluation): void;
+  },
 ): Promise<EvaluatedOutcome[]> {
   const results: EvaluatedOutcome[] = [];
   for (const outcome of outcomes) {
+    hooks?.onStart?.(outcome);
     const evaluation = await dispatch(outcome, backend, ctx);
+    hooks?.onFinish?.(outcome, evaluation);
     results.push({ outcome, evaluation });
   }
   return results;

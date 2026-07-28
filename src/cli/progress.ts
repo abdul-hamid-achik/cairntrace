@@ -61,6 +61,45 @@ export function makeInteractiveListener(
 
   let stepCount = 0;
 
+  // Live line ticker: while a step, precondition, or verifier poll is in
+  // flight, redraw its marker line with a spinner frame and elapsed time so
+  // a many-minute wait reads as "working, bounded" instead of "dead". Frames
+  // animate only on a real TTY — under CAIRN_FORCE_TTY into a pipe every
+  // redraw would land as a new log line, so those get the static marker.
+  const animate = Boolean(process.stderr.isTTY);
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  let tickerRender: ((frame: string, elapsed: string) => string) | undefined;
+  let tickerStart = 0;
+  let frameIdx = 0;
+
+  function startTicker(render: (frame: string, elapsed: string) => string) {
+    stopTicker();
+    tickerRender = render;
+    tickerStart = Date.now();
+    frameIdx = 0;
+    out(render(SPINNER_FRAMES[0]!, ""));
+    if (!animate) return;
+    ticker = setInterval(() => {
+      if (!tickerRender) return;
+      frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
+      out(
+        `\r${c.clearEOL}${tickerRender(
+          SPINNER_FRAMES[frameIdx]!,
+          formatMs(Date.now() - tickerStart),
+        )}`,
+      );
+    }, 250);
+    ticker.unref?.();
+  }
+
+  function stopTicker() {
+    if (ticker) {
+      clearInterval(ticker);
+      ticker = undefined;
+    }
+    tickerRender = undefined;
+  }
+
   return {
     onRunStart(spec, runId, runDir, backendName) {
       out(
@@ -71,14 +110,17 @@ export function makeInteractiveListener(
     },
 
     onPreconditionStart(name, timeoutMs) {
-      // A quiesce-style precondition can legitimately block for many minutes;
-      // without this line the terminal is indistinguishable from a dead run.
-      out(
-        `  ${c.dim}▸ precondition ${name} (budget ${formatMs(timeoutMs)})…${c.reset}`,
+      // A quiesce-style precondition can legitimately block for many minutes.
+      startTicker(
+        (frame, elapsed) =>
+          `  ${c.dim}${frame} precondition ${name} ${
+            elapsed ? `${elapsed} / ` : ""
+          }budget ${formatMs(timeoutMs)}…${c.reset}`,
       );
     },
 
     onPreconditionFinish(name, exitCode, durationMs) {
+      stopTicker();
       const mark =
         exitCode === 0 ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
       out(
@@ -88,11 +130,16 @@ export function makeInteractiveListener(
 
     onStepStart(_idx, _step, stepId) {
       stepCount++;
-      // Print start marker; the finish callback will overwrite this line.
-      out(`  ${c.dim}▸ ${stepId}…${c.reset}`);
+      startTicker(
+        (frame, elapsed) =>
+          `  ${c.dim}${frame} ${stepId}${
+            elapsed ? ` ${elapsed}` : ""
+          }…${c.reset}`,
+      );
     },
 
     onStepFinish(_idx, stepId, status, durationMs, error) {
+      stopTicker();
       // Clear and re-print the same line with the result.
       const mark =
         status === "passed"
@@ -113,11 +160,25 @@ export function makeInteractiveListener(
     },
 
     onOutcomesStart(total) {
+      stopTicker();
       if (stepCount > 0) out("\n");
       out(`${c.bold}Outcomes${c.reset} ${c.dim}(${total})${c.reset}\n`);
     },
 
+    onOutcomeStart(outcome) {
+      // Answer-change verifiers legitimately poll for minutes; show whose
+      // completion window is burning.
+      startTicker(
+        (frame, elapsed) =>
+          `  ${c.dim}${frame} ${outcome.id} verifying${
+            elapsed ? ` ${elapsed}` : ""
+          }…${c.reset}`,
+      );
+    },
+
     onOutcomeFinish(outcome, evaluation) {
+      stopTicker();
+      out(`\r${c.clearEOL}`);
       if (evaluation.skipped) {
         out(
           `  ${c.yellow}·${c.reset} ${outcome.id} ${c.dim}(blocked)${c.reset}\n`,
@@ -142,6 +203,7 @@ export function makeInteractiveListener(
     },
 
     onRunEnd(result) {
+      stopTicker();
       const passed = result.outcomes.filter(
         (o) => o.status === "passed",
       ).length;
@@ -190,6 +252,8 @@ function printRerunHint(
     `${c.dim}Reproduce:${c.reset}    cairn run ${result.spec.path} --env ${result.environment}\n`,
   );
 }
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // Progress goes to stderr — stdout is reserved for structured results.
 function out(s: string): void {

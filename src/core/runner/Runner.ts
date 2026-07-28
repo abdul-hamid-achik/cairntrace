@@ -105,6 +105,7 @@ export interface ProgressListener {
     error: string | undefined,
   ): void;
   onOutcomesStart?(total: number): void;
+  onOutcomeStart?(outcome: Outcome): void;
   onOutcomeFinish?(outcome: Outcome, evaluation: VerifierEvaluation): void;
   onRunEnd?(result: RunResult): void;
 }
@@ -1064,15 +1065,22 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // that merely lost its compositing surface (e.g. a slept display) still
   // reports real pass/fail. The wedged flag only skips the optional artifact
   // captures above (console/network/trace/video).
+  // Listener calls ride the evaluation loop itself: a long verifier poll used
+  // to buffer EVERY outcome line until the whole set finished, so two 5-min
+  // polls meant ten silent minutes and then all verdicts at once.
   const evaluated = await evaluateOutcomes(
     resolved.outcomes,
     opts.backend,
     ctx,
+    {
+      onStart: (outcome) => opts.listener?.onOutcomeStart?.(outcome),
+      onFinish: (outcome, evaluation) =>
+        opts.listener?.onOutcomeFinish?.(outcome, evaluation),
+    },
   );
 
   const outcomeResults: OutcomeResult[] = [];
   for (const { outcome, evaluation } of evaluated) {
-    opts.listener?.onOutcomeFinish?.(outcome, evaluation);
     const outcomeStatus: OutcomeResult["status"] = evaluation.skipped
       ? "skipped"
       : evaluation.passed
