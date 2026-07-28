@@ -91,7 +91,12 @@ export function makePlainListener(
   const write = options.write ?? out;
   const line = (s: string) =>
     write(`[${new Date().toISOString().slice(11, 19)}] ${s}\n`);
+  // The when: gate of the step in flight, for the skip line.
+  let currentWhen: string | undefined;
   return {
+    onStepStart(_idx, step) {
+      currentWhen = "when" in step ? step.when : undefined;
+    },
     onRunStart(spec, _runId, runDir, backendName) {
       line(
         `run start: ${spec.name} (env=${spec.environment ?? "local"}, backend=${backendName})`,
@@ -109,7 +114,11 @@ export function makePlainListener(
       );
     },
     onStepFinish(_idx, stepId, status, durationMs, error) {
-      line(`step ${stepId} ${status} ${formatMs(durationMs)}`);
+      const skipReason =
+        status === "skipped"
+          ? ` (when ${currentWhen ? `"${currentWhen}"` : "condition"} not met)`
+          : "";
+      line(`step ${stepId} ${status}${skipReason} ${formatMs(durationMs)}`);
       if (status === "failed" && error) {
         for (const errorLine of summarizeStepError(error)) {
           write(`  ${errorLine}\n`);
@@ -156,6 +165,8 @@ export function makeInteractiveListener(
   const c: Palette = options.color === false ? noColors : ANSI;
 
   let stepCount = 0;
+  // The when: gate of the step currently in flight, for the skip line.
+  let currentWhen: string | undefined;
 
   // Live line ticker: while a step, precondition, or verifier poll is in
   // flight, redraw its marker line with a spinner frame and elapsed time so
@@ -224,8 +235,9 @@ export function makeInteractiveListener(
       );
     },
 
-    onStepStart(_idx, _step, stepId) {
+    onStepStart(_idx, step, stepId) {
       stepCount++;
+      currentWhen = "when" in step ? step.when : undefined;
       startTicker(
         (frame, elapsed) =>
           `  ${c.dim}${frame} ${stepId}${
@@ -244,8 +256,14 @@ export function makeInteractiveListener(
             ? `${c.red}✗${c.reset}`
             : `${c.yellow}·${c.reset}`;
       const dur = `${c.dim}${formatMs(durationMs)}${c.reset}`;
+      // Say WHICH gate skipped the step: "(skipped by when:)" read as a
+      // rendering glitch, not as the conditional doing its job.
       const tail =
-        status === "skipped" ? ` ${c.dim}(skipped by when:)${c.reset}` : "";
+        status === "skipped"
+          ? ` ${c.dim}(skipped — when ${
+              currentWhen ? `"${currentWhen}"` : "condition"
+            } not met)${c.reset}`
+          : "";
       out(`\r${c.clearEOL}  ${mark} ${stepId} ${dur}${tail}`);
       if (status === "failed" && error) {
         for (const line of summarizeStepError(error)) {

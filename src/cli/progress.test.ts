@@ -44,6 +44,12 @@ describe("makePlainListener", () => {
     listener.onPreconditionStart?.("quiesce", 1_800_000);
     listener.onPreconditionFinish?.("quiesce", 0, 754_000);
     listener.onStepFinish?.(0, "edit_website", "passed", 4_100, undefined);
+    listener.onStepStart?.(
+      1,
+      { when: "notText:Headquarters", open: "/x" } as never,
+      "reload_page",
+    );
+    listener.onStepFinish?.(1, "reload_page", "skipped", 13, undefined);
     listener.onOutcomeStart?.({ id: "processed" } as never);
     listener.onOutcomeFinish?.({ id: "processed" } as never, {
       passed: false,
@@ -55,6 +61,10 @@ describe("makePlainListener", () => {
     expect(text).toContain("precondition quiesce started (budget 30m 0s)");
     expect(text).toContain("precondition quiesce ok 12m 34s");
     expect(text).toContain("step edit_website passed 4.1s");
+    // A skip must name its gate: "(skipped by when:)" read as a glitch.
+    expect(text).toContain(
+      'step reload_page skipped (when "notText:Headquarters" not met) 13ms',
+    );
     expect(text).toContain("outcome processed verifying…");
     expect(text).toContain("outcome processed failed");
     expect(text).toContain("expected: status=done");
