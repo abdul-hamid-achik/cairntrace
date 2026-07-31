@@ -476,6 +476,15 @@ export function makeServicesInteractiveListener(
   // runner trims stdout); track it so the next milestone/ticker starts on a
   // fresh line instead of gluing onto the stream.
   let rawEndedNewline = true;
+  // `docker compose up -d` output is intermediate status spam (Creating/
+  // Created/Starting/Started). Buffer the docker phase and clear it when the
+  // phase settles — the milestone carries the outcome, and a failing docker
+  // phase already surfaces its output tail through the ServicesError. The
+  // full output stays in the run's service-log artifact either way. Other
+  // phases (seed, tmux) keep streaming raw.
+  const DOCKER_BUFFER_MAX = 8_192;
+  let dockerPhase = false;
+  let dockerBuffer = "";
 
   function startTicker(label: string): void {
     stopTicker();
@@ -555,6 +564,11 @@ export function makeServicesInteractiveListener(
       // still shows it via the logger in plain mode).
     },
     onOutput(chunk) {
+      if (dockerPhase) {
+        // Keep the elapsed ticker running; discard the status spam on settle.
+        dockerBuffer = (dockerBuffer + chunk).slice(-DOCKER_BUFFER_MAX);
+        return;
+      }
       stopTicker();
       output.write(chunk);
       rawEndedNewline = chunk.endsWith("\n");
@@ -566,11 +580,19 @@ export function makeServicesInteractiveListener(
         case "complete":
         case "skip":
         case "fail":
+          if (dockerPhase) {
+            dockerPhase = false;
+            dockerBuffer = "";
+          }
           // Terminal boundaries are rendered as milestone lines by `log`;
           // retire any ticker still in flight.
           stopTicker();
           return;
         default:
+          if (event.phase === "docker" && event.event === "start") {
+            dockerPhase = true;
+            dockerBuffer = "";
+          }
           // start / readiness-check / healthcheck / relaunch / ready-wait:
           // keep a live marker while the phase is in flight.
           startTicker(`${event.phase} — ${truncate(event.message, 100)}`);

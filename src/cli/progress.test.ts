@@ -304,4 +304,63 @@ describe("makeServicesInteractiveListener", () => {
       `\n${SERVICES_GLYPH_STEP}  tmux — session "cairn-graphite" ready`,
     );
   });
+
+  it("buffers docker compose up status spam and clears it on ready", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "docker",
+      event: "start",
+      message: "docker compose up -d",
+      timestamp: "t",
+    });
+    n.onOutput(
+      "Container graphite-mongo-1 Creating\nContainer graphite-mongo-1 Started\n",
+    );
+    n.onEvent({
+      phase: "docker",
+      event: "ready",
+      message: "docker ready",
+      timestamp: "t",
+    });
+    n.log("services: docker — ready");
+
+    const text = writes.join("");
+    // The compose status lines never reach the terminal; the milestone does.
+    expect(text).not.toContain("Container graphite-mongo-1");
+    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
+    expect(text).toContain("services: docker — ready");
+  });
+
+  it("clears the docker buffer on failure too (ServicesError carries the tail)", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "docker",
+      event: "start",
+      message: "docker compose up -d",
+      timestamp: "t",
+    });
+    n.onOutput("Container graphite-mongo-1 Creating\n");
+    n.onEvent({
+      phase: "docker",
+      event: "fail",
+      message: "exit 1",
+      timestamp: "t",
+    });
+    expect(writes.join("")).not.toContain("Container graphite-mongo-1");
+  });
+
+  it("keeps streaming seed output raw", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "seed",
+      event: "start",
+      message: "bash tools/local-seed-state.sh run",
+      timestamp: "t",
+    });
+    n.onOutput("importing rows…\n");
+    expect(writes.join("")).toContain("importing rows…\n");
+  });
 });
