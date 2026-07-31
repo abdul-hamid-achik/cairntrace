@@ -460,11 +460,12 @@ export interface ServicesNarrator {
  * renderer is only wired for `--format md --progress tty`.
  */
 export function makeServicesInteractiveListener(
-  options: { color?: boolean } = {},
+  options: { color?: boolean; detail?: boolean } = {},
 ): ServicesNarrator {
   const color = options.color !== false;
   const c: Palette = color ? ansiColors : noColors;
   const guide = color;
+  const detail = options.detail === true;
   const output = process.stderr;
   const animate = Boolean(process.stderr.isTTY);
 
@@ -558,10 +559,13 @@ export function makeServicesInteractiveListener(
       stopTicker();
       emit(mark(servicesMilestoneMark(message)), truncate(message, 240));
     },
-    logDetail() {
-      // Play-by-play behind each milestone is carried by the ticker labels;
-      // verbose detail stays out of the interactive view (--log-level debug
-      // still shows it via the logger in plain mode).
+    logDetail(message) {
+      // Seed/play-by-play details are requested via --verbose: keep them out
+      // of the default interactive view, and dim them when asked for.
+      if (!detail) return;
+      stopTicker();
+      out(`${c.dim}${message}${c.reset}${message.endsWith("\n") ? "" : "\n"}`);
+      rawEndedNewline = true;
     },
     onOutput(chunk) {
       if (dockerPhase) {

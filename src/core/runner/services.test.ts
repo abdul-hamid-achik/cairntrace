@@ -409,9 +409,9 @@ describe("startServices — indefinite wait + live output", () => {
     expect(streamed.join("")).toContain("Container redis Started");
   });
 
-  it("streams seed command output to ctx.onOutput as it arrives", async () => {
+  it("routes seed command output to ctx.logDetail (DEBUG, --verbose)", async () => {
     seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
-    const streamed: string[] = [];
+    const details: string[] = [];
     shellChildImpl = () => streamingChild(["imported 42 records\n"], 0, []);
 
     await track(
@@ -423,13 +423,13 @@ describe("startServices — indefinite wait + live output", () => {
           configDir: dir,
           project: "test",
           coldStart: false,
-          onOutput: (c) => {
-            streamed.push(c);
+          logDetail: (m) => {
+            details.push(m);
           },
         },
       ),
     );
-    expect(streamed.join("")).toContain("imported 42 records");
+    expect(details.join("")).toContain("imported 42 records");
   });
 
   it("does not crash when ctx.onOutput is unset (no streaming)", async () => {
@@ -907,7 +907,7 @@ describe("startServices — seed phase", () => {
     ).rejects.toThrow(/seed command failed/);
   });
 
-  it("redacts scoped seed secrets from streamed output and failure diagnostics", async () => {
+  it("redacts scoped seed secrets from detail output and failure diagnostics", async () => {
     seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
     shellImpl = async () => ({
       exitCode: 2,
@@ -925,7 +925,7 @@ describe("startServices — seed phase", () => {
           coldStart: false,
           env: { DATABASE_URL: "seed-secret-value" },
           secretValues: ["seed-secret-value"],
-          onOutput: (chunk) => output.push(chunk),
+          logDetail: (m) => output.push(m),
         },
       ),
     ).rejects.toThrow(/\[redacted\]/);

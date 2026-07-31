@@ -815,12 +815,13 @@ async function startSeed(
     result: r,
     redactor,
   });
-  // Redact the complete stream before forwarding it. Redacting individual
-  // chunks could expose a value split across chunk boundaries.
-  if (ctx.onOutput) {
-    if (r.stdout) ctx.onOutput(redactor.text(r.stdout));
-    if (r.stderr) ctx.onOutput(redactor.text(r.stderr));
-  }
+  // Seed details are play-by-play behind the "seed — running" milestone:
+  // route the redacted stream through the detail channel (DEBUG — shown with
+  // --verbose) instead of the live stream, so a default run stays readable.
+  // The full output still lands in the service-log artifact, and a failing
+  // seed surfaces its tail through the error below.
+  const seedStream = redactor.text(`${r.stdout}\n${r.stderr}`).trimEnd();
+  if (seedStream) ctx.logDetail?.(seedStream);
 
   // Record the result regardless of exit code (failed seeds are tracked too).
   await store.recordRun(ctx.project, cfg, r.exitCode);

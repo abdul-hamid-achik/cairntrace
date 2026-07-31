@@ -351,7 +351,7 @@ describe("makeServicesInteractiveListener", () => {
     expect(writes.join("")).not.toContain("Container graphite-mongo-1");
   });
 
-  it("keeps streaming seed output raw", () => {
+  it("streams onOutput raw for non-docker phases", () => {
     const writes = captureStderr();
     const n = makeServicesInteractiveListener({ color: false });
     n.onEvent({
@@ -362,5 +362,22 @@ describe("makeServicesInteractiveListener", () => {
     });
     n.onOutput("importing rows…\n");
     expect(writes.join("")).toContain("importing rows…\n");
+  });
+
+  it("hides seed detail by default and shows it with the detail option", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.logDetail(
+      "[MONGO IMPORT] Restored `graphite.entities` - 33697 documents\n",
+    );
+    expect(writes.join("")).toBe("");
+
+    const writesVerbose = captureStderr();
+    const nv = makeServicesInteractiveListener({
+      color: false,
+      detail: true,
+    });
+    nv.logDetail("[MONGO IMPORT] Restored `graphite.entities`\n");
+    expect(writesVerbose.join("")).toContain("[MONGO IMPORT] Restored");
   });
 });

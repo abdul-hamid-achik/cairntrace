@@ -293,6 +293,15 @@ export function setProgressMarkerActive(active: boolean): void {
 }
 
 /**
+ * Current resolved level of the base logger (after flags, env, config, and
+ * narration defaults). Used by the tty narrator to decide whether detail
+ * play-by-play (e.g. seed output) is requested via --verbose.
+ */
+export function currentLogLevel(): LogLevel {
+  return log.level;
+}
+
+/**
  * Store the CLI flags and configure the logger from flags + env (no config).
  * Called once at CLI boot from the commander `preAction` hook. The stored
  * flags are reused by `reconfigureWithConfig()` so a later-loaded config

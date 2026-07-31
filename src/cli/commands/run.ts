@@ -53,7 +53,12 @@ import {
   resolveProgressMode,
   type ProgressMode,
 } from "../progress";
-import { log, reconfigureWithConfig, setNarrationDefault } from "../logger";
+import {
+  currentLogLevel,
+  log,
+  reconfigureWithConfig,
+  setNarrationDefault,
+} from "../logger";
 import { resolveScopedSecrets, type ScopedSecrets } from "./secrets";
 import { publishRunDirectory } from "./publish";
 import { maybeAutoStash, stashDirectory } from "./stash";
@@ -713,7 +718,13 @@ export async function maybeStartServices(
     format === "md" ? resolveProgressMode(opts.progress) : undefined;
   const servicesNarrator =
     progressMode === "tty"
-      ? makeServicesInteractiveListener({ color: colorEnabled() })
+      ? makeServicesInteractiveListener({
+          color: colorEnabled(),
+          // Seed detail renders in the interactive view only when --verbose
+          // (or CAIRN_LOG_LEVEL=debug) asked for it, matching the logger's
+          // debug channel in plain mode.
+          detail: currentLogLevel() === "debug",
+        })
       : undefined;
   if (progressMode) setNarrationDefault(true);
 

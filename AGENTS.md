@@ -263,8 +263,10 @@ Key rules:
   command runs and cleared when the phase settles (ready/reused/failed); a
   failing phase still surfaces its output tail through the error, and the
   full output is kept in the run's service-log artifact. Seed output is
-  buffered and redacted before
-  forwarding so a secret split across chunks cannot leak. Each not-yet-ready
+  buffered, redacted, and routed to the detail channel (DEBUG — shown with
+  --verbose, hidden by default);
+  a failing seed surfaces its tail through the error, and the full output is
+  kept in the run's service-log artifact. Each not-yet-ready
   tmux window's pane tail is streamed every few seconds so a stuck window
   shows its startup logs/errors instead of a blind wait. Non-interactive/CI
   runs stay quiet (the logger's default warn level suppresses info).
