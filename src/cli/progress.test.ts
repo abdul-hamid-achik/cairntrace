@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   clackLine,
   completionMark,
   makeInteractiveListener,
   makePlainListener,
+  makeServicesInteractiveListener,
   resolveProgressMode,
+  SERVICES_GLYPH_ERROR,
+  SERVICES_GLYPH_STEP,
+  SERVICES_GLYPH_SUCCESS,
+  SERVICES_GLYPH_WARN,
   summarizeStepError,
 } from "./progress";
 
@@ -221,5 +226,82 @@ describe("resolveProgressMode", () => {
     // escape hatch.
     process.env.CAIRN_PROGRESS = "plain";
     expect(resolveProgressMode(undefined)).toBe("plain");
+  });
+});
+
+function captureStderr(): string[] {
+  const writes: string[] = [];
+  vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+    writes.push(String(chunk));
+    return true;
+  });
+  return writes;
+}
+
+describe("makeServicesInteractiveListener", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders milestone marks, ticker labels, and raw output", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "seed",
+      event: "start",
+      message: "bash tools/local-seed-state.sh run",
+      timestamp: "t",
+    });
+    n.onOutput("importing rows…\n");
+    n.log("services: seed — complete");
+
+    const text = writes.join("");
+    expect(text).toContain("seed — bash tools/local-seed-state.sh run");
+    expect(text).toContain("importing rows…\n");
+    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
+    expect(text).toContain("services: seed — complete");
+    // Raw stream must be untouched by ticker redraws in the same chunk.
+    expect(text).toContain("importing rows…\n");
+  });
+
+  it("marks failures and warnings with their own glyphs", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.log("seed command failed (exit 1): bash tools/seed.sh");
+    n.log("docker — healthcheck WARNING: unhealthy after 2 failures");
+    n.log("teardown[0] failed (exit 1); continuing");
+
+    const text = writes.join("");
+    expect(text).toContain(SERVICES_GLYPH_ERROR);
+    expect(text).toContain(SERVICES_GLYPH_WARN);
+    // The best-effort teardown failure is a warning, not an error.
+    expect(text.indexOf(SERVICES_GLYPH_WARN)).toBeLessThan(
+      text.lastIndexOf(SERVICES_GLYPH_WARN),
+    );
+  });
+
+  it("retires the ticker on terminal lifecycle events", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "tmux",
+      event: "ready-wait",
+      message: 'waiting for "web"',
+      timestamp: "t",
+    });
+    n.onEvent({
+      phase: "tmux",
+      event: "ready",
+      message: 'session "cairn-graphite" ready',
+      timestamp: "t",
+    });
+    n.log('tmux — session "cairn-graphite" ready');
+
+    const text = writes.join("");
+    expect(text).toContain('tmux — waiting for "web"…\n');
+    // Terminal event retires the ticker: the milestone starts on its own line.
+    expect(text).toContain(
+      `\n${SERVICES_GLYPH_STEP}  tmux — session "cairn-graphite" ready`,
+    );
   });
 });

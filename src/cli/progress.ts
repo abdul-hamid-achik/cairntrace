@@ -10,6 +10,7 @@ import {
   unicode,
 } from "@clack/prompts";
 import type { ProgressListener } from "../core/runner/Runner";
+import type { ServicesEvent } from "../core/runner/services";
 import type { RunResult } from "../core/schema/run.v1";
 import { setProgressMarkerActive } from "./logger";
 
@@ -436,6 +437,148 @@ export function makeInteractiveListener(
   };
 }
 
+export interface ServicesNarrator {
+  /** Milestone lines (docker/seed/tmux/teardown phase boundaries). */
+  log: (message: string) => void;
+  /** Play-by-play behind each milestone (readiness/healthcheck echoes). */
+  logDetail: (message: string) => void;
+  /** Raw subprocess output (docker compose, seed, pane tails). */
+  onOutput: (chunk: string) => void;
+  /** Structured lifecycle events from startServices(). */
+  onEvent: (event: ServicesEvent) => void;
+}
+
+/**
+ * Interactive narrator for the services lifecycle (docker/seed/tmux/teardown).
+ *
+ * Milestone lines render as docker-style flat clack marks; a live ticker
+ * (spinner frame + elapsed) runs while a phase is in flight so a many-minute
+ * seed/tmux wait reads as "working, bounded" instead of dead. Raw subprocess
+ * output stops the ticker and streams through untouched — the spinner never
+ * corrupts or is corrupted by docker compose / demo-import output. Non-TTY
+ * runs keep the leveled logger narration (see maybeStartServices); this
+ * renderer is only wired for `--format md --progress tty`.
+ */
+export function makeServicesInteractiveListener(
+  options: { color?: boolean } = {},
+): ServicesNarrator {
+  const color = options.color !== false;
+  const c: Palette = color ? ansiColors : noColors;
+  const guide = color;
+  const output = process.stderr;
+  const animate = Boolean(process.stderr.isTTY);
+
+  let ticker: NodeJS.Timeout | undefined;
+  let tickerLabel = "";
+  let tickerStart = 0;
+  let frameIdx = 0;
+  // Raw subprocess chunks may arrive without a trailing newline (the shell
+  // runner trims stdout); track it so the next milestone/ticker starts on a
+  // fresh line instead of gluing onto the stream.
+  let rawEndedNewline = true;
+
+  function startTicker(label: string): void {
+    stopTicker();
+    setProgressMarkerActive(true);
+    tickerLabel = label;
+    tickerStart = Date.now();
+    frameIdx = 0;
+    // Never overwrite the tail of a raw stream that lacked a trailing newline.
+    if (!rawEndedNewline) out("\n");
+    // Without a real TTY the frame is a static marker, so terminate its line
+    // — otherwise the next milestone would glue onto it.
+    out(`\r${c.clearEOL}${tick(SPINNER_FRAMES[0]!, "")}${animate ? "" : "\n"}`);
+    rawEndedNewline = true;
+    if (!animate) return;
+    ticker = setInterval(() => {
+      frameIdx = (frameIdx + 1) % SPINNER_FRAMES.length;
+      out(
+        `\r${c.clearEOL}${tick(
+          SPINNER_FRAMES[frameIdx]!,
+          formatMs(Date.now() - tickerStart),
+        )}`,
+      );
+    }, 250);
+    ticker.unref?.();
+  }
+
+  function stopTicker(): void {
+    if (ticker) {
+      clearInterval(ticker);
+      ticker = undefined;
+      out(`\r${c.clearEOL}`);
+    }
+    setProgressMarkerActive(false);
+  }
+
+  /** In-flight marker line: spinner frame + phase label + live elapsed. */
+  const tick = (frame: string, elapsed: string) =>
+    `${c.dim}${frame}${c.reset}  ${tickerLabel}${
+      elapsed ? ` ${elapsed}` : ""
+    }…`;
+
+  /**
+   * One milestone line: mark + 2 spaces + text. Written directly (like the
+   * spec listener's `flat`) instead of through clack's log.message: clack 1.7
+   * pre-styles its exported S_* glyphs and injects control bytes through the
+   * guide path, which would leak into pipes and break the plain fallback.
+   */
+  function emit(symbol: string, text: string): void {
+    if (!rawEndedNewline) out("\n");
+    out(`${symbol}  ${text}\n`);
+    rawEndedNewline = true;
+  }
+
+  /**
+   * Mark glyphs follow the framework's completionMark family (◆/■/▲/◇),
+   * colored by outcome like the spec listener's marks.
+   */
+  function mark(symbol: string): string {
+    if (!guide) return symbol;
+    const code =
+      symbol === SERVICES_GLYPH_ERROR
+        ? c.red
+        : symbol === SERVICES_GLYPH_WARN
+          ? c.yellow
+          : c.green;
+    return `${code}${symbol}${c.reset}`;
+  }
+
+  return {
+    log(message) {
+      stopTicker();
+      emit(mark(servicesMilestoneMark(message)), truncate(message, 240));
+    },
+    logDetail() {
+      // Play-by-play behind each milestone is carried by the ticker labels;
+      // verbose detail stays out of the interactive view (--log-level debug
+      // still shows it via the logger in plain mode).
+    },
+    onOutput(chunk) {
+      stopTicker();
+      output.write(chunk);
+      rawEndedNewline = chunk.endsWith("\n");
+    },
+    onEvent(event) {
+      switch (event.event) {
+        case "ready":
+        case "reuse":
+        case "complete":
+        case "skip":
+        case "fail":
+          // Terminal boundaries are rendered as milestone lines by `log`;
+          // retire any ticker still in flight.
+          stopTicker();
+          return;
+        default:
+          // start / readiness-check / healthcheck / relaunch / ready-wait:
+          // keep a live marker while the phase is in flight.
+          startTicker(`${event.phase} — ${truncate(event.message, 100)}`);
+      }
+    },
+  };
+}
+
 /**
  * Completion mark for the batch narration (run.ts): the same glyph family as
  * the tty renderer's clack marks, so `cairn run` speaks one visual language
@@ -495,6 +638,37 @@ function printRerunHint(
 const SPINNER_FRAMES = unicode
   ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
   : ["|", "/", "-", "\\"];
+
+// clack 1.7 pre-styles its exported S_* glyphs (e.g. S_SUCCESS already
+// carries control bytes), so the services narrator uses bare locals — same
+// glyph family (◆/■/▲/◇) as completionMark, wrapped in its own palette.
+export const SERVICES_GLYPH_SUCCESS = unicode ? "◆" : "*";
+export const SERVICES_GLYPH_ERROR = unicode ? "■" : "x";
+export const SERVICES_GLYPH_WARN = unicode ? "▲" : "!";
+export const SERVICES_GLYPH_STEP = unicode ? "◇" : "o";
+
+/**
+ * Milestone mark from the message text: the lifecycle formats its own
+ * boundary lines ("services: docker — ready", "seed — running (cmd)",
+ * "teardown (…)"), so the mark is derived deterministically from it.
+ */
+function servicesMilestoneMark(message: string): string {
+  if (/WARNING|unhealthy/i.test(message)) return SERVICES_GLYPH_WARN;
+  if (/fail/i.test(message)) {
+    // Teardown best-effort failures keep the run going; warn, not error.
+    return /continuing|non-fatal/i.test(message)
+      ? SERVICES_GLYPH_WARN
+      : SERVICES_GLYPH_ERROR;
+  }
+  if (
+    /— (ready|complete|reused|reuse)|already live|passed|committed|ok:|skipping|skipped|reusing/i.test(
+      message,
+    )
+  ) {
+    return SERVICES_GLYPH_SUCCESS;
+  }
+  return SERVICES_GLYPH_STEP;
+}
 
 // Progress goes to stderr — stdout is reserved for structured results.
 function out(s: string): void {

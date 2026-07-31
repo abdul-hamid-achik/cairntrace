@@ -156,6 +156,12 @@ per-agent code paths.
 - Before declaring a spec complete, run `cairn spec verify --json` once (include
   `--config <path>` if the spec uses config-backed `${vars.X}`), then run
   `cairn run --cold-start --json` once. If that fails, the spec isn't done.
+  `cairn spec verify` also audits placeholder references statically: an
+  `${env.X}` without a `:-default` that no supplied source (process.env,
+  config `secrets.required`, or the `CAIRN_*` namespace) covers, or a
+  `${secrets.X}` missing from `secrets.required`, fails verify with exit 4 —
+  both would otherwise substitute to an empty string mid-run. Imported
+  actions are audited too.
 - Do **not** edit `intent` or `outcomes` of an existing spec without surfacing
   a diff to the user. The `contractHash:` stamp will refuse the write if
   changed without `cairn spec verify --stamp`.

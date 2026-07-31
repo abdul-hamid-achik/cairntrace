@@ -49,6 +49,7 @@ import { emit, resolveFormat } from "../format";
 import {
   completionMark,
   makeProgressListener,
+  makeServicesInteractiveListener,
   resolveProgressMode,
   type ProgressMode,
 } from "../progress";
@@ -701,6 +702,21 @@ export async function maybeStartServices(
     return createNoopServicesHandle();
   }
 
+  // Interactive services narration: same axis as spec progress — only under
+  // `--format md` + `--progress tty` (auto resolves on a real stderr TTY).
+  // Every other mode keeps the leveled logger narration (info milestones,
+  // debug detail, raw streaming), which respects --quiet/--log-level/
+  // --log-format json. The narrator suppresses duplicate logger narration
+  // via setNarrationDefault, exactly like the spec progress listener.
+  const format = resolveFormat(opts, "md");
+  const progressMode: ProgressMode | undefined =
+    format === "md" ? resolveProgressMode(opts.progress) : undefined;
+  const servicesNarrator =
+    progressMode === "tty"
+      ? makeServicesInteractiveListener({ color: colorEnabled() })
+      : undefined;
+  if (progressMode) setNarrationDefault(true);
+
   return startServices(cfg, {
     configDir,
     coldStart,
@@ -712,12 +728,19 @@ export async function maybeStartServices(
     // Lifecycle narration + live subprocess output route through the logger
     // (leveled, always stderr). info lines + raw streaming show on an
     // interactive TTY (default info); --quiet/json suppresses them.
-    log: (m: string) => log.scope("services").info(m),
+    log: servicesNarrator
+      ? servicesNarrator.log
+      : (m: string) => log.scope("services").info(m),
     // Play-by-play behind each milestone (readiness/healthcheck command
     // echoes, tmux scaffolding, retry narration) — DEBUG only, visible with
     // --verbose / CAIRN_LOG_LEVEL=debug.
-    logDetail: (m: string) => log.scope("services").debug(m),
-    onOutput: (c: string) => log.raw(c),
+    logDetail: servicesNarrator
+      ? servicesNarrator.logDetail
+      : (m: string) => log.scope("services").debug(m),
+    onOutput: servicesNarrator
+      ? servicesNarrator.onOutput
+      : (c: string) => log.raw(c),
+    onEvent: servicesNarrator?.onEvent,
   });
 }
 

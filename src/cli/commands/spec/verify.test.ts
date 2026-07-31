@@ -289,4 +289,91 @@ outcomes:
     expect(text.startsWith("# keep this comment\n\n")).toBe(true);
     expect(text).toContain(`contractHash: ${hash}`);
   });
+
+  it("flags silent-empty env refs and undeclared secrets", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:9
+secrets:
+  provider: env
+  required:
+    - SUPPLIED_SECRET
+`,
+    );
+    const specPath = join(dir, "silent-empty.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: silent_empty_refs
+intent: silent empty substitutions must fail verify
+preconditions:
+  commands:
+    - run: "echo \${env.NOT_SUPPLIED} \${secrets.UNDECLARED} \${env.SUPPLIED_SECRET} \${env.CAIRN_TVAULT_ENV:-local}"
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+`,
+    );
+
+    const result = await runVerify(specPath, {
+      json: true,
+      config: configPath,
+    });
+    expect(result.code).toBe(4);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.status).toBe("invalid");
+    const errors = parsed.errors as string[];
+    expect(errors.some((e) => e.includes("${env.NOT_SUPPLIED}"))).toBe(true);
+    expect(errors.some((e) => e.includes("${secrets.UNDECLARED}"))).toBe(true);
+    // Declared secrets and defaulted env refs are not findings.
+    expect(errors.some((e) => e.includes("SUPPLIED_SECRET"))).toBe(false);
+    expect(errors.some((e) => e.includes("CAIRN_TVAULT_ENV"))).toBe(false);
+  });
+
+  it("accepts env refs with defaults and declared secrets", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:9
+secrets:
+  provider: env
+  required:
+    - SUPPLIED_SECRET
+`,
+    );
+    const specPath = join(dir, "clean-refs.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: clean_refs
+intent: supplied refs verify clean
+preconditions:
+  commands:
+    - run: "echo \${env.NODE_ENV:-development} \${secrets.SUPPLIED_SECRET}"
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+`,
+    );
+
+    const result = await runVerify(specPath, {
+      json: true,
+      config: configPath,
+    });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout).status).toBe("valid");
+  });
 });

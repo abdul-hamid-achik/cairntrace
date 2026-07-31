@@ -8,6 +8,7 @@ import {
   ContractHashMismatchError,
   parseSpec,
 } from "../../../core/parser/parseSpec";
+import { auditPlaceholderReferences } from "../../../core/referenceAudit";
 import { SpecSchema } from "../../../core/schema/spec.v1";
 import { emit, resolveFormat } from "../../format";
 import { parseVarFlags } from "../run";
@@ -70,6 +71,30 @@ export async function verifyCommand(
       // Cold-start contract lint (plan §10.6)
       const c = coldStartLint(parsed.spec);
       if (c) result.warnings.push(c);
+
+      // Static placeholder reference audit: `${env.X}` without a default and
+      // `${secrets.X}` no provider supplies both substitute to an EMPTY string
+      // at run time (parseSpec resolves them silently). Catch them here — in
+      // seconds, before the run — instead of as a confusing mid-run failure.
+      const auditFiles: Array<{ path: string; text: string }> = [
+        { path: specPath, text: await readFile(specPath, "utf8") },
+      ];
+      for (const action of parsed.actionsByName.values()) {
+        auditFiles.push({
+          path: action.path,
+          text: await readFile(action.path, "utf8"),
+        });
+      }
+      const findings = auditPlaceholderReferences(auditFiles, {
+        secretsRequired: runtime.config?.secrets?.required,
+      });
+      for (const f of findings) {
+        result.errors.push(`${f.file}: ${f.token} — ${f.message}`);
+      }
+      if (findings.length > 0) {
+        result.status = "invalid";
+        exitCode = 4;
+      }
     }
   } catch (e) {
     if (e instanceof ContractHashMismatchError) {

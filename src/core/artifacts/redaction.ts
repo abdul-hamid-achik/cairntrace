@@ -8,6 +8,16 @@ const BUILT_IN_SENSITIVE_HEADERS = ["Authorization", "Cookie", "Set-Cookie"];
 const BUILT_IN_QUERY_PARAM_RE =
   /^(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|password|secret|code[_-]?verifier|otp|passcode|credential|assertion)$/i;
 
+/**
+ * Credentials embedded in URL userinfo (`scheme://user:pass@host`). Seed
+ * commands and child-process output carry connection URIs whose userinfo is
+ * only known at runtime (e.g. `.envrc`/staging creds), so no literal value is
+ * registered for them and key-name heuristics cannot see inside the authority
+ * component. Scrub the whole userinfo, keeping scheme + host so logs stay
+ * debuggable.
+ */
+const URI_USERINFO_RE = /(\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/\s@]+)@/g;
+
 interface RedactionRules {
   headerNames: readonly string[];
   queryParamNames: ReadonlySet<string>;
@@ -79,6 +89,7 @@ function redactStringWithRules(
   }
   output = redactHeaderValues(output, rules.headerNames);
   output = redactQueryParamValues(output, rules.queryParamNames);
+  output = output.replace(URI_USERINFO_RE, "$1[redacted]@");
   return output;
 }
 

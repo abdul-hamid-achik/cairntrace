@@ -154,6 +154,34 @@ describe("createArtifactRedactor", () => {
     ).toEqual({ open: { path: "[redacted]" } });
   });
 
+  it("redacts credentials embedded in URL userinfo", () => {
+    // Regression: demo-import child output embeds full connection URIs whose
+    // userinfo (example staging credentials) is never a registered literal.
+    const redactor = createArtifactRedactor(undefined, {});
+    expect(
+      redactor.text(
+        "mongodump --uri mongodb+srv://app_user:app_password@db.example.com/?authSource=admin -d test",
+      ),
+    ).toBe(
+      "mongodump --uri mongodb+srv://[redacted]@db.example.com/?authSource=admin -d test",
+    );
+    expect(redactor.text("http://user:pass@host/path")).toBe(
+      "http://[redacted]@host/path",
+    );
+    // Empty userinfo is scrubbed too (`redis://:pass@host`).
+    expect(redactor.text("redis://:secret@host:6379/0")).toBe(
+      "redis://[redacted]@host:6379/0",
+    );
+    // No userinfo → untouched (an @ later in the path is not authority).
+    expect(redactor.text("https://host/path@anchor?q=1")).toBe(
+      "https://host/path@anchor?q=1",
+    );
+    // Nested JSON strings are scrubbed too (resolved spec fields, evidence).
+    expect(
+      redactor.value({ uri: "postgres://db:pass@localhost:5432/app" }),
+    ).toEqual({ uri: "postgres://[redacted]@localhost:5432/app" });
+  });
+
   it("clearRegisteredSecretValues resets the registry", () => {
     registerSecretValues(["another-leaky-value"]);
     clearRegisteredSecretValues();
