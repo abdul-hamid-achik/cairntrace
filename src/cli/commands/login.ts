@@ -1,7 +1,7 @@
-import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
+import { confirm, isCancel, S_BAR, S_INFO, S_SUCCESS } from "@clack/prompts";
 import { AgentBrowserAdapter } from "../../adapters/agent-browser/AgentBrowserAdapter";
 import { CheckpointStore } from "../../core/checkpoint/CheckpointStore";
+import { ansiColors as c, clackLine } from "../progress";
 
 export interface LoginOptions {
   url?: string;
@@ -10,8 +10,6 @@ export interface LoginOptions {
   provider?: string;
   device?: string;
 }
-
-const ANSI = { dim: "\x1b[2m", green: "\x1b[32m", reset: "\x1b[0m" };
 
 /**
  * Interactive login flow.
@@ -57,9 +55,7 @@ export async function loginCommand(
 
   const timeoutMs = Number(opts.timeout ?? 300_000);
 
-  process.stdout.write(
-    `${ANSI.dim}Opening browser at${ANSI.reset} ${opts.url}\n`,
-  );
+  clackLine(`${c.dim}${S_INFO}${c.reset}`, `Opening browser at ${opts.url}`);
   const opened = await adapter.runStep({ open: opts.url });
   if (!opened.ok) {
     process.stderr.write(
@@ -69,8 +65,9 @@ export async function loginCommand(
   }
 
   if (opts.waitFor) {
-    process.stdout.write(
-      `${ANSI.dim}Waiting for${ANSI.reset} ${opts.waitFor} ${ANSI.dim}(timeout ${timeoutMs}ms)${ANSI.reset}\n`,
+    clackLine(
+      `${c.dim}${S_INFO}${c.reset}`,
+      `Waiting for ${opts.waitFor} ${c.dim}(timeout ${timeoutMs}ms)${c.reset}`,
     );
     const colon = opts.waitFor.indexOf(":");
     if (colon < 0) {
@@ -102,13 +99,17 @@ export async function loginCommand(
       process.exit(2);
     }
   } else {
-    const rl = createInterface({ input: stdin, output: stdout });
-    try {
-      await rl.question(
-        `${ANSI.dim}Log in in the browser, then press ENTER to capture…${ANSI.reset} `,
-      );
-    } finally {
-      rl.close();
+    // clack's confirm is the interactive capture gate: the user logs in in
+    // the headed browser, then presses Enter (Yes is the default). A cancel
+    // (Esc/Ctrl+C) aborts without capturing.
+    const answer = await confirm({
+      message: "Log in in the browser, then press Enter to capture",
+      initialValue: true,
+      output: process.stderr,
+    });
+    if (isCancel(answer) || answer === false) {
+      process.stderr.write("cairn login: canceled\n");
+      process.exit(2);
     }
   }
 
@@ -123,10 +124,12 @@ export async function loginCommand(
   // Best-effort close — the user might keep the session alive.
   await adapter.close().catch(() => undefined);
 
-  process.stdout.write(
-    `${ANSI.green}✓ Saved checkpoint${ANSI.reset} "${name}" → ${outPath}\n`,
+  clackLine(
+    `${c.green}${S_SUCCESS}${c.reset}`,
+    `Saved checkpoint ${c.bold}${name}${c.reset} → ${outPath}`,
   );
-  process.stdout.write(
-    `${ANSI.dim}Reference it with:${ANSI.reset} session: { resume: ${name} }\n`,
+  clackLine(
+    `${c.dim}${S_BAR}${c.reset}`,
+    `${c.dim}Reference it with:${c.reset} session: { resume: ${name} }`,
   );
 }

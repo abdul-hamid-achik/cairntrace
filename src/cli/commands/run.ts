@@ -47,6 +47,7 @@ import {
 } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import {
+  completionMark,
   makeProgressListener,
   resolveProgressMode,
   type ProgressMode,
@@ -859,18 +860,6 @@ async function runBatch(
   // Bold and colored marks only exist in the tty renderer; plain mode is a
   // designed sequential format, not tty with codes stripped.
   const bold = (s: string) => (interactive ? `\x1b[1m${s}\x1b[0m` : s);
-  const statusMark = (status: RunResult["status"]) =>
-    status === "passed"
-      ? interactive
-        ? "\x1b[32m✓\x1b[0m"
-        : "✓"
-      : status === "failed"
-        ? interactive
-          ? "\x1b[31m✗\x1b[0m"
-          : "✗"
-        : interactive
-          ? "\x1b[33m·\x1b[0m"
-          : "·";
   const tStart = Date.now();
   const startedAt = new Date(tStart).toISOString();
   const artifactRoot = await resolveBatchArtifactRoot(specs[0]!, opts);
@@ -1005,7 +994,7 @@ async function runBatch(
           completedByIndex[idx] = r;
           if (progressMode) {
             log.raw(
-              `  ${statusMark(r.status)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
+              `  ${completionMark(r.status, interactive)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
                 r.outcomes.filter((o) => o.status === "passed").length
               }/${r.outcomes.length} outcomes)\n`,
             );
@@ -1017,7 +1006,7 @@ async function runBatch(
           const err = e as Error;
           if (progressMode) {
             log.raw(
-              `  ${statusMark("errored")} [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
+              `  ${completionMark("errored", interactive)} [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
             );
           }
           const errored = synthesizeErroredResult(specPath, err, {

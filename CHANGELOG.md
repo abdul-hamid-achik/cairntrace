@@ -5,6 +5,50 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-07-31
+
+### Changed
+
+- `cairn run` TTY narration now renders through `@clack/prompts`: docker-style
+  flat marks (◆/■/▲/◇) for steps, preconditions, and outcomes, guide bars
+  around the run header, and the closing summary box (`└  PASSED n/m …`).
+  Output stays pinned to stderr (clack defaults to stdout) so the structured
+  `--format` document is untouched; the in-flight animation remains a local
+  ticker because clack's `spinner()` grabs stdin (readline + raw mode) and
+  intercepts keys (Esc → `process.exit(0)`, Ctrl+C swallowed) — that would
+  break signal-time cleanup and interruptibility. Symbols are colored through
+  the project palette because Bun's `util.styleText` ignores NO_COLOR, so
+  `--no-color` still means zero ANSI. `--progress auto` now follows the
+  stderr sink (like docker --progress) instead of stdout, so piping stdout
+  to a file keeps the live narration and `2>log` no longer writes cursor
+  redraws into the file. `@clack/prompts` is now actually used — removed from
+  knip's `ignoreDependencies`.
+
+- The batch narration (`cairn run` with `--parallel > 1`) now uses the same
+  clack glyph family (◆/■/▲) for completion lines, so single and batch runs
+  speak one visual language.
+
+- Logger/ticker coordination: while the tty renderer's live marker line is in
+  flight, every logger write clears the marker line first (`\r` + clear-EOL)
+  so `--verbose` or any future mid-step logging lands clean instead of being
+  overwritten by the next spinner redraw (the marker redraws below it on the
+  next tick).
+
+- `cairn login`'s capture gate is now a clack `confirm` prompt (Enter =
+  capture, Esc/Ctrl+C cancels) instead of a bare readline; its narration
+  moved from stdout to stderr and renders with the same clack marks as the
+  run renderer (ℹ/◆/│), so stdout no longer carries narrative text.
+
+- `cairn spec heal` (and `heal --verify`) now narrate the underlying run(s)
+  with the same progress renderer as `cairn run` (auto/CAIRN_PROGRESS, all
+  output to stderr) instead of running in silence; the markdown heal report
+  stays the only thing on stdout. The stale stdout "Healing …" header is
+  gone.
+
+- The tty ticker's spinner frames fall back to ASCII (`| / - \\`) on
+  non-unicode terminals (TERM=linux) instead of rendering braille boxes;
+  the same `unicode` detection clack uses.
+
 ## [2.5.0] - 2026-07-28
 
 ### Added

@@ -4,6 +4,7 @@ import {
   configureLoggerFromFlags,
   reconfigureWithConfig,
   resolveLogConfig,
+  setProgressMarkerActive,
 } from "./logger";
 
 /**
@@ -71,6 +72,46 @@ describe("logger levels + format", () => {
     configureLoggerFromFlags({ logLevel: "silent", color: false });
     log.error("quiet");
     expect(cap.lines.join("")).toBe("");
+  });
+
+  it("clears the tty progress marker line before each write", () => {
+    // While the tty renderer's live marker is in flight (setProgressMarkerActive),
+    // every logger write must retire the marker line first (`\r` + clear-EOL)
+    // so the log line lands clean instead of being overwritten by the next
+    // spinner redraw. No stray ANSI when color is off.
+    configureLoggerFromFlags({ logLevel: "debug", color: false });
+    setProgressMarkerActive(true);
+    try {
+      log.info("mid-step", { wait: "open_page" });
+    } finally {
+      setProgressMarkerActive(false);
+    }
+    const line = cap.lines.join("");
+    expect(line.startsWith("\r")).toBe(true);
+    expect(line).not.toContain("\x1b[");
+    expect(line).toContain("mid-step");
+    expect(line).toContain("wait=open_page");
+
+    // With color on, the marker line is cleared with a real clear-EOL.
+    // The flag from beforeEach (color: false) must be dropped first — flags
+    // outrank config — then config.color forces color even in a non-TTY
+    // test runner.
+    configureLoggerFromFlags({ logLevel: "debug" });
+    reconfigureWithConfig({ color: true });
+    setProgressMarkerActive(true);
+    try {
+      log.info("colored");
+    } finally {
+      setProgressMarkerActive(false);
+    }
+    const colored = cap.lines.join("");
+    expect(colored).toContain("\r\x1b[K");
+  });
+
+  it("writes clean lines when no marker is active", () => {
+    configureLoggerFromFlags({ logLevel: "debug", color: false });
+    log.info("idle");
+    expect(cap.lines.join("").startsWith("\r")).toBe(false);
   });
 
   it("emits NDJSON objects in json format", () => {

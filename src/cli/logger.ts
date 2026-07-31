@@ -194,14 +194,15 @@ class Logger {
   raw(chunk: string): void {
     if (LEVEL_WEIGHT[this.opts.level] > LEVEL_WEIGHT.info) return;
     if (!this.opts.color) {
-      process.stderr.write(chunk);
+      process.stderr.write(this.markerPrefix() + chunk);
       return;
     }
     process.stderr.write(
-      chunk
-        .split("\n")
-        .map((l) => colorizeRaw(l, this.opts.color))
-        .join("\n"),
+      this.markerPrefix() +
+        chunk
+          .split("\n")
+          .map((l) => colorizeRaw(l, this.opts.color))
+          .join("\n"),
     );
   }
 
@@ -235,7 +236,7 @@ class Logger {
         : `${this.scopeName} `
       : "";
     const line = `${scopeStr}${iconStr} ${tagStr} ${msg}${renderFields(fields, color)}`;
-    process.stderr.write(line + "\n");
+    process.stderr.write(this.markerPrefix() + line + "\n");
   }
 
   private writeJson(
@@ -250,7 +251,16 @@ class Logger {
       ...(this.scopeName ? { scope: this.scopeName } : {}),
       msg,
     };
-    process.stderr.write(JSON.stringify(entry) + "\n");
+    process.stderr.write(this.markerPrefix() + JSON.stringify(entry) + "\n");
+  }
+
+  /**
+   * When the tty progress renderer's live marker line is in flight, clear it
+   * before writing so this line lands clean instead of being overwritten by
+   * the next spinner redraw (the marker redraws below it on the next tick).
+   */
+  private markerPrefix(): string {
+    return markerActive ? `\r${this.opts.color ? "\x1b[K" : ""}` : "";
   }
 }
 
@@ -269,6 +279,18 @@ interface RawLogFlags {
 let rawFlags: RawLogFlags = {};
 let lastConfig: LoggingConfig | undefined;
 let narrationActive = false;
+let markerActive = false;
+
+/**
+ * The tty progress renderer (src/cli/progress.ts) reports whether its live
+ * marker line is in flight. While it is, every logger write clears the marker
+ * line first (`\r` + clear-EOL) so a log line lands clean instead of being
+ * overwritten by the next spinner redraw — the marker redraws below it on
+ * the next tick.
+ */
+export function setProgressMarkerActive(active: boolean): void {
+  markerActive = active;
+}
 
 /**
  * Store the CLI flags and configure the logger from flags + env (no config).

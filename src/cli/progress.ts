@@ -1,12 +1,24 @@
+import {
+  intro,
+  log as clackLog,
+  outro,
+  S_BAR,
+  S_ERROR,
+  S_STEP_SUBMIT,
+  S_SUCCESS,
+  S_WARN,
+  unicode,
+} from "@clack/prompts";
 import type { ProgressListener } from "../core/runner/Runner";
 import type { RunResult } from "../core/schema/run.v1";
+import { setProgressMarkerActive } from "./logger";
 
 /* ----- Color helpers ----- */
 
 // The tty renderer uses string-concatenation coloring (${c.green}text${c.reset}),
 // so it needs raw ANSI strings rather than picocolors' function-based API.
 // picocolors is used for the logger; here we keep the palette pattern.
-const ansiColors: Palette = {
+export const ansiColors: Palette = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
@@ -18,7 +30,7 @@ const ansiColors: Palette = {
   clearEOL: "\x1b[K",
 };
 
-const noColors: Palette = {
+export const noColors: Palette = {
   reset: "",
   bold: "",
   dim: "",
@@ -30,7 +42,7 @@ const noColors: Palette = {
   clearEOL: "",
 };
 
-interface Palette {
+export interface Palette {
   reset: string;
   bold: string;
   dim: string;
@@ -42,16 +54,6 @@ interface Palette {
   clearEOL: string;
 }
 
-/**
- * True when the output supports ANSI escape codes (real TTY, not a pipe).
- * `CAIRN_FORCE_TTY=1` overrides for use in headless test harnesses where you
- * still want to see the progressive output.
- */
-export function isInteractive(): boolean {
-  if (process.env.CAIRN_FORCE_TTY === "1") return true;
-  return Boolean(process.stdout.isTTY);
-}
-
 export type ProgressMode = "tty" | "plain";
 
 /**
@@ -59,7 +61,9 @@ export type ProgressMode = "tty" | "plain";
  * is the cursor-redraw renderer (spinner, overwritten lines), `plain` is a
  * designed sequential renderer (timestamped milestone lines, no control
  * codes) that is safe to pipe, tee, and diff — not "tty minus colors".
- * `auto` (the default) picks by stdout, exactly like docker --progress.
+ * `auto` (the default) picks by the progress sink itself — stderr, exactly
+ * like docker --progress — because stdout stays reserved for the structured
+ * `--format` document and says nothing about where narration renders.
  */
 export function resolveProgressMode(flag?: string): ProgressMode {
   const requested = flag ?? process.env.CAIRN_PROGRESS;
@@ -69,7 +73,7 @@ export function resolveProgressMode(flag?: string): ProgressMode {
   }
   // CAIRN_FORCE_TTY predates --progress; honour it as an explicit tty vote.
   if (process.env.CAIRN_FORCE_TTY === "1") return "tty";
-  return process.stdout.isTTY ? "tty" : "plain";
+  return process.stderr.isTTY ? "tty" : "plain";
 }
 
 export function makeProgressListener(
@@ -160,14 +164,71 @@ export function makePlainListener(
 
 /**
  * Build a TTY-aware progress listener for `cairn run`.
- * Returns `null` when the environment doesn't want progress (non-TTY or JSON/YAML mode).
+ *
+ * Renders through @clack/prompts (docker-style flat marks — ✔/✖/⚠/◇ — plus
+ * guide bars around the run header and the closing outro box), with three
+ * deliberate deviations from clack's defaults:
+ *
+ * - Output is pinned to stderr everywhere (clack defaults to stdout) — stdout
+ *   stays reserved for the structured `--format` document.
+ * - The in-flight animation is a local ticker, NOT clack's `spinner()`:
+ *   clack's spinner grabs stdin (readline + raw mode) and intercepts keys
+ *   (Esc → `process.exit(0)`, Ctrl+C swallowed while raw), which would break
+ *   cairn's signal-time cleanup and the ability to interrupt a run.
+ * - clack hardcodes its marks through `node:util` styleText, which Bun does
+ *   not disable via NO_COLOR; every symbol is colored through the project
+ *   palette so `--no-color` still means zero ANSI (guide bars are dropped
+ *   with it, since clack draws those gray unconditionally).
  */
 export function makeInteractiveListener(
   options: { color?: boolean } = {},
 ): ProgressListener {
-  const c: Palette = options.color === false ? noColors : ansiColors;
+  const color = options.color !== false;
+  const c: Palette = color ? ansiColors : noColors;
+  const guide = color;
+  const output = process.stderr;
 
-  let stepCount = 0;
+  /** One clack log line: symbol + 2 spaces + text (docker-style flat marks). */
+  function emit(
+    symbol: string,
+    text: string,
+    opts: { spacing?: number } = {},
+  ): void {
+    // Without guide bars clack drops the symbol entirely; inline it so the
+    // mark still reads in --no-color mode.
+    const content = guide ? text : `${symbol}  ${text}`;
+    clackLog.message(content, {
+      symbol,
+      output,
+      withGuide: guide,
+      spacing: opts.spacing ?? 0,
+    });
+  }
+
+  /** A bare line with no symbol or guide prefix (tail details, hints). */
+  function flat(text: string): void {
+    clackLog.message(text, {
+      symbol: "",
+      output,
+      withGuide: false,
+      spacing: 0,
+    });
+  }
+
+  /** A blank tree-bar line (or a plain blank line without color). */
+  function spacer(): void {
+    if (guide) {
+      clackLog.message("", {
+        symbol: `${c.dim}${S_BAR}${c.reset}`,
+        output,
+        withGuide: true,
+        spacing: 0,
+      });
+    } else {
+      output.write("\n");
+    }
+  }
+
   // The when: gate of the step currently in flight, for the skip line.
   let currentWhen: string | undefined;
 
@@ -177,17 +238,20 @@ export function makeInteractiveListener(
   // animate only on a real TTY — under CAIRN_FORCE_TTY into a pipe every
   // redraw would land as a new log line, so those get the static marker.
   const animate = Boolean(process.stderr.isTTY);
-  let ticker: ReturnType<typeof setInterval> | undefined;
+  let ticker: NodeJS.Timeout | undefined;
   let tickerRender: ((frame: string, elapsed: string) => string) | undefined;
   let tickerStart = 0;
   let frameIdx = 0;
 
   function startTicker(render: (frame: string, elapsed: string) => string) {
     stopTicker();
+    setProgressMarkerActive(true);
     tickerRender = render;
     tickerStart = Date.now();
     frameIdx = 0;
-    out(render(SPINNER_FRAMES[0]!, ""));
+    // The marker owns one line slot: the interval redraws it in place and
+    // stopTicker retires it, so the next emit starts on a fresh line.
+    out(`\r${c.clearEOL}${render(SPINNER_FRAMES[0]!, "")}`);
     if (!animate) return;
     ticker = setInterval(() => {
       if (!tickerRender) return;
@@ -206,61 +270,60 @@ export function makeInteractiveListener(
     if (ticker) {
       clearInterval(ticker);
       ticker = undefined;
+      out(`\r${c.clearEOL}`);
     }
+    setProgressMarkerActive(false);
     tickerRender = undefined;
   }
 
+  /** In-flight marker line: spinner frame + label + live elapsed. */
+  const tick = (label: string) => (frame: string, elapsed: string) =>
+    `${c.dim}${frame}${c.reset}  ${label}${elapsed ? ` ${elapsed}` : ""}…`;
+
   return {
     onRunStart(spec, runId, runDir, backendName, environment) {
-      out(
-        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${environment}, backend=${backendName})${c.reset}\n`,
+      intro(
+        `${c.bold}Running:${c.reset} ${c.cyan}${spec.name}${c.reset}  ${c.dim}(env=${environment}, backend=${backendName})${c.reset}`,
+        { output, withGuide: guide },
       );
-      out(`${c.dim}Run id:${c.reset} ${runId}\n`);
-      out(`${c.dim}Run dir:${c.reset} ${runDir}\n\n`);
+      emit(`${c.dim}${S_BAR}${c.reset}`, `${c.dim}Run id:${c.reset} ${runId}`);
+      emit(
+        `${c.dim}${S_BAR}${c.reset}`,
+        `${c.dim}Run dir:${c.reset} ${runDir}`,
+      );
+      spacer();
     },
 
     onPreconditionStart(name, timeoutMs) {
       // A quiesce-style precondition can legitimately block for many minutes.
       startTicker(
         (frame, elapsed) =>
-          `  ${c.dim}${frame} precondition ${name} ${
+          `${c.dim}${frame}${c.reset}  precondition ${name} ${
             elapsed ? `${elapsed} / ` : ""
-          }budget ${formatMs(timeoutMs)}…${c.reset}`,
+          }budget ${formatMs(timeoutMs)}…`,
       );
     },
 
     onPreconditionFinish(name, exitCode, durationMs, details) {
       stopTicker();
-      const mark =
-        exitCode === 0 ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
-      out(
-        `\r${c.clearEOL}  ${mark} precondition ${name} ${formatPreconditionStatus(
-          exitCode,
-          details,
-        )} ${c.dim}${formatMs(durationMs)}${c.reset}\n`,
-      );
+      const text = `precondition ${name} ${formatPreconditionStatus(
+        exitCode,
+        details,
+      )} ${c.dim}${formatMs(durationMs)}${c.reset}`;
+      if (exitCode === 0 && !details?.timedOut) {
+        emit(`${c.green}${S_SUCCESS}${c.reset}`, text);
+      } else {
+        emit(`${c.red}${S_ERROR}${c.reset}`, text);
+      }
     },
 
     onStepStart(_idx, step, stepId) {
-      stepCount++;
       currentWhen = "when" in step ? step.when : undefined;
-      startTicker(
-        (frame, elapsed) =>
-          `  ${c.dim}${frame} ${stepId}${
-            elapsed ? ` ${elapsed}` : ""
-          }…${c.reset}`,
-      );
+      startTicker(tick(stepId));
     },
 
     onStepFinish(_idx, stepId, status, durationMs, error) {
       stopTicker();
-      // Clear and re-print the same line with the result.
-      const mark =
-        status === "passed"
-          ? `${c.green}✓${c.reset}`
-          : status === "failed"
-            ? `${c.red}✗${c.reset}`
-            : `${c.yellow}·${c.reset}`;
       const dur = `${c.dim}${formatMs(durationMs)}${c.reset}`;
       // Say WHICH gate skipped the step: "(skipped by when:)" read as a
       // rendering glitch, not as the conditional doing its job.
@@ -270,54 +333,60 @@ export function makeInteractiveListener(
               currentWhen ? `"${currentWhen}"` : "condition"
             } not met)${c.reset}`
           : "";
-      out(`\r${c.clearEOL}  ${mark} ${stepId} ${dur}${tail}`);
-      if (status === "failed" && error) {
-        for (const line of summarizeStepError(error)) {
-          out(`\n    ${c.red}${line}${c.reset}`);
-        }
+      if (status === "passed") {
+        emit(`${c.green}${S_SUCCESS}${c.reset}`, `${stepId} ${dur}`);
+      } else if (status === "failed") {
+        const lines = error ? summarizeStepError(error) : [];
+        emit(
+          `${c.red}${S_ERROR}${c.reset}`,
+          [
+            `${stepId} ${dur}`,
+            ...lines.map((line) => `${c.red}${line}${c.reset}`),
+          ].join("\n"),
+        );
+      } else {
+        emit(`${c.yellow}${S_WARN}${c.reset}`, `${stepId} ${dur}${tail}`);
       }
-      out("\n");
     },
 
     onOutcomesStart(total) {
       stopTicker();
-      if (stepCount > 0) out("\n");
-      out(`${c.bold}Outcomes${c.reset} ${c.dim}(${total})${c.reset}\n`);
+      emit(`${c.green}${S_STEP_SUBMIT}${c.reset}`, `Outcomes (${total})`, {
+        spacing: 1,
+      });
     },
 
     onOutcomeStart(outcome) {
       // Answer-change verifiers legitimately poll for minutes; show whose
       // completion window is burning.
-      startTicker(
-        (frame, elapsed) =>
-          `  ${c.dim}${frame} ${outcome.id} verifying${
-            elapsed ? ` ${elapsed}` : ""
-          }…${c.reset}`,
-      );
+      startTicker(tick(`${outcome.id} verifying`));
     },
 
     onOutcomeFinish(outcome, evaluation) {
       stopTicker();
-      out(`\r${c.clearEOL}`);
       if (evaluation.skipped) {
-        out(
-          `  ${c.yellow}·${c.reset} ${outcome.id} ${c.dim}(blocked)${c.reset}\n`,
-        );
-        out(
-          `    ${c.dim}${truncate(evaluation.actual.split("\n")[0] ?? "", 200)}${c.reset}\n`,
+        emit(
+          `${c.yellow}${S_WARN}${c.reset}`,
+          [
+            `${outcome.id} ${c.dim}(blocked)${c.reset}`,
+            `${c.dim}${truncate(evaluation.actual.split("\n")[0] ?? "", 200)}${c.reset}`,
+          ].join("\n"),
         );
         return;
       }
-      const mark = evaluation.passed
-        ? `${c.green}✓${c.reset}`
-        : `${c.red}✗${c.reset}`;
-      out(`  ${mark} ${outcome.id}\n`);
-      if (!evaluation.passed) {
-        out(
-          `    ${c.dim}expected:${c.reset} ${truncate(evaluation.expected, 200)}\n`,
-        );
-        out(
-          `    ${c.dim}actual:${c.reset}   ${truncate(evaluation.actual.split("\n")[0] ?? "", 200)}\n`,
+      if (evaluation.passed) {
+        emit(`${c.green}${S_SUCCESS}${c.reset}`, outcome.id);
+      } else {
+        emit(
+          `${c.red}${S_ERROR}${c.reset}`,
+          [
+            outcome.id,
+            `${c.dim}expected:${c.reset} ${truncate(evaluation.expected, 200)}`,
+            `${c.dim}actual:${c.reset}   ${truncate(
+              evaluation.actual.split("\n")[0] ?? "",
+              200,
+            )}`,
+          ].join("\n"),
         );
       }
     },
@@ -332,35 +401,75 @@ export function makeInteractiveListener(
 
       const banner =
         result.status === "passed"
-          ? `${c.bold}${c.green}✓ PASSED${c.reset}`
+          ? `${c.bold}${c.green}PASSED${c.reset}`
           : result.status === "failed"
-            ? `${c.bold}${c.red}✗ FAILED${c.reset}`
-            : `${c.bold}${c.yellow}· ERRORED${c.reset}`;
+            ? `${c.bold}${c.red}FAILED${c.reset}`
+            : `${c.bold}${c.yellow}ERRORED${c.reset}`;
 
-      out(
-        `\n${banner}  ${passed}/${total} outcomes  ${c.dim}${dur}${c.reset}\n`,
+      outro(
+        `${banner}  ${passed}/${total} outcomes  ${c.dim}${dur}${c.reset}`,
+        {
+          output,
+          withGuide: guide,
+        },
       );
 
       if (result.status !== "passed") {
         const failed = result.outcomes.filter((o) => o.status === "failed");
         if (failed.length > 0) {
-          out(`\n${c.dim}Failed outcomes:${c.reset}\n`);
+          flat(`${c.dim}Failed outcomes:${c.reset}`);
           for (const o of failed) {
-            out(
+            flat(
               `  ${c.red}-${c.reset} ${o.id}${
                 o.evidence ? `  ${c.dim}→ ${o.evidence}${c.reset}` : ""
-              }\n`,
+              }`,
             );
           }
         }
       }
 
-      out(
-        `\n${c.dim}Agent context:${c.reset} ${result.runDir}/${result.artifacts.agentContext}\n`,
+      flat(
+        `${c.dim}Agent context:${c.reset} ${result.runDir}/${result.artifacts.agentContext}`,
       );
-      printRerunHint(result, c, out);
+      printRerunHint(result, c, flat);
     },
   };
+}
+
+/**
+ * Completion mark for the batch narration (run.ts): the same glyph family as
+ * the tty renderer's clack marks, so `cairn run` speaks one visual language
+ * in both the single and batch paths. `color: false` yields the bare glyph.
+ */
+export function completionMark(
+  status: "passed" | "failed" | "errored",
+  color: boolean,
+): string {
+  const glyph =
+    status === "passed" ? S_SUCCESS : status === "failed" ? S_ERROR : S_WARN;
+  if (!color) return glyph;
+  const code =
+    status === "passed"
+      ? ansiColors.green
+      : status === "failed"
+        ? ansiColors.red
+        : ansiColors.yellow;
+  return `${code}${glyph}${ansiColors.reset}`;
+}
+
+/**
+ * One clack log line to stderr for non-run commands (login, heal): mark +
+ * 2 spaces + text, with no guide bars (those depend on clack's hardcoded
+ * gray styleText, which would leak ANSI under `--no-color`). Callers build
+ * the symbol from the exported palettes so colors stay fully controllable.
+ */
+export function clackLine(symbol: string, text: string, spacing = 0): void {
+  clackLog.message(`${symbol}  ${text}`, {
+    symbol,
+    output: process.stderr,
+    withGuide: false,
+    spacing,
+  });
 }
 
 function formatPreconditionStatus(
@@ -379,11 +488,13 @@ function printRerunHint(
   write: (s: string) => void,
 ): void {
   write(
-    `${c.dim}Reproduce:${c.reset}    cairn run ${result.spec.path} --env ${result.environment}\n`,
+    `${c.dim}Reproduce:${c.reset}    cairn run ${result.spec.path} --env ${result.environment}`,
   );
 }
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES = unicode
+  ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+  : ["|", "/", "-", "\\"];
 
 // Progress goes to stderr — stdout is reserved for structured results.
 function out(s: string): void {

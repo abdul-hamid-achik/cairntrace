@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  clackLine,
+  completionMark,
   makeInteractiveListener,
   makePlainListener,
   resolveProgressMode,
@@ -106,6 +108,10 @@ describe("makePlainListener", () => {
       );
       expect(text).not.toContain("exit undefined");
     }
+    // The interactive renderer honors `color: false`: no ANSI may leak even
+    // though clack hardcodes its own marks — symbols go through the palette.
+    // eslint-disable-next-line no-control-regex
+    expect(ttyLines.join("")).not.toMatch(/\x1b\[/);
   });
 });
 
@@ -147,6 +153,38 @@ describe("onRunStart env header", () => {
   });
 });
 
+describe("completionMark", () => {
+  it("renders the clack glyph family, bare without color", () => {
+    // Glyphs follow clack's unicode detection (◆/■/▲ or their ASCII
+    // fallbacks on a TERM=linux console) — assert the color contract, not
+    // the exact glyph.
+    const esc = "\u001b[";
+    expect(completionMark("passed", false)).not.toContain(esc);
+    expect(completionMark("failed", false)).not.toContain(esc);
+    expect(completionMark("errored", false)).not.toContain(esc);
+    expect(completionMark("passed", true)).toContain(esc);
+    expect(completionMark("failed", true)).toContain(esc);
+    expect(completionMark("errored", true)).toContain(esc);
+  });
+});
+
+describe("clackLine", () => {
+  it("renders symbol + 2 spaces + text to stderr", () => {
+    const written: string[] = [];
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string) => {
+      written.push(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      clackLine("◆", "Saved checkpoint x → /tmp/x.json");
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    expect(written.join("")).toContain("◆  Saved checkpoint x → /tmp/x.json");
+  });
+});
+
 describe("resolveProgressMode", () => {
   const saved = {
     force: process.env.CAIRN_FORCE_TTY,
@@ -169,11 +207,13 @@ describe("resolveProgressMode", () => {
     expect(() => resolveProgressMode("fancy")).toThrow(/auto\|tty\|plain/);
   });
 
-  it("auto follows stdout TTY-ness, with CAIRN_FORCE_TTY as a tty vote", () => {
+  it("auto follows stderr TTY-ness, with CAIRN_FORCE_TTY as a tty vote", () => {
     delete process.env.CAIRN_FORCE_TTY;
     delete process.env.CAIRN_PROGRESS;
+    // Progress renders to stderr (stdout stays reserved for structured
+    // output), so auto follows the stderr sink — like docker --progress.
     expect(resolveProgressMode(undefined)).toBe(
-      process.stdout.isTTY ? "tty" : "plain",
+      process.stderr.isTTY ? "tty" : "plain",
     );
     process.env.CAIRN_FORCE_TTY = "1";
     expect(resolveProgressMode(undefined)).toBe("tty");

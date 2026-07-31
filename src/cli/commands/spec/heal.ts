@@ -9,7 +9,8 @@ import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
 import { trackBackend } from "../../cleanup";
 import { emit, resolveFormat } from "../../format";
-import { isInteractive } from "../../progress";
+import { log } from "../../logger";
+import { makeProgressListener, resolveProgressMode } from "../../progress";
 
 export interface HealCommandOptions {
   apply?: boolean;
@@ -39,14 +40,24 @@ export async function healCommand(
   });
   const untrack = trackBackend(backend);
 
+  // Heal re-runs the spec; narrate it with the same renderer `cairn run`
+  // uses (auto/CAIRN_PROGRESS, stderr), instead of healing in silence.
+  const progressMode =
+    format === "md" ? resolveProgressMode(undefined) : undefined;
+  const listener = progressMode
+    ? makeProgressListener(progressMode, {
+        color: log.color && process.env.TERM !== "dumb",
+      })
+    : undefined;
+
   let exitCode = 2;
   try {
-    if (format === "md" && isInteractive()) {
-      process.stdout.write(`Healing ${specPath}…\n\n`);
-    }
-
     if (opts.verify) {
-      const vr = await healVerify({ specPath, backend });
+      const vr = await healVerify({
+        specPath,
+        backend,
+        ...(listener ? { listener } : {}),
+      });
       exitCode = vr.verified ? 0 : 5;
       if (format === "json" || format === "yaml") {
         process.stdout.write(emit(format, vr, () => ""));
@@ -59,6 +70,7 @@ export async function healCommand(
         specPath,
         backend,
         ...(opts.apply ? { apply: opts.apply } : {}),
+        ...(listener ? { listener } : {}),
       });
 
       exitCode = output.exitCode;

@@ -3,7 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { isSeq, parseDocument } from "yaml";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { parseSpec } from "../parser/parseSpec";
-import { runSpec } from "../runner/Runner";
+import { runSpec, type ProgressListener } from "../runner/Runner";
 import type { PatchOp } from "../schema/heal.v1";
 import type { RunResult } from "../schema/run.v1";
 import type { ExitCode } from "../schema/shared";
@@ -20,6 +20,11 @@ export interface HealOptions {
   artifactRoot?: string;
   /** Write the patched spec back to disk. */
   apply?: boolean;
+  /**
+   * Progress narration for the underlying run(s) — the CLI wires the same
+   * listener `cairn run` uses, so heal is never a silent re-run.
+   */
+  listener?: ProgressListener;
 }
 
 export interface HealOutput {
@@ -69,6 +74,7 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     specPath: opts.specPath,
     backend: opts.backend,
     ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
+    ...(opts.listener ? { listener: opts.listener } : {}),
   });
 
   if (result.status === "passed") {
@@ -584,6 +590,7 @@ export async function healVerify(opts: HealOptions): Promise<HealVerifyResult> {
       specPath: opts.specPath,
       backend: opts.backend,
       ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
+      ...(opts.listener ? { listener: opts.listener } : {}),
     });
   } catch (e) {
     // Rerun errored — rollback.
