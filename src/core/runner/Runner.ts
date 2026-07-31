@@ -6,7 +6,11 @@ import type {
   BrowserBackend,
   ResolvedElement,
 } from "../../adapters/browserBackend";
-import { ArtifactWriter } from "../artifacts/ArtifactWriter";
+import { createProcessTreeWatchdog } from "../../adapters/agent-browser/processTree";
+import {
+  ArtifactWriter,
+  type ArtifactRedactor,
+} from "../artifacts/ArtifactWriter";
 import {
   addEnospcHint,
   pruneRuns,
@@ -39,6 +43,7 @@ import {
   type Step,
   type TransformStep,
 } from "../schema/spec.v1";
+import type { RetentionConfig } from "../schema/config.v1";
 import type {
   OutcomeResult,
   RunArtifacts,
@@ -77,6 +82,11 @@ import {
   type ProcessMetricsSummary,
   renderProcessMarkdown,
 } from "../monitor/processSampler";
+import type {
+  ServicesArtifactBundle,
+  ServicesRunStatus,
+  ServicesRunWindow,
+} from "./services";
 
 /**
  * Optional progress callbacks the runner invokes during execution.
@@ -102,6 +112,7 @@ export interface ProgressListener {
     name: string,
     exitCode: number | undefined,
     durationMs: number,
+    details?: { timedOut?: boolean; signal?: string },
   ): void;
   onStepStart?(idx: number, step: Step, stepId: string): void;
   onStepFinish?(
@@ -154,6 +165,14 @@ export interface RunOptions {
     timestamp: string;
     data?: Record<string, unknown>;
   }>;
+  /**
+   * Best-effort service-log capture supplied by the CLI-owned services
+   * lifecycle. The runner writes the returned bounded bundle inside runDir.
+   */
+  captureServicesArtifacts?: (
+    status: ServicesRunStatus,
+    runWindow: ServicesRunWindow,
+  ) => Promise<ServicesArtifactBundle>;
   /**
    * Opt-in process monitoring. `true` or a config object enables the
    * `--monitor` sampler: the browser process tree's CPU/RSS is sampled during
@@ -285,6 +304,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   const startedAt = now.toISOString();
+  const coldStart = opts.coldStart ?? runEnv["CI"] === "true";
   await writer.appendEvent({
     ts: startedAt,
     type: "run.started",
@@ -329,32 +349,82 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         timeoutMs: command.timeoutMs ?? 120_000,
       });
       opts.listener?.onPreconditionStart?.(label, command.timeoutMs ?? 120_000);
-      const result = await execa(command.run, {
+      const timeoutMs = command.timeoutMs ?? 120_000;
+      const subprocess = execa(command.run, {
         shell: true,
         cwd,
         env: preEnv,
         reject: false,
-        timeout: command.timeoutMs ?? 120_000,
+        // The process-tree watchdog owns the exact deadline. Execa is a
+        // slightly-later fallback if Cairn's event loop cannot run it.
+        timeout: timeoutMs + 2_000,
         all: true,
       });
+      const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs);
+      const result = await (async () => {
+        try {
+          return await subprocess;
+        } finally {
+          watchdog.cancel();
+        }
+      })();
+      const timedOut = watchdog.timedOut || result.timedOut;
       const output = String(result.all ?? "");
+      const durationMs = Date.now() - startedAtMs;
       await writer.appendEvent({
         ts: new Date().toISOString(),
         type: "precondition.run",
         name: label,
         exitCode: result.exitCode,
-        durationMs: Date.now() - startedAtMs,
+        durationMs,
+        timedOut,
+        ...(result.signal ? { signal: result.signal } : {}),
         output: output.slice(0, 4000),
       });
       opts.listener?.onPreconditionFinish?.(
         label,
         result.exitCode,
-        Date.now() - startedAtMs,
+        durationMs,
+        {
+          timedOut,
+          ...(result.signal ? { signal: result.signal } : {}),
+        },
       );
       if (result.exitCode !== 0) {
-        throw new Error(
-          `Precondition "${label}" failed (exit ${result.exitCode}): ${output.slice(0, 500)}`,
-        );
+        const message = timedOut
+          ? `Precondition "${label}" timed out after ${durationMs}ms${
+              result.signal ? ` (${result.signal})` : ""
+            }`
+          : `Precondition "${label}" failed (exit ${result.exitCode}): ${output.slice(0, 500)}`;
+        const failureResult = await finalizePreconditionFailure({
+          writer,
+          redactor,
+          spec,
+          specPath,
+          runId,
+          runDir,
+          environment: env,
+          backend: backendName,
+          coldStart,
+          labels: opts.labels,
+          startedAt,
+          name: label,
+          durationMs,
+          timedOut,
+          signal: result.signal,
+          message,
+          listener: opts.listener,
+          ...(opts.captureServicesArtifacts
+            ? { captureServicesArtifacts: opts.captureServicesArtifacts }
+            : {}),
+        });
+        await applyRunRetention({
+          retention: runtime.config?.retention,
+          artifactRoot,
+          writer,
+          opts,
+        });
+        return failureResult;
       }
     }
   }
@@ -426,7 +496,6 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Cold-start gate (plan §10.6). Default `false` locally, `true` in CI.
   // Resolves before checkpoint resume so the spec's own setup populates state
   // *after* the wipe.
-  const coldStart = opts.coldStart ?? runEnv["CI"] === "true";
   if (coldStart) {
     await safe(() => opts.backend.clearBrowserState());
   }
@@ -675,6 +744,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           specDir: dirname(specPath),
           artifacts: namedArtifacts,
           vars: resolvedVars,
+          childEnv: opts.childEnv ?? runEnv,
+          ...(opts.selectedTvaultKeys !== undefined
+            ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+            : {}),
         });
         if (!transformed.ok) {
           stepStatus = "failed";
@@ -998,31 +1071,19 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ? []
     : await safe(() => opts.backend.getNetworkRequests()).then((x) => x ?? []);
   const consoleErrors = consoleEntries.filter((e) => e.type === "error");
-  await writer.writeText(
-    "console/console.ndjson",
-    consoleEntries.map((entry) => JSON.stringify(entry)).join("\n") +
-      (consoleEntries.length ? "\n" : ""),
-    "console",
-  );
-  await writer.writeText(
-    "console/errors.ndjson",
-    consoleErrors.map((entry) => JSON.stringify(entry)).join("\n") +
-      (consoleErrors.length ? "\n" : ""),
-    "console",
-  );
+  await writer.writeNdjson("console/console.ndjson", consoleEntries, "console");
+  await writer.writeNdjson("console/errors.ndjson", consoleErrors, "console");
   const failedNetwork = networkEntries.filter(
     (e) => e.status !== undefined && e.status >= 400,
   );
-  await writer.writeText(
+  await writer.writeNdjson(
     "network/requests.ndjson",
-    networkEntries.map((entry) => JSON.stringify(entry)).join("\n") +
-      (networkEntries.length ? "\n" : ""),
+    networkEntries,
     "network",
   );
-  await writer.writeText(
+  await writer.writeNdjson(
     "network/failed_requests.ndjson",
-    failedNetwork.map((entry) => JSON.stringify(entry)).join("\n") +
-      (failedNetwork.length ? "\n" : ""),
+    failedNetwork,
     "network",
   );
 
@@ -1060,8 +1121,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     artifacts: namedArtifacts,
     responses,
     evals: evalValues,
+    networkEntries,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     vars: resolvedVars,
+    childEnv: opts.childEnv ?? runEnv,
+    ...(opts.selectedTvaultKeys !== undefined
+      ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+      : {}),
     ...(processMetricsSummary ? { processMetrics: processMetricsSummary } : {}),
   };
   opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
@@ -1282,6 +1348,16 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
   }
 
+  // Service processes are still alive here, so capture their bounded tails
+  // before the CLI tears the shared lifecycle down. Diagnostic collection is
+  // deliberately outside durationMs and cannot change the behavioral verdict.
+  const servicesArtifact = await writeServicesArtifacts({
+    writer,
+    capture: opts.captureServicesArtifacts,
+    status,
+    runWindow: { startedAt, endedAt },
+  });
+
   const artifacts: RunArtifacts = {
     report: "report.html",
     reportJson: "report.json",
@@ -1296,6 +1372,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
     ...(Object.keys(evals).length > 0 ? { evals } : {}),
     ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    ...(servicesArtifact ? { services: servicesArtifact } : {}),
     ...(tracePath ? { trace: tracePath } : {}),
     ...(processMetricsArtifact
       ? { processMetrics: processMetricsArtifact }
@@ -1385,65 +1462,260 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // — a prune failure must never fail the run that just completed. Default
   // keepRuns is 3 (see DEFAULT_KEEP_RUNS) when no retention block is set;
   // retention.enabled: false disables pruning entirely.
-  const retention = runtime.config?.retention;
+  await applyRunRetention({
+    retention: runtime.config?.retention,
+    artifactRoot,
+    writer,
+    opts,
+  });
+
+  return publicResult;
+}
+
+const SERVICES_MANIFEST_PATH = "services/manifest.json";
+
+/**
+ * Attach a services lifecycle bundle to the current run without allowing
+ * observability failures to rewrite the test result. The services layer owns
+ * collection and bounds; ArtifactWriter owns confinement, redaction and file
+ * permissions.
+ */
+async function writeServicesArtifacts(input: {
+  writer: ArtifactWriter;
+  capture: RunOptions["captureServicesArtifacts"];
+  status: ServicesRunStatus;
+  runWindow: ServicesRunWindow;
+}): Promise<string | undefined> {
+  if (!input.capture) return undefined;
+
+  try {
+    const bundle = await input.capture(input.status, input.runWindow);
+    if (!bundle.captured) return undefined;
+
+    for (const file of bundle.files) {
+      await input.writer.writeText(
+        file.relativePath,
+        file.content,
+        `services-${file.source}`,
+      );
+    }
+
+    await input.writer.writeJson(
+      SERVICES_MANIFEST_PATH,
+      {
+        $schema: "urn:cairntrace.dev:service-artifacts:v1",
+        version: bundle.version,
+        status: bundle.status,
+        capturedAt: bundle.capturedAt,
+        runWindow: bundle.runWindow,
+        policy: bundle.policy,
+        ownership: bundle.ownership,
+        files: bundle.files.map((file) => ({
+          source: file.source,
+          path: file.relativePath,
+          label: file.label,
+          bytes: file.bytes,
+          truncated: file.truncated,
+          ...(file.metadata ? { metadata: file.metadata } : {}),
+        })),
+        errors: bundle.errors,
+        totalBytes: bundle.totalBytes,
+        truncated: bundle.truncated,
+      },
+      "services-manifest",
+    );
+    await input.writer.appendEvent({
+      ts: bundle.capturedAt,
+      type: "artifact.services",
+      action: "capture",
+      path: SERVICES_MANIFEST_PATH,
+      sources: bundle.files.length,
+      errors: bundle.errors.length,
+      totalBytes: bundle.totalBytes,
+      truncated: bundle.truncated,
+    });
+    return SERVICES_MANIFEST_PATH;
+  } catch (error) {
+    // Capture is diagnostic-only. Preserve the browser/outcome verdict and
+    // leave a redacted event explaining why no service manifest was linked.
+    await safe(() =>
+      input.writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.services",
+        action: "error",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return undefined;
+  }
+}
+
+async function applyRunRetention(input: {
+  retention: RetentionConfig | undefined;
+  artifactRoot: string;
+  writer: ArtifactWriter;
+  opts: RunOptions;
+}): Promise<void> {
+  const { retention, artifactRoot, writer, opts } = input;
   const keepRuns =
     retention?.enabled === false
       ? undefined
       : (retention?.keepRuns ?? DEFAULT_KEEP_RUNS);
-  if (keepRuns !== undefined) {
-    const requiresArchive = retention?.archiveToStash === true;
-    const requiresPublication = retention?.publish?.enabled === true;
-    if (
-      (requiresArchive && !opts.onArchiveRun) ||
-      (requiresPublication && !opts.onPublishRun)
-    ) {
-      // Fail closed: deleting without the configured archive callback would
-      // violate the user's retention policy. Some callers (for example
-      // library/MCP integrations) do not inject the CLI's file.cheap adapter.
-      await writer.appendEvent({
-        ts: new Date().toISOString(),
-        type: "artifact.retention",
-        action: "warning",
-        warning: requiresPublication
-          ? "retention.publish.enabled is true but no publication adapter was provided; pruning was skipped"
-          : "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
-      });
-      return publicResult;
-    }
+  if (keepRuns === undefined) return;
 
-    // Archive pruned runs to fcheap before deletion when configured. The
-    // archive callback is injected via opts so the core runner doesn't depend
-    // on the stash (fcheap) CLI module.
-    const onArchive =
-      (requiresArchive || requiresPublication) &&
-      (opts.onArchiveRun || opts.onPublishRun)
-        ? async (dir: string, rid: string) => {
-            const tags = [
-              ...(retention?.archiveTags ?? []),
-              "retention-archived",
-            ];
-            if (requiresArchive) await opts.onArchiveRun!(dir, rid, tags);
-            if (requiresPublication) {
-              await opts.onPublishRun!(
-                dir,
-                rid,
-                tags,
-                retention?.publish?.retentionDays ?? 7,
-              );
-            }
-          }
-        : undefined;
-    const keepFailedRuns =
-      retention?.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS;
-    await safe(() =>
-      pruneRuns(artifactRoot, {
-        keepRuns,
-        keepFailedRuns,
-        ...(onArchive ? { onArchive } : {}),
-      }),
-    );
+  const requiresArchive = retention?.archiveToStash === true;
+  const requiresPublication = retention?.publish?.enabled === true;
+  if (
+    (requiresArchive && !opts.onArchiveRun) ||
+    (requiresPublication && !opts.onPublishRun)
+  ) {
+    // Fail closed: deleting without the configured archive callback would
+    // violate the user's retention policy. Some callers (for example
+    // library/MCP integrations) do not inject the CLI's file.cheap adapter.
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.retention",
+      action: "warning",
+      warning: requiresPublication
+        ? "retention.publish.enabled is true but no publication adapter was provided; pruning was skipped"
+        : "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
+    });
+    return;
   }
 
+  // Archive pruned runs to fcheap before deletion when configured. The
+  // archive callback is injected via opts so the core runner doesn't depend
+  // on the stash (fcheap) CLI module.
+  const onArchive =
+    (requiresArchive || requiresPublication) &&
+    (opts.onArchiveRun || opts.onPublishRun)
+      ? async (dir: string, rid: string) => {
+          const tags = [
+            ...(retention?.archiveTags ?? []),
+            "retention-archived",
+          ];
+          if (requiresArchive) await opts.onArchiveRun!(dir, rid, tags);
+          if (requiresPublication) {
+            await opts.onPublishRun!(
+              dir,
+              rid,
+              tags,
+              retention?.publish?.retentionDays ?? 7,
+            );
+          }
+        }
+      : undefined;
+  const keepFailedRuns = retention?.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS;
+  await safe(() =>
+    pruneRuns(artifactRoot, {
+      keepRuns,
+      keepFailedRuns,
+      ...(onArchive ? { onArchive } : {}),
+    }),
+  );
+}
+
+interface PreconditionFailureInput {
+  writer: ArtifactWriter;
+  redactor: ArtifactRedactor;
+  spec: Spec;
+  specPath: string;
+  runId: string;
+  runDir: string;
+  environment: string;
+  backend: string;
+  coldStart: boolean;
+  labels?: Record<string, string>;
+  startedAt: string;
+  name: string;
+  durationMs: number;
+  timedOut: boolean;
+  signal?: string;
+  message: string;
+  listener?: ProgressListener;
+  captureServicesArtifacts?: RunOptions["captureServicesArtifacts"];
+}
+
+/**
+ * Finalize a failure that occurs after the real run context exists but before
+ * browser steps begin. This keeps the run discoverable by `cairn stats` and
+ * prevents the CLI from replacing it with an unwritten parse/local/0ms shell.
+ */
+async function finalizePreconditionFailure(
+  input: PreconditionFailureInput,
+): Promise<RunResult> {
+  const endedAt = new Date().toISOString();
+  const durationMs = Math.max(
+    input.durationMs,
+    Date.parse(endedAt) - Date.parse(input.startedAt),
+  );
+  const labels =
+    input.labels && Object.keys(input.labels).length > 0
+      ? input.labels
+      : undefined;
+  const servicesArtifact = await writeServicesArtifacts({
+    writer: input.writer,
+    capture: input.captureServicesArtifacts,
+    status: "errored",
+    runWindow: { startedAt: input.startedAt, endedAt },
+  });
+  const artifacts: RunArtifacts = {
+    report: "report.html",
+    reportJson: "report.json",
+    agentContext: "agent_context.md",
+    events: "events.ndjson",
+    ...(servicesArtifact ? { services: servicesArtifact } : {}),
+    manifest: "artifact-manifest.json",
+  };
+  const result: RunResult = {
+    $schema: "urn:cairntrace.dev:run:v1",
+    version: "1",
+    runId: input.runId,
+    runDir: input.runDir,
+    spec: {
+      name: input.spec.name,
+      path: input.specPath,
+      contractHash: input.spec.contractHash ?? computeContractHash(input.spec),
+    },
+    environment: input.environment,
+    backend: input.backend as RunResult["backend"],
+    coldStart: input.coldStart,
+    ...(labels ? { labels } : {}),
+    status: "errored",
+    summary: `errored in precondition '${input.name}': ${input.message}`,
+    failure: {
+      phase: "precondition",
+      name: input.name,
+      message: input.message,
+      durationMs: input.durationMs,
+      timedOut: input.timedOut,
+      ...(input.signal ? { signal: input.signal } : {}),
+    },
+    startedAt: input.startedAt,
+    endedAt,
+    durationMs,
+    outcomes: [],
+    steps: [],
+    artifacts,
+    exitCode: 2,
+  };
+
+  const publicResult = input.redactor.value(result);
+  await input.writer.appendEvent({
+    ts: endedAt,
+    type: "run.errored",
+    runId: input.runId,
+    phase: "precondition",
+    name: input.name,
+    durationMs,
+    timedOut: input.timedOut,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  await input.writer.writeRun(publicResult);
+  await input.writer.writeOutcomesIndex(publicResult);
+  await input.writer.writeAgentContext(input.spec, publicResult);
+  await input.writer.writeManifest(artifacts.manifest);
+  input.listener?.onRunEnd?.(publicResult);
   return publicResult;
 }
 
@@ -1784,6 +2056,8 @@ async function runTransformStep(opts: {
   specDir: string;
   artifacts: Record<string, ArtifactRef>;
   vars?: Record<string, string | number | boolean>;
+  childEnv?: Record<string, string | undefined>;
+  selectedTvaultKeys?: Iterable<string>;
 }): Promise<
   | {
       ok: true;
@@ -1810,6 +2084,10 @@ async function runTransformStep(opts: {
     file,
     cwd: opts.specDir,
     entryNames: ["transform"],
+    ...(opts.childEnv !== undefined ? { env: opts.childEnv } : {}),
+    ...(opts.selectedTvaultKeys !== undefined
+      ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+      : {}),
     ctx: {
       input,
       inputPath: input,
@@ -1896,10 +2174,27 @@ async function runEvalStep(opts: {
 
   let result;
   try {
+    const deadline = target.timeoutMs
+      ? Date.now() + target.timeoutMs
+      : undefined;
     result = await opts.backend.evaluate(
       wrapped,
       target.timeoutMs ? { timeoutMs: target.timeoutMs } : {},
     );
+    if (
+      !result.ok &&
+      target.retryOnNavigation &&
+      isNavigationContextLoss(result.stderr)
+    ) {
+      await opts.backend.waitForTimeout(350);
+      const remainingMs = deadline
+        ? Math.max(1, deadline - Date.now())
+        : undefined;
+      result = await opts.backend.evaluate(
+        wrapped,
+        remainingMs ? { timeoutMs: remainingMs } : {},
+      );
+    }
   } catch (e) {
     return {
       ok: false,
@@ -1931,6 +2226,12 @@ async function runEvalStep(opts: {
   }
 
   return { ok: true, value };
+}
+
+function isNavigationContextLoss(stderr: string): boolean {
+  return /Inspected target navigated or closed|Execution context was destroyed|Cannot find context with specified id/i.test(
+    stderr,
+  );
 }
 
 /**

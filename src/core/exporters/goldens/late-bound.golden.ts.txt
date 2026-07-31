@@ -9,10 +9,277 @@
 
 import { expect, test } from "@playwright/test";
 
+// Cairn-compatible network evidence for exported node verifiers.
+interface CairnEvidenceRequest {
+  url(): string;
+  method(): string;
+  postData(): string | null;
+  headers(): Record<string, string>;
+}
+interface CairnEvidenceResponse {
+  request(): CairnEvidenceRequest;
+  status(): number;
+}
+interface CairnEvidencePage {
+  on(event: "request", listener: (request: CairnEvidenceRequest) => void): unknown;
+  on(event: "response", listener: (response: CairnEvidenceResponse) => void): unknown;
+  on(event: "requestfinished", listener: (request: CairnEvidenceRequest) => void): unknown;
+  on(event: "requestfailed", listener: (request: CairnEvidenceRequest) => void): unknown;
+}
+interface CairnEvidenceRedaction {
+  headers?: string[];
+  queryParams?: string[];
+  storageKeys?: string[];
+  values?: string[];
+  responseTimeoutMs?: number;
+}
+interface CairnNetworkEntry {
+  url: string;
+  method: string;
+  timestamp: number;
+  responseTimestamp?: number;
+  durationMs?: number;
+  status?: number;
+  error?: string;
+  postData?: string;
+  postDataBytes?: number;
+  postDataTruncated?: boolean;
+  postDataOmittedReason?: "non-json" | "invalid-json" | "oversized" | "capture-error";
+}
+interface CairnApiRequestEvidence {
+  url: string;
+  method: string;
+  status?: number;
+  timestamp?: number;
+  body?: unknown;
+  contentType?: string;
+}
+const CAIRN_MAX_JSON_POST_DATA_BYTES = 64 * 1024;
+const CAIRN_PATCH_RESPONSE_TIMEOUT_MS = 120_000;
+const CAIRN_SENSITIVE_NAME_RE = /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion/i;
+
+export function createCairnNetworkEvidence(page: CairnEvidencePage, redaction: CairnEvidenceRedaction = {}) {
+  const entries: CairnNetworkEntry[] = [];
+  const byRequest = new WeakMap<CairnEvidenceRequest, CairnNetworkEntry>();
+  const pendingPatches = new Map<CairnEvidenceRequest, { promise: Promise<void>; resolve: () => void }>();
+  const responseTimeoutMs = Math.max(1, redaction.responseTimeoutMs ?? CAIRN_PATCH_RESPONSE_TIMEOUT_MS);
+  const configuredNames = new Set(
+    [...(redaction.headers ?? []), ...(redaction.storageKeys ?? [])]
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const configuredQueryParams = new Set(
+    (redaction.queryParams ?? [])
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const explicitSecrets = (redaction.values ?? [])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+  const ambientSecrets = Object.entries(process.env)
+    .filter(([key, value]) => key !== "CAIRN_RUN_TOKEN" && value && CAIRN_SENSITIVE_NAME_RE.test(key))
+    .map((entry) => String(entry[1] ?? "").trim())
+    .filter(Boolean);
+  const literalSecrets = [...new Set([...explicitSecrets, ...ambientSecrets])]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  const isSensitiveName = (name: string) =>
+    CAIRN_SENSITIVE_NAME_RE.test(name) || configuredNames.has(name.toLowerCase());
+  const redactLiteralText = (input: string) => {
+    let output = input;
+    for (const secret of literalSecrets) output = output.split(secret).join("[redacted]");
+    return output;
+  };
+  const redactUrl = (input: string) => {
+    const scrubbed = redactLiteralText(input);
+    const hasAbsoluteScheme = /^[a-z][a-z\d+.-]*:/i.test(scrubbed);
+    const isProtocolRelative = scrubbed.startsWith("//");
+    try {
+      const parsed = new URL(scrubbed, "http://cairn.invalid");
+      const safeParams = new URLSearchParams();
+      for (const [key, value] of parsed.searchParams.entries()) {
+        const safeValue =
+          CAIRN_SENSITIVE_NAME_RE.test(key) || configuredQueryParams.has(key.toLowerCase())
+            ? "[redacted]"
+            : redactLiteralText(value);
+        safeParams.append(key, safeValue);
+      }
+      parsed.search = safeParams.toString();
+      if (hasAbsoluteScheme) return parsed.toString();
+      if (isProtocolRelative) return "//" + parsed.host + parsed.pathname + parsed.search + parsed.hash;
+      return parsed.pathname + parsed.search + parsed.hash;
+    } catch {
+      return "[redacted]";
+    }
+  };
+  const redactValue = (input: unknown): unknown => {
+    if (typeof input === "string") return redactLiteralText(input);
+    if (input === null || typeof input !== "object") return input;
+    if (Array.isArray(input)) return input.map(redactValue);
+    const record = input as Record<string, unknown>;
+    const namedValueIsSensitive =
+      typeof record.name === "string" &&
+      (isSensitiveName(record.name) || configuredQueryParams.has(record.name.toLowerCase()));
+    return Object.fromEntries(
+      Object.entries(record).map(([key, value]) => [
+        key,
+        isSensitiveName(key) || (namedValueIsSensitive && key.toLowerCase() === "value")
+          ? "[redacted]"
+          : redactValue(value),
+      ]),
+    );
+  };
+  const captureJsonPostData = (raw: string | null, contentType: string | undefined): Partial<CairnNetworkEntry> => {
+    if (raw === null) return {};
+    const bytes = new TextEncoder().encode(raw).byteLength;
+    if (!contentType || !/(?:\/|\+)json(?:\b|;)/i.test(contentType)) {
+      return { postDataBytes: bytes, postDataOmittedReason: "non-json" };
+    }
+    if (bytes > CAIRN_MAX_JSON_POST_DATA_BYTES) {
+      return { postDataBytes: bytes, postDataTruncated: true, postDataOmittedReason: "oversized" };
+    }
+    try {
+      return { postData: JSON.stringify(redactValue(JSON.parse(raw))) };
+    } catch {
+      return { postDataBytes: bytes, postDataOmittedReason: "invalid-json" };
+    }
+  };
+  const captureRequest = (request: CairnEvidenceRequest) => {
+    const timestamp = Date.now();
+    let entry: CairnNetworkEntry;
+    try {
+      const headers = request.headers();
+      entry = {
+        url: redactUrl(request.url()),
+        method: request.method().toUpperCase(),
+        timestamp,
+        ...captureJsonPostData(request.postData(), headers["content-type"]),
+      };
+    } catch {
+      entry = {
+        url: "[redacted]",
+        method: "UNKNOWN",
+        timestamp,
+        postDataOmittedReason: "capture-error",
+      };
+    }
+    entries.push(entry);
+    byRequest.set(request, entry);
+    if (entry.method === "PATCH") {
+      let resolveCompletion: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        resolveCompletion = resolve;
+      });
+      pendingPatches.set(request, { promise, resolve: resolveCompletion });
+    }
+  };
+  const finishRequest = (request: CairnEvidenceRequest) => {
+    const pending = pendingPatches.get(request);
+    if (!pending) return;
+    pendingPatches.delete(request);
+    pending.resolve();
+  };
+  page.on("request", captureRequest);
+  page.on("response", (response: CairnEvidenceResponse) => {
+    const entry = byRequest.get(response.request());
+    if (entry) {
+      entry.status = response.status();
+    }
+  });
+  page.on("requestfinished", (request: CairnEvidenceRequest) => {
+    const entry = byRequest.get(request);
+    if (entry) {
+      if (entry.status === undefined) entry.error = "response status unavailable";
+      entry.responseTimestamp = Date.now();
+      entry.durationMs = Math.max(0, entry.responseTimestamp - entry.timestamp);
+    }
+    finishRequest(request);
+  });
+  page.on("requestfailed", (request: CairnEvidenceRequest) => {
+    const entry = byRequest.get(request);
+    if (entry) {
+      entry.error = "request failed";
+      entry.responseTimestamp = Date.now();
+      entry.durationMs = Math.max(0, entry.responseTimestamp - entry.timestamp);
+    }
+    finishRequest(request);
+  });
+
+  return {
+    recordApiRequest(input: CairnApiRequestEvidence) {
+      const responseTimestamp = Date.now();
+      const timestamp = input.timestamp ?? responseTimestamp;
+      const timing = {
+        timestamp,
+        responseTimestamp,
+        durationMs: Math.max(0, responseTimestamp - timestamp),
+      };
+      let raw: string | null = null;
+      let contentType = input.contentType;
+      if (input.body !== undefined) {
+        try {
+          raw = typeof input.body === "string" ? input.body : JSON.stringify(input.body);
+          if (typeof input.body !== "string" && !contentType) contentType = "application/json";
+        } catch {
+          entries.push({
+            url: redactUrl(input.url),
+            method: input.method.toUpperCase(),
+            ...timing,
+            ...(input.status === undefined ? {} : { status: input.status }),
+            postDataOmittedReason: "capture-error",
+          });
+          return;
+        }
+      }
+      entries.push({
+        url: redactUrl(input.url),
+        method: input.method.toUpperCase(),
+        ...timing,
+        ...(input.status === undefined ? {} : { status: input.status }),
+        ...captureJsonPostData(raw, contentType),
+      });
+    },
+    async persist(runDir: string): Promise<void> {
+      const pending = [...pendingPatches.values()].map((completion) => completion.promise);
+      if (pending.length > 0) {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        const completed = await Promise.race([
+          Promise.all(pending).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timeoutId = setTimeout(() => resolve(false), responseTimeoutMs);
+          }),
+        ]);
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        if (!completed) {
+          throw new Error("Timed out waiting for captured PATCH response evidence.");
+        }
+      }
+      const [{ mkdir, writeFile }, { join }] = await Promise.all([
+        import("node:fs/promises"),
+        import("node:path"),
+      ]);
+      const networkDir = join(runDir, "network");
+      await mkdir(networkDir, { recursive: true });
+      const body = entries.map((entry) => JSON.stringify(entry)).join("\n");
+      await writeFile(join(networkDir, "requests.ndjson"), body ? body + "\n" : "", {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    },
+  };
+}
+
 const RUN_TOKEN = process.env.CAIRN_RUN_TOKEN ?? Math.random().toString(36).slice(2, 10);
 
-test("golden_late_bound", async ({ page }) => {
-  process.env.CAIRN_RUN_START_FLOOR_MS = String(Date.now());
+test("golden_late_bound", async ({ page }, testInfo) => {
+  // Derived from sequential step/outcome budgets; bounded to 30m–4h.
+  test.setTimeout(1800000);
+
+  // Node verifiers consume a self-contained, sanitized Cairn-compatible run directory.
+  const cairnRunDir = testInfo.outputPath("cairn-run");
+  const cairnNetworkEvidence = createCairnNetworkEvidence(page, { headers: [], queryParams: [], storageKeys: [], values: [...[], process.env["API_KEY"] ?? "", process.env["APP_PASSWORD"] ?? ""] });
 
   // --- steps ---
   // step: go
@@ -63,6 +330,7 @@ test("golden_late_bound", async ({ page }) => {
   // durably_processed: node verifier proves durable processing
   {
     // node verifier (runs in the test's node context, not the browser)
+    await cairnNetworkEvidence.persist(cairnRunDir);
     const mod = await import("../../verifiers/check.ts");
     // ESM/CJS interop: Playwright transpiles TS imports to CJS, so a
     // default export may surface as mod.default.default.
@@ -74,6 +342,7 @@ test("golden_late_bound", async ({ page }) => {
       fixtures: { "expectedRoute": "temporal", "token": `prefix-${RUN_TOKEN}`, "secret": `${process.env.API_KEY ?? ""}` },
       artifacts: {},
       vars: {},
+      runDir: cairnRunDir,
       specDir: "/specs/flows",
     });
     expect(res && res.ok, `verifier evidence: ${JSON.stringify(res && (res.evidence ?? res))}`).toBe(true);

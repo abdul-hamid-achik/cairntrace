@@ -463,6 +463,8 @@ export const EvalStepSchema = z
         /** Passed as the single argument to the wrapped function. */
         args: z.record(z.unknown()).optional(),
         timeoutMs: z.number().int().positive().optional(),
+        /** Retry once when a page navigation destroys this eval's CDP context. */
+        retryOnNavigation: z.boolean().optional(),
       })
       .refine((v) => Boolean(v.js) !== Boolean(v.file), {
         message: "eval needs exactly one of js | file",

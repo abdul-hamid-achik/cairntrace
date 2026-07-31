@@ -1,5 +1,8 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
-import type { ArtifactRef } from "../../../adapters/browserBackend";
+import type {
+  ArtifactRef,
+  NetworkEntry,
+} from "../../../adapters/browserBackend";
 import type { ProcessMetricsSummary } from "../../monitor/processSampler";
 import type { Verifier } from "../../schema/verifier.v1";
 
@@ -37,6 +40,12 @@ export interface VerifierContext {
   responses?: Record<string, unknown>;
   /** Captured eval-step return values, for ${evals.<name>.…} in fixtures. */
   evals?: Record<string, unknown>;
+  /**
+   * The exact end-of-steps network snapshot persisted in
+   * network/requests.ndjson. Network verdicts reuse it so a request cannot
+   * change from pending to complete between artifact capture and evaluation.
+   */
+  networkEntries?: NetworkEntry[];
   /** Config-resolved baseUrl for relative browser-side HTTP checks. */
   baseUrl?: string;
   /**
@@ -45,6 +54,10 @@ export interface VerifierContext {
    * have to be threaded through per-outcome fixtures maps.
    */
   vars?: Record<string, string | number | boolean>;
+  /** Environment authorized for Node verifier children; never exposed on ctx. */
+  childEnv?: Record<string, string | undefined>;
+  /** TinyVault-prefixed keys explicitly selected for target children. */
+  selectedTvaultKeys?: Iterable<string>;
   /**
    * Process metrics collected by the `--monitor` run sampler, for the
    * `process` verifier. Absent when the run wasn't monitored.

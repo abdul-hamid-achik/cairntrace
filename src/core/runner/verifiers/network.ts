@@ -8,9 +8,12 @@ import type { VerifierEvaluation } from "./types";
 export async function evaluateNetwork(
   verifier: NetworkVerifier,
   backend: BrowserBackend,
+  capturedEntries?: NetworkEntry[],
 ): Promise<VerifierEvaluation> {
   const { method, urlContains, status } = verifier.network;
-  const all = await backend.getNetworkRequests({ method, filter: urlContains });
+  const all = capturedEntries
+    ? filterNetworkEntries(capturedEntries, method, urlContains)
+    : await backend.getNetworkRequests({ method, filter: urlContains });
   const matching = all.filter((e) =>
     e.status !== undefined ? matchesStatus(e.status, status) : false,
   );
@@ -35,8 +38,21 @@ export async function evaluateNetwork(
     actual:
       all.length === 0
         ? "no requests were captured (consider whether the step actually triggered the call)"
-        : `no requests matched. ${all.length} request(s) observed:\n${formatEntries(all.slice(0, 10))}`,
+        : `${all.length} request(s) matched the method and URL, but none matched the expected status ${expectedStatusDesc}:\n${formatEntries(all.slice(0, 10))}`,
   };
+}
+
+export function filterNetworkEntries(
+  entries: NetworkEntry[],
+  method: string | undefined,
+  urlContains: string,
+): NetworkEntry[] {
+  const normalizedMethod = method?.toUpperCase();
+  return entries.filter(
+    (entry) =>
+      (!normalizedMethod || entry.method.toUpperCase() === normalizedMethod) &&
+      entry.url.includes(urlContains),
+  );
 }
 
 function matchesStatus(status: number, m: StatusMatcher): boolean {

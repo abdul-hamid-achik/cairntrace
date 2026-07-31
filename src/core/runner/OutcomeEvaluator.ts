@@ -90,9 +90,10 @@ async function dispatch(
     if (isTextVerifier(v)) return await evaluateText(v, backend);
     if (isNotTextVerifier(v)) return await evaluateNotText(v, backend);
     if (isUrlVerifier(v)) return await evaluateUrl(v, backend);
-    if (isNetworkVerifier(v)) return await evaluateNetwork(v, backend);
+    if (isNetworkVerifier(v))
+      return await evaluateNetwork(v, backend, ctx.networkEntries);
     if (isNoFailedRequestsVerifier(v))
-      return await evaluateNoFailedRequests(v, backend);
+      return await evaluateNoFailedRequests(v, backend, ctx.networkEntries);
     if (isConsoleVerifier(v)) return await evaluateConsole(v, backend);
     if (isCountVerifier(v)) return await evaluateCount(v, backend);
     if (isXlsxVerifier(v)) return await evaluateXlsx(v, ctx);

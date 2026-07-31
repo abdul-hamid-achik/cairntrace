@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 
 export interface LogsCommandOptions {
@@ -24,11 +24,14 @@ export interface LogsCommandOptions {
  *   cairn logs                    recent runs, newest first
  *   cairn logs latest             one run: status, phases, files with sizes
  *   cairn logs latest --events    replay events.ndjson to stdout (tee-able)
- *   cairn logs --services         list captured tmux pane logs
- *   cairn logs --service web-api  replay one window's pane log
+ *   cairn logs latest --services  list run-local service artifacts
+ *   cairn logs latest --service web-api
+ *                                 replay one run-local tmux pane log
  *
  * `ref` accepts a run directory name, an absolute path, `latest`, or
- * `previous` (same grammar as stash/investigate).
+ * `previous` (same grammar as stash/investigate). Service lookups default to
+ * `latest`, then fall back to the legacy ~/.cairntrace/services pane logs when
+ * that run has no matching run-local artifact.
  */
 export async function logsCommand(
   ref: string | undefined,
@@ -37,19 +40,38 @@ export async function logsCommand(
   const servicesRoot =
     process.env.CAIRN_SERVICES_LOG_ROOT ??
     join(homedir(), ".cairntrace", "services");
-  if (opts.service) {
-    process.exitCode = await streamServicePaneLog(servicesRoot, opts.service);
-    return;
-  }
-  if (opts.services) {
-    process.exitCode = await listServicePaneLogs(servicesRoot);
-    return;
-  }
-
   const runsRoot = await resolveArtifactRoot({
     ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
     ...(opts.config ? { config: opts.config } : {}),
   });
+
+  if (opts.service || opts.services) {
+    const runDir = await resolveRunRef(ref ?? "latest", runsRoot).catch(
+      () => undefined,
+    );
+    if (runDir) {
+      if (opts.service) {
+        const localResult = await streamRunServicePaneLog(runDir, opts.service);
+        if (localResult !== undefined) {
+          process.exitCode = localResult;
+          return;
+        }
+      } else {
+        const localResult = await listRunServiceArtifacts(runDir);
+        if (localResult !== undefined) {
+          process.exitCode = localResult;
+          return;
+        }
+      }
+    }
+
+    // Compatibility for runs created before service artifacts lived inside
+    // the run pack. This fallback can be removed after old pane logs age out.
+    process.exitCode = opts.service
+      ? await streamServicePaneLog(servicesRoot, opts.service)
+      : await listServicePaneLogs(servicesRoot);
+    return;
+  }
 
   if (!ref) {
     process.exitCode = await listRuns(runsRoot);
@@ -65,6 +87,86 @@ export async function logsCommand(
     return;
   }
   process.exitCode = await showRun(runDir);
+}
+
+/**
+ * List a run's self-contained service artifacts. `undefined` means the run has
+ * no local service pack, so callers may fall back to the legacy global logs.
+ */
+async function listRunServiceArtifacts(
+  runDir: string,
+): Promise<number | undefined> {
+  const servicesDir = join(runDir, "services");
+  const files = await collectRegularFiles(servicesDir);
+  if (files.length === 0) return undefined;
+
+  files.sort((a, b) => {
+    const aManifest = a.relative === "manifest.json" ? 0 : 1;
+    const bManifest = b.relative === "manifest.json" ? 0 : 1;
+    return aManifest - bManifest || a.relative.localeCompare(b.relative);
+  });
+
+  process.stdout.write(`service artifacts: ${servicesDir}\n`);
+  for (const file of files) {
+    process.stdout.write(
+      `  ${`services/${file.relative}`.padEnd(44)} ${formatBytes(file.bytes)}\n`,
+    );
+  }
+  process.stdout.write(
+    `\nreplay one: cairn logs ${runDir.split("/").pop()} --service <window>\n`,
+  );
+  return 0;
+}
+
+async function collectRegularFiles(
+  root: string,
+): Promise<Array<{ relative: string; bytes: number }>> {
+  const files: Array<{ relative: string; bytes: number }> = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(
+      () => [],
+    );
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+      } else if (entry.isFile()) {
+        const size = (await stat(path).catch(() => undefined))?.size;
+        if (size !== undefined) {
+          files.push({
+            relative: relative(root, path).replaceAll("\\", "/"),
+            bytes: size,
+          });
+        }
+      }
+    }
+  };
+  await visit(root);
+  return files;
+}
+
+/**
+ * Stream `services/tmux/<sanitized-window>.log` when present. `undefined`
+ * signals absence so the legacy global pane-log fallback remains available.
+ */
+async function streamRunServicePaneLog(
+  runDir: string,
+  window: string,
+): Promise<number | undefined> {
+  const safeWindow = sanitizeServiceWindow(window);
+  if (!safeWindow) return undefined;
+  const path = join(runDir, "services", "tmux", `${safeWindow}.log`);
+  const file = await stat(path).catch(() => undefined);
+  if (!file?.isFile()) return undefined;
+  return streamFile(path, `run-local pane log disappeared: ${safeWindow}.log`);
+}
+
+function sanitizeServiceWindow(window: string): string | undefined {
+  const safe = window
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "");
+  return safe && safe !== "." && safe !== ".." ? safe : undefined;
 }
 
 async function listRuns(runsRoot: string): Promise<number> {

@@ -108,6 +108,109 @@ describe("cairn logs", () => {
     expect(process.exitCode).toBe(0);
   });
 
+  it("lists the latest run-local service pack with its manifest first", async () => {
+    const older = await writeRun("older_service_run", 60_000);
+    await mkdir(join(older, "services", "tmux"), { recursive: true });
+    await writeFile(join(older, "services", "manifest.json"), "{}\n");
+    await writeFile(join(older, "services", "tmux", "old-worker.log"), "old\n");
+
+    const latest = await writeRun("latest_service_run", 1_000);
+    await mkdir(join(latest, "services", "tmux"), { recursive: true });
+    await mkdir(join(latest, "services", "docker"), { recursive: true });
+    await writeFile(join(latest, "services", "tmux", "web-api.log"), "ready\n");
+    await writeFile(
+      join(latest, "services", "docker", "compose.log"),
+      "healthy\n",
+    );
+    await writeFile(join(latest, "services", "manifest.json"), "{}\n");
+
+    await logsCommand(undefined, {
+      artifactRoot: runsRoot,
+      services: true,
+    });
+
+    const text = captured.join("");
+    expect(text).toContain(`service artifacts: ${join(latest, "services")}`);
+    expect(text).toContain("services/manifest.json");
+    expect(text).toContain("services/tmux/web-api.log");
+    expect(text).toContain("services/docker/compose.log");
+    expect(text).not.toContain("old-worker.log");
+    expect(text.indexOf("services/manifest.json")).toBeLessThan(
+      text.indexOf("services/docker/compose.log"),
+    );
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("streams a run-local pane before considering the legacy fallback", async () => {
+    const run = await writeRun("local_service_run", 0);
+    await mkdir(join(run, "services", "tmux"), { recursive: true });
+    await writeFile(
+      join(run, "services", "tmux", "web-api.log"),
+      "run-local web api\n",
+    );
+    await writeFile(
+      join(servicesRoot, "graphite-web-api.pane.log"),
+      "legacy web api\n",
+    );
+
+    await logsCommand("local_service_run", {
+      artifactRoot: runsRoot,
+      service: "web-api",
+    });
+
+    expect(captured.join("")).toBe("run-local web api\n");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("sanitizes a run-local window name before resolving its log", async () => {
+    const run = await writeRun("sanitized_service_run", 0);
+    await mkdir(join(run, "services", "tmux"), { recursive: true });
+    await writeFile(
+      join(run, "services", "tmux", "web-api.log"),
+      "sanitized match\n",
+    );
+
+    await logsCommand("sanitized_service_run", {
+      artifactRoot: runsRoot,
+      service: "web api",
+    });
+
+    expect(captured.join("")).toBe("sanitized match\n");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("falls back to legacy pane logs when the selected run has no local pack", async () => {
+    await writeRun("legacy_fallback_run", 0);
+    await writeFile(
+      join(servicesRoot, "graphite-worker.pane.log"),
+      "legacy worker output\n",
+    );
+
+    await logsCommand(undefined, {
+      artifactRoot: runsRoot,
+      service: "worker",
+    });
+
+    expect(captured.join("")).toBe("legacy worker output\n");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("lists legacy pane logs when no run-local service pack exists", async () => {
+    await writeRun("legacy_list_fallback_run", 0);
+    await writeFile(
+      join(servicesRoot, "graphite-worker.pane.log"),
+      "legacy worker output\n",
+    );
+
+    await logsCommand(undefined, {
+      artifactRoot: runsRoot,
+      services: true,
+    });
+
+    expect(captured.join("")).toContain("graphite-worker.pane.log");
+    expect(process.exitCode).toBe(0);
+  });
+
   it("fails loudly when the window has no captured pane log", async () => {
     await logsCommand(undefined, { service: "nope" });
     expect(process.exitCode).toBe(2);

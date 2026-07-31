@@ -81,6 +81,10 @@ async function evaluateNodeScript(
       : {}),
     cwd: ctx.specDir,
     entryNames: ["verify"],
+    ...(ctx.childEnv !== undefined ? { env: ctx.childEnv } : {}),
+    ...(ctx.selectedTvaultKeys !== undefined
+      ? { selectedTvaultKeys: ctx.selectedTvaultKeys }
+      : {}),
     ctx: {
       fixtures: resolveRuntimeFixtures(verifier, ctx),
       artifacts: ctx.artifacts ?? {},

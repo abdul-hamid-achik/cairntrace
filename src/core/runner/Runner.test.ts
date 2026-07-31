@@ -41,6 +41,7 @@ vi.mock("../clip/vidtraceClip", () => ({
 
 let workDir: string;
 let artifactRoot: string;
+const itPosix = process.platform === "win32" ? it.skip : it;
 
 beforeAll(async () => {
   workDir = await mkdtemp(join(tmpdir(), "cairntrace-runner-"));
@@ -3093,6 +3094,140 @@ steps:
     expect(result.steps[0]!.error).toContain("eval");
   });
 
+  it("retries one navigation context loss when explicitly enabled", async () => {
+    const specPath = await writeSpec(
+      "eval_retry_navigation",
+      `version: 1
+name: eval_retry_navigation
+intent: an idempotent eval may survive a page navigation
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - id: verify_after_navigation
+    eval:
+      js: "return { ready: true }"
+      retryOnNavigation: true
+`,
+    );
+    const backend = new MockBrowserBackend();
+    let calls = 0;
+    backend.evaluate = async () => {
+      calls++;
+      return calls === 1
+        ? {
+            ok: false,
+            stdout: "",
+            stderr: "CDP error: Inspected target navigated or closed",
+            exitCode: 1,
+            durationMs: 0,
+            argv: ["eval"],
+          }
+        : {
+            ok: true,
+            stdout: JSON.stringify({ ready: true }),
+            stderr: "",
+            exitCode: 0,
+            durationMs: 0,
+            argv: ["eval"],
+          };
+    };
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(calls).toBe(2);
+  });
+
+  it("does not retry navigation loss without opt-in or retry ordinary eval errors", async () => {
+    for (const testCase of [
+      {
+        name: "no_opt_in",
+        retryOnNavigation: false,
+        stderr: "Inspected target navigated or closed",
+      },
+      {
+        name: "ordinary_error",
+        retryOnNavigation: true,
+        stderr: "ReferenceError: boom",
+      },
+    ]) {
+      const specPath = await writeSpec(
+        `eval_${testCase.name}`,
+        `version: 1
+name: eval_${testCase.name}
+intent: retries stay narrowly scoped
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - id: eval_once
+    eval:
+      js: "return true"
+      retryOnNavigation: ${testCase.retryOnNavigation}
+`,
+      );
+      const backend = new MockBrowserBackend();
+      const fallbackEvaluate = backend.evaluate.bind(backend);
+      let calls = 0;
+      backend.evaluate = async (js, options) => {
+        if (!js.includes("return true")) return fallbackEvaluate(js, options);
+        calls++;
+        return {
+          ok: false,
+          stdout: "",
+          stderr: testCase.stderr,
+          exitCode: 1,
+          durationMs: 0,
+          argv: ["eval"],
+        };
+      };
+
+      const result = await runSpec({ specPath, backend, artifactRoot });
+      expect(result.status).toBe("failed");
+      expect(calls).toBe(1);
+    }
+  });
+
+  it("fails after a second navigation context loss", async () => {
+    const specPath = await writeSpec(
+      "eval_retry_navigation_once",
+      `version: 1
+name: eval_retry_navigation_once
+intent: navigation retry is bounded to one replay
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - id: bounded_retry
+    eval:
+      js: "return true"
+      retryOnNavigation: true
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const fallbackEvaluate = backend.evaluate.bind(backend);
+    let calls = 0;
+    backend.evaluate = async (js, options) => {
+      if (!js.includes("return true")) return fallbackEvaluate(js, options);
+      calls++;
+      return {
+        ok: false,
+        stdout: "",
+        stderr: "Execution context was destroyed during navigation",
+        exitCode: 1,
+        durationMs: 0,
+        argv: ["eval"],
+      };
+    };
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("failed");
+    expect(calls).toBe(2);
+  });
+
   it("passes args to the eval function", async () => {
     const specPath = await writeSpec(
       "eval_args",
@@ -3225,6 +3360,68 @@ steps: []
     expect(events[startedIdx]).toMatchObject({ timeoutMs: 5000 });
   });
 
+  itPosix("kills a timed-out precondition and its descendants", async () => {
+    const fixtureDir = await mkdtemp(
+      join(tmpdir(), "cairn-precondition-tree-"),
+    );
+    const scriptPath = join(fixtureDir, "resistant-precondition.cjs");
+    const pidsPath = join(fixtureDir, "pids.json");
+    await writeFile(
+      scriptPath,
+      `const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => {});
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+writeFileSync(process.argv[2], JSON.stringify({ parent: process.pid, child: child.pid }));
+setInterval(() => {}, 1000);
+`,
+    );
+    const specPath = await writeSpec(
+      "precondition_tree_timeout",
+      `version: 1
+name: precondition_tree_timeout
+intent: timed-out setup cannot outlive its run and mutate state during teardown
+preconditions:
+  commands:
+    - name: resistant_tree
+      run: >-
+        exec ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} ${JSON.stringify(pidsPath)}
+      timeoutMs: 250
+outcomes:
+  - id: unreachable
+    description: precondition must fail first
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    let pids: { parent: number; child: number } | undefined;
+    try {
+      const result = await runSpec({
+        specPath,
+        backend: new MockBrowserBackend(),
+        artifactRoot,
+      });
+      expect(result.status).toBe("errored");
+      expect(result.failure?.message).toMatch(/timed out/);
+      pids = JSON.parse(await readFile(pidsPath, "utf8")) as {
+        parent: number;
+        child: number;
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(processIsAlive(pids.parent)).toBe(false);
+      expect(processIsAlive(pids.child)).toBe(false);
+    } finally {
+      for (const pid of pids ? [pids.parent, pids.child] : []) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone, as expected.
+        }
+      }
+    }
+  });
+
   it("hands verify scripts the failed step so they can bail instead of polling", async () => {
     const specPath = await writeSpec(
       "verify_sees_failed_step",
@@ -3313,3 +3510,12 @@ steps: []
     expect(evidence).toContain("timeout");
   });
 });
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}

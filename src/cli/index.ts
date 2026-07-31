@@ -133,7 +133,7 @@ addFormatFlags(
     )
     .option(
       "--services-dry-run",
-      "preview the services lifecycle plan without executing (prints what would happen)",
+      "print the services lifecycle plan and exit without running specs",
       false,
     )
     .option(
@@ -177,6 +177,11 @@ addFormatFlags(
       "run a shell command after all specs and before services teardown (repeatable). Failures are logged, non-fatal.",
       collectRepeatable,
       [] as string[],
+    )
+    .option(
+      "--hook-timeout-ms <ms>",
+      "maximum duration of each --before/--after hook (default 600000; max 7200000)",
+      "600000",
     )
     .option(
       "--select-only",

@@ -15,6 +15,8 @@ import {
   TmuxConfigSchema,
   TmuxWindowSchema,
   ServicesConfigSchema,
+  ServicesArtifactsConfigSchema,
+  resolveServicesArtifactsConfig,
   SecretsConfigSchema,
 } from "../../../core/schema/config.v1";
 import {
@@ -310,6 +312,25 @@ describe("TmuxConfigSchema validations", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts opt-in sequential tmux readiness", () => {
+    const result = TmuxConfigSchema.safeParse({
+      session: "sample-app",
+      waitForReadyBeforeNext: true,
+      windows: [{ name: "web", command: "yarn start" }],
+    });
+    expect(result.success).toBe(true);
+    expect(result.data?.waitForReadyBeforeNext).toBe(true);
+  });
+
+  it("rejects a non-boolean sequential tmux readiness value", () => {
+    const result = TmuxConfigSchema.safeParse({
+      session: "sample-app",
+      waitForReadyBeforeNext: "true",
+      windows: [{ name: "web", command: "yarn start" }],
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects unknown keys", () => {
     const result = TmuxConfigSchema.safeParse({
       session: "sample-app",
@@ -586,6 +607,52 @@ describe("ServicesConfigSchema cross-field validations", () => {
     const result = ServicesConfigSchema.safeParse({
       docker: { command: "docker compose up -d" },
       bogus: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("resolves missing services.artifacts to bounded on-failure defaults", () => {
+    expect(resolveServicesArtifactsConfig(undefined)).toEqual({
+      when: "on-failure",
+      capture: ["lifecycle", "tmux", "docker", "seed"],
+      maxLinesPerSource: 2_000,
+      maxBytesPerSource: 512 * 1024,
+      maxBytesPerRun: 8 * 1024 * 1024,
+    });
+  });
+
+  it("accepts explicit services.artifacts policy and materializes defaults", () => {
+    const result = ServicesArtifactsConfigSchema.safeParse({ when: "always" });
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({
+      when: "always",
+      maxLinesPerSource: 2_000,
+      maxBytesPerSource: 512 * 1024,
+      maxBytesPerRun: 8 * 1024 * 1024,
+    });
+  });
+
+  it("rejects duplicate sources and a per-source cap above the run cap", () => {
+    expect(
+      ServicesArtifactsConfigSchema.safeParse({
+        capture: ["tmux", "tmux"],
+      }).success,
+    ).toBe(false);
+    expect(
+      ServicesArtifactsConfigSchema.safeParse({
+        maxBytesPerSource: 1024,
+        maxBytesPerRun: 512,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects tmux window artifact-name collisions", () => {
+    const result = TmuxConfigSchema.safeParse({
+      session: "sample-app",
+      windows: [
+        { name: "web api", command: "yarn start" },
+        { name: "web-api", command: "yarn start" },
+      ],
     });
     expect(result.success).toBe(false);
   });

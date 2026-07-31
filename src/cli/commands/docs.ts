@@ -940,6 +940,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         body: "The `docker.readinessCheck` field runs a shell command after `docker compose up` completes. Exit 0 means infra is ready; non-zero fails the run with the stderr tail. Use this when `docker compose up -d` returns before the services are actually reachable (e.g. `curl -sf http://localhost:27017` for mongo).",
       },
       {
+        title: "Run-Local Service Artifacts",
+        body: "Before each run is finalized, Cairntrace can attach bounded, redacted service evidence under `<runDir>/services/`: lifecycle NDJSON, docker/provisioner command transcripts, tmux pane tails (including reused sessions), timestamped local Docker Compose logs limited to the run window, and seed/post-command output. A remote provisioner such as Chalupa keeps its launch/tunnel transcript without probing an unrelated local Compose project. `services.artifacts.when` accepts `on-failure` (default), `always`, or `never`; source defaults are all four with `maxLinesPerSource: 2000`, `maxBytesPerSource: 524288`, and `maxBytesPerRun: 8388608`. Capture errors are recorded in `services/manifest.json` and never change the behavioral verdict. Inspect with `cairn logs [ref] --services` or replay one pane with `cairn logs [ref] --service <window>`. Normal run retention removes the pack with its run.",
+      },
+      {
         title: "Config Validation",
         body: "Run `cairn config validate [--config <path>]` to validate a cairntrace.config.yml file. Checks structure (zod schema), cross-field rules (unique tmux window names, readyOn must have url or text, tvault provider requires tvault block), and reports all errors with JSON-path locations. Exit 0 = valid, 4 = invalid. Supports `--format json|yaml|md`.",
       },
@@ -961,7 +965,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Dry-Run Mode",
-        body: "Pass `--services-dry-run` to `cairn run` to preview the services lifecycle plan without executing anything. Prints the docker/seed/tmux/teardown configuration to stderr, then returns a no-op handle. No docker commands run, no tmux session is created, no seed is executed. Use this to verify your `services:` block is correctly configured before a real run.",
+        body: "Pass `--services-dry-run` to `cairn run` to preview the services lifecycle plan without executing anything. It prints the docker/seed/tmux/teardown configuration to stderr, then exits successfully before starting a web server, hooks, browser, preconditions, or the spec. Use this to verify your `services:` block is correctly configured before a real run.",
       },
       {
         title: "Per-Environment Services",

@@ -40,6 +40,7 @@ vi.mock("./secrets", async () => {
   };
 });
 const { resolveScopedSecrets } = await import("./secrets");
+const itPosix = process.platform === "win32" ? it.skip : it;
 
 describe("synthesizeErroredResult", () => {
   it("produces a RunResult that parses against the v1 wire schema", () => {
@@ -425,6 +426,79 @@ steps:
     expect(stderr).toContain("teardown: 2 command(s)");
   });
 
+  itPosix(
+    "exits after the plan without creating a run or executing preconditions",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "cairntrace-dryrun-terminal-"));
+      const artifactRoot = join(dir, "runs");
+      const marker = join(dir, "precondition-ran");
+      const configPath = join(dir, "cairntrace.config.yml");
+      const specPath = join(dir, "spec.yml");
+      await writeFile(
+        configPath,
+        `version: 1
+project: terminal-dry-run
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+services:
+  seed:
+    command: "echo \${env.DRY_RUN_SECRET}"
+`,
+      );
+      await writeFile(
+        specPath,
+        `version: 1
+name: terminal_dry_run
+intent: A services dry-run must stop before executing the spec.
+preconditions:
+  commands:
+    - run: "touch precondition-ran"
+outcomes:
+  - id: never_runs
+    description: The spec is never evaluated
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - open: { path: "data:text/html,<h1>never</h1>", waitUntil: load }
+`,
+      );
+
+      try {
+        const result = await execa(
+          binCairn,
+          [
+            "run",
+            specPath,
+            "--config",
+            configPath,
+            "--services-dry-run",
+            "--artifact-root",
+            artifactRoot,
+            "--format",
+            "json",
+          ],
+          { env: { DRY_RUN_SECRET: "q7!" } },
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.stderr).toContain("services dry-run plan:");
+        expect(result.stderr).toContain("seed: echo [redacted]");
+        expect(result.stderr).not.toContain("q7!");
+        expect(result.stdout).toBe("");
+        expect(result.stdout).not.toContain("q7!");
+        await expect(readFile(marker, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(readdir(artifactRoot)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("prints not-configured for missing phases", async () => {
     const { stderr } = await runDryRun(
       `version: 1
@@ -564,6 +638,82 @@ describe("runHookCommands", () => {
         },
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("honors an explicit per-hook timeout", async () => {
+    const { runHookCommands } = await import("./run");
+    await expect(
+      runHookCommands("before", ["exec sleep 1"], { timeoutMs: 10 }),
+    ).rejects.toThrow();
+  });
+
+  itPosix("kills the complete hook process tree at the timeout", async () => {
+    const { runHookCommands } = await import("./run");
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-hook-tree-"));
+    const scriptPath = join(dir, "resistant-hook.cjs");
+    const pidsPath = join(dir, "pids.json");
+    await writeFile(
+      scriptPath,
+      `const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+process.on("SIGTERM", () => {});
+const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
+writeFileSync(process.argv[2], JSON.stringify({ parent: process.pid, child: child.pid }));
+setInterval(() => {}, 1000);
+`,
+    );
+
+    let pids: { parent: number; child: number } | undefined;
+    try {
+      await expect(
+        runHookCommands(
+          "before",
+          [
+            `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} ${JSON.stringify(pidsPath)}`,
+          ],
+          { timeoutMs: 250 },
+        ),
+      ).rejects.toThrow(/process tree was killed/);
+      pids = JSON.parse(await readFile(pidsPath, "utf8")) as {
+        parent: number;
+        child: number;
+      };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(processIsAlive(pids.parent)).toBe(false);
+      expect(processIsAlive(pids.child)).toBe(false);
+    } finally {
+      for (const pid of pids ? [pids.parent, pids.child] : []) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone, as expected.
+        }
+      }
+    }
+  });
+});
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("parseHookTimeoutMs", () => {
+  it("defaults to ten minutes and accepts the thirty-minute cutover budget", async () => {
+    const { parseHookTimeoutMs } = await import("./run");
+    expect(parseHookTimeoutMs(undefined)).toBe(600_000);
+    expect(parseHookTimeoutMs("1800000")).toBe(1_800_000);
+  });
+
+  it("rejects non-integers, zero, and pathological durations", async () => {
+    const { parseHookTimeoutMs } = await import("./run");
+    expect(() => parseHookTimeoutMs("1.5")).toThrow(/integer/);
+    expect(() => parseHookTimeoutMs("0")).toThrow(/between/);
+    expect(() => parseHookTimeoutMs("7200001")).toThrow(/between/);
   });
 });
 

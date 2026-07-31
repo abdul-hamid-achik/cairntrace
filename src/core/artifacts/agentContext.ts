@@ -96,6 +96,43 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
         o.evidence ? `, see ${o.evidence}` : ""
       }`,
   );
+  const preconditionFailure =
+    result.failure?.phase === "precondition" ? result.failure : undefined;
+  const emptyOutcomeLines =
+    result.outcomes.length === 0
+      ? [
+          preconditionFailure
+            ? `- · Not evaluated — precondition "${preconditionFailure.name ?? "unknown"}" ${
+                preconditionFailure.timedOut ? "timed out" : "failed"
+              }: ${preconditionFailure.message}`
+            : `- · No outcomes were evaluated (run status: ${result.status}).`,
+        ]
+      : [];
+
+  let suggestedNextStep: string;
+  if (preconditionFailure) {
+    suggestedNextStep = `- Fix precondition "${preconditionFailure.name ?? "unknown"}" before rerunning: ${preconditionFailure.message}`;
+  } else if (result.status === "errored") {
+    suggestedNextStep = `- The run errored before its contract completed${
+      result.failure?.message ? `: ${result.failure.message}` : "."
+    } Inspect events.ndjson and the captured diagnostics, then re-run.`;
+  } else if (failed.length > 0) {
+    suggestedNextStep =
+      "- Read each failing outcome's evidence file (paths above). Each contains Expected/Actual/Source. Edit code, re-run.";
+  } else if (skipped.length > 0) {
+    suggestedNextStep =
+      "- Blocked outcomes were never evaluated — fix the failed step first (see step results), then re-run.";
+  } else if (result.status !== "passed") {
+    suggestedNextStep = `- The run did not pass${
+      result.failure?.message ? `: ${result.failure.message}` : "."
+    } Inspect events.ndjson and the captured diagnostics, then re-run.`;
+  } else if (result.outcomes.length === 0) {
+    suggestedNextStep =
+      "- No outcomes were evaluated; add or restore contract outcomes before treating this run as evidence.";
+  } else {
+    suggestedNextStep =
+      "- All outcomes passed. If you arrived here from a bug report, double-check that the failing scenario is captured by an outcome.";
+  }
 
   const evidenceRefs: string[] = [];
   for (const o of failed) {
@@ -110,6 +147,8 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     for (const path of result.artifacts.diagnostics)
       evidenceRefs.push(`- ${path}`);
   }
+  if (result.artifacts.services)
+    evidenceRefs.push(`- ${result.artifacts.services}`);
   if (result.artifacts.downloads) {
     for (const [name, path] of Object.entries(result.artifacts.downloads))
       evidenceRefs.push(`- ${name}: ${path}`);
@@ -147,6 +186,7 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     ...passLines,
     ...failureLines,
     ...skippedLines,
+    ...emptyOutcomeLines,
   ];
 
   if (lastSuccessfulStep) {
@@ -201,11 +241,7 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
   lines.push(
     "",
     "## Suggested next steps",
-    failed.length > 0
-      ? "- Read each failing outcome's evidence file (paths above). Each contains Expected/Actual/Source. Edit code, re-run."
-      : skipped.length > 0
-        ? "- Blocked outcomes were never evaluated — fix the failed step first (see step results), then re-run."
-        : "- All outcomes passed. If you arrived here from a bug report, double-check that the failing scenario is captured by an outcome.",
+    suggestedNextStep,
     "- If steps failed because of UI drift rather than a real regression, run: cairn spec heal " +
       `${result.spec.path}`,
   );

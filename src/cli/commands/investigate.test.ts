@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -294,6 +295,19 @@ exit 2
       expect(
         readFileSync(join(runDir, "investigate.json"), "utf8"),
       ).not.toContain("auth failure");
+      if (process.platform !== "win32") {
+        expect(statSync(join(runDir, "investigate.json")).mode & 0o777).toBe(
+          0o600,
+        );
+      }
+      const manifest = JSON.parse(
+        readFileSync(join(runDir, "artifact-manifest.json"), "utf8"),
+      ) as { artifacts: Array<{ path: string }> };
+      expect(manifest.artifacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: "investigate.json" }),
+        ]),
+      );
       const context = readFileSync(join(runDir, "agent_context.md"), "utf8");
       expect(context).toContain("## Code Matches");
       expect(context).toContain("src/auth.ts:12 (score: 0.90)");

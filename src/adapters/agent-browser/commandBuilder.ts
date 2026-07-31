@@ -174,7 +174,13 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
     argv.push("--fn", `!(${expression})`);
   } else if ("selector" in w) {
     argv.push(w.selector);
-    if (w.state !== undefined) argv.push("--state", w.state);
+    // In agent-browser 0.33.1, `wait <selector>` already means "wait until
+    // visible". Passing `--state visible` is not accepted by this command and
+    // fails with "Failed to read state from visible". Non-default states such
+    // as hidden/detached/attached still need the explicit flag.
+    if (w.state !== undefined && w.state !== "visible") {
+      argv.push("--state", w.state);
+    }
   } else {
     argv.push("--load", w.load);
   }

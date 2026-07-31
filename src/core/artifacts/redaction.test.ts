@@ -24,11 +24,117 @@ describe("createArtifactRedactor", () => {
 
   it("redacts spec-declared literal values", () => {
     const redactor = createArtifactRedactor(
-      { values: ["super-secret-xyz"] },
+      { values: ["super-secret-xyz", "731"] },
       {},
     );
-    expect(redactor.text("the password is super-secret-xyz")).toBe(
-      "the password is [redacted]",
+    expect(redactor.text("the password is super-secret-xyz; pin=731")).toBe(
+      "the password is [redacted]; pin=[redacted]",
+    );
+  });
+
+  it("applies configured header, query-param, and storage-key names", () => {
+    const redactor = createArtifactRedactor(
+      {
+        headers: ["X-Cairn-Session", "-private"],
+        queryParams: ["preview.key"],
+        storageKeys: ["tenant.session"],
+      },
+      {},
+    );
+
+    expect(
+      redactor.value({
+        headers: {
+          "x-cairn-session": "raw-header-secret",
+          accept: "application/json",
+        },
+        localStorage: {
+          "TENANT.SESSION": "raw-storage-secret",
+          theme: "dark",
+        },
+        storageState: {
+          origins: [
+            {
+              origin: "https://example.test",
+              localStorage: [
+                { name: "tenant.session", value: "raw-list-secret" },
+                { name: "theme", value: "dark" },
+              ],
+            },
+          ],
+        },
+        url: "https://example.test/?preview.key=raw-query-secret&view=full",
+      }),
+    ).toEqual({
+      headers: {
+        "x-cairn-session": "[redacted]",
+        accept: "application/json",
+      },
+      localStorage: {
+        "TENANT.SESSION": "[redacted]",
+        theme: "dark",
+      },
+      storageState: {
+        origins: [
+          {
+            origin: "https://example.test",
+            localStorage: [
+              { name: "tenant.session", value: "[redacted]" },
+              { name: "theme", value: "dark" },
+            ],
+          },
+        ],
+      },
+      url: "https://example.test/?preview.key=[redacted]&view=full",
+    });
+    expect(
+      redactor.text(
+        "X-CAIRN-SESSION: raw-text-header\n-private: punctuation-header-secret\nGET /?PREVIEW.KEY=raw-text-query&view=full",
+      ),
+    ).toBe(
+      "X-CAIRN-SESSION: [redacted]\n-private: [redacted]\nGET /?PREVIEW.KEY=[redacted]&view=full",
+    );
+    expect(
+      redactor.text("GET /?auth%5Bcredential%5D=raw-encoded-secret&view=full"),
+    ).toBe("GET /?auth%5Bcredential%5D=raw-encoded-secret&view=full");
+  });
+
+  it("redacts configured URL-encoded query parameter names", () => {
+    const redactor = createArtifactRedactor(
+      { queryParams: ["auth[credential]"] },
+      {},
+    );
+    expect(
+      redactor.text("GET /?auth%5Bcredential%5D=raw-encoded-secret&view=full"),
+    ).toBe("GET /?auth%5Bcredential%5D=[redacted]&view=full");
+  });
+
+  it("redacts browser credential keys without treating generic code as secret", () => {
+    const redactor = createArtifactRedactor(undefined, {});
+
+    expect(
+      redactor.value({
+        code: "public-result-code",
+        code_verifier: "raw-code-verifier",
+        otp: "123456",
+        passcode: "raw-passcode",
+        credential: "raw-credential",
+        assertion: "raw-assertion",
+      }),
+    ).toEqual({
+      code: "public-result-code",
+      code_verifier: "[redacted]",
+      otp: "[redacted]",
+      passcode: "[redacted]",
+      credential: "[redacted]",
+      assertion: "[redacted]",
+    });
+    expect(
+      redactor.text(
+        "https://example.test/callback?code=public-result-code&code_verifier=raw-code-verifier&otp=123456",
+      ),
+    ).toBe(
+      "https://example.test/callback?code=public-result-code&code_verifier=[redacted]&otp=[redacted]",
     );
   });
 

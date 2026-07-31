@@ -93,6 +93,7 @@ cairn run flows/ --tag answer-change \
 - `--label key=value` (repeatable) is written into each `run.json` as `labels`.
 - `--before <shell>` (repeatable) runs **after** services/secrets and **before** the first spec — use it for domain setup (path flips, warmers). Failures abort the run.
 - `--after <shell>` (repeatable) runs after all specs and before services teardown; failures are logged, non-fatal.
+- `--hook-timeout-ms <ms>` bounds each hook independently (10 minutes by default, 2 hours maximum). Raise it explicitly when a fenced drain/restart has a larger documented wall-clock budget; prefix the hook with `exec` when its cancellation must reach the target process directly.
 - `services.seed.postCommands` always run after seed (even when seed is skipped as fresh) — use for fixture ensure scripts.
 
 Aggregate cohorts:
@@ -113,6 +114,10 @@ Every spec must satisfy the **cold-start contract**: replayable from a fresh bro
 2. `session: { resume: <checkpoint> }` — capture a logged-in state once with `cairn checkpoint capture-from-session` and resume it.
 3. `preconditions: { commands: [{ run: "..." }] }` — set up state from the shell.
 4. `coldStart: guest` — explicitly acknowledge that a public flow intentionally starts without a session.
+
+Each precondition command is bounded by `timeoutMs` (120 seconds by default). On timeout Cairn
+hard-kills the command and its descendant process tree, so a child setup tool cannot survive into
+teardown or mutate the next run.
 
 There is no path that "just works because my dev session is logged in." A spec that only runs in dev is a spec that does not run. The guest acknowledgement suppresses the setup lint; it does not skip the required cold-start replay.
 

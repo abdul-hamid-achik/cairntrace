@@ -88,6 +88,8 @@ export const RunArtifactsSchema = z
     /** eval-step captured values (evals/<assign>.json), by assign name. */
     evals: z.record(z.string(), RelativePathSchema).optional(),
     diagnostics: z.array(RelativePathSchema).optional(),
+    /** Manifest for bounded, redacted service logs captured with this run. */
+    services: RelativePathSchema.optional(),
     /** `diagnostics/process.json` from a --monitor run (browser process metrics). */
     processMetrics: RelativePathSchema.optional(),
     console: RelativePathSchema.optional(),
@@ -113,12 +115,22 @@ export const RunSpecRefSchema = z
   .strict();
 export const RunFailureSchema = z
   .object({
+    /** Execution phase that failed before/around a browser step. */
+    phase: z.string().min(1).optional(),
+    /** Authored phase item name (for example a named precondition). */
+    name: z.string().min(1).optional(),
     /** Outcome id whose verifier failed (absent when the failure is step-level or a crash). */
     outcome: z.string().min(1).optional(),
     /** Step id that failed (absent when the failure is outcome-level or a crash). */
     step: z.string().min(1).optional(),
     /** Canonical one-liner reason the run did not pass. Populated on status=failed|errored. */
     message: z.string().min(1),
+    /** Actual elapsed time in the failed phase. */
+    durationMs: z.number().int().nonnegative().optional(),
+    /** True when the phase was terminated by its configured deadline. */
+    timedOut: z.boolean().optional(),
+    /** Termination signal reported by the child-process runner, when present. */
+    signal: z.string().min(1).optional(),
   })
   .strict();
 export type RunFailure = z.infer<typeof RunFailureSchema>;
@@ -148,6 +160,15 @@ export const buildRunNextActions = (
   if (result.status === "passed") return [];
   const rerun = `cairn run ${result.spec.path} --json`;
   const f = result.failure;
+  if (f?.phase === "precondition") {
+    return [
+      {
+        command: rerun,
+        reason: `precondition "${f.name ?? "unknown"}" failed: ${f.message} — inspect events.ndjson and fix the environment or precondition before rerunning`,
+        safeToAutoRun: false,
+      },
+    ];
+  }
   if (f?.step) {
     // A step that did not complete is the classic locator-drift case: heal
     // repairs the selector from a fresh snapshot. Outcome failures (all steps

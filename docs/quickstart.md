@@ -108,6 +108,7 @@ snapshots/           accessibility state captured during the run
 screenshots/         visual evidence when the capture policy requests it
 console/             browser console messages and errors
 network/             observed requests and failures
+services/            bounded service logs when services are configured
 replay.json          the exact replay manifest
 ```
 

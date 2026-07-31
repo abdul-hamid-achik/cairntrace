@@ -41,6 +41,7 @@ Override the root with `--artifact-root <path>` or set `artifactRoot` in
 ├── downloads/            # files saved by download steps
 ├── transforms/           # files produced by transform steps
 ├── diagnostics/          # per-step JSON and optional process summaries
+├── services/             # bounded/redacted lifecycle, tmux, Compose and seed logs
 ├── traces/               # backend trace ZIP (when retained by policy)
 └── videos/               # Playwright WebM, clips, and audit vidtrace output
 ```
@@ -50,6 +51,21 @@ two files any agent must learn to read are `agent_context.md` (narrative) and
 `outcomes/<id>.md` (per-outcome evidence). `report.json` is a presentation
 envelope that embeds the run plus rendered summaries, artifact links, theme,
 and reproduction metadata.
+
+`network/requests.ndjson` uses a cross-backend request shape. Native Playwright
+entries include a numeric epoch `timestamp` and sanitized `postData` only for
+valid JSON bodies no larger than 64 KiB. Headers and opaque, invalid, or
+oversized bodies are omitted; the artifact writer reparses JSON `postData` and
+redacts sensitive keys again before persistence. Native Playwright stamps
+`responseTimestamp` and `durationMs` only when `requestfinished` or
+`requestfailed` confirms that the request is terminal; receiving response
+headers alone does not count as completion. When agent-browser reports a
+terminal status or error without response timing, Cairntrace records the
+network-snapshot time as a conservative `responseTimestamp` upper bound and
+derives `durationMs`; these entries carry
+`responseTimingSource: "network-snapshot-upper-bound"`, while native timing is
+left unmarked. Pending entries remain unstamped. This upper bound is causal
+evidence, not a precise request-latency measurement.
 
 Optional `labels` on `run.json` (from `cairn run --label key=value`) let `cairn stats --group-by` build A/B cohorts across many packs without inventing a separate benchmark format.
 
@@ -94,6 +110,7 @@ Optional `labels` on `run.json` (from `cairn run --label key=value`) let `cairn 
     "reportJson": "report.json",
     "agentContext": "agent_context.md",
     "events": "events.ndjson",
+    "services": "services/manifest.json",
     "manifest": "artifact-manifest.json"
   },
   "exitCode": 0

@@ -203,6 +203,32 @@ describe("evaluateOutcomes (dispatcher)", () => {
     expect(r.evaluation.passed).toBe(true);
   });
 
+  it("routes network verdicts through the persisted end-of-steps snapshot", async () => {
+    const r = await eval1(
+      [
+        outcome("net", {
+          network: {
+            method: "POST",
+            urlContains: "/api/save",
+            status: { equals: 200 },
+          },
+        }),
+      ],
+      mockBackend(),
+      ctx({
+        networkEntries: [
+          {
+            method: "POST",
+            url: "https://app.example.com/api/save",
+          },
+        ],
+      }),
+    );
+
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).toContain("<pending>");
+  });
+
   it("routes noFailedRequests → evaluateNoFailedRequests", async () => {
     const r = await eval1(
       [outcome("nfr", { noFailedRequests: { urlContains: "/api/" } })],

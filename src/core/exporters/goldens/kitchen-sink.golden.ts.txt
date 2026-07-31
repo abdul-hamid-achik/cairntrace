@@ -6,10 +6,11 @@
 import { expect, test } from "@playwright/test";
 
 test("golden_kitchen_sink", async ({ page }) => {
+  // Derived from sequential step/outcome budgets; bounded to 30m–4h.
+  test.setTimeout(1800000);
+
   const requests: Array<{ url: string; method: string; status?: number }> = [];
   page.on("response", (r) => requests.push({ url: r.url(), method: r.request().method(), status: r.status() }));
-
-  process.env.CAIRN_RUN_START_FLOOR_MS = String(Date.now());
 
   // --- steps ---
   // step: go

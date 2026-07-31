@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { startServices, ServicesError, type ServicesHandle } from "./services";
+import {
+  createNoopServicesHandle,
+  startServices,
+  ServicesError,
+  type ServicesHandle,
+} from "./services";
 import type { SeedConfig } from "../schema/config.v1";
 
 /**
@@ -548,6 +553,177 @@ describe("startServices — indefinite wait + live output", () => {
     );
     expect(handle.startedByUs).toBe(true);
   });
+
+  it("fails immediately with pane evidence when a service exits before readiness and timeout is indefinite", async () => {
+    let mainSent = false;
+    const events: Array<{ phase: string; event: string; data?: unknown }> = [];
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (
+        cmd === "tmux" &&
+        args[0] === "send-keys" &&
+        args[3] === "yarn worker"
+      ) {
+        mainSent = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        const format = args.at(-1);
+        if (
+          format ===
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+        ) {
+          // The interactive pane itself remains alive, but the service has
+          // returned to zsh before its readyOn URL ever answered.
+          return { exitCode: 0, stdout: "0\t\tzsh", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: mainSent ? "node" : "zsh",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return {
+          exitCode: 0,
+          stdout: "starting worker\nfatal: temporal connection refused\n$",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    probeOnceImpl = async () => false;
+    const paneLogRoot = await mkdtemp(join(tmpdir(), "cairn-pane-logs-"));
+
+    await expect(
+      startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 0,
+            windows: [
+              {
+                name: "worker",
+                command: "yarn worker",
+                readyOn: { url: "http://localhost:9090/ready" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          serviceLogRoot: paneLogRoot,
+          onEvent: (event) => events.push(event),
+        },
+      ),
+    ).rejects.toThrow(
+      /service command exited before readiness; pane returned to idle shell "zsh"[\s\S]*fatal: temporal connection refused/,
+    );
+
+    expect(
+      execaCalls.filter(
+        (call) =>
+          call.cmd === "tmux" &&
+          call.args[0] === "send-keys" &&
+          call.args[3] === "yarn worker",
+      ),
+    ).toHaveLength(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: "tmux",
+        event: "fail",
+        data: expect.objectContaining({
+          window: "worker",
+          reason: "service-command-exited",
+          currentCommand: "zsh",
+        }),
+      }),
+    );
+    await expect(
+      readFile(join(paneLogRoot, "test-worker.pane.log"), "utf8"),
+    ).resolves.toContain("fatal: temporal connection refused");
+  });
+
+  it("captures a Fatal line emitted between the periodic capture and pane exit detection", async () => {
+    let mainSent = false;
+    let paneCaptures = 0;
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (
+        cmd === "tmux" &&
+        args[0] === "send-keys" &&
+        args[3] === "yarn worker"
+      ) {
+        mainSent = true;
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        if (
+          args.at(-1) ===
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+        ) {
+          return { exitCode: 0, stdout: "1\t17\tnode", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: mainSent ? "node" : "zsh",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        paneCaptures += 1;
+        return {
+          exitCode: 0,
+          stdout:
+            paneCaptures === 1
+              ? "starting worker"
+              : "starting worker\nFatal: final connection error",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    probeOnceImpl = async () => false;
+    const paneLogRoot = await mkdtemp(join(tmpdir(), "cairn-pane-logs-"));
+
+    await expect(
+      startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 0,
+            windows: [
+              {
+                name: "worker",
+                command: "yarn worker",
+                readyOn: { url: "http://localhost:9090/ready" },
+              },
+            ],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          serviceLogRoot: paneLogRoot,
+        },
+      ),
+    ).rejects.toThrow(
+      /pane exited \(exit 17\) before readiness[\s\S]*Fatal: final connection error/,
+    );
+
+    expect(paneCaptures).toBe(2);
+    const paneLog = await readFile(
+      join(paneLogRoot, "test-worker.pane.log"),
+      "utf8",
+    );
+    expect(paneLog).toContain("Fatal: final connection error");
+    expect(paneLog.match(/starting worker/g)).toHaveLength(1);
+  });
 });
 
 describe("startServices — seed phase", () => {
@@ -853,6 +1029,223 @@ describe("startServices — tmux phase", () => {
     expect(
       execaCalls.some((c) => c.cmd === "tmux" && c.args[0] === "clear-history"),
     ).toBe(true);
+  });
+
+  it("boots and readies tmux windows one at a time when explicitly enabled", async () => {
+    const order: string[] = [];
+    const started = new Set<string>();
+    const captureCount = new Map<string, number>();
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "new-window") {
+        order.push(`create:${String(args[args.indexOf("-n") + 1])}`);
+      }
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        const target = String(args[2]);
+        const command = String(args[3]);
+        if (command === "start web" || command === "start api") {
+          started.add(target);
+          order.push(`send:${target.split(":").at(-1)}`);
+        }
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        const target = String(args[3]);
+        if (
+          args.at(-1) ===
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+        ) {
+          return { exitCode: 0, stdout: "0\t\tnode", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: started.has(target) ? "node" : "zsh",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        const target = String(args[3]);
+        const count = (captureCount.get(target) ?? 0) + 1;
+        captureCount.set(target, count);
+        if (target.endsWith(":web") && count < 3) {
+          return { exitCode: 0, stdout: "web booting", stderr: "" };
+        }
+        const window = target.split(":").at(-1)!;
+        order.push(`ready:${window}`);
+        return { exitCode: 0, stdout: `${window} ready`, stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            waitForReadyBeforeNext: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "start web",
+                readyOn: { text: "web ready" },
+              },
+              {
+                name: "api",
+                command: "start api",
+                readyOn: { text: "api ready" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(order.indexOf("send:web")).toBeLessThan(order.indexOf("ready:web"));
+    expect(order.indexOf("ready:web")).toBeLessThan(
+      order.indexOf("create:api"),
+    );
+    expect(order.indexOf("create:api")).toBeLessThan(order.indexOf("send:api"));
+    expect(
+      handle.events.filter(
+        (event) => event.phase === "tmux" && event.event === "ready-wait",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("keeps the default tmux boot-all-then-wait ordering", async () => {
+    const order: string[] = [];
+    const started = new Set<string>();
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        const target = String(args[2]);
+        const command = String(args[3]);
+        if (command.startsWith("start ")) {
+          started.add(target);
+          order.push(`send:${target.split(":").at(-1)}`);
+        }
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        const target = String(args[3]);
+        return {
+          exitCode: 0,
+          stdout: started.has(target) ? "node" : "zsh",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        const window = String(args[3]).split(":").at(-1)!;
+        order.push(`ready:${window}`);
+        return { exitCode: 0, stdout: `${window} ready`, stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "start web",
+                readyOn: { text: "web ready" },
+              },
+              {
+                name: "api",
+                command: "start api",
+                readyOn: { text: "api ready" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(order.indexOf("send:api")).toBeLessThan(order.indexOf("ready:web"));
+  });
+
+  it("stops sequential startup when the current tmux pane dies", async () => {
+    const started = new Set<string>();
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "send-keys") {
+        const target = String(args[2]);
+        if (args[3] === "start web") started.add(target);
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        const target = String(args[3]);
+        if (
+          args.at(-1) ===
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+        ) {
+          return { exitCode: 0, stdout: "1\t23\tnode", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: started.has(target) ? "node" : "zsh",
+          stderr: "",
+        };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return {
+          exitCode: 0,
+          stdout: "web starting\nfatal: dependency unavailable",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    await expect(
+      startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            reuseExisting: false,
+            waitForReadyBeforeNext: true,
+            readyTimeoutMs: 5000,
+            windows: [
+              {
+                name: "web",
+                command: "start web",
+                readyOn: { text: "web ready" },
+              },
+              {
+                name: "api",
+                command: "start api",
+                readyOn: { text: "api ready" },
+              },
+            ],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    ).rejects.toThrow(/pane exited \(exit 23\) before readiness/);
+
+    expect(
+      execaCalls.some(
+        (call) =>
+          call.cmd === "tmux" &&
+          call.args[0] === "new-window" &&
+          call.args.includes("api"),
+      ),
+    ).toBe(false);
+    expect(
+      execaCalls.some(
+        (call) =>
+          call.cmd === "tmux" &&
+          call.args[0] === "send-keys" &&
+          call.args[3] === "start api",
+      ),
+    ).toBe(false);
   });
 
   it("reuses existing tmux session when reuseExisting is true", async () => {
@@ -2102,6 +2495,20 @@ describe("startServices — teardown best-effort (errors don't propagate)", () =
     await expect(handle.stop()).resolves.toBeUndefined();
     // The second command should still have run
     expect(shellCalls.some((c) => c.command === "echo ok")).toBe(true);
+    expect(handle.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: "teardown",
+          event: "fail",
+          data: { index: 0, exitCode: 1 },
+        }),
+        expect.objectContaining({
+          phase: "teardown",
+          event: "complete",
+          data: { index: 1, exitCode: 0 },
+        }),
+      ]),
+    );
   });
 });
 
@@ -3052,6 +3459,265 @@ describe("startServices — fcheap stash integration", () => {
     await handle.stop();
     // No stash calls because there were no artifacts
     expect(stashCalls.length).toBe(0);
+  });
+});
+
+describe("startServices — bounded run artifact capture", () => {
+  it("defaults to on-failure and returns redacted seed/post + lifecycle output", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    shellImpl = async (command) => ({
+      exitCode: 0,
+      stdout: `\u001b[31m${command} super-secret\u001b[0m\u0000`,
+      stderr: "seed warning",
+    });
+
+    const handle = track(
+      await startServices(
+        {
+          seed: {
+            command: "yarn seed",
+            postCommands: ["yarn ensure-fixture"],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          secretValues: ["super-secret"],
+        },
+      ),
+    );
+
+    const passed = await handle.captureRunArtifacts("passed");
+    expect(passed).toMatchObject({
+      captured: false,
+      reason: "status-passed",
+      policy: { when: "on-failure" },
+    });
+
+    const failed = await handle.captureRunArtifacts("failed");
+    expect(failed.captured).toBe(true);
+    expect(failed.files.some((file) => file.source === "lifecycle")).toBe(true);
+    expect(failed.files.filter((file) => file.source === "seed")).toHaveLength(
+      2,
+    );
+    const text = failed.files.map((file) => file.content).join("\n");
+    expect(text).toContain("[redacted]");
+    expect(text).not.toContain("super-secret");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("\u0000");
+  });
+
+  it("captures a reused tmux session by tmuxSessionName with a confined filename", async () => {
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "list-windows") {
+        return { exitCode: 0, stdout: "web api", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        return { exitCode: 0, stdout: "node", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        return {
+          exitCode: 0,
+          stdout: "\u001b[32mready\u001b[0m\u0000 tmux-secret",
+          stderr: "",
+        };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          tmux: {
+            session: "test-sess",
+            reuseExisting: true,
+            windows: [{ name: "web api", command: "yarn start" }],
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          secretValues: ["tmux-secret"],
+        },
+      ),
+    );
+
+    expect(handle.startedByUs).toBe(false);
+    const bundle = await handle.captureRunArtifacts("errored");
+    expect(bundle.ownership.tmux).toBe("reused");
+    const pane = bundle.files.find((file) => file.source === "tmux");
+    expect(pane?.relativePath).toBe("services/tmux/web-api.log");
+    expect(pane?.content).toContain("ready");
+    expect(pane?.content).toContain("[redacted]");
+    expect(pane?.content).not.toContain("\u001b");
+    expect(pane?.content).not.toContain("\u0000");
+  });
+
+  it("captures Docker Compose logs inside the requested run time window", async () => {
+    execaImpl = async (cmd, args) => {
+      if (cmd === "docker" && args[1] === "ps") {
+        return {
+          exitCode: 0,
+          stdout: '{"State":"running","Status":"Up 2 minutes"}',
+          stderr: "",
+        };
+      }
+      if (cmd === "docker" && args[1] === "logs") {
+        return { exitCode: 0, stdout: "compose output", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            cwd: dir,
+            reuseExisting: true,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    const bundle = await handle.captureRunArtifacts("failed", {
+      startedAt: "2026-07-29T12:00:00.000Z",
+      endedAt: "2026-07-29T12:05:00.000Z",
+    });
+
+    expect(bundle.ownership.docker).toBe("reused");
+    expect(
+      bundle.files.find(
+        (file) => file.relativePath === "services/docker/compose.log",
+      )?.content,
+    ).toBe("compose output");
+    const logsCall = execaCalls.find(
+      (call) => call.cmd === "docker" && call.args[1] === "logs",
+    );
+    expect(logsCall?.args).toEqual(
+      expect.arrayContaining([
+        "--no-color",
+        "--timestamps",
+        "--tail",
+        "2000",
+        "--since",
+        "2026-07-29T12:00:00.000Z",
+        "--until",
+        "2026-07-29T12:05:00.000Z",
+      ]),
+    );
+  });
+
+  it("keeps a remote provisioner transcript without probing an unrelated local Compose project", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({
+      exitCode: 0,
+      stdout: "chalupa launched remote compute with remote-secret",
+      stderr: "",
+    });
+
+    const handle = track(
+      await startServices(
+        {
+          docker: { command: "tools/chalupa-up-and-tunnel.sh", cwd: dir },
+          artifacts: {
+            when: "always",
+            capture: ["docker"],
+            maxLinesPerSource: 2_000,
+            maxBytesPerSource: 512 * 1024,
+            maxBytesPerRun: 8 * 1024 * 1024,
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          secretValues: ["remote-secret"],
+        },
+      ),
+    );
+
+    const bundle = await handle.captureRunArtifacts("passed");
+    const transcript = bundle.files.find(
+      (file) => file.relativePath === "services/docker/00-start.log",
+    );
+    expect(transcript?.content).toContain("chalupa launched remote compute");
+    expect(transcript?.content).toContain("[redacted]");
+    expect(transcript?.content).not.toContain("remote-secret");
+    expect(
+      execaCalls.some(
+        (call) => call.cmd === "docker" && call.args[1] === "logs",
+      ),
+    ).toBe(false);
+    expect(execaCalls.some((call) => call.cmd === "docker")).toBe(false);
+  });
+
+  it("enforces the aggregate cap and records source errors without throwing", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    shellImpl = async () => ({
+      exitCode: 0,
+      stdout: "x".repeat(2_000),
+      stderr: "",
+    });
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "list-windows") {
+        return { exitCode: 0, stdout: "worker", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "display-message") {
+        return { exitCode: 0, stdout: "node", stderr: "" };
+      }
+      if (cmd === "tmux" && args[0] === "capture-pane") {
+        throw new Error("capture unavailable");
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          seed: {
+            command: "seed",
+            postCommands: ["post-1", "post-2"],
+          },
+          tmux: {
+            session: "test-sess",
+            reuseExisting: true,
+            windows: [{ name: "worker", command: "yarn start" }],
+          },
+          artifacts: {
+            when: "always",
+            capture: ["tmux", "seed"],
+            maxLinesPerSource: 2_000,
+            maxBytesPerSource: 256,
+            maxBytesPerRun: 512,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    const bundle = await handle.captureRunArtifacts("passed");
+    expect(bundle.totalBytes).toBeLessThanOrEqual(512);
+    expect(bundle.truncated).toBe(true);
+    expect(bundle.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: "tmux",
+          message: "capture unavailable",
+        }),
+      ]),
+    );
   });
 });
 
@@ -4123,15 +4789,14 @@ describe("maybeStartServices — dry-run mode", () => {
   it("prints plan and returns no-op handle when servicesDryRun is true", async () => {
     // We test via run.ts maybeStartServices, but since that's harder to
     // isolate, we verify the handle shape here.
-    const noopHandle: ServicesHandle = {
-      startedByUs: false,
-      events: [],
-      stop: async () => undefined,
-      terminateSync: () => undefined,
-    };
+    const noopHandle = createNoopServicesHandle();
 
     expect(noopHandle.startedByUs).toBe(false);
     expect(noopHandle.events).toEqual([]);
+    expect(await noopHandle.captureRunArtifacts("failed")).toMatchObject({
+      captured: false,
+      reason: "policy-never",
+    });
     await noopHandle.stop();
     expect(() => noopHandle.terminateSync()).not.toThrow();
   });

@@ -75,6 +75,38 @@ describe("makePlainListener", () => {
     expect(text).not.toMatch(/\x1b\[/);
     expect(lines[0]).toMatch(/^\[\d\d:\d\d:\d\d\] /);
   });
+
+  it("renders precondition timeouts explicitly in plain and TTY modes", () => {
+    const plainLines: string[] = [];
+    const plain = makePlainListener({ write: (s) => plainLines.push(s) });
+    plain.onPreconditionFinish?.("readiness_gate", undefined, 1_250, {
+      timedOut: true,
+      signal: "SIGTERM",
+    });
+
+    const ttyLines: string[] = [];
+    const tty = makeInteractiveListener({ color: false });
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string) => {
+      ttyLines.push(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      tty.onPreconditionFinish?.("readiness_gate", undefined, 1_250, {
+        timedOut: true,
+        signal: "SIGTERM",
+      });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    for (const text of [plainLines.join(""), ttyLines.join("")]) {
+      expect(text).toContain(
+        "precondition readiness_gate timed out (SIGTERM) 1.3s",
+      );
+      expect(text).not.toContain("exit undefined");
+    }
+  });
 });
 
 describe("onRunStart env header", () => {

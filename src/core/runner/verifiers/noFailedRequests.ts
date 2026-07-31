@@ -1,14 +1,20 @@
-import type { BrowserBackend } from "../../../adapters/browserBackend";
+import type {
+  BrowserBackend,
+  NetworkEntry,
+} from "../../../adapters/browserBackend";
 import type { NoFailedRequestsVerifier } from "../../schema/verifier.v1";
-import { formatEntries } from "./network";
+import { filterNetworkEntries, formatEntries } from "./network";
 import type { VerifierEvaluation } from "./types";
 
 export async function evaluateNoFailedRequests(
   verifier: NoFailedRequestsVerifier,
   backend: BrowserBackend,
+  capturedEntries?: NetworkEntry[],
 ): Promise<VerifierEvaluation> {
   const { urlContains, method } = verifier.noFailedRequests;
-  const all = await backend.getNetworkRequests({ method, filter: urlContains });
+  const all = capturedEntries
+    ? filterNetworkEntries(capturedEntries, method, urlContains)
+    : await backend.getNetworkRequests({ method, filter: urlContains });
   // A request is "failed" if it returned 4xx/5xx OR carries an error marker
   // (aborted / blocked / DNS-failed / connection-refused / request-step
   // failure) — those never get a >=400 status, so a status-only check would
@@ -27,7 +33,7 @@ export async function evaluateNoFailedRequests(
       actual:
         all.length === 0
           ? "no matching requests observed (the filter produced an empty set)"
-          : `all ${all.length} matching request(s) completed with status <400`,
+          : `all ${all.length} matching request(s) had no captured 4xx/5xx status or explicit network error`,
     };
   }
 

@@ -1072,7 +1072,7 @@ describe("screenshot timeout", () => {
     expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
       ["--session", "screenshot-hang", "screenshot", "/tmp/hung.png"],
-      expect.objectContaining({ timeout: 15_000 }),
+      expect.objectContaining({ timeout: 20_000 }),
     );
     expect(result.error).toContain("no rendering surface");
     expect(result.error).toContain("display asleep/headless");
@@ -1094,7 +1094,7 @@ describe("child timeout enforcement", () => {
     expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
       ["--session", "deadline", "navigate", "/dashboard"],
-      expect.objectContaining({ timeout: 60_000 }),
+      expect.objectContaining({ timeout: 65_000 }),
     );
   });
 
@@ -1117,7 +1117,7 @@ describe("child timeout enforcement", () => {
         "--timeout",
         "5000",
       ],
-      expect.objectContaining({ timeout: 10_000 }),
+      expect.objectContaining({ timeout: 15_000 }),
     );
     expect(execaMock).toHaveBeenCalledTimes(1);
   });
@@ -1154,7 +1154,7 @@ describe("child timeout enforcement", () => {
     expect(execaMock).toHaveBeenCalledWith(
       "agent-browser",
       ["--session", "custom-deadline", "get", "url"],
-      expect.objectContaining({ timeout: 5_000 }),
+      expect.objectContaining({ timeout: 10_000 }),
     );
   });
 });
@@ -1280,7 +1280,7 @@ describe("wait step slicing", () => {
         "--timeout",
         "12000",
       ],
-      expect.objectContaining({ timeout: 17_000 }),
+      expect.objectContaining({ timeout: 22_000 }),
     );
   });
 
@@ -1300,7 +1300,7 @@ describe("wait step slicing", () => {
         "--fn",
         expect.stringContaining('includes("ready")'),
       ],
-      expect.objectContaining({ timeout: 60_000 }),
+      expect.objectContaining({ timeout: 65_000 }),
     );
   });
 });
@@ -2825,5 +2825,72 @@ describe("read failures fail loudly instead of reporting a green verdict", () =>
     await expect(adapter.getNetworkRequests()).rejects.toThrow(
       /could not read network requests.*daemon unreachable/s,
     );
+  });
+
+  it("adds a conservative snapshot timing only to terminal entries that lack native timing", async () => {
+    const snapshotTimestamp = 1_800_000_000_000;
+    const nativeResponseTimestamp = snapshotTimestamp - 1_500;
+    execaMock.mockResolvedValue({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        success: true,
+        data: {
+          requests: [
+            {
+              url: "https://example.test/api/answers",
+              method: "PATCH",
+              status: 204,
+              timestamp: snapshotTimestamp - 2_000,
+            },
+            {
+              url: "https://example.test/events",
+              method: "GET",
+              timestamp: snapshotTimestamp - 1_000,
+            },
+            {
+              url: "https://example.test/failed",
+              method: "GET",
+              error: "net::ERR_FAILED",
+              timestamp: snapshotTimestamp - 500,
+            },
+            {
+              url: "https://example.test/native-timing",
+              method: "GET",
+              status: 200,
+              timestamp: snapshotTimestamp - 2_000,
+              responseTimestamp: nativeResponseTimestamp,
+              durationMs: 500,
+            },
+          ],
+        },
+      }),
+      stderr: "",
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValue(snapshotTimestamp);
+
+    try {
+      const adapter = new AgentBrowserAdapter({ session: "network-timing" });
+      const requests = await adapter.getNetworkRequests();
+
+      expect(requests[0]).toMatchObject({
+        responseTimestamp: snapshotTimestamp,
+        durationMs: 2_000,
+        responseTimingSource: "network-snapshot-upper-bound",
+      });
+      expect(requests[1]).not.toHaveProperty("responseTimestamp");
+      expect(requests[1]).not.toHaveProperty("durationMs");
+      expect(requests[2]).toMatchObject({
+        responseTimestamp: snapshotTimestamp,
+        durationMs: 500,
+        responseTimingSource: "network-snapshot-upper-bound",
+      });
+      expect(requests[3]).toMatchObject({
+        responseTimestamp: nativeResponseTimestamp,
+        durationMs: 500,
+      });
+      expect(requests[3]).not.toHaveProperty("responseTimingSource");
+    } finally {
+      now.mockRestore();
+    }
   });
 });

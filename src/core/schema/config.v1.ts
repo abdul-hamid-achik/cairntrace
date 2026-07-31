@@ -292,11 +292,26 @@ export const TmuxPreCommandSchema = z.union([
 ]);
 export type TmuxPreCommand = z.infer<typeof TmuxPreCommandSchema>;
 
+function serviceArtifactWindowSegment(value: string): string | undefined {
+  const safe = value
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[.-]+|[.-]+$/g, "");
+  return safe && safe !== "." && safe !== ".." ? safe : undefined;
+}
+
 /** A single tmux window running one service. */
 export const TmuxWindowSchema = z
   .object({
     /** Window name (becomes the tmux window title; must be unique within the session). */
-    name: z.string().min(1),
+    name: z
+      .string()
+      .min(1)
+      .max(100)
+      .refine(
+        (name) => serviceArtifactWindowSegment(name) !== undefined,
+        "tmux window name must produce a safe service-artifact filename",
+      ),
     /** Working directory (relative to configDir or absolute). */
     cwd: z.string().optional(),
     /** Command to send to the window's shell (sent via `tmux send-keys ... Enter`). */
@@ -424,6 +439,11 @@ export const TmuxConfigSchema = z
     windows: z.array(TmuxWindowSchema).min(1),
     /** Reuse if the session already exists (default: true, false in CI). */
     reuseExisting: z.boolean().optional(),
+    /**
+     * Boot windows in declaration order, waiting for each window's `readyOn`
+     * before booting the next. Opt-in; the default boots all windows first.
+     */
+    waitForReadyBeforeNext: z.boolean().optional(),
     /** Max ms to wait for all windows to become ready. Default 90000. 0 = wait indefinitely. */
     readyTimeoutMs: z.number().int().nonnegative().optional(),
     /**
@@ -451,8 +471,94 @@ export const TmuxConfigSchema = z
       return new Set(names).size === names.length;
     },
     { message: "tmux window names must be unique within a session" },
+  )
+  .refine(
+    (cfg) => {
+      const artifactNames = cfg.windows.map((window) =>
+        serviceArtifactWindowSegment(window.name),
+      );
+      return new Set(artifactNames).size === artifactNames.length;
+    },
+    {
+      message:
+        "tmux window names must remain unique after service-artifact filename sanitization",
+    },
   );
 export type TmuxConfig = z.infer<typeof TmuxConfigSchema>;
+
+export const SERVICES_ARTIFACT_CAPTURE_SOURCES = [
+  "lifecycle",
+  "tmux",
+  "docker",
+  "seed",
+] as const;
+export const DEFAULT_SERVICES_ARTIFACT_MAX_LINES_PER_SOURCE = 2_000;
+export const DEFAULT_SERVICES_ARTIFACT_MAX_BYTES_PER_SOURCE = 512 * 1024;
+export const DEFAULT_SERVICES_ARTIFACT_MAX_BYTES_PER_RUN = 8 * 1024 * 1024;
+
+/**
+ * Local, per-run service diagnostics. This is deliberately independent from
+ * `services.stash`: local evidence is useful even when fcheap is unavailable,
+ * while stash remains an optional publication mechanism.
+ *
+ * The `services.artifacts` block itself is optional. Runtime callers resolve a
+ * missing block through this schema (`parse({})`), so the effective default is
+ * still `when: on-failure` without making `ServicesConfig` awkward for direct
+ * programmatic callers.
+ */
+export const ServicesArtifactsConfigSchema = z
+  .object({
+    /** Capture never, only for failed/errored runs, or for every run. */
+    when: z.enum(["never", "on-failure", "always"]).default("on-failure"),
+    /** Service evidence sources to include in the returned bundle. */
+    capture: z
+      .array(z.enum(SERVICES_ARTIFACT_CAPTURE_SOURCES))
+      .min(1)
+      .max(SERVICES_ARTIFACT_CAPTURE_SOURCES.length)
+      .default([...SERVICES_ARTIFACT_CAPTURE_SOURCES])
+      .refine(
+        (sources) => new Set(sources).size === sources.length,
+        "services.artifacts.capture sources must be unique",
+      ),
+    /** Tail lines requested from each tmux pane / Docker Compose log. */
+    maxLinesPerSource: z
+      .number()
+      .int()
+      .min(1)
+      .max(50_000)
+      .default(DEFAULT_SERVICES_ARTIFACT_MAX_LINES_PER_SOURCE),
+    /** Hard UTF-8 byte cap for one returned artifact. */
+    maxBytesPerSource: z
+      .number()
+      .int()
+      .min(256)
+      .max(16 * 1024 * 1024)
+      .default(DEFAULT_SERVICES_ARTIFACT_MAX_BYTES_PER_SOURCE),
+    /** Hard aggregate UTF-8 byte cap for the complete per-run bundle. */
+    maxBytesPerRun: z
+      .number()
+      .int()
+      .min(256)
+      .max(128 * 1024 * 1024)
+      .default(DEFAULT_SERVICES_ARTIFACT_MAX_BYTES_PER_RUN),
+  })
+  .strict()
+  .refine((cfg) => cfg.maxBytesPerSource <= cfg.maxBytesPerRun, {
+    message: "services.artifacts.maxBytesPerSource must be <= maxBytesPerRun",
+    path: ["maxBytesPerSource"],
+  });
+export type ServicesArtifactsConfig = z.infer<
+  typeof ServicesArtifactsConfigSchema
+>;
+export type ServicesArtifactCaptureSource =
+  (typeof SERVICES_ARTIFACT_CAPTURE_SOURCES)[number];
+
+/** Resolve the effective policy when the optional block is absent. */
+export function resolveServicesArtifactsConfig(
+  config: ServicesArtifactsConfig | undefined,
+): ServicesArtifactsConfig {
+  return ServicesArtifactsConfigSchema.parse(config ?? {});
+}
 
 /**
  * Controls how services session artifacts are stashed to the fcheap vault
@@ -502,6 +608,8 @@ export const ServicesConfigSchema = z
     tmux: TmuxConfigSchema.optional(),
     /** Shell commands run AFTER specs (teardown), best-effort, non-fatal. */
     teardown: z.array(z.string().min(1)).optional(),
+    /** Bounded local service evidence returned for attachment to each run. */
+    artifacts: ServicesArtifactsConfigSchema.optional(),
     /** Stash services session artifacts to fcheap after the run. */
     stash: ServicesStashConfigSchema.optional(),
   })

@@ -49,6 +49,7 @@ import {
   newRefUsage,
   type RefUsage,
 } from "./templateValue";
+import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
 
 export type ExportLang = "ts" | "js";
 
@@ -131,48 +132,34 @@ export function exportPlaywright(
     ...(opts.sourcePath ? { specDir: dirname(resolve(opts.sourcePath)) } : {}),
     ...(opts.outPath ? { outDir: dirname(resolve(opts.outPath)) } : {}),
   };
-
-  const needsNetwork = spec.outcomes.some(
-    (o) => isNetworkVerifier(o.verify) || isNoFailedRequestsVerifier(o.verify),
-  );
-  const needsConsole = spec.outcomes.some((o) => isConsoleVerifier(o.verify));
+  const timeoutBudget = playwrightTestTimeoutBudget(spec);
+  const needsNodeVerifierEvidence =
+    ctx.specDir !== undefined && hasNodeFileVerifier(spec);
+  if (needsNodeVerifierEvidence) {
+    ctx.nodeVerifierRunDir = "cairnRunDir";
+    ctx.nodeVerifierEvidence = "cairnNetworkEvidence";
+  }
 
   // ----- test body (rendered FIRST so ctx.usage knows every late-bound ref
   // before the header is assembled) -----
   const body: Stmt[] = [];
 
-  if (needsNetwork) {
-    const typeAnn =
-      lang === "ts"
-        ? `: Array<{ url: string; method: string; status?: number }>`
-        : "";
-    body.push(
-      raw(`const requests${typeAnn} = [];`),
-      raw(
-        `page.on("response", (r) => requests.push({ url: r.url(), method: r.request().method(), status: r.status() }));`,
-      ),
-      blank,
-    );
-  }
-  if (needsConsole) {
-    const typeAnn = lang === "ts" ? `: string[]` : "";
-    body.push(
-      raw(`const consoleErrors${typeAnn} = [];`),
-      raw(
-        `page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });`,
-      ),
-      raw(`page.on("pageerror", (e) => consoleErrors.push(e.message));`),
-      blank,
-    );
-  }
-
-  // Causation floor for node verifiers: without a cairn runDir/network log,
-  // verifiers would fall back to a wide time window that can match a PREVIOUS
-  // run's events (observed false positive). Stamp this run's start instead.
   body.push(
-    raw(`process.env.CAIRN_RUN_START_FLOOR_MS = String(Date.now());`),
+    comment(`Derived from sequential step/outcome budgets; bounded to 30m–4h.`),
+    ...(timeoutBudget.capped
+      ? [
+          comment(
+            `WARNING: authored budgets exceed the 4h export ceiling; split this spec.`,
+          ),
+        ]
+      : []),
+    raw(`test.setTimeout(${timeoutBudget.timeoutMs});`),
     blank,
   );
+  const evidenceInsertAt = body.length;
+
+  body.push(...renderOutcomeEvidenceSetup(spec, lang));
+
   if (steps.length > 0) {
     body.push(comment(`--- steps ---`));
     for (const step of steps) {
@@ -189,6 +176,14 @@ export function exportPlaywright(
     const rendered = renderOutcome(outcome, ctx);
     if (rendered.exported) coverage.outcomesExported += 1;
     body.push(...rendered.stmts, blank);
+  }
+
+  if (needsNodeVerifierEvidence) {
+    body.splice(
+      evidenceInsertAt,
+      0,
+      ...renderNodeVerifierEvidenceSetup(spec, ctx),
+    );
   }
 
   // ----- file assembly -----
@@ -240,6 +235,12 @@ export function exportPlaywright(
   }
 
   file.push(blank, raw(`import { expect, test } from "@playwright/test";`));
+  if (needsNodeVerifierEvidence) {
+    file.push(
+      blank,
+      verbatim(renderNodeVerifierEvidenceRuntime(lang).trimEnd().split("\n")),
+    );
+  }
   if (ctx.usage.runToken) {
     // Late-bound `${run.token}`: unique per Playwright invocation so exported
     // tests remain re-runnable (unique values keep emitting change events).
@@ -252,7 +253,13 @@ export function exportPlaywright(
   }
   file.push(
     blank,
-    block(`test(${JSON.stringify(title)}, async ({ page }) => {`, body, `});`),
+    block(
+      `test(${JSON.stringify(title)}, async ({ page }${
+        needsNodeVerifierEvidence ? ", testInfo" : ""
+      }) => {`,
+      body,
+      `});`,
+    ),
   );
 
   return {
@@ -262,6 +269,399 @@ export function exportPlaywright(
     requiredEnv: envNames,
     preconditions: preconditionLines,
   };
+}
+
+export function hasNodeFileVerifier(spec: Spec): boolean {
+  return spec.outcomes.some(
+    (outcome) =>
+      isScriptVerifier(outcome.verify) &&
+      outcome.verify.script.runtime === "node" &&
+      outcome.verify.script.file !== undefined,
+  );
+}
+
+/**
+ * Install every listener-backed evidence collector before the first step.
+ * Both single-file and project exports use this helper so rendering a network
+ * or console outcome can never drift away from declaring its backing buffer.
+ */
+export function renderOutcomeEvidenceSetup(
+  spec: Spec,
+  lang: ExportLang,
+): Stmt[] {
+  const stmts: Stmt[] = [];
+  const needsNetwork = spec.outcomes.some(
+    (outcome) =>
+      isNetworkVerifier(outcome.verify) ||
+      isNoFailedRequestsVerifier(outcome.verify),
+  );
+  const needsConsole = spec.outcomes.some((outcome) =>
+    isConsoleVerifier(outcome.verify),
+  );
+
+  if (needsNetwork) {
+    const typeAnn =
+      lang === "ts"
+        ? `: Array<{ url: string; method: string; status?: number }>`
+        : "";
+    stmts.push(
+      raw(`const requests${typeAnn} = [];`),
+      raw(
+        `page.on("response", (r) => requests.push({ url: r.url(), method: r.request().method(), status: r.status() }));`,
+      ),
+      blank,
+    );
+  }
+  if (needsConsole) {
+    const typeAnn = lang === "ts" ? `: string[]` : "";
+    stmts.push(
+      raw(`const consoleErrors${typeAnn} = [];`),
+      raw(
+        `page.on("console", (msg) => { if (msg.type() === "error") consoleErrors.push(msg.text()); });`,
+      ),
+      raw(`page.on("pageerror", (e) => consoleErrors.push(e.message));`),
+      blank,
+    );
+  }
+
+  return stmts;
+}
+
+export function renderNodeVerifierEvidenceSetup(
+  spec: Spec,
+  ctx: EmitCtx,
+): Stmt[] {
+  const redaction = spec.redaction;
+  const emitArray = (values: string[] | undefined): string =>
+    `[${(values ?? []).map((value) => emitValue(value, ctx.usage)).join(", ")}]`;
+  const configuredValues = emitArray(redaction?.values);
+  const headers = emitArray(redaction?.headers);
+  const queryParams = emitArray(redaction?.queryParams);
+  const storageKeys = emitArray(redaction?.storageKeys);
+  // Every late-bound env reference may be a vault secret even when its name is
+  // innocuous (MONGO_URI, DATABASE_URL, ...). Feed its runtime value into the
+  // artifact scrubber without ever writing that value into generated source.
+  const lateBoundValues = [...ctx.usage.envNames]
+    .toSorted()
+    .map((name) => `process.env[${JSON.stringify(name)}] ?? ""`);
+  const values = [`...${configuredValues}`, ...lateBoundValues].join(", ");
+
+  return [
+    comment(
+      `Node verifiers consume a self-contained, sanitized Cairn-compatible run directory.`,
+    ),
+    raw(`const ${ctx.nodeVerifierRunDir} = testInfo.outputPath("cairn-run");`),
+    raw(
+      `const ${ctx.nodeVerifierEvidence} = createCairnNetworkEvidence(page, { headers: ${headers}, queryParams: ${queryParams}, storageKeys: ${storageKeys}, values: [${values}] });`,
+    ),
+    blank,
+  ];
+}
+
+/**
+ * Self-contained runtime embedded into exported tests that invoke node file
+ * verifiers. It intentionally captures no headers and only retains bounded,
+ * valid JSON request bodies after recursive redaction.
+ */
+export function renderNodeVerifierEvidenceRuntime(lang: ExportLang): string {
+  const ts = lang === "ts";
+  const lines = [
+    `// Cairn-compatible network evidence for exported node verifiers.`,
+    ...(ts
+      ? [
+          `interface CairnEvidenceRequest {`,
+          `  url(): string;`,
+          `  method(): string;`,
+          `  postData(): string | null;`,
+          `  headers(): Record<string, string>;`,
+          `}`,
+          `interface CairnEvidenceResponse {`,
+          `  request(): CairnEvidenceRequest;`,
+          `  status(): number;`,
+          `}`,
+          `interface CairnEvidencePage {`,
+          `  on(event: "request", listener: (request: CairnEvidenceRequest) => void): unknown;`,
+          `  on(event: "response", listener: (response: CairnEvidenceResponse) => void): unknown;`,
+          `  on(event: "requestfinished", listener: (request: CairnEvidenceRequest) => void): unknown;`,
+          `  on(event: "requestfailed", listener: (request: CairnEvidenceRequest) => void): unknown;`,
+          `}`,
+          `interface CairnEvidenceRedaction {`,
+          `  headers?: string[];`,
+          `  queryParams?: string[];`,
+          `  storageKeys?: string[];`,
+          `  values?: string[];`,
+          `  responseTimeoutMs?: number;`,
+          `}`,
+          `interface CairnNetworkEntry {`,
+          `  url: string;`,
+          `  method: string;`,
+          `  timestamp: number;`,
+          `  responseTimestamp?: number;`,
+          `  durationMs?: number;`,
+          `  status?: number;`,
+          `  error?: string;`,
+          `  postData?: string;`,
+          `  postDataBytes?: number;`,
+          `  postDataTruncated?: boolean;`,
+          `  postDataOmittedReason?: "non-json" | "invalid-json" | "oversized" | "capture-error";`,
+          `}`,
+          `interface CairnApiRequestEvidence {`,
+          `  url: string;`,
+          `  method: string;`,
+          `  status?: number;`,
+          `  timestamp?: number;`,
+          `  body?: unknown;`,
+          `  contentType?: string;`,
+          `}`,
+        ]
+      : []),
+    `const CAIRN_MAX_JSON_POST_DATA_BYTES = 64 * 1024;`,
+    `const CAIRN_PATCH_RESPONSE_TIMEOUT_MS = 120_000;`,
+    `const CAIRN_SENSITIVE_NAME_RE = /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion/i;`,
+    ``,
+    `export function createCairnNetworkEvidence(page${
+      ts ? ": CairnEvidencePage" : ""
+    }, redaction${ts ? ": CairnEvidenceRedaction" : ""} = {}) {`,
+    `  const entries${ts ? ": CairnNetworkEntry[]" : ""} = [];`,
+    `  const byRequest = new WeakMap${
+      ts ? "<CairnEvidenceRequest, CairnNetworkEntry>" : ""
+    }();`,
+    `  const pendingPatches = new Map${
+      ts
+        ? "<CairnEvidenceRequest, { promise: Promise<void>; resolve: () => void }>"
+        : ""
+    }();`,
+    `  const responseTimeoutMs = Math.max(1, redaction.responseTimeoutMs ?? CAIRN_PATCH_RESPONSE_TIMEOUT_MS);`,
+    `  const configuredNames = new Set(`,
+    `    [...(redaction.headers ?? []), ...(redaction.storageKeys ?? [])]`,
+    `      .map((name) => name.trim().toLowerCase())`,
+    `      .filter(Boolean),`,
+    `  );`,
+    `  const configuredQueryParams = new Set(`,
+    `    (redaction.queryParams ?? [])`,
+    `      .map((name) => name.trim().toLowerCase())`,
+    `      .filter(Boolean),`,
+    `  );`,
+    `  const explicitSecrets = (redaction.values ?? [])`,
+    `    .map((value) => String(value ?? "").trim())`,
+    `    .filter(Boolean);`,
+    `  const ambientSecrets = Object.entries(process.env)`,
+    `    .filter(([key, value]) => key !== "CAIRN_RUN_TOKEN" && value && CAIRN_SENSITIVE_NAME_RE.test(key))`,
+    `    .map((entry) => String(entry[1] ?? "").trim())`,
+    `    .filter(Boolean);`,
+    `  const literalSecrets = [...new Set([...explicitSecrets, ...ambientSecrets])]`,
+    `    .map((value) => String(value ?? "").trim())`,
+    `    .filter(Boolean)`,
+    `    .sort((a, b) => b.length - a.length);`,
+    ``,
+    `  const isSensitiveName = (name${ts ? ": string" : ""}) =>`,
+    `    CAIRN_SENSITIVE_NAME_RE.test(name) || configuredNames.has(name.toLowerCase());`,
+    `  const redactLiteralText = (input${ts ? ": string" : ""}) => {`,
+    `    let output = input;`,
+    `    for (const secret of literalSecrets) output = output.split(secret).join("[redacted]");`,
+    `    return output;`,
+    `  };`,
+    `  const redactUrl = (input${ts ? ": string" : ""}) => {`,
+    `    const scrubbed = redactLiteralText(input);`,
+    `    const hasAbsoluteScheme = /^[a-z][a-z\\d+.-]*:/i.test(scrubbed);`,
+    `    const isProtocolRelative = scrubbed.startsWith("//");`,
+    `    try {`,
+    `      const parsed = new URL(scrubbed, "http://cairn.invalid");`,
+    `      const safeParams = new URLSearchParams();`,
+    `      for (const [key, value] of parsed.searchParams.entries()) {`,
+    `        const safeValue =`,
+    `          CAIRN_SENSITIVE_NAME_RE.test(key) || configuredQueryParams.has(key.toLowerCase())`,
+    `            ? "[redacted]"`,
+    `            : redactLiteralText(value);`,
+    `        safeParams.append(key, safeValue);`,
+    `      }`,
+    `      parsed.search = safeParams.toString();`,
+    `      if (hasAbsoluteScheme) return parsed.toString();`,
+    `      if (isProtocolRelative) return "//" + parsed.host + parsed.pathname + parsed.search + parsed.hash;`,
+    `      return parsed.pathname + parsed.search + parsed.hash;`,
+    `    } catch {`,
+    `      return "[redacted]";`,
+    `    }`,
+    `  };`,
+    `  const redactValue = (input${ts ? ": unknown" : ""})${
+      ts ? ": unknown" : ""
+    } => {`,
+    `    if (typeof input === "string") return redactLiteralText(input);`,
+    `    if (input === null || typeof input !== "object") return input;`,
+    `    if (Array.isArray(input)) return input.map(redactValue);`,
+    `    const record = input${ts ? " as Record<string, unknown>" : ""};`,
+    `    const namedValueIsSensitive =`,
+    `      typeof record.name === "string" &&`,
+    `      (isSensitiveName(record.name) || configuredQueryParams.has(record.name.toLowerCase()));`,
+    `    return Object.fromEntries(`,
+    `      Object.entries(record).map(([key, value]) => [`,
+    `        key,`,
+    `        isSensitiveName(key) || (namedValueIsSensitive && key.toLowerCase() === "value")`,
+    `          ? "[redacted]"`,
+    `          : redactValue(value),`,
+    `      ]),`,
+    `    );`,
+    `  };`,
+    `  const captureJsonPostData = (raw${
+      ts ? ": string | null" : ""
+    }, contentType${ts ? ": string | undefined" : ""})${
+      ts ? ": Partial<CairnNetworkEntry>" : ""
+    } => {`,
+    `    if (raw === null) return {};`,
+    `    const bytes = new TextEncoder().encode(raw).byteLength;`,
+    `    if (!contentType || !/(?:\\/|\\+)json(?:\\b|;)/i.test(contentType)) {`,
+    `      return { postDataBytes: bytes, postDataOmittedReason: "non-json" };`,
+    `    }`,
+    `    if (bytes > CAIRN_MAX_JSON_POST_DATA_BYTES) {`,
+    `      return { postDataBytes: bytes, postDataTruncated: true, postDataOmittedReason: "oversized" };`,
+    `    }`,
+    `    try {`,
+    `      return { postData: JSON.stringify(redactValue(JSON.parse(raw))) };`,
+    `    } catch {`,
+    `      return { postDataBytes: bytes, postDataOmittedReason: "invalid-json" };`,
+    `    }`,
+    `  };`,
+    `  const captureRequest = (request${
+      ts ? ": CairnEvidenceRequest" : ""
+    }) => {`,
+    `    const timestamp = Date.now();`,
+    `    let entry${ts ? ": CairnNetworkEntry" : ""};`,
+    `    try {`,
+    `      const headers = request.headers();`,
+    `      entry = {`,
+    `        url: redactUrl(request.url()),`,
+    `        method: request.method().toUpperCase(),`,
+    `        timestamp,`,
+    `        ...captureJsonPostData(request.postData(), headers["content-type"]),`,
+    `      };`,
+    `    } catch {`,
+    `      entry = {`,
+    `        url: "[redacted]",`,
+    `        method: "UNKNOWN",`,
+    `        timestamp,`,
+    `        postDataOmittedReason: "capture-error",`,
+    `      };`,
+    `    }`,
+    `    entries.push(entry);`,
+    `    byRequest.set(request, entry);`,
+    `    if (entry.method === "PATCH") {`,
+    `      let resolveCompletion${ts ? ": () => void" : ""} = () => {};`,
+    `      const promise = new Promise${ts ? "<void>" : ""}((resolve) => {`,
+    `        resolveCompletion = resolve;`,
+    `      });`,
+    `      pendingPatches.set(request, { promise, resolve: resolveCompletion });`,
+    `    }`,
+    `  };`,
+    `  const finishRequest = (request${
+      ts ? ": CairnEvidenceRequest" : ""
+    }) => {`,
+    `    const pending = pendingPatches.get(request);`,
+    `    if (!pending) return;`,
+    `    pendingPatches.delete(request);`,
+    `    pending.resolve();`,
+    `  };`,
+    `  page.on("request", captureRequest);`,
+    `  page.on("response", (response${
+      ts ? ": CairnEvidenceResponse" : ""
+    }) => {`,
+    `    const entry = byRequest.get(response.request());`,
+    `    if (entry) {`,
+    `      entry.status = response.status();`,
+    `    }`,
+    `  });`,
+    `  page.on("requestfinished", (request${
+      ts ? ": CairnEvidenceRequest" : ""
+    }) => {`,
+    `    const entry = byRequest.get(request);`,
+    `    if (entry) {`,
+    `      if (entry.status === undefined) entry.error = "response status unavailable";`,
+    `      entry.responseTimestamp = Date.now();`,
+    `      entry.durationMs = Math.max(0, entry.responseTimestamp - entry.timestamp);`,
+    `    }`,
+    `    finishRequest(request);`,
+    `  });`,
+    `  page.on("requestfailed", (request${
+      ts ? ": CairnEvidenceRequest" : ""
+    }) => {`,
+    `    const entry = byRequest.get(request);`,
+    `    if (entry) {`,
+    `      entry.error = "request failed";`,
+    `      entry.responseTimestamp = Date.now();`,
+    `      entry.durationMs = Math.max(0, entry.responseTimestamp - entry.timestamp);`,
+    `    }`,
+    `    finishRequest(request);`,
+    `  });`,
+    ``,
+    `  return {`,
+    `    recordApiRequest(input${ts ? ": CairnApiRequestEvidence" : ""}) {`,
+    `      const responseTimestamp = Date.now();`,
+    `      const timestamp = input.timestamp ?? responseTimestamp;`,
+    `      const timing = {`,
+    `        timestamp,`,
+    `        responseTimestamp,`,
+    `        durationMs: Math.max(0, responseTimestamp - timestamp),`,
+    `      };`,
+    `      let raw${ts ? ": string | null" : ""} = null;`,
+    `      let contentType = input.contentType;`,
+    `      if (input.body !== undefined) {`,
+    `        try {`,
+    `          raw = typeof input.body === "string" ? input.body : JSON.stringify(input.body);`,
+    `          if (typeof input.body !== "string" && !contentType) contentType = "application/json";`,
+    `        } catch {`,
+    `          entries.push({`,
+    `            url: redactUrl(input.url),`,
+    `            method: input.method.toUpperCase(),`,
+    `            ...timing,`,
+    `            ...(input.status === undefined ? {} : { status: input.status }),`,
+    `            postDataOmittedReason: "capture-error",`,
+    `          });`,
+    `          return;`,
+    `        }`,
+    `      }`,
+    `      entries.push({`,
+    `        url: redactUrl(input.url),`,
+    `        method: input.method.toUpperCase(),`,
+    `        ...timing,`,
+    `        ...(input.status === undefined ? {} : { status: input.status }),`,
+    `        ...captureJsonPostData(raw, contentType),`,
+    `      });`,
+    `    },`,
+    `    async persist(runDir${ts ? ": string" : ""})${
+      ts ? ": Promise<void>" : ""
+    } {`,
+    `      const pending = [...pendingPatches.values()].map((completion) => completion.promise);`,
+    `      if (pending.length > 0) {`,
+    `        let timeoutId${
+      ts ? ": ReturnType<typeof setTimeout> | undefined" : ""
+    };`,
+    `        const completed = await Promise.race([`,
+    `          Promise.all(pending).then(() => true),`,
+    `          new Promise${ts ? "<boolean>" : ""}((resolve) => {`,
+    `            timeoutId = setTimeout(() => resolve(false), responseTimeoutMs);`,
+    `          }),`,
+    `        ]);`,
+    `        if (timeoutId !== undefined) clearTimeout(timeoutId);`,
+    `        if (!completed) {`,
+    `          throw new Error("Timed out waiting for captured PATCH response evidence.");`,
+    `        }`,
+    `      }`,
+    `      const [{ mkdir, writeFile }, { join }] = await Promise.all([`,
+    `        import("node:fs/promises"),`,
+    `        import("node:path"),`,
+    `      ]);`,
+    `      const networkDir = join(runDir, "network");`,
+    `      await mkdir(networkDir, { recursive: true });`,
+    `      const body = entries.map((entry) => JSON.stringify(entry)).join("\\n");`,
+    `      await writeFile(join(networkDir, "requests.ndjson"), body ? body + "\\n" : "", {`,
+    `        encoding: "utf8",`,
+    `        mode: 0o600,`,
+    `      });`,
+    `    },`,
+    `  };`,
+    `}`,
+    ``,
+  ];
+  return lines.join("\n");
 }
 
 /* ----- emit context ----- */
@@ -281,6 +681,10 @@ export interface EmitCtx {
    */
   verifierImportPrefix?: string;
   verifierFiles?: Set<string>;
+  /** Generated run directory passed to every exported node file verifier. */
+  nodeVerifierRunDir?: string;
+  /** Generated sanitized network recorder persisted before node verification. */
+  nodeVerifierEvidence?: string;
 }
 
 export function newEmitCtx(
@@ -813,14 +1217,42 @@ function renderRequestStep(
     opts.push(`data: ${emitValue(r.body, ctx.usage)}`);
   }
   const varName = r.assign ? safeIdent(r.assign) : "_res";
+  const evidenceTimestamp = `${varName}CairnRequestTimestamp`;
   const stmts: Stmt[] = [
     comment(
       `request step (${r.assign ?? "unnamed"}) — page.request shares browser context cookies`,
     ),
+  ];
+  if (ctx.nodeVerifierEvidence) {
+    stmts.push(raw(`const ${evidenceTimestamp} = Date.now();`));
+  }
+  stmts.push(
     raw(
       `const ${varName} = await page.request.fetch(${str(r.url)}, { ${opts.join(", ")} });`,
     ),
-  ];
+  );
+  if (ctx.nodeVerifierEvidence) {
+    const contentType = Object.entries(headers).find(
+      ([name]) => name.toLowerCase() === "content-type",
+    )?.[1];
+    const evidence: string[] = [
+      `url: ${varName}.url()`,
+      `method: ${JSON.stringify(method)}`,
+      `status: ${varName}.status()`,
+      `timestamp: ${evidenceTimestamp}`,
+    ];
+    if (r.body !== undefined) {
+      evidence.push(`body: ${emitValue(r.body, ctx.usage)}`);
+    }
+    if (contentType !== undefined) {
+      evidence.push(`contentType: ${emitStr(contentType, ctx.usage)}`);
+    }
+    stmts.push(
+      raw(
+        `${ctx.nodeVerifierEvidence}.recordApiRequest({ ${evidence.join(", ")} });`,
+      ),
+    );
+  }
   if (r.expectStatus !== undefined) {
     if (Array.isArray(r.expectStatus)) {
       stmts.push(
@@ -1057,6 +1489,15 @@ function renderScriptOutcome(
   ctx: EmitCtx,
 ): Rendered {
   if (v.script.runtime === "node" && v.script.file && ctx.specDir) {
+    if (!ctx.nodeVerifierRunDir || !ctx.nodeVerifierEvidence) {
+      return skipStmt(
+        ctx,
+        "outcome",
+        "node verifier runDir evidence runtime unavailable",
+        `node verifier skipped — export must provide a sanitized runDir`,
+        outcomeId,
+      );
+    }
     // Playwright tests already run in node and its loader transpiles TS
     // imports, so a `runtime: node` file verifier is directly executable:
     // import the module and call its `verify(ctx)` entry with the same ctx
@@ -1082,6 +1523,9 @@ function renderScriptOutcome(
           comment(
             `node verifier (runs in the test's node context, not the browser)`,
           ),
+          raw(
+            `await ${ctx.nodeVerifierEvidence}.persist(${ctx.nodeVerifierRunDir});`,
+          ),
           raw(`const mod = await import(${JSON.stringify(importPath)});`),
           comment(
             `ESM/CJS interop: Playwright transpiles TS imports to CJS, so a`,
@@ -1103,6 +1547,7 @@ function renderScriptOutcome(
               ),
               raw(`artifacts: {},`),
               raw(`vars: {},`),
+              raw(`runDir: ${ctx.nodeVerifierRunDir},`),
               raw(`specDir: ${JSON.stringify(ctx.specDir)},`),
             ],
             `});`,

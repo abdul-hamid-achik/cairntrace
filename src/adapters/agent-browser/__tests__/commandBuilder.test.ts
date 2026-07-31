@@ -121,6 +121,16 @@ describe("waitConditionToArgv", () => {
     ).toEqual(["wait", "#element_69d53d5dabbab17b1fede24f"]);
   });
 
+  it("selector wait omits the redundant unsupported visible state", () => {
+    expect(
+      waitConditionToArgv({
+        selector: "#ready",
+        state: "visible",
+        timeoutMs: 30000,
+      }),
+    ).toEqual(["wait", "#ready", "--timeout", "30000"]);
+  });
+
   it("selector wait with state and timeout", () => {
     expect(
       waitConditionToArgv({

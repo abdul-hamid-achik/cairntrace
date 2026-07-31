@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import {
   appendFile,
+  chmod,
+  lstat,
   mkdir,
   readdir,
   rm,
@@ -36,6 +38,9 @@ import {
 } from "./renderers/report";
 import { renderYaml } from "./renderers/yaml";
 
+const ARTIFACT_DIRECTORY_MODE = 0o700;
+const ARTIFACT_FILE_MODE = 0o600;
+
 /**
  * Event emitted to events.ndjson during a run. Append-only.
  */
@@ -62,6 +67,7 @@ export interface RunEvent {
     | "artifact.eval"
     | "artifact.monitor"
     | "artifact.video"
+    | "artifact.services"
     | "artifact.stash"
     | "artifact.retention"
     | "viewport.set"
@@ -121,6 +127,7 @@ export class ArtifactWriter {
   private readonly artifactKinds = new Map<string, string>();
   private readonly pendingWrites = new Set<Promise<unknown>>();
   private eventTail: Promise<void> = Promise.resolve();
+  private eventLogPermissionsSealed = false;
 
   constructor(
     runDir: string,
@@ -131,7 +138,11 @@ export class ArtifactWriter {
   }
 
   async ensureDirs(): Promise<void> {
-    await mkdir(this.runDir, { recursive: true });
+    await mkdir(this.runDir, {
+      recursive: true,
+      mode: ARTIFACT_DIRECTORY_MODE,
+    });
+    await tightenMode(this.runDir, ARTIFACT_DIRECTORY_MODE);
     await Promise.all(
       [
         "screenshots",
@@ -181,7 +192,11 @@ export class ArtifactWriter {
   /** Ensure a confined artifact directory exists. */
   async ensureDir(relative: string): Promise<string> {
     const absolute = this.resolve(relative);
-    await mkdir(absolute, { recursive: true });
+    await mkdir(absolute, {
+      recursive: true,
+      mode: ARTIFACT_DIRECTORY_MODE,
+    });
+    await tightenMode(absolute, ARTIFACT_DIRECTORY_MODE);
     return absolute;
   }
 
@@ -194,7 +209,7 @@ export class ArtifactWriter {
     kind = inferArtifactKind(relative),
   ): Promise<string> {
     const absolute = this.resolve(relative);
-    await mkdir(dirname(absolute), { recursive: true });
+    await ensurePrivateDirectory(dirname(absolute));
     this.artifactKinds.set(toPortablePath(relative), kind);
     return absolute;
   }
@@ -222,8 +237,11 @@ export class ArtifactWriter {
   ): Promise<void> {
     const absolute = this.resolve(relative);
     const operation = (async () => {
-      await mkdir(dirname(absolute), { recursive: true });
-      await writeFile(absolute, this.redactor.text(contents));
+      await ensurePrivateDirectory(dirname(absolute));
+      await writeFile(absolute, this.redactor.text(contents), {
+        mode: ARTIFACT_FILE_MODE,
+      });
+      await tightenMode(absolute, ARTIFACT_FILE_MODE);
       this.artifactKinds.set(toPortablePath(relative), kind);
     })();
     return this.track(operation);
@@ -243,6 +261,35 @@ export class ArtifactWriter {
     await this.writeText(relative, `${rendered}\n`, kind);
   }
 
+  /**
+   * Write newline-delimited JSON while values are still structured. Redacting
+   * the rendered string is too late for dynamic header values such as
+   * Authorization, Cookie, and Set-Cookie: their field names are then only
+   * escaped text, rather than keys the redactor can classify.
+   */
+  async writeNdjson(
+    relative: string,
+    values: readonly unknown[],
+    kind = inferArtifactKind(relative),
+  ): Promise<void> {
+    const rendered = values
+      .map((value, index) => {
+        const line = JSON.stringify(this.redactor.value(value));
+        if (line === undefined) {
+          throw new TypeError(
+            `artifact NDJSON value is not serializable: ${relative}[${index}]`,
+          );
+        }
+        return line;
+      })
+      .join("\n");
+    await this.writeText(
+      relative,
+      `${rendered}${values.length > 0 ? "\n" : ""}`,
+      kind,
+    );
+  }
+
   async writeBinary(
     relative: string,
     contents: Uint8Array,
@@ -250,8 +297,9 @@ export class ArtifactWriter {
   ): Promise<void> {
     const absolute = this.resolve(relative);
     const operation = (async () => {
-      await mkdir(dirname(absolute), { recursive: true });
-      await writeFile(absolute, contents);
+      await ensurePrivateDirectory(dirname(absolute));
+      await writeFile(absolute, contents, { mode: ARTIFACT_FILE_MODE });
+      await tightenMode(absolute, ARTIFACT_FILE_MODE);
       this.artifactKinds.set(toPortablePath(relative), kind);
     })();
     return this.track(operation);
@@ -287,7 +335,12 @@ export class ArtifactWriter {
     });
     const operation = (async () => {
       try {
-        await pipeline(source, limiter, createWriteStream(absolute));
+        await pipeline(
+          source,
+          limiter,
+          createWriteStream(absolute, { mode: ARTIFACT_FILE_MODE }),
+        );
+        await tightenMode(absolute, ARTIFACT_FILE_MODE);
         return { path: absolute, bytes };
       } catch (error) {
         await rm(absolute, { force: true });
@@ -400,8 +453,18 @@ export class ArtifactWriter {
     const line = `${JSON.stringify(this.redactor.value(event))}\n`;
     const absolute = this.resolve("events.ndjson");
     const operation = this.eventTail.then(async () => {
-      await mkdir(dirname(absolute), { recursive: true });
-      await appendFile(absolute, line);
+      if (!this.eventLogPermissionsSealed) {
+        await ensurePrivateDirectory(dirname(absolute));
+      }
+      await appendFile(absolute, line, { mode: ARTIFACT_FILE_MODE });
+      // appendFile's mode only applies when creating the file. Seal an existing
+      // permissive event log on this writer's first append, then avoid two
+      // extra filesystem syscalls for every subsequent event. writeManifest()
+      // seals the complete tree again before publishing it.
+      if (!this.eventLogPermissionsSealed) {
+        await tightenMode(absolute, ARTIFACT_FILE_MODE);
+        this.eventLogPermissionsSealed = true;
+      }
       this.artifactKinds.set("events.ndjson", "event-log");
     });
     this.eventTail = operation.catch(() => undefined);
@@ -451,6 +514,7 @@ export class ArtifactWriter {
   ): Promise<ArtifactManifest> {
     const absolute = this.resolve(relative);
     await this.flushPendingWrites();
+    await this.normalizeArtifactPermissions(this.runDir);
     const excluded = toPortablePath(relative);
     const artifacts = await this.collectManifestEntries(
       this.runDir,
@@ -459,8 +523,11 @@ export class ArtifactWriter {
     );
     artifacts.sort((a, b) => a.path.localeCompare(b.path));
     const manifest: ArtifactManifest = { version: "1", artifacts };
-    await mkdir(dirname(absolute), { recursive: true });
-    await writeFile(absolute, `${JSON.stringify(manifest, null, 2)}\n`);
+    await ensurePrivateDirectory(dirname(absolute));
+    await writeFile(absolute, `${JSON.stringify(manifest, null, 2)}\n`, {
+      mode: ARTIFACT_FILE_MODE,
+    });
+    await tightenMode(absolute, ARTIFACT_FILE_MODE);
     this.artifactKinds.set(excluded, "manifest");
     return manifest;
   }
@@ -512,6 +579,47 @@ export class ArtifactWriter {
     }
     return entries;
   }
+
+  /**
+   * Producer-owned artifacts (screenshots, traces, downloads) are written
+   * outside ArtifactWriter's write helpers. Seal the complete tree before its
+   * manifest is published. Symbolic links are deliberately ignored here and
+   * rejected by collectManifestEntries, so chmod never follows one outside the
+   * run directory.
+   */
+  private async normalizeArtifactPermissions(directory: string): Promise<void> {
+    await tightenMode(directory, ARTIFACT_DIRECTORY_MODE);
+    const children = await readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      if (child.isSymbolicLink()) continue;
+      const absolute = resolvePath(directory, child.name);
+      if (child.isDirectory()) {
+        await this.normalizeArtifactPermissions(absolute);
+      } else if (child.isFile()) {
+        await tightenMode(absolute, ARTIFACT_FILE_MODE);
+      }
+    }
+  }
+}
+
+async function ensurePrivateDirectory(absolute: string): Promise<void> {
+  await mkdir(absolute, {
+    recursive: true,
+    mode: ARTIFACT_DIRECTORY_MODE,
+  });
+  await tightenMode(absolute, ARTIFACT_DIRECTORY_MODE);
+}
+
+async function tightenMode(absolute: string, mode: number): Promise<void> {
+  // Windows does not implement POSIX permission bits. Parent-directory
+  // confinement still applies there; ACL hardening requires a platform-native
+  // policy outside this writer.
+  if (process.platform === "win32") return;
+  const entry = await lstat(absolute);
+  if (entry.isSymbolicLink()) {
+    throw new Error(`artifact permissions refuse symbolic link: ${absolute}`);
+  }
+  await chmod(absolute, mode);
 }
 
 function toPortablePath(relative: string): string {

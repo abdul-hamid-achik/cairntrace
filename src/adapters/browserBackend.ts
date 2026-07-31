@@ -50,6 +50,18 @@ export interface NetworkEntry {
   status?: number;
   resourceType?: string;
   durationMs?: number;
+  /** Unix epoch milliseconds, matching agent-browser request evidence. */
+  timestamp?: number;
+  /** Epoch milliseconds when a response/failure became observable. */
+  responseTimestamp?: number;
+  /** Present only when response timing is a conservative capture-time bound. */
+  responseTimingSource?: "network-snapshot-upper-bound";
+  /** Bounded request body text when the backend can observe it safely. */
+  postData?: string;
+  /** Original UTF-8 body size when postData had to be bounded. */
+  postDataBytes?: number;
+  postDataTruncated?: boolean;
+  postDataOmittedReason?: "non-json" | "invalid-json" | "oversized";
   startedAt?: string;
   [extra: string]: unknown;
 }

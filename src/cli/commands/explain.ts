@@ -123,7 +123,7 @@ export function buildExplain(): ExplainResult {
             type: "boolean",
             default: false,
             description:
-              "Preview the services lifecycle (docker/seed/tmux) without executing any commands. Prints the plan and returns a no-op handle.",
+              "Preview the services lifecycle (docker/seed/tmux) without executing any commands. Prints the plan and exits before web-server, hooks, browser, preconditions, or specs.",
           },
           {
             name: "--auto-annotate",

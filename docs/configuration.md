@@ -74,6 +74,7 @@ services:                             # multi-service lifecycle (docker/seed/tmu
   seed: { command: "yarn demo-import", ttlSeconds: 21600, freshnessCheck: "mongosh --quiet --eval 'db.count()' mydb" }
   tmux:
     session: myapp
+    waitForReadyBeforeNext: true         # opt-in serial boot; shared readyTimeoutMs deadline
     windows:
       - { name: web, cwd: web-app, command: "yarn serve", readyOn: { url: http://localhost:8080 } }
   teardown: ["tmux kill-session -t myapp", "docker compose down"]
@@ -141,7 +142,7 @@ Each placeholder is resolved exactly once and emitted verbatim — a value that 
 Several settings that look like config actually live on the **spec**, not `cairntrace.config.yml`:
 
 - `backend`, `mode`, `viewport`, `vars`, `environment`, `settleMs`, `coldStart`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
-- `redaction:` on a spec is `{ headers?, queryParams?, storageKeys?, values? }` (arrays of strings to scrub), not a regex list.
+- `redaction:` on a spec is `{ headers?, queryParams?, storageKeys?, values? }`, not a regex list. Header, query-parameter, and storage-key names match case-insensitively; `values` are literal secret strings. These rules augment the built-in credential heuristics rather than replacing them.
 
 Backend choice and capture policies are per-spec because they describe *what this flow observes*, not project plumbing. Project plumbing (environments, services, secrets, retention, integrations) is what goes in config.
 
@@ -152,6 +153,7 @@ Backend choice and capture policies are per-spec because they describe *what thi
 - `secrets.provider: tvault` requires a `tvault:` block with either `project` (direct) or `group`+`env` (inheritance) — not both.
 - `tmux` window names must be unique within a session.
 - A `tmux` window with `readyOn` must specify at least one of `url` or `text`.
+- `tmux.waitForReadyBeforeNext` defaults to false. When true, each window must satisfy `readyOn` before the next is booted; `readyTimeoutMs` remains one shared deadline for the complete sequence.
 - An `xlsx` verifier (spec-side) requires `sheets` or `validations`.
 
 Run it in CI before `cairn run` so a malformed config fails fast instead of mid-run.

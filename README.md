@@ -263,6 +263,9 @@ bounded page-fetch fallback. Relative request URLs resolve against config
 
 Request-step calls are mirrored into run network evidence, so `network` and
 `noFailedRequests` outcomes can assert on API calls made by the spec itself.
+Native Playwright entries include a numeric epoch `timestamp` and, for valid
+JSON bodies up to 64 KiB, sanitized `postData`. Sensitive JSON keys are
+redacted; headers and opaque, invalid, or oversized bodies are never persisted.
 
 `batch` runs a chain of selector interactions in **one** backend invocation
 (agent-browser `batch --bail`), so transient UI state survives — e.g. a hover
@@ -511,6 +514,7 @@ transforms/
 requests/
 evals/
 diagnostics/
+services/            # optional bounded service-log pack
 traces/
 videos/
 ```

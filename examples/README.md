@@ -110,6 +110,7 @@ formatting in the YAML are preserved by `--apply` (uses the `yaml` package's
    screenshots/<step>.png      (on failure or when always-on)
    console/console.ndjson, errors.ndjson
    network/requests.ndjson, failed_requests.ndjson
+   services/manifest.json      (when services artifact capture is enabled)
    downloads/<file>
    transforms/<file>
    spec.resolved.yml

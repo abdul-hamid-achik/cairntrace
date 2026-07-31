@@ -27,7 +27,32 @@ describe("exportPlaywright", () => {
     const src = srcOf(baseSpec({}));
     expect(src).toContain(`import { expect, test } from "@playwright/test";`);
     expect(src).toContain(`test("exporter_smoke", async ({ page }) => {`);
+    expect(src).toContain(`test.setTimeout(1800000);`);
     expect(src.trim().endsWith("});")).toBe(true);
+  });
+
+  it("warns when an authored budget reaches the four-hour ceiling", () => {
+    const src = srcOf(
+      baseSpec({
+        outcomes: [
+          {
+            id: "slow",
+            description: "slow verifier completes",
+            verify: {
+              script: {
+                runtime: "node",
+                file: "../verifiers/slow.ts",
+                timeoutMs: 5 * 60 * 60 * 1000,
+              },
+            },
+          },
+        ],
+      }),
+      { sourcePath: "/tmp/flows/slow.yml" },
+    );
+
+    expect(src).toContain(`test.setTimeout(14400000);`);
+    expect(src).toContain(`authored budgets exceed the 4h export ceiling`);
   });
 
   it("translates open/click/hover/fill steps", () => {

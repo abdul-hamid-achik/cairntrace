@@ -18,6 +18,9 @@
     "vidtrace",
     "tvault"
   ],
+  "ignoreDependencies": [
+    "@clack/prompts"
+  ],
   "ignoreIssues": {
     "src/core/schema/**": ["exports", "types"],
     "src/cli/commands/secrets.ts": ["exports", "types"],

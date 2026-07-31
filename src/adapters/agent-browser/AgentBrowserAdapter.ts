@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +42,7 @@ import {
   parseViewportMetrics,
   quoteIfNeeded,
 } from "./parseOutput";
+import { createProcessTreeWatchdog, descendantPidsSync } from "./processTree";
 import type { AgentBrowserOptions } from "./types";
 
 type BatchCommandPhase = "probe" | "action" | "pace" | "verify";
@@ -543,7 +543,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
         }`,
       );
     }
-    return parseEnvelope<NetworkEntry>(r.stdout, "requests");
+    const entries = parseEnvelope<NetworkEntry>(r.stdout, "requests");
+    return normalizeTerminalNetworkTiming(entries, Date.now());
   }
 
   /** Stop tracking. Useful between specs to avoid stale entries leaking. */
@@ -822,7 +823,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if (pid === undefined) return false;
     // Capture children before any kill so the escalation path still knows
     // which Chrome to take down.
-    const children = childPidsSync(pid);
+    const children = descendantPidsSync(pid);
     try {
       process.kill(pid, "SIGTERM");
       const deadline = Date.now() + DAEMON_TERM_POLL_MS;
@@ -1872,18 +1873,31 @@ export class AgentBrowserAdapter implements BrowserBackend {
       ...argv,
     ];
     // Every invocation carries a hard deadline so a wedged daemon can never
-    // hang a run: execa SIGTERMs the child at `timeout` (SIGKILL 5s later).
+    // hang a run. Cairn owns the primary watchdog because package-manager
+    // shims can spawn a native child without forwarding execa's SIGTERM; that
+    // orphan keeps inherited pipes open and can double the observed timeout.
     const timeoutMs =
       invokeOpts.timeoutMs ??
       this.opts.defaultTimeoutMs ??
       DEFAULT_COMMAND_TIMEOUT_MS;
-    const result = await execa(this.binary, fullArgv, {
+    const subprocess = execa(this.binary, fullArgv, {
       reject: false,
       cwd: this.opts.cwd,
-      timeout: timeoutMs,
+      // A later execa timeout remains defense-in-depth if the watchdog itself
+      // cannot run (for example, during a blocked event loop).
+      timeout: timeoutMs + EXECA_TIMEOUT_FALLBACK_MS,
       env: targetChildEnv(process.env),
     });
-    if (result.timedOut) {
+    const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs, () =>
+      this.terminateDaemon(),
+    );
+    let result;
+    try {
+      result = await subprocess;
+    } finally {
+      watchdog.cancel();
+    }
+    if (watchdog.timedOut || result.timedOut) {
       // Set the flag AFTER composing the result so the retry guard's
       // `sawChildTimeout` check in invoke() reflects only PRIOR kills.
       // (Setting it before would make the same-call retry decide it has
@@ -1925,6 +1939,47 @@ const POLL_INTERVAL_MS = 250;
  * own command timeouts (and spec-level `timeoutMs`) fire well before it.
  */
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+/** Execa fallback after Cairn's own process-tree watchdog. */
+const EXECA_TIMEOUT_FALLBACK_MS = 5_000;
+
+/**
+ * agent-browser exposes a terminal status/error but does not currently expose
+ * response timing. The completed snapshot is a conservative upper bound for
+ * when those terminal entries became observable. Preserve native timing when
+ * a future agent-browser version supplies it, and never stamp pending entries.
+ */
+function normalizeTerminalNetworkTiming(
+  entries: NetworkEntry[],
+  snapshotTimestampMs: number,
+): NetworkEntry[] {
+  return entries.map((entry) => {
+    if (
+      entry.responseTimestamp !== undefined ||
+      entry.durationMs !== undefined ||
+      typeof entry.timestamp !== "number" ||
+      !Number.isSafeInteger(entry.timestamp) ||
+      entry.timestamp <= 0 ||
+      !isTerminalNetworkEntry(entry)
+    ) {
+      return entry;
+    }
+
+    const responseTimestamp = Math.max(entry.timestamp, snapshotTimestampMs);
+    return {
+      ...entry,
+      responseTimestamp,
+      durationMs: responseTimestamp - entry.timestamp,
+      responseTimingSource: "network-snapshot-upper-bound",
+    };
+  });
+}
+
+function isTerminalNetworkEntry(entry: NetworkEntry): boolean {
+  return (
+    (typeof entry.status === "number" && Number.isSafeInteger(entry.status)) ||
+    (typeof entry.error === "string" && entry.error.length > 0)
+  );
+}
 
 /**
  * Length of each fresh subprocess slice used to re-issue a state-predicate
@@ -2022,24 +2077,6 @@ function isAlive(pid: number): boolean {
 /** Synchronous sleep — usable inside signal handlers where timers never fire. */
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** Direct child pids of `pid` (the daemon's Chrome). Best-effort, darwin/linux. */
-function childPidsSync(pid: number): number[] {
-  try {
-    const r = spawnSync("pgrep", ["-P", String(pid)], {
-      encoding: "utf8",
-      timeout: 2_000,
-      env: targetChildEnv(process.env),
-    });
-    if (typeof r.stdout !== "string") return [];
-    return r.stdout
-      .split("\n")
-      .map((line) => Number(line.trim()))
-      .filter((n) => Number.isInteger(n) && n > 1);
-  } catch {
-    return [];
-  }
 }
 
 /** Backoff schedule for transient daemon-busy retries (dogfood P2 #14). */

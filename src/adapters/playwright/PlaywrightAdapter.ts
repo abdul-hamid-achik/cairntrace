@@ -14,6 +14,7 @@ import type {
   Locator as PlaywrightLocator,
   Page,
   Request,
+  Response,
 } from "playwright";
 import type {
   BatchSubStep,
@@ -58,6 +59,14 @@ export interface PlaywrightAdapterOptions {
 }
 
 type RequestMode = "api" | "cookie-bridge" | "subprocess-cookie-bridge";
+
+/**
+ * Keep network evidence useful for request correlation without allowing a
+ * single upload/large mutation to grow every run artifact without bound.
+ */
+const MAX_CAPTURED_POST_DATA_BYTES = 64 * 1024;
+const SENSITIVE_POST_DATA_KEY_RE =
+  /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion/i;
 
 /**
  * Playwright BrowserBackend.
@@ -445,14 +454,14 @@ export class PlaywrightAdapter implements BrowserBackend {
         timeoutMs,
         `request timed out after ${timeoutMs}ms`,
       );
-      this.recordSyntheticRequest(req, {
+      this.recordSyntheticRequest(req, start, {
         status: response.status,
         durationMs: Date.now() - start,
       });
       return response;
     } catch (e) {
       const message = (e as Error).message;
-      this.recordSyntheticRequest(req, {
+      this.recordSyntheticRequest(req, start, {
         status: 0,
         durationMs: Date.now() - start,
         error: message,
@@ -955,31 +964,61 @@ export class PlaywrightAdapter implements BrowserBackend {
   }
 
   private attachListeners(page: Page): void {
+    const pendingRequests = new WeakMap<
+      Request,
+      { entry: NetworkEntry; timestamp: number; status?: number }
+    >();
+
+    const stampTerminalTiming = (
+      request: Request,
+    ):
+      | { entry: NetworkEntry; timestamp: number; status?: number }
+      | undefined => {
+      const pending = pendingRequests.get(request);
+      if (!pending) return undefined;
+      pendingRequests.delete(request);
+      const responseTimestamp = Date.now();
+      pending.entry.responseTimestamp = responseTimestamp;
+      pending.entry.durationMs = Math.max(
+        0,
+        responseTimestamp - pending.timestamp,
+      );
+      return pending;
+    };
+
     page.on("request", (req: Request) => {
+      const timestamp = Date.now();
       const entry: NetworkEntry = {
         url: req.url(),
         method: req.method(),
         resourceType: req.resourceType(),
-        startedAt: new Date().toISOString(),
+        timestamp,
+        startedAt: new Date(timestamp).toISOString(),
+        ...captureJsonPostData(req.postData(), req.headers()["content-type"]),
       };
       this.networkLog.push(entry);
-      // Pair *this* request with *its* response asynchronously. Previously we
-      // matched response→request by URL, which stamped the wrong status on the
-      // wrong entry whenever the same URL was hit more than once (login form
-      // retries, polling, identical asset URLs).
-      req
-        .response()
-        .then((res) => {
-          if (res) entry.status = res.status();
-        })
-        .catch(() => {
-          // The promise rejects only when the request FAILED (aborted, blocked,
-          // DNS, refused) — a still-pending request leaves it unresolved. Mark
-          // the failure explicitly so `noFailedRequests` can flag it without
-          // false-failing genuinely-pending/streaming requests (which keep an
-          // undefined status and no error).
-          entry.error = req.failure()?.errorText ?? "request failed";
-        });
+      pendingRequests.set(req, { entry, timestamp });
+    });
+    page.on("response", (res: Response) => {
+      const pending = pendingRequests.get(res.request());
+      if (pending) pending.status = res.status();
+    });
+    page.on("requestfinished", (req: Request) => {
+      const pending = stampTerminalTiming(req);
+      if (!pending) return;
+
+      // Response headers arrive before the body is complete. Keep their status
+      // private until requestfinished makes the whole terminal record visible.
+      if (pending.status !== undefined) pending.entry.status = pending.status;
+      else
+        pending.entry.error =
+          req.failure()?.errorText ??
+          "request finished without response status";
+    });
+    page.on("requestfailed", (req: Request) => {
+      const pending = stampTerminalTiming(req);
+      if (!pending) return;
+      pending.entry.error = req.failure()?.errorText ?? "request failed";
     });
     page.on("console", (msg: ConsoleMessage) => {
       const type = msg.type();
@@ -999,6 +1038,7 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   private recordSyntheticRequest(
     req: BackendRequest,
+    timestamp: number,
     result: { status: number; durationMs: number; error?: string },
   ): void {
     this.networkLog.push({
@@ -1007,9 +1047,12 @@ export class PlaywrightAdapter implements BrowserBackend {
       method: req.method,
       status: result.status,
       resourceType: "fetch",
-      startedAt: new Date().toISOString(),
+      timestamp,
+      responseTimestamp: timestamp + result.durationMs,
+      startedAt: new Date(timestamp).toISOString(),
       durationMs: result.durationMs,
       source: "cairntrace.request",
+      ...captureBackendRequestPostData(req),
       ...(result.error ? { error: result.error } : {}),
     });
   }
@@ -1254,6 +1297,78 @@ function waitForContinuousRequestQuiet(
     page.on("requestfailed", onRequestDone);
     armQuietTimer();
   });
+}
+
+function captureJsonPostData(
+  raw: string | null,
+  contentType: string | undefined,
+): Pick<
+  NetworkEntry,
+  "postData" | "postDataBytes" | "postDataTruncated" | "postDataOmittedReason"
+> {
+  if (raw === null) return {};
+  const bytes = Buffer.byteLength(raw, "utf8");
+  if (!isJsonContentType(contentType)) {
+    return { postDataBytes: bytes, postDataOmittedReason: "non-json" };
+  }
+  if (bytes > MAX_CAPTURED_POST_DATA_BYTES) {
+    return {
+      postDataBytes: bytes,
+      postDataTruncated: true,
+      postDataOmittedReason: "oversized",
+    };
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object") {
+      return { postDataBytes: bytes, postDataOmittedReason: "invalid-json" };
+    }
+    return { postData: JSON.stringify(redactSensitivePostData(parsed)) };
+  } catch {
+    return { postDataBytes: bytes, postDataOmittedReason: "invalid-json" };
+  }
+}
+
+function captureBackendRequestPostData(
+  request: BackendRequest,
+): Pick<
+  NetworkEntry,
+  "postData" | "postDataBytes" | "postDataTruncated" | "postDataOmittedReason"
+> {
+  if (request.body === undefined) return {};
+  if (typeof request.body !== "string") {
+    try {
+      return captureJsonPostData(
+        JSON.stringify(request.body),
+        "application/json",
+      );
+    } catch {
+      return { postDataOmittedReason: "invalid-json" };
+    }
+  }
+  const contentType = Object.entries(request.headers ?? {}).find(
+    ([name]) => name.toLowerCase() === "content-type",
+  )?.[1];
+  return captureJsonPostData(request.body, contentType);
+}
+
+function isJsonContentType(value: string | undefined): boolean {
+  const mediaType = value?.split(";", 1)[0]?.trim().toLowerCase();
+  return (
+    mediaType === "application/json" || Boolean(mediaType?.endsWith("+json"))
+  );
+}
+
+function redactSensitivePostData(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitivePostData);
+  if (value === null || typeof value !== "object") return value;
+  const redacted: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    redacted[key] = SENSITIVE_POST_DATA_KEY_RE.test(key)
+      ? "[redacted]"
+      : redactSensitivePostData(nested);
+  }
+  return redacted;
 }
 
 function screenshotTimeoutMessage(): string {

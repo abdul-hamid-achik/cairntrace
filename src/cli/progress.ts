@@ -1,9 +1,12 @@
 import type { ProgressListener } from "../core/runner/Runner";
 import type { RunResult } from "../core/schema/run.v1";
 
-/* ----- ANSI helpers ----- */
+/* ----- Color helpers ----- */
 
-const ANSI = {
+// The tty renderer uses string-concatenation coloring (${c.green}text${c.reset}),
+// so it needs raw ANSI strings rather than picocolors' function-based API.
+// picocolors is used for the logger; here we keep the palette pattern.
+const ansiColors: Palette = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
@@ -12,11 +15,10 @@ const ANSI = {
   yellow: "\x1b[33m",
   blue: "\x1b[34m",
   cyan: "\x1b[36m",
-  /** clear from cursor to end of line */
   clearEOL: "\x1b[K",
 };
 
-const noColors = {
+const noColors: Palette = {
   reset: "",
   bold: "",
   dim: "",
@@ -106,11 +108,12 @@ export function makePlainListener(
     onPreconditionStart(name, timeoutMs) {
       line(`precondition ${name} started (budget ${formatMs(timeoutMs)})`);
     },
-    onPreconditionFinish(name, exitCode, durationMs) {
+    onPreconditionFinish(name, exitCode, durationMs, details) {
       line(
-        `precondition ${name} ${
-          exitCode === 0 ? "ok" : `failed (exit ${exitCode})`
-        } ${formatMs(durationMs)}`,
+        `precondition ${name} ${formatPreconditionStatus(
+          exitCode,
+          details,
+        )} ${formatMs(durationMs)}`,
       );
     },
     onStepFinish(_idx, stepId, status, durationMs, error) {
@@ -162,7 +165,7 @@ export function makePlainListener(
 export function makeInteractiveListener(
   options: { color?: boolean } = {},
 ): ProgressListener {
-  const c: Palette = options.color === false ? noColors : ANSI;
+  const c: Palette = options.color === false ? noColors : ansiColors;
 
   let stepCount = 0;
   // The when: gate of the step currently in flight, for the skip line.
@@ -226,12 +229,15 @@ export function makeInteractiveListener(
       );
     },
 
-    onPreconditionFinish(name, exitCode, durationMs) {
+    onPreconditionFinish(name, exitCode, durationMs, details) {
       stopTicker();
       const mark =
         exitCode === 0 ? `${c.green}✓${c.reset}` : `${c.red}✗${c.reset}`;
       out(
-        `\r${c.clearEOL}  ${mark} precondition ${name} ${c.dim}${formatMs(durationMs)}${c.reset}\n`,
+        `\r${c.clearEOL}  ${mark} precondition ${name} ${formatPreconditionStatus(
+          exitCode,
+          details,
+        )} ${c.dim}${formatMs(durationMs)}${c.reset}\n`,
       );
     },
 
@@ -355,6 +361,16 @@ export function makeInteractiveListener(
       printRerunHint(result, c, out);
     },
   };
+}
+
+function formatPreconditionStatus(
+  exitCode: number | undefined,
+  details: { timedOut?: boolean; signal?: string } | undefined,
+): string {
+  if (details?.timedOut) {
+    return `timed out${details.signal ? ` (${details.signal})` : ""}`;
+  }
+  return exitCode === 0 ? "ok" : `failed (exit ${exitCode ?? "unknown"})`;
 }
 
 function printRerunHint(

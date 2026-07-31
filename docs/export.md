@@ -29,6 +29,21 @@ MCP: `cairn_export_playwright` with `path`, optional `out` / `outDir`, `lang`, `
 Coverage reports list **skips** (e.g. `eval.file`, node `script` verifiers,
 `monitor`) so agents know the handoff is partial.
 
+Generated tests set an explicit timeout derived from the spec's sequential
+step and outcome budgets. In particular, separate node verifier
+`script.timeoutMs` values are added rather than collapsed to one 30-minute
+default. Exported operations without an explicit limit reserve 30 seconds;
+project preconditions reserve their `timeoutMs` or Cairntrace's 120-second
+default. The exporter adds 10% headroom (at least one minute), keeps a
+30-minute floor, and applies a four-hour safety ceiling; split a spec if the
+generated warning says its authored budget reached that ceiling. In
+`--project` mode, `playwright.config.*` uses the largest test or precondition
+budget while each test narrows itself with `test.setTimeout(...)`. Each
+precondition also preserves its spec-relative `cwd`, applies its own
+`timeoutMs`, and layers authored `preconditions.env` over a filtered child
+environment. The generated runner strips publisher/TinyVault control
+credentials and kills the owned shell plus descendants at the hard deadline.
+
 ## What maps well
 
 | Cairntrace | Playwright |

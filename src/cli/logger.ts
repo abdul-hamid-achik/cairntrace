@@ -19,6 +19,12 @@
  * imported across the CLI layer; the runner core stays logger-free (it talks
  * via injected `ctx.log`/`onOutput` callbacks that the CLI wires to this logger).
  */
+import { createColors } from "picocolors";
+
+// picocolors auto-detects TTY; the logger has its own color flag that can
+// force color on (e.g. config `logging.color: true` in a non-TTY harness).
+// Two palettes: auto (respects env) and forced (always emits ANSI).
+const forced = createColors(true);
 
 export type LogLevel = "debug" | "info" | "warn" | "error" | "silent";
 export type LogFormat = "human" | "json";
@@ -60,28 +66,18 @@ const LEVEL_ICON: Record<LogLevel, string> = {
   silent: "",
 };
 
-/* ----- ANSI color theme (centralized; replaces scattered escape literals) ----- */
+/* ----- Color theme via picocolors (replaces hand-rolled ANSI escapes) ----- */
 
-const C = {
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  bold: "\x1b[1m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  cyan: "\x1b[36m",
-};
-
-function levelColor(level: LogLevel): string {
+function levelColor(level: LogLevel): (text: string) => string {
   switch (level) {
     case "error":
-      return C.red;
+      return forced.red;
     case "warn":
-      return C.yellow;
+      return forced.yellow;
     case "debug":
-      return C.dim;
+      return forced.dim;
     default:
-      return "";
+      return (t) => t;
   }
 }
 
@@ -98,17 +94,17 @@ function colorizeRaw(line: string, color: boolean): string {
       line,
     )
   ) {
-    return `${C.red}${line}${C.reset}`;
+    return forced.red(line);
   }
   if (/\b(warn(ing)?|deprecated)\b/i.test(line)) {
-    return `${C.yellow}${line}${C.reset}`;
+    return forced.yellow(line);
   }
   if (
     /\b(listening|ready|connected|started|compiled|done in|✓|success)\b/i.test(
       line,
     )
   ) {
-    return `${C.green}${line}${C.reset}`;
+    return forced.green(line);
   }
   return line;
 }
@@ -123,9 +119,9 @@ function renderFields(
   if (entries.length === 0) return "";
   const parts = entries.map(([k, v]) => {
     const val = typeof v === "string" ? v : (JSON.stringify(v) ?? String(v));
-    return color ? `${C.dim}${k}=${val}${C.reset}` : `${k}=${val}`;
+    return color ? forced.dim(`${k}=${val}`) : `${k}=${val}`;
   });
-  return "  " + parts.join(color ? ` ${C.reset}${C.dim}` : " ");
+  return "  " + parts.join(" ");
 }
 
 class Logger {
@@ -230,11 +226,12 @@ class Logger {
     const color = this.opts.color;
     const icon = LEVEL_ICON[level];
     const tag = LEVEL_TAG[level];
-    const iconStr = color ? `${levelColor(level)}${icon}${C.reset}` : icon;
-    const tagStr = color ? `${levelColor(level)}${tag}${C.reset}` : tag;
+    const paint = levelColor(level);
+    const iconStr = color ? paint(icon) : icon;
+    const tagStr = color ? paint(tag) : tag;
     const scopeStr = this.scopeName
       ? color
-        ? `${C.dim}${this.scopeName}${C.reset} `
+        ? `${forced.dim(this.scopeName)} `
         : `${this.scopeName} `
       : "";
     const line = `${scopeStr}${iconStr} ${tagStr} ${msg}${renderFields(fields, color)}`;

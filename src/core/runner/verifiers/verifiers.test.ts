@@ -193,6 +193,62 @@ describe("network", () => {
     );
     expect(r.passed).toBe(false);
   });
+
+  it("distinguishes a status mismatch from a missing method-and-URL request", async () => {
+    const b = new MockBrowserBackend();
+    b.pushNetworkEntry({
+      url: "/api/invoices/import",
+      method: "POST",
+      status: 500,
+    });
+    const r = await evaluateNetwork(
+      {
+        network: {
+          method: "POST",
+          urlContains: "/api/invoices/import",
+          status: { equals: 200 },
+        },
+      },
+      b,
+    );
+
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain(
+      "1 request(s) matched the method and URL, but none matched the expected status == 200",
+    );
+    expect(r.actual).toContain("POST /api/invoices/import → 500");
+    expect(r.actual).not.toContain("no requests matched");
+  });
+
+  it("uses the persisted network snapshot instead of a later backend state", async () => {
+    const b = new MockBrowserBackend();
+    b.pushNetworkEntry({
+      url: "/api/questions/kit/deliverable/fixture",
+      method: "GET",
+      status: 200,
+    });
+    const persistedSnapshot = [
+      {
+        url: "/api/questions/kit/deliverable/fixture",
+        method: "GET",
+      },
+    ];
+
+    const r = await evaluateNetwork(
+      {
+        network: {
+          method: "GET",
+          urlContains: "/api/questions/kit/deliverable/fixture",
+          status: { equals: 200 },
+        },
+      },
+      b,
+      persistedSnapshot,
+    );
+
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("<pending>");
+  });
 });
 
 describe("noFailedRequests", () => {
@@ -243,6 +299,30 @@ describe("noFailedRequests", () => {
       b,
     );
     expect(r.passed).toBe(true);
+    expect(r.actual).toContain(
+      "had no captured 4xx/5xx status or explicit network error",
+    );
+    expect(r.actual).not.toContain("completed");
+  });
+
+  it("uses the persisted snapshot for no-failure verdicts", async () => {
+    const b = new MockBrowserBackend();
+    b.pushNetworkEntry({ url: "/api/x", method: "GET", status: 200 });
+
+    const r = await evaluateNoFailedRequests(
+      { noFailedRequests: { urlContains: "/api/" } },
+      b,
+      [
+        {
+          url: "/api/x",
+          method: "GET",
+          error: "net::ERR_CONNECTION_RESET",
+        },
+      ],
+    );
+
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("/api/x");
   });
 });
 

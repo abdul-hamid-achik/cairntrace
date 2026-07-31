@@ -101,7 +101,7 @@ You tried to override a reserved env var like `PATH` or `HOME`. The runner refus
 
 ## "My secret still appears in artifacts"
 
-The redaction layer scrubs any object key matching the built-in sensitive-key heuristic (`authorization`, `cookie`, `token`, `secret`, `password`, `api_key`, …), the `Authorization`/`Cookie`/`Set-Cookie` header lines, token-bearing query params, and any literal value you list in the spec's `redaction:` block. If a secret still leaks, its key does not match the heuristic and you did not list its value:
+The redaction layer scrubs any object key matching the built-in sensitive-key heuristic (`authorization`, `cookie`, `token`, `secret`, `password`, `api_key`, `code_verifier`, `otp`, `credential`, …), the `Authorization`/`Cookie`/`Set-Cookie` header lines, credential-bearing query params, and any literal value you list in the spec's `redaction:` block. Use `redaction.headers`, `redaction.queryParams`, or `redaction.storageKeys` for product-specific names; matching is case-insensitive. If a secret still leaks, its key does not match the heuristic and you did not configure its name or literal value:
 
 ```yaml
 redaction:

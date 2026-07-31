@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   readdir,
   readFile as readFileAsync,
@@ -26,6 +26,7 @@ import type { BrowserBackend } from "../../adapters/browserBackend.js";
 import type { ServicesHandle } from "../../core/runner/services.js";
 import type { WebServerHandle } from "../../core/runner/webServer.js";
 import { refreshAgentContextCodeMatches } from "../../core/artifacts/agentContext.js";
+import { ArtifactWriter } from "../../core/artifacts/ArtifactWriter.js";
 import { createArtifactRedactor } from "../../core/artifacts/redaction.js";
 import { loadConfig } from "../../core/config/loader.js";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup.js";
@@ -953,11 +954,16 @@ export async function investigateRunDirectory(
     createArtifactRedactor(undefined).value(result),
   );
   try {
-    writeFileSync(
-      join(runDir, "investigate.json"),
-      JSON.stringify(publicResult, null, 2),
+    const writer = new ArtifactWriter(
+      runDir,
+      createArtifactRedactor(undefined),
     );
+    await writer.writeJson("investigate.json", publicResult, "investigation");
     refreshAgentContextCodeMatches(runDir);
+    // Investigation enriches an already-finalized run. Republish its manifest
+    // so checksums and permissions cover both investigate.json and the updated
+    // agent context before a later stash/publication sees the directory.
+    await writer.writeManifest();
   } catch {
     // best-effort — the run dir might be read-only or gone
   }

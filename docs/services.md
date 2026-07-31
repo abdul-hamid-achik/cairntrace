@@ -38,6 +38,7 @@ services:
   tmux:
     session: myapp
     reuseExisting: true
+    waitForReadyBeforeNext: true # opt-in: gate each later window on prior readyOn
     options:
       - { key: mouse, value: "on" }
     env:
@@ -51,6 +52,12 @@ services:
           command: "curl -sf http://localhost:8080/healthz"
           intervalSeconds: 20
           retries: 3
+  artifacts:
+    when: on-failure
+    capture: [lifecycle, tmux, docker, seed]
+    maxLinesPerSource: 2000
+    maxBytesPerSource: 524288
+    maxBytesPerRun: 8388608
   stash:
     enabled: true
     autoStash: always
@@ -63,17 +70,42 @@ services:
 
 - **docker** — `command` runs once; `reuseExisting: true` skips if the readiness check already passes. `readinessCheck` gates startup; `healthcheck` polls until green or `retries` is exhausted.
 - **seed** — runs after docker is healthy. Freshness is tracked at `~/.cairntrace/services/<project>.seed.json` with a three-layer check (fingerprint + TTL + optional data-level command). A fresh-enough seed is reused; otherwise the seed command re-runs. Optional `postCommands` always run after that decision (skip or complete) — use them for lightweight fixture ensure scripts the bulk import does not ship.
-- **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`. On reuse, missing windows are created and idle panes (shell prompt, no running service) are re-launched; busy panes are left alone. If docker was freshly started this run, the whole session is recreated so app processes reconnect to new containers. Cairn waits for the interactive shell before `send-keys` and clears pane history first so `readyOn` text cannot match stale scrollback.
+- **tmux** — a named session with one or more windows, each with its own `cwd`, `command`, `readyOn`, and `healthcheck`. `readyOn` can be `{ url }` or `{ text }`. By default Cairn boots every window before waiting for readiness. Set `waitForReadyBeforeNext: true` to boot in declaration order and wait for each window's `readyOn` before creating or starting the next; all windows share the single `readyTimeoutMs` deadline, and a dead/disappeared pane fails immediately. On reuse, missing windows are created and idle panes (shell prompt, no running service) are re-launched; busy panes are left alone. If docker was freshly started this run, the whole session is recreated so app processes reconnect to new containers. Cairn waits for the interactive shell before `send-keys` and clears pane history first so `readyOn` text cannot match stale scrollback.
+- **artifacts** — saves bounded, redacted lifecycle, docker/provisioner command output, tmux, local Compose, and seed/post-command evidence inside each run while the services are still alive. A remote provisioner such as Chalupa retains its launch/tunnel transcript without probing an unrelated local Compose project. The block is optional and defaults to `when: on-failure`, all four sources, 2,000 lines and 512 KiB per source, and 8 MiB total per run. Set `when: always` while stabilizing a suite or `never` to disable it. Collection errors are recorded in `services/manifest.json` and never change the test verdict.
 - **stash** — optionally saves session artifacts (tmux panes, docker logs, seed
   output) in the local file.cheap vault. It does not upload or replicate them.
 - **teardown** — after the last spec. When tmux reuse is on (the default), cairn leaves the session alive and also skips `docker compose down` so infra the live panes need is not torn out from under them. With `tmux.reuseExisting: false`, full teardown runs (tmux kill + docker down).
+
+## Reading service artifacts from a run
+
+Runs that capture service evidence keep it inside the self-contained artifact
+pack under `services/`: `services/manifest.json` describes the capture and
+`services/tmux/<window>.log` contains each sanitized tmux window log. Use the
+run-aware log commands so the evidence remains tied to the exact behavioral
+run that produced it:
+
+```bash
+cairn logs latest --services
+cairn logs latest --service web-api
+cairn logs previous --service worker
+```
+
+When `ref` is omitted, service lookup uses `latest`. Cairntrace checks the
+selected run first. If it has no run-local service pack (or no matching tmux
+window), the command falls back to the legacy pane logs under
+`~/.cairntrace/services` (or `CAIRN_SERVICES_LOG_ROOT`). This compatibility
+fallback keeps older runs inspectable while new captures move into run
+directories managed by the normal retention policy.
 
 ## Skipping and per-environment overrides
 
 ```bash
 cairn run flows/x.yml --no-services           # skip the whole lifecycle
-cairn run flows/x.yml --services-dry-run       # print the plan, do not execute
+cairn run flows/x.yml --services-dry-run       # print the plan and exit; do not run specs
 ```
+
+The printed plan keeps commands readable while replacing interpolated
+environment and selected-vault secret values with `[redacted]`.
 
 Per-environment overrides replace `--no-services` for remote envs:
 

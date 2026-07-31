@@ -1,5 +1,5 @@
 import { execa } from "execa";
-import { targetChildEnv } from "../processEnv";
+import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
 
 const RESULT_MARKER = "__CAIRNTRACE_RESULT__";
 
@@ -11,6 +11,10 @@ export interface NodeScriptInvocation {
   entryNames: string[];
   /** Kill the child past this budget. Absent = unbounded (legacy behavior). */
   timeoutMs?: number;
+  /** Invocation-scoped environment authorized for this target child. */
+  env?: Record<string, string | undefined>;
+  /** TinyVault-prefixed keys explicitly selected as target input. */
+  selectedTvaultKeys?: Iterable<string>;
 }
 
 export interface NodeScriptResult {
@@ -25,14 +29,30 @@ export interface NodeScriptResult {
 export async function runNodeScript(
   invocation: NodeScriptInvocation,
 ): Promise<NodeScriptResult> {
-  const r = await execa("node", ["--input-type=module", "-e", NODE_BOOTSTRAP], {
-    cwd: invocation.cwd,
-    input: JSON.stringify(invocation),
-    reject: false,
-    all: false,
-    env: targetChildEnv(process.env),
-    ...(invocation.timeoutMs ? { timeout: invocation.timeoutMs } : {}),
-  });
+  // Environment values configure the child process; they must not also be
+  // serialized into the authored script payload on stdin.
+  const { env, selectedTvaultKeys, ...payload } = invocation;
+  const r = await execa(
+    "node",
+    [
+      "--experimental-transform-types",
+      "--input-type=module",
+      "-e",
+      NODE_BOOTSTRAP,
+    ],
+    {
+      cwd: invocation.cwd,
+      input: JSON.stringify(payload),
+      reject: false,
+      all: false,
+      extendEnv: false,
+      env: targetChildEnvWithSelectedTvaultKeys(
+        env ?? process.env,
+        selectedTvaultKeys ?? [],
+      ),
+      ...(invocation.timeoutMs ? { timeout: invocation.timeoutMs } : {}),
+    },
+  );
 
   const stdout = String(r.stdout ?? "");
   const stderr = String(r.stderr ?? "");

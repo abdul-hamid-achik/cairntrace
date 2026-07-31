@@ -10,19 +10,25 @@ import {
   resolve,
 } from "node:path";
 import { execa } from "execa";
+import { createProcessTreeWatchdog } from "../../adapters/agent-browser/processTree";
 import { addEnospcHint } from "../../core/artifacts/retention";
+import { createArtifactRedactor } from "../../core/artifacts/redaction";
 import { renderJUnit } from "../../core/artifacts/renderers/junit";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
 import { targetChildEnvWithSelectedTvaultKeys } from "../../core/processEnv";
 import { ContractHashMismatchError } from "../../core/parser/parseSpec";
 import { runPool } from "../../core/runner/pool";
-import { runSpec } from "../../core/runner/Runner";
+import { runSpec, type ProgressListener } from "../../core/runner/Runner";
 import {
   startWebServer,
   type WebServerHandle,
 } from "../../core/runner/webServer";
-import { startServices, type ServicesHandle } from "../../core/runner/services";
+import {
+  createNoopServicesHandle,
+  startServices,
+  type ServicesHandle,
+} from "../../core/runner/services";
 import type { BrowserConfig } from "../../core/schema/config.v1";
 import type { RunResult } from "../../core/schema/run.v1";
 import type {
@@ -136,6 +142,8 @@ export interface RunCommandOptions {
    * teardown. Failures are logged but do not change the run exit code.
    */
   after?: string[];
+  /** Per-command timeout shared by `--before` and `--after` hooks. */
+  hookTimeoutMs?: string;
 }
 
 /**
@@ -190,6 +198,22 @@ export function parseVarFlags(
   return out;
 }
 
+export function parseHookTimeoutMs(raw: string | undefined): number {
+  const value = raw ?? "600000";
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`--hook-timeout-ms expects an integer, got "${value}"`);
+  }
+  const milliseconds = Number(value);
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 1 ||
+    milliseconds > 7_200_000
+  ) {
+    throw new Error("--hook-timeout-ms must be between 1 and 7200000");
+  }
+  return milliseconds;
+}
+
 /**
  * Run repeatable `--before` / `--after` shell hooks.
  * `before` failures are fatal (default); `after` can be non-fatal.
@@ -202,28 +226,47 @@ export async function runHookCommands(
     cwd?: string;
     env?: Record<string, string | undefined>;
     selectedTvaultKeys?: Iterable<string>;
+    timeoutMs?: number;
   } = {},
 ): Promise<void> {
   const list = (commands ?? []).map((c) => c.trim()).filter(Boolean);
   if (list.length === 0) return;
   const fatal = opts.fatal ?? true;
   const cwd = opts.cwd ?? process.cwd();
+  const timeoutMs = opts.timeoutMs ?? 600_000;
   for (const command of list) {
     runLog.info(`${phase}: ${command}`);
     try {
-      const r = await execa(command, {
+      const subprocess = execa(command, {
         shell: true,
         cwd,
         env: targetChildEnvWithSelectedTvaultKeys(
           opts.env ?? process.env,
           opts.selectedTvaultKeys ?? [],
         ),
-        // Path-flip + service restart scripts are short; long builds should
-        // use services preCommands instead. 10 min ceiling for slow boots.
-        timeout: 600_000,
+        // Cairn's tree watchdog owns the exact deadline. Execa remains a
+        // slightly-later fallback if the event loop cannot run the watchdog.
+        timeout: timeoutMs + 2_000,
         reject: false,
         all: true,
       });
+      const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs);
+      const r = await (async () => {
+        try {
+          return await subprocess;
+        } finally {
+          watchdog.cancel();
+        }
+      })();
+      if (watchdog.timedOut || r.timedOut) {
+        const tail = (r.all ?? r.stderr ?? "").trim().slice(-2000);
+        const msg = `${phase} hook timed out after ${timeoutMs}ms and its process tree was killed: ${command}${
+          tail ? `\n${tail}` : ""
+        }`;
+        if (fatal) throw new Error(msg);
+        runLog.warn(msg);
+        continue;
+      }
       if (r.exitCode !== 0) {
         const tail = (r.all ?? r.stderr ?? "").trim().slice(-2000);
         const msg = `${phase} hook failed (exit ${r.exitCode}): ${command}${
@@ -260,6 +303,13 @@ export async function runCommand(
   runLog.info(summarizeStartingSpecs(specs, process.cwd()));
   runLog.debug(`starting: ${specs.join(", ")}`);
   const parallel = Math.max(1, Number(opts.parallel ?? "1"));
+  let hookTimeoutMs: number;
+  try {
+    hookTimeoutMs = parseHookTimeoutMs(opts.hookTimeoutMs);
+  } catch (e) {
+    runLog.error((e as Error).message);
+    process.exit(2);
+  }
   let expandedSpecs: string[];
 
   try {
@@ -346,6 +396,25 @@ export async function runCommand(
     process.exit(2);
   }
 
+  // A services dry-run is a planning command, not a spec run with no-op
+  // services. Resolve and print the effective lifecycle, then stop before the
+  // web server, hooks, browser backend, run directory, or preconditions exist.
+  if (opts.servicesDryRun) {
+    try {
+      await maybeStartServices(
+        expandedSpecs[0]!,
+        opts,
+        scopedSecrets,
+        () => undefined,
+      );
+      process.exitCode = 0;
+      return;
+    } catch (e) {
+      runLog.error((e as Error).message);
+      process.exit(2);
+    }
+  }
+
   // Bring up the configured webServer (if any) once for the whole invocation,
   // before any spec runs. A boot/setup failure here is fatal (exit 2).
   let server: WebServerHandle | undefined;
@@ -399,6 +468,7 @@ export async function runCommand(
     await runHookCommands("before", opts.before, {
       env: scopedSecrets.childEnv,
       selectedTvaultKeys: scopedSecrets.selectedKeys,
+      timeoutMs: hookTimeoutMs,
     });
   } catch (e) {
     runLog.error((e as Error).message);
@@ -422,7 +492,7 @@ export async function runCommand(
         ? await runSingle(
             expandedSpecs[0]!,
             opts,
-            svcHandle?.events,
+            svcHandle,
             browser,
             scopedSecrets,
           )
@@ -430,7 +500,7 @@ export async function runCommand(
             expandedSpecs,
             parallel,
             opts,
-            svcHandle?.events,
+            svcHandle,
             browser,
             scopedSecrets,
           );
@@ -442,6 +512,7 @@ export async function runCommand(
         fatal: false,
         env: scopedSecrets.childEnv,
         selectedTvaultKeys: scopedSecrets.selectedKeys,
+        timeoutMs: hookTimeoutMs,
       });
     } catch (e) {
       runLog.warn(`after hook: ${(e as Error).message}`);
@@ -596,16 +667,26 @@ export async function maybeStartServices(
 
   // --services-dry-run: print the plan, return a no-op handle, don't execute.
   if (opts.servicesDryRun) {
+    const redactor = createArtifactRedactor(
+      undefined,
+      scopedSecrets.env,
+      scopedSecrets.secretValues,
+    );
+    // Redact complete commands before truncating them. Truncating first could
+    // expose a prefix of a long secret that no longer matches the registered
+    // literal value.
+    const dockerCommand = redactor.text(cfg.docker?.command ?? "");
+    const seedCommand = redactor.text(cfg.seed?.command ?? "");
     const lines = [
       "services dry-run plan:",
       `  project: ${project}`,
       `  cold-start: ${coldStart}`,
       cfg.docker
-        ? `  docker: ${cfg.docker.command} (reuseExisting: ${cfg.docker.reuseExisting ?? !coldStart})`
+        ? `  docker: ${dockerCommand} (reuseExisting: ${cfg.docker.reuseExisting ?? !coldStart})`
         : "  docker: (not configured)",
       cfg.seed
-        ? `  seed: ${cfg.seed.command.slice(0, 80)}${
-            cfg.seed.command.length > 80 ? "..." : ""
+        ? `  seed: ${seedCommand.slice(0, 80)}${
+            seedCommand.length > 80 ? "..." : ""
           } (ttlSeconds: ${cfg.seed.ttlSeconds ?? 0})`
         : "  seed: (not configured)",
       cfg.tmux
@@ -615,13 +696,8 @@ export async function maybeStartServices(
         ? `  teardown: ${cfg.teardown.length} command(s)`
         : "  teardown: (none)",
     ];
-    process.stderr.write(lines.join("\n") + "\n");
-    return {
-      startedByUs: false,
-      events: [],
-      stop: async () => undefined,
-      terminateSync: () => undefined,
-    };
+    process.stderr.write(redactor.text(lines.join("\n") + "\n"));
+    return createNoopServicesHandle();
   }
 
   return startServices(cfg, {
@@ -646,10 +722,24 @@ export async function maybeStartServices(
 
 /* ----- single-spec path (preserves v0.0 behavior) ----- */
 
+/** Preserve the UI listener while observing the durable run directory. */
+function withRunStartHook(
+  listener: ProgressListener | undefined,
+  hook: (runDir: string) => void,
+): ProgressListener {
+  return {
+    ...listener,
+    onRunStart(spec, runId, runDir, backendName, environment) {
+      hook(runDir);
+      listener?.onRunStart?.(spec, runId, runDir, backendName, environment);
+    },
+  };
+}
+
 async function runSingle(
   specPath: string,
   opts: RunCommandOptions,
-  servicesEvents?: ServicesHandle["events"],
+  services?: ServicesHandle,
   browser?: BrowserConfig,
   scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
@@ -665,6 +755,19 @@ async function runSingle(
   const interactive = progressMode === "tty";
   const listener = progressMode
     ? makeProgressListener(progressMode, { color: colorEnabled() })
+    : undefined;
+  let activeRunDir: string | undefined;
+  const signalAwareListener = services
+    ? withRunStartHook(listener, (runDir) => {
+        activeRunDir = runDir;
+      })
+    : listener;
+  const untrackSignalArtifactReporter = services
+    ? trackAbortReporter((signal) => {
+        if (activeRunDir) {
+          services.captureSignalArtifactsSync(activeRunDir, signal);
+        }
+      })
     : undefined;
   if (progressMode) setNarrationDefault(true);
 
@@ -691,15 +794,20 @@ async function runSingle(
             selectedTvaultKeys: scopedSecrets.selectedKeys,
           }
         : {}),
-      ...(servicesEvents !== undefined && servicesEvents.length > 0
-        ? { servicesEvents }
+      ...(services?.events.length ? { servicesEvents: services.events } : {}),
+      ...(services
+        ? { captureServicesArtifacts: services.captureRunArtifacts }
         : {}),
       workerIndex: 0,
       ...(opts.monitor ? { monitor: opts.monitor } : {}),
-      ...(listener ? { listener } : {}),
+      ...(signalAwareListener ? { listener: signalAwareListener } : {}),
       onArchiveRun: archiveRun,
       onPublishRun: publishRun,
     });
+    // runSpec captures the normal success/failure service bundle before it
+    // resolves. From here onward the signal-only fallback must not overwrite
+    // that finalized evidence pack.
+    activeRunDir = undefined;
     exitCode = result.exitCode;
     if (!(await stampIfGreen(opts, [result]))) {
       return 2;
@@ -724,6 +832,7 @@ async function runSingle(
     }
     emitErroredResult(result, format);
   } finally {
+    untrackSignalArtifactReporter?.();
     untrack();
     await backend.close().catch(() => undefined);
   }
@@ -738,7 +847,7 @@ async function runBatch(
   specs: string[],
   parallel: number,
   opts: RunCommandOptions,
-  servicesEvents?: ServicesHandle["events"],
+  services?: ServicesHandle,
   browser?: BrowserConfig,
   scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
@@ -765,10 +874,16 @@ async function runBatch(
   const tStart = Date.now();
   const startedAt = new Date(tStart).toISOString();
   const artifactRoot = await resolveBatchArtifactRoot(specs[0]!, opts);
+  const activeRunDirs = new Set<string>();
   const completedByIndex: Array<RunResult | undefined> = Array.from({
     length: specs.length,
   });
   const untrackAbortReporter = trackAbortReporter((signal) => {
+    if (services) {
+      for (const runDir of activeRunDirs) {
+        services.captureSignalArtifactsSync(runDir, signal);
+      }
+    }
     const completed = completedByIndex.filter(
       (result): result is RunResult => result !== undefined,
     );
@@ -827,6 +942,13 @@ async function runBatch(
           progressMode && parallel === 1
             ? makeProgressListener(progressMode, { color: colorEnabled() })
             : undefined;
+        let activeRunDir: string | undefined;
+        const signalAwareListener = services
+          ? withRunStartHook(specListener, (runDir) => {
+              activeRunDir = runDir;
+              activeRunDirs.add(runDir);
+            })
+          : specListener;
         if (progressMode) {
           const specLabel =
             specPath
@@ -863,15 +985,20 @@ async function runBatch(
                   selectedTvaultKeys: scopedSecrets.selectedKeys,
                 }
               : {}),
-            ...(servicesEvents !== undefined && servicesEvents.length > 0
-              ? { servicesEvents }
+            ...(services?.events.length
+              ? { servicesEvents: services.events }
+              : {}),
+            ...(services
+              ? { captureServicesArtifacts: services.captureRunArtifacts }
               : {}),
             workerIndex,
             ...(opts.monitor ? { monitor: opts.monitor } : {}),
-            ...(specListener ? { listener: specListener } : {}),
+            ...(signalAwareListener ? { listener: signalAwareListener } : {}),
             onArchiveRun: archiveRun,
             onPublishRun: publishRun,
           });
+          if (activeRunDir) activeRunDirs.delete(activeRunDir);
+          activeRunDir = undefined;
           // runSpec returns only after run.json/report.json/manifest are durable.
           // Record immediately, before best-effort annotation/stash work, so a
           // signal can index every completed per-spec artifact directory.
@@ -899,6 +1026,7 @@ async function runBatch(
           completedByIndex[idx] = errored;
           return errored;
         } finally {
+          if (activeRunDir) activeRunDirs.delete(activeRunDir);
           untrack();
           await backend.close().catch(() => undefined);
         }
