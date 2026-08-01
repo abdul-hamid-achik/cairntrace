@@ -1,0 +1,60 @@
+name: npm-publish
+
+# Publish @thelacanians/cairntrace to the npm registry when a release tag is
+# pushed (or manually via workflow_dispatch).
+#
+# Auth model: npm "Trusted Publisher" (OIDC) — no NODE_AUTH_TOKEN secret
+# involved. For this to work the thelacanians org owner must add this
+# repository as a trusted publisher once:
+#   npm → thelacanians org → Settings → Packages →
+#   "Publish packages via GitHub Actions" → Add Publisher →
+#   repo: abdul-hamid-achik/cairntrace,
+#   workflow file: .github/workflows/npm-publish.yml,
+#   package scope: @thelacanians
+# `npm publish --provenance` then mints the auth token from the workflow's
+# OIDC id-token and attaches a signed provenance attestation.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # OIDC → npm provenance + trusted-publisher auth
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@4bc047ad3df7f6d6f1f7e9a5c5b1d1c6b9f9a9f9 # v2
+
+      - name: Assert tag matches package version
+        # The release flow bumps package.json in the tag commit; publishing a
+        # mismatched version would silently ship the wrong tag's contents.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "error: tag v${TAG} != package version ${PKG}" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify gate
+        run: bun run verify
+
+      - name: Set up Node (npm)
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c448adde47 # v4.2.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm (trusted publisher + provenance)
+        run: npm publish --provenance --access public

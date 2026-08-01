@@ -1,15 +1,19 @@
 {
-  "name": "cairntrace",
+  "name": "@thelacanians/cairntrace",
   "version": "2.7.1",
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "cairn": "./bin/cairn"
   },
   "files": [
     "bin",
     "src",
+    "!src/**/*.test.ts",
     "AGENTS.md",
     "CLAUDE.md",
     "SECURITY.md",

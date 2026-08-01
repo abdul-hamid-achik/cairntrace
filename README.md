@@ -23,11 +23,22 @@ format.
 
 ## Installation Guide
 
-Cairntrace is **not published to npm or GitHub Packages**. The supported
-install path is cloning this repository and running it from source with Bun —
-there is no build or compile step. Pin the
+Cairntrace is published to npm as **`@thelacanians/cairntrace`** (requires
+[Bun](https://bun.com) `>=1.3.0` at runtime — the CLI ships as a bun shebang
+with no build step). Installing from source is also supported and equivalent:
+clone + `bun install`, no compile step. Pin the
 [latest release](https://github.com/abdul-hamid-achik/cairntrace/releases/latest)
 or use `main`.
+
+### 0. Install from npm (global CLI)
+
+```bash
+npm install -g @thelacanians/cairntrace
+cairn --help
+```
+
+Updating later is `npm update -g @thelacanians/cairntrace`. If you prefer to
+run from source, follow the clone path below.
 
 ### 1. Install prerequisites
 

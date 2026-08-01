@@ -14,10 +14,14 @@ Agents author + run + heal those specs via the `cairn` CLI or the MCP server.
 - MCP server: `cairn mcp` (stdio JSON-RPC) — preferred path for MCP-aware agents
 - Plan: `~/notes/cairntrace_project_plan.md` (private to the author)
 - Examples: [`examples/`](./examples) — a tiny demo app + spec YAMLs
-- Distribution: **not published to npm or GitHub Packages.** Users install by
-  cloning `github.com/abdul-hamid-achik/cairntrace`, running `bun install`,
-  and using `./bin/cairn` (optionally symlinked onto `$PATH`). Releases are
-  git tags mirrored as GitHub release pages.
+- Distribution: published to npm as **`@thelacanians/cairntrace`** (scoped,
+  public). Tag pushes run `.github/workflows/npm-publish.yml`, which verifies
+  the gate, asserts the tag matches `package.json` version, and publishes with
+  provenance via an npm **Trusted Publisher** (OIDC — no token secret). The
+  published package is the same source layout: `bin/cairn` (bun shebang) +
+  `src/` (no build step), so the CLI requires Bun `>=1.3.0` at runtime.
+  Installing from source (clone + `bun install`) remains supported and
+  equivalent.
 - Versioning: SemVer tags are the release record. All `v1.x.y` tags are
   Cairntrace v1; do not rewrite old tags/releases just to make the visible
   numbering look cleaner.
