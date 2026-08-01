@@ -969,6 +969,13 @@ annotated `vX.Y.Z` tag, push `main` and the tag, then create the GitHub release
 with `gh release create`. Do not create a floating `latest` tag — GitHub keeps
 `/releases/latest` pointed at the newest release automatically.
 
+## Related
+
+- [**chalupa.run**](https://chalupa.run) — by the same author: disposable
+  DigitalOcean environments from Docker Compose (SSH-only, services bound to
+  `127.0.0.1`) with a fleet console for status, test runs, and cost. Cairntrace
+  specs run against chalupa-spawned stacks over an SSH tunnel.
+
 ## Security
 
 See [SECURITY.md](./SECURITY.md). Short version: Cairntrace specs are trusted

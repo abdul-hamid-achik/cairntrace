@@ -15,6 +15,17 @@ A real browser acceptance check is the difference between "the model says it's d
 
 The "intent + outcomes" pair is the contract. Steps are repairable hints. When the contract changes, the spec is broken (use `cairn spec verify --stamp` to re-stamp). When only the steps change, the contract survives and the runner keeps trusting the spec.
 
+## Companion product: chalupa.run
+
+Cairntrace pairs with [**chalupa.run**](https://chalupa.run), a fleet console for
+disposable Docker Compose environments on DigitalOcean — status, activity,
+test runs, and estimated cost, with every service port bound to `127.0.0.1` and
+only SSH exposed. Install with `curl -fsSL https://chalupa.run/install.sh | bash`.
+The same author runs Cairntrace specs against chalupa-spawned stacks (the
+Graphite suite is a working example): cairn owns the spec/seed lifecycle on a
+shared Docker host while chalupa provisions and sinks the ephemeral compute
+behind an SSH tunnel.
+
 ## Where to go next
 
 - [Quickstart](/quickstart) — install `cairn` and run your first browser spec.
