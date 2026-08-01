@@ -69,7 +69,17 @@ function NotesView({ notes }: { notes: Note[] }) {
   return (
     <Box flexDirection="column">
       {notes.map((note, i) => (
-        <Text key={i} dimColor>
+        <Text
+          key={i}
+          dimColor={note.kind === "info"}
+          color={
+            note.kind === "warn"
+              ? "yellow"
+              : note.kind === "error"
+                ? "red"
+                : undefined
+          }
+        >
           {note.message}
         </Text>
       ))}
@@ -79,47 +89,54 @@ function NotesView({ notes }: { notes: Note[] }) {
 
 /* ----- services lifecycle task list ----- */
 
+function PhaseRowView({ phase }: { phase: PhaseRow }) {
+  const elapsed = useElapsed(phase.startedAt);
+  return (
+    <Box flexDirection="column">
+      {phase.status === "running" ? (
+        <Spinner
+          label={`${phase.phase}${
+            phase.message ? ` — ${truncate(phase.message, 120)}` : ""
+          } ${formatDuration(elapsed)}`}
+        />
+      ) : (
+        <StatusLine status={phase.status}>
+          {phase.phase}
+          {phase.message ? (
+            <Text dimColor> — {truncate(phase.message, 120)}</Text>
+          ) : null}
+          <Duration
+            ms={
+              phase.finishedAt !== undefined
+                ? phase.finishedAt - phase.startedAt
+                : undefined
+            }
+          />
+        </StatusLine>
+      )}
+      {phase.output.length > 0 &&
+      (phase.status === "running" || phase.status === "failed") ? (
+        <Box flexDirection="column" marginLeft={2}>
+          {phase.output
+            .slice(phase.status === "failed" ? -5 : -10)
+            .map((line, i) => (
+              <Text key={i} dimColor>
+                {line}
+              </Text>
+            ))}
+        </Box>
+      ) : null}
+    </Box>
+  );
+}
+
 function ServicesView({ phases }: { phases: PhaseRow[] }) {
   if (phases.length === 0) return null;
   return (
     <Box flexDirection="column" marginBottom={1}>
-      {phases.map((phase) => {
-        const elapsed = useElapsed(phase.startedAt);
-        return (
-          <Box key={phase.phase} flexDirection="column">
-            {phase.status === "running" ? (
-              <Spinner
-                label={`${phase.phase}${
-                  phase.message ? ` — ${truncate(phase.message, 120)}` : ""
-                } ${formatDuration(elapsed)}`}
-              />
-            ) : (
-              <StatusLine status={phase.status}>
-                {phase.phase}
-                {phase.message ? (
-                  <Text dimColor> — {truncate(phase.message, 120)}</Text>
-                ) : null}
-                <Duration
-                  ms={
-                    phase.finishedAt !== undefined
-                      ? phase.finishedAt - phase.startedAt
-                      : undefined
-                  }
-                />
-              </StatusLine>
-            )}
-            {phase.status === "running" && phase.output.length > 0 ? (
-              <Box flexDirection="column" marginLeft={2}>
-                {phase.output.slice(-10).map((line, i) => (
-                  <Text key={i} dimColor>
-                    {line}
-                  </Text>
-                ))}
-              </Box>
-            ) : null}
-          </Box>
-        );
-      })}
+      {phases.map((phase) => (
+        <PhaseRowView key={phase.phase} phase={phase} />
+      ))}
     </Box>
   );
 }

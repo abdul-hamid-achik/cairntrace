@@ -173,13 +173,18 @@ export function makeInkServicesNarrator(store: TuiStore): ServicesNarrator {
     log(message) {
       // Seed heartbeats are covered by the spinner; teardown commands are
       // worth a note since their events carry no command text.
-      if (/still running after/.test(message)) return;
+      if (message.startsWith("still running after")) return;
       if (message.startsWith("teardown (")) {
         store.push({ type: "note", kind: "info", message });
       }
     },
-    logDetail() {
-      // Play-by-play detail is not rendered in the tree.
+    logDetail(message) {
+      // Seed output arrives on the detail channel (debug-gated in plain
+      // mode). Multi-line payloads are the streamed import output — feed
+      // them to the services panel; single-line play-by-play stays hidden.
+      if (message.includes("\n")) {
+        store.push({ type: "services-output", chunk: message });
+      }
     },
     onOutput(chunk) {
       store.push({ type: "services-output", chunk });
@@ -189,6 +194,15 @@ export function makeInkServicesNarrator(store: TuiStore): ServicesNarrator {
       switch (event.event) {
         case "start":
           store.push({ type: "services-start", phase, message: event.message });
+          return;
+        case "failure-cleanup":
+          // The error message already surfaces in the fatal alert; don't
+          // leave a perpetual running teardown row with it as its message.
+          store.push({
+            type: "note",
+            kind: "info",
+            message: "cleaning up after failure",
+          });
           return;
         case "fail":
           store.push({

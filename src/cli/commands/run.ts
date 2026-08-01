@@ -994,12 +994,7 @@ async function runBatch(
         type: "specs-count",
         count: specs.length,
       });
-      tuiNote(
-        "info",
-        `Running ${specs.length} spec${
-          specs.length === 1 ? "" : "s"
-        } (parallel: ${parallel})`,
-      );
+      // The "starting N specs" note (runCommand) already announces the batch.
     } else {
       log.raw(
         `${bold("Running")} ${specs.length} spec${
