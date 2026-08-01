@@ -30,15 +30,26 @@ clone + `bun install`, no compile step. Pin the
 [latest release](https://github.com/abdul-hamid-achik/cairntrace/releases/latest)
 or use `main`.
 
-### 0. Install from npm (global CLI)
+### 0. Install the CLI (any package manager)
+
+One-liner (detects your package manager — bun > pnpm > yarn > npm):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdul-hamid-achik/cairntrace/main/install.sh | bash
+```
+
+Or manually with your preferred manager:
 
 ```bash
 npm install -g @thelacanians/cairntrace
-cairn --help
+bun add -g @thelacanians/cairntrace
+pnpm add -g @thelacanians/cairntrace
+yarn global add @thelacanians/cairntrace
 ```
 
-Updating later is `npm update -g @thelacanians/cairntrace`. If you prefer to
-run from source, follow the clone path below.
+Verify with `cairn --version`. The CLI requires [Bun](https://bun.com) `>=1.3.0` at
+runtime (it ships as a Bun shebang with no build step). If you prefer to run from
+source, follow the clone path below.
 
 ### 1. Install prerequisites
 

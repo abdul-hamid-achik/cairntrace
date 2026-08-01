@@ -1,6 +1,30 @@
 # Distribution
 
-Cairntrace is **not published to npm or GitHub Packages.** The supported install path is cloning the repo and running from source with Bun — there is no build or compile step. Pin to the latest release tag or use `main` for the latest.
+Cairntrace is published to npm as **`@thelacanians/cairntrace`** and installed
+with any package manager. Installing from source (clone + `bun install`) is also
+supported and equivalent — there is no build or compile step either way. Pin to
+the latest release tag or use `main` for the latest.
+
+## Install the CLI
+
+One-liner (detects your package manager — bun > pnpm > yarn > npm):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abdul-hamid-achik/cairntrace/main/install.sh | bash
+```
+
+Or manually:
+
+```bash
+npm install -g @thelacanians/cairntrace
+bun add -g @thelacanians/cairntrace
+pnpm add -g @thelacanians/cairntrace
+yarn global add @thelacanians/cairntrace
+```
+
+Requires [Bun](https://bun.com) `>=1.3.0` at runtime (the CLI is a Bun shebang).
+Tag pushes to `main` publish new versions automatically via
+`.github/workflows/npm-publish.yml` (npm Trusted Publisher + provenance).
 
 ## What gets distributed
 

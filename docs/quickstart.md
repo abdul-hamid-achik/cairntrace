@@ -15,7 +15,16 @@ Go from clone to a passing behavioral browser spec against Cairntrace's tiny dem
 
 You can use Playwright instead, but the commands below follow the default agent-browser path.
 
-## 1. Clone and install
+## 1. Install Cairntrace
+
+Fastest (any package manager):
+
+```bash
+npm install -g @thelacanians/cairntrace
+cairn --version
+```
+
+Or run from source (equivalent — no build step):
 
 ```bash
 git clone https://github.com/abdul-hamid-achik/cairntrace
@@ -24,7 +33,7 @@ bun install
 ./bin/cairn doctor
 ```
 
-Cairntrace runs directly through its Bun launcher. There is no compile step and it is not published to npm.
+Cairntrace runs directly through its Bun launcher. There is no compile step.
 
 ## 2. Start the demo app
 
