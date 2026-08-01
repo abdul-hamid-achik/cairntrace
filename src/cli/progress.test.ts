@@ -1,14 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   clackLine,
   completionMark,
-  makeInteractiveListener,
   makePlainListener,
-  makeServicesInteractiveListener,
   resolveProgressMode,
-  SERVICES_GLYPH_ERROR,
-  SERVICES_GLYPH_SUCCESS,
-  SERVICES_GLYPH_WARN,
   summarizeStepError,
 } from "./progress";
 
@@ -82,7 +77,7 @@ describe("makePlainListener", () => {
     expect(lines[0]).toMatch(/^\[\d\d:\d\d:\d\d\] /);
   });
 
-  it("renders precondition timeouts explicitly in plain and TTY modes", () => {
+  it("renders precondition timeouts explicitly in plain mode", () => {
     const plainLines: string[] = [];
     const plain = makePlainListener({ write: (s) => plainLines.push(s) });
     plain.onPreconditionFinish?.("readiness_gate", undefined, 1_250, {
@@ -90,32 +85,11 @@ describe("makePlainListener", () => {
       signal: "SIGTERM",
     });
 
-    const ttyLines: string[] = [];
-    const tty = makeInteractiveListener({ color: false });
-    const originalWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: string) => {
-      ttyLines.push(chunk);
-      return true;
-    }) as typeof process.stderr.write;
-    try {
-      tty.onPreconditionFinish?.("readiness_gate", undefined, 1_250, {
-        timedOut: true,
-        signal: "SIGTERM",
-      });
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-
-    for (const text of [plainLines.join(""), ttyLines.join("")]) {
-      expect(text).toContain(
-        "precondition readiness_gate timed out (SIGTERM) 1.3s",
-      );
-      expect(text).not.toContain("exit undefined");
-    }
-    // The interactive renderer honors `color: false`: no ANSI may leak even
-    // though clack hardcodes its own marks — symbols go through the palette.
-    // eslint-disable-next-line no-control-regex
-    expect(ttyLines.join("")).not.toMatch(/\x1b\[/);
+    const text = plainLines.join("");
+    expect(text).toContain(
+      "precondition readiness_gate timed out (SIGTERM) 1.3s",
+    );
+    expect(text).not.toContain("exit undefined");
   });
 });
 
@@ -135,24 +109,6 @@ describe("onRunStart env header", () => {
     expect(text).toContain(
       "run start: answer_change (env=do, backend=agent-browser)",
     );
-    expect(text).not.toContain("env=local");
-  });
-
-  it("interactive listener: shows the resolved environment, not spec.environment", () => {
-    const written: string[] = [];
-    const listener = makeInteractiveListener({ color: false });
-    const originalWrite = process.stderr.write.bind(process.stderr);
-    process.stderr.write = ((chunk: string) => {
-      written.push(chunk);
-      return true;
-    }) as typeof process.stderr.write;
-    try {
-      listener.onRunStart?.(spec, "run_1", "/tmp/run_1", "agent-browser", "do");
-    } finally {
-      process.stderr.write = originalWrite;
-    }
-    const text = written.join("");
-    expect(text).toContain("(env=do, backend=agent-browser)");
     expect(text).not.toContain("env=local");
   });
 });
@@ -225,216 +181,5 @@ describe("resolveProgressMode", () => {
     // escape hatch.
     process.env.CAIRN_PROGRESS = "plain";
     expect(resolveProgressMode(undefined)).toBe("plain");
-  });
-});
-
-function captureStderr(): string[] {
-  const writes: string[] = [];
-  vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
-    writes.push(String(chunk));
-    return true;
-  });
-  return writes;
-}
-
-describe("makeServicesInteractiveListener", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("renders milestone marks, ticker labels, and raw output", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "seed",
-      event: "start",
-      message: "bash tools/local-seed-state.sh run",
-      timestamp: "t",
-    });
-    n.onOutput("importing rows…\n");
-    n.log("services: seed — complete");
-
-    const text = writes.join("");
-    expect(text).toContain("seed — bash tools/local-seed-state.sh run");
-    expect(text).toContain("importing rows…\n");
-    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
-    expect(text).toContain("services: seed — complete");
-    // Terminal milestones carry their phase duration (B).
-    expect(text).toMatch(/services: seed — complete \d+ms/);
-    // Raw stream must be untouched by ticker redraws in the same chunk.
-    expect(text).toContain("importing rows…\n");
-  });
-
-  it("marks failures and warnings with their own glyphs", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.log("seed command failed (exit 1): bash tools/seed.sh");
-    n.log("docker — healthcheck WARNING: unhealthy after 2 failures");
-    n.log("teardown[0] failed (exit 1); continuing");
-
-    const text = writes.join("");
-    expect(text).toContain(SERVICES_GLYPH_ERROR);
-    expect(text).toContain(SERVICES_GLYPH_WARN);
-    // The best-effort teardown failure is a warning, not an error.
-    expect(text.indexOf(SERVICES_GLYPH_WARN)).toBeLessThan(
-      text.lastIndexOf(SERVICES_GLYPH_WARN),
-    );
-  });
-
-  it("retires the ticker on terminal lifecycle events", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "tmux",
-      event: "ready-wait",
-      message: 'waiting for "web"',
-      timestamp: "t",
-    });
-    n.onEvent({
-      phase: "tmux",
-      event: "ready",
-      message: 'session "cairn-graphite" ready',
-      timestamp: "t",
-    });
-    n.log('tmux — session "cairn-graphite" ready');
-
-    const text = writes.join("");
-    expect(text).toContain('tmux — waiting for "web"…\n');
-    // Terminal event retires the ticker: the milestone starts on its own line.
-    expect(text).toContain(
-      `\n${SERVICES_GLYPH_SUCCESS}  tmux — session "cairn-graphite" ready`,
-    );
-  });
-
-  it("buffers docker compose up status spam and clears it on ready", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "docker",
-      event: "start",
-      message: "docker compose up -d",
-      timestamp: "t",
-    });
-    n.onOutput(
-      "Container graphite-mongo-1 Creating\nContainer graphite-mongo-1 Started\n",
-    );
-    n.onEvent({
-      phase: "docker",
-      event: "ready",
-      message: "docker ready",
-      timestamp: "t",
-    });
-    n.log("services: docker — ready");
-
-    const text = writes.join("");
-    // The compose status lines never reach the terminal; the milestone does.
-    expect(text).not.toContain("Container graphite-mongo-1");
-    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
-    expect(text).toContain("services: docker — ready");
-  });
-
-  it("clears the docker buffer on failure too (ServicesError carries the tail)", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "docker",
-      event: "start",
-      message: "docker compose up -d",
-      timestamp: "t",
-    });
-    n.onOutput("Container graphite-mongo-1 Creating\n");
-    n.onEvent({
-      phase: "docker",
-      event: "fail",
-      message: "exit 1",
-      timestamp: "t",
-    });
-    expect(writes.join("")).not.toContain("Container graphite-mongo-1");
-  });
-
-  it("streams onOutput raw for non-docker phases", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "seed",
-      event: "start",
-      message: "bash tools/local-seed-state.sh run",
-      timestamp: "t",
-    });
-    n.onOutput("importing rows…\n");
-    expect(writes.join("")).toContain("importing rows…\n");
-  });
-
-  it("hides seed detail by default and shows it with the detail option", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.logDetail(
-      "[MONGO IMPORT] Restored `graphite.entities` - 33697 documents\n",
-    );
-    expect(writes.join("")).toBe("");
-
-    const writesVerbose = captureStderr();
-    const nv = makeServicesInteractiveListener({
-      color: false,
-      detail: true,
-    });
-    nv.logDetail("[MONGO IMPORT] Restored `graphite.entities`\n");
-    expect(writesVerbose.join("")).toContain("[MONGO IMPORT] Restored");
-  });
-
-  it("shows the whole services lifecycle duration on the tmux-ready milestone", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "docker",
-      event: "start",
-      message: "docker compose up -d",
-      timestamp: "t",
-    });
-    n.onEvent({
-      phase: "docker",
-      event: "ready",
-      message: "docker ready",
-      timestamp: "t",
-    });
-    n.onEvent({
-      phase: "tmux",
-      event: "start",
-      message: 'creating session "cairn-graphite"',
-      timestamp: "t",
-    });
-    n.log('tmux — session "cairn-graphite" ready');
-    expect(writes.join("")).toMatch(
-      /tmux — session "cairn-graphite" ready \d+ms/,
-    );
-  });
-
-  it("renders seed postCommand completions with their own duration", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.onEvent({
-      phase: "seed",
-      event: "start",
-      message: "postCommand: bash tools/ensure-fixture.js",
-      timestamp: "t",
-    });
-    n.onEvent({
-      phase: "seed",
-      event: "complete",
-      message: "postCommand ok: bash tools/ensure-fixture.js",
-      timestamp: "t",
-    });
-    const text = writes.join("");
-    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
-    expect(text).toMatch(
-      /postCommand ok: bash tools\/ensure-fixture\.js \d+ms/,
-    );
-  });
-
-  it("filters seed heartbeats from the interactive view (ticker covers them)", () => {
-    const writes = captureStderr();
-    const n = makeServicesInteractiveListener({ color: false });
-    n.log("seed — still running after 5m 12s");
-    expect(writes.join("")).toBe("");
   });
 });

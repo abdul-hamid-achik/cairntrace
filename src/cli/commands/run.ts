@@ -47,21 +47,23 @@ import {
 } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import {
-  clackLine,
   completionMark,
-  makeProgressListener,
-  makeServicesInteractiveListener,
+  makePlainListener,
   resolveProgressMode,
-  SERVICES_GLYPH_STEP,
-  SERVICES_GLYPH_WARN,
   type ProgressMode,
 } from "../progress";
 import {
-  currentLogLevel,
-  log,
-  reconfigureWithConfig,
-  setNarrationDefault,
-} from "../logger";
+  getTuiStore,
+  isTuiMounted,
+  makeInkProgressListener,
+  makeInkServicesNarrator,
+  mountTui,
+  tuiFatal,
+  tuiNote,
+  unmountTui,
+} from "../ui";
+import { TuiStore } from "../ui/store";
+import { log, reconfigureWithConfig, setNarrationDefault } from "../logger";
 import { resolveScopedSecrets, type ScopedSecrets } from "./secrets";
 import { publishRunDirectory } from "./publish";
 import { maybeAutoStash, stashDirectory } from "./stash";
@@ -173,7 +175,7 @@ async function archiveRun(
   // exception by design to keep the active run from failing.
   if (!r.ok) {
     const message = `fcheap archive failed: ${r.error ?? "unknown"}`;
-    runLog.warn(`${message}; retained ${runDir}`);
+    noteWarn(`${message}; retained ${runDir}`);
     throw new Error(message);
   }
 }
@@ -274,7 +276,7 @@ export async function runHookCommands(
           tail ? `\n${tail}` : ""
         }`;
         if (fatal) throw new Error(msg);
-        runLog.warn(msg);
+        noteWarn(msg);
         continue;
       }
       if (r.exitCode !== 0) {
@@ -283,11 +285,11 @@ export async function runHookCommands(
           tail ? `\n${tail}` : ""
         }`;
         if (fatal) throw new Error(msg);
-        runLog.warn(msg);
+        noteWarn(msg);
       }
     } catch (e) {
       if (fatal) throw e;
-      runLog.warn(`${phase} hook error: ${(e as Error).message}`);
+      noteWarn(`${phase} hook error: ${(e as Error).message}`);
     }
   }
 }
@@ -313,6 +315,33 @@ function resolveRunProgressMode(
     : undefined;
 }
 
+/** Info narration: through the Ink tree when mounted, else the logger. */
+function noteInfo(message: string): void {
+  if (isTuiMounted()) tuiNote("info", message);
+  else runLog.info(message);
+}
+
+/** Warn narration: through the Ink tree when mounted, else the logger. */
+function noteWarn(message: string): void {
+  if (isTuiMounted()) tuiNote("warn", message);
+  else runLog.warn(message);
+}
+
+/**
+ * Fatal run error: through the tree (final frame) when mounted, else logger.
+ * When the tree is mounted, give React a frame to paint the alert before
+ * exiting — a synchronous process.exit would unmount before the render.
+ */
+function failRun(message: string, code = 2): void {
+  if (isTuiMounted()) {
+    tuiFatal(message);
+    setTimeout(() => process.exit(code), 100);
+  } else {
+    runLog.error(message);
+    process.exit(code);
+  }
+}
+
 export async function runCommand(
   specs: string[],
   opts: RunCommandOptions,
@@ -328,7 +357,10 @@ export async function runCommand(
   // same flat mark as the services milestones.
   const startingLine = summarizeStartingSpecs(specs, process.cwd());
   if (progressMode === "tty") {
-    clackLine(SERVICES_GLYPH_STEP, startingLine);
+    // The Ink tree owns stderr from here on; every later narration line goes
+    // through the store. The exit handler unmounts it on process.exit.
+    mountTui(new TuiStore());
+    tuiNote("info", startingLine);
   } else {
     runLog.info(startingLine);
   }
@@ -338,21 +370,21 @@ export async function runCommand(
   try {
     hookTimeoutMs = parseHookTimeoutMs(opts.hookTimeoutMs);
   } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
   let expandedSpecs: string[];
 
   try {
     expandedSpecs = await expandSpecArgs(specs);
   } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   if (expandedSpecs.length === 0) {
-    runLog.error("at least one spec path is required");
-    process.exit(2);
+    failRun("at least one spec path is required", 2);
+    return;
   }
 
   const requiredTags = normalizeTagFilters(opts.tag);
@@ -361,8 +393,8 @@ export async function runCommand(
     parseVarFlags(opts.var);
     parseLabelFlags(opts.label);
   } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   // `--select-only`: resolve which specs WOULD run and exit 0 WITHOUT launching
@@ -390,15 +422,16 @@ export async function runCommand(
   if (requiredTags.length > 0) {
     const tagSel = await selectSpecsByTags(expandedSpecs, requiredTags);
     expandedSpecs = tagSel.selected;
-    runLog.info(
+    noteInfo(
       `tag filter [${requiredTags.join(", ")}]: ${expandedSpecs.length} spec(s)`,
     );
     if (expandedSpecs.length === 0) {
-      runLog.error(
+      failRun(
         `no specs matched --tag ${requiredTags.map((t) => JSON.stringify(t)).join(" --tag ")} ` +
           `(need every tag on metadata.tags; case-insensitive)`,
+        2,
       );
-      process.exit(2);
+      return;
     }
   }
 
@@ -411,7 +444,7 @@ export async function runCommand(
       opts.sinceCodemap,
     );
     if (expandedSpecs.length === 0) {
-      runLog.info(
+      noteInfo(
         `--since-codemap ${opts.sinceCodemap} selected 0 specs (blast radius matched no spec's coversSymbol); nothing to run`,
       );
       process.exitCode = 0;
@@ -423,14 +456,16 @@ export async function runCommand(
   try {
     scopedSecrets = await maybeInjectTvaultSecrets(expandedSpecs[0]!, opts);
   } catch (e) {
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   // A services dry-run is a planning command, not a spec run with no-op
   // services. Resolve and print the effective lifecycle, then stop before the
   // web server, hooks, browser backend, run directory, or preconditions exist.
   if (opts.servicesDryRun) {
+    // The dry-run plan prints raw to stderr; release the viewport first.
+    if (isTuiMounted()) unmountTui();
     try {
       await maybeStartServices(
         expandedSpecs[0]!,
@@ -441,8 +476,7 @@ export async function runCommand(
       process.exitCode = 0;
       return;
     } catch (e) {
-      runLog.error((e as Error).message);
-      process.exit(2);
+      failRun((e as Error).message, 2);
     }
   }
 
@@ -462,8 +496,8 @@ export async function runCommand(
     );
   } catch (e) {
     untrackServer?.();
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   // Bring up the configured services environment (docker/seed/tmux), if any.
@@ -484,8 +518,8 @@ export async function runCommand(
     // Tear down the web server too before exiting.
     if (server) await server.stop().catch(() => undefined);
     untrackServer?.();
-    runLog.error((e as Error).message);
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   // Project-level browser tuning (config `browser:` block) applied to every
@@ -502,7 +536,6 @@ export async function runCommand(
       timeoutMs: hookTimeoutMs,
     });
   } catch (e) {
-    runLog.error((e as Error).message);
     if (svcHandle) {
       await svcHandle.stop().catch(() => undefined);
       untrackSvc?.();
@@ -511,7 +544,8 @@ export async function runCommand(
       await server.stop().catch(() => undefined);
       untrackServer?.();
     }
-    process.exit(2);
+    failRun((e as Error).message, 2);
+    return;
   }
 
   // Resolve one final exit status only after lifecycle teardown; forcing an
@@ -546,7 +580,7 @@ export async function runCommand(
         timeoutMs: hookTimeoutMs,
       });
     } catch (e) {
-      runLog.warn(`after hook: ${(e as Error).message}`);
+      noteWarn(`after hook: ${(e as Error).message}`);
     }
     if (svcHandle) {
       await svcHandle.stop().catch(() => undefined);
@@ -556,13 +590,11 @@ export async function runCommand(
       if (server.startedByUs && exitCode !== 0) {
         const logTail = server.tailLog(80).trim();
         if (logTail) {
-          runLog.warn(
+          noteInfo(
             `web server log (last 80 lines${
               server.logPath ? `, full: ${server.logPath}` : ""
-            }):`,
+            }):\n${logTail}`,
           );
-          // The tail is server output — stream it raw so it isn't re-leveled.
-          log.raw(`${logTail}\n`);
         }
       }
       await server.stop().catch(() => undefined);
@@ -742,13 +774,7 @@ export async function maybeStartServices(
     format === "md" ? resolveProgressMode(opts.progress) : undefined;
   const servicesNarrator =
     progressMode === "tty"
-      ? makeServicesInteractiveListener({
-          color: colorEnabled(),
-          // Seed detail renders in the interactive view only when --verbose
-          // (or CAIRN_LOG_LEVEL=debug) asked for it, matching the logger's
-          // debug channel in plain mode.
-          detail: currentLogLevel() === "debug",
-        })
+      ? makeInkServicesNarrator(getTuiStore()!)
       : undefined;
   if (progressMode) setNarrationDefault(true);
 
@@ -761,14 +787,10 @@ export async function maybeStartServices(
     selectedTvaultKeys: scopedSecrets.selectedKeys,
     secretValues: scopedSecrets.secretValues,
     // Lifecycle narration + live subprocess output route through the logger
-    // (leveled, always stderr). info lines + raw streaming show on an
-    // interactive TTY (default info); --quiet/json suppresses them.
+    // (leveled, always stderr) in plain mode; the Ink tree owns them in tty.
     log: servicesNarrator
       ? servicesNarrator.log
       : (m: string) => log.scope("services").info(m),
-    // Play-by-play behind each milestone (readiness/healthcheck command
-    // echoes, tmux scaffolding, retry narration) — DEBUG only, visible with
-    // --verbose / CAIRN_LOG_LEVEL=debug.
     logDetail: servicesNarrator
       ? servicesNarrator.logDetail
       : (m: string) => log.scope("services").debug(m),
@@ -812,7 +834,9 @@ async function runSingle(
   const progressMode: ProgressMode | undefined = resolveRunProgressMode(opts);
   const interactive = progressMode === "tty";
   const listener = progressMode
-    ? makeProgressListener(progressMode, { color: colorEnabled() })
+    ? interactive
+      ? makeInkProgressListener(getTuiStore()!)
+      : makePlainListener()
     : undefined;
   let activeRunDir: string | undefined;
   const signalAwareListener = services
@@ -879,11 +903,7 @@ async function runSingle(
       specPath,
       opts,
       progressMode === "tty"
-        ? (message, kind) =>
-            clackLine(
-              kind === "warn" ? SERVICES_GLYPH_WARN : SERVICES_GLYPH_STEP,
-              message,
-            )
+        ? (message, kind) => tuiNote(kind, message)
         : undefined,
     );
 
@@ -962,11 +982,24 @@ async function runBatch(
   });
 
   if (progressMode) {
-    log.raw(
-      `${bold("Running")} ${specs.length} spec${
-        specs.length === 1 ? "" : "s"
-      } (parallel: ${parallel})\n\n`,
-    );
+    if (progressMode === "tty") {
+      getTuiStore()?.push({
+        type: "specs-count",
+        count: specs.length,
+      });
+      tuiNote(
+        "info",
+        `Running ${specs.length} spec${
+          specs.length === 1 ? "" : "s"
+        } (parallel: ${parallel})`,
+      );
+    } else {
+      log.raw(
+        `${bold("Running")} ${specs.length} spec${
+          specs.length === 1 ? "" : "s"
+        } (parallel: ${parallel})\n\n`,
+      );
+    }
   }
 
   // Each SPEC gets its own session id — not just each worker. A per-worker
@@ -996,7 +1029,9 @@ async function runBatch(
         // keeps completion lines only (interleaved redraws would corrupt).
         const specListener =
           progressMode && parallel === 1
-            ? makeProgressListener(progressMode, { color: colorEnabled() })
+            ? progressMode === "tty"
+              ? makeInkProgressListener(getTuiStore()!)
+              : makePlainListener()
             : undefined;
         let activeRunDir: string | undefined;
         const signalAwareListener = services
@@ -1011,9 +1046,18 @@ async function runBatch(
               .split("/")
               .pop()
               ?.replace(/\.ya?ml$/, "") ?? specPath;
-          log.raw(
-            `${bold(`[${idx + 1}/${specs.length}]`)} ${specLabel} — starting…\n`,
-          );
+          if (progressMode === "tty") {
+            getTuiStore()?.push({
+              type: "spec-start",
+              idx,
+              total: specs.length,
+              label: specLabel,
+            });
+          } else {
+            log.raw(
+              `${bold(`[${idx + 1}/${specs.length}]`)} ${specLabel} — starting…\n`,
+            );
+          }
         }
         try {
           const vars = parseVarFlags(opts.var);
@@ -1059,7 +1103,23 @@ async function runBatch(
           // Record immediately, before best-effort annotation/stash work, so a
           // signal can index every completed per-spec artifact directory.
           completedByIndex[idx] = r;
-          if (progressMode) {
+          if (progressMode === "tty") {
+            getTuiStore()?.push({
+              type: "spec-finish",
+              idx,
+              status:
+                r.status === "passed"
+                  ? "passed"
+                  : r.status === "errored"
+                    ? "errored"
+                    : "failed",
+              name: r.spec.name,
+              durationMs: r.durationMs,
+              passed: r.outcomes.filter((o) => o.status === "passed").length,
+              totalOutcomes: r.outcomes.length,
+              error: r.failure?.message,
+            });
+          } else if (progressMode) {
             log.raw(
               `  ${completionMark(r.status, interactive)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${r.outcomes.filter((o) => o.status === "passed").length}/${r.outcomes.length} outcomes)\n`,
             );
@@ -1069,18 +1129,29 @@ async function runBatch(
             specPath,
             opts,
             progressMode === "tty"
-              ? (message, kind) =>
-                  clackLine(
-                    kind === "warn" ? SERVICES_GLYPH_WARN : SERVICES_GLYPH_STEP,
-                    message,
-                  )
+              ? (message, kind) => tuiNote(kind, message)
               : undefined,
           );
           return r;
         } catch (e) {
           // Synthesize an errored RunResult so the batch survives.
           const err = e as Error;
-          if (progressMode) {
+          if (progressMode === "tty") {
+            getTuiStore()?.push({
+              type: "spec-finish",
+              idx,
+              status: "errored",
+              name:
+                specPath
+                  .split("/")
+                  .pop()
+                  ?.replace(/\.ya?ml$/, "") ?? specPath,
+              durationMs: 0,
+              passed: 0,
+              totalOutcomes: 0,
+              error: err.message,
+            });
+          } else if (progressMode) {
             log.raw(
               `  ${completionMark("errored", interactive)} [${idx + 1}/${specs.length}] ${specPath}: ${err.message}\n`,
             );
@@ -1120,6 +1191,13 @@ async function runBatch(
         : summary.errored > 0
           ? 2
           : 0;
+
+    if (isTuiMounted()) {
+      getTuiStore()?.push({
+        type: "batch-end",
+        summary: { ...summary, durationMs: totalDurationMs },
+      });
+    }
 
     const batch: BatchRunResult = {
       $schema: "urn:cairntrace.dev:run-batch:v1",
@@ -1217,8 +1295,8 @@ export async function maybeInjectTvaultSecrets(
   }
   if (scoped.injectedKeys.length > 0) {
     const msg = `prepared ${scoped.injectedKeys.length} scoped secrets from tvault "${scoped.target}"`;
-    if (resolveRunProgressMode(opts) === "tty") {
-      clackLine(SERVICES_GLYPH_STEP, msg);
+    if (isTuiMounted()) {
+      tuiNote("info", msg);
     } else {
       runLog.info(msg);
     }
@@ -1246,9 +1324,6 @@ export function backendOpts(
       ? { postClickSettleMs: browser.postClickSettleMs }
       : {}),
   };
-}
-function colorEnabled(): boolean {
-  return log.color && process.env.TERM !== "dumb";
 }
 
 interface FailureAutomationConfig {

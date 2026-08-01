@@ -5,7 +5,7 @@
     "bin/cairn",
     "docs/.vitepress/theme/index.ts"
   ],
-  "project": ["src/**/*.ts", "bin/cairn"],
+  "project": ["src/**/*.ts", "src/**/*.tsx", "bin/cairn"],
   "ignore": [
     "src/adapters/agent-browser/index.ts",
     "src/core/schema/index.ts"

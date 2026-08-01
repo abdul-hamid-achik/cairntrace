@@ -289,6 +289,14 @@ services lifecycle narration and live subprocess output. `cairn run`/`cairn
 clean` route through the leveled logger (`src/cli/logger.ts`); other commands
 are migrating incrementally.
 
+**Interactive TUI:** under `--format md --progress tty` the narration renders
+through an **Ink**-based TUI (`src/cli/ui/` — store-driven views for the
+services lifecycle, single-spec runs, and batches, all on one theme). All
+narration flows through the store; nothing writes to the viewport directly.
+Non-TTY/CI keeps the byte-stable plain listener (`src/cli/progress.ts`) and
+`--log-format json` keeps machine-readable NDJSON. clack remains only for
+interactive prompts (login/heal).
+
 **Verbosity** (global flags + env + config, highest priority first):
 - `--log-level <debug|info|warn|error|silent>`, `--quiet` (=warn),
   `--verbose` (=debug). Default: info on a TTY, warn in CI/piped.

@@ -9,8 +9,10 @@ import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
 import { trackBackend } from "../../cleanup";
 import { emit, resolveFormat } from "../../format";
-import { log } from "../../logger";
-import { makeProgressListener, resolveProgressMode } from "../../progress";
+import { makePlainListener, resolveProgressMode } from "../../progress";
+import type { ProgressListener } from "../../../core/runner/Runner";
+import { getTuiStore, makeInkProgressListener, mountTui } from "../../ui";
+import { TuiStore } from "../../ui/store";
 
 export interface HealCommandOptions {
   apply?: boolean;
@@ -44,11 +46,14 @@ export async function healCommand(
   // uses (auto/CAIRN_PROGRESS, stderr), instead of healing in silence.
   const progressMode =
     format === "md" ? resolveProgressMode(undefined) : undefined;
-  const listener = progressMode
-    ? makeProgressListener(progressMode, {
-        color: log.color && process.env.TERM !== "dumb",
-      })
-    : undefined;
+  let listener: ProgressListener | undefined;
+  if (progressMode === "tty") {
+    // Same Ink TUI as `cairn run`; the exit handler unmounts it.
+    mountTui(new TuiStore());
+    listener = makeInkProgressListener(getTuiStore()!);
+  } else if (progressMode) {
+    listener = makePlainListener();
+  }
 
   let exitCode = 2;
   try {
