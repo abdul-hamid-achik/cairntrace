@@ -432,6 +432,38 @@ describe("startServices — indefinite wait + live output", () => {
     expect(details.join("")).toContain("imported 42 records");
   });
 
+  it("emits seed heartbeats while a long import runs", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    const logs: string[] = [];
+    vi.useFakeTimers();
+    try {
+      let releaseChild!: () => void;
+      const gate = new Promise<void>((r) => (releaseChild = r));
+      shellChildImpl = async () => {
+        await gate;
+        return { exitCode: 0, stdout: "done\n", stderr: "" };
+      };
+      const running = startServices(
+        { seed: { command: "yarn demo-import", cwd: dir, ttlSeconds: 0 } },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          log: (message) => logs.push(message),
+        },
+      );
+      // Let the import run past the 60s heartbeat window, then finish it.
+      await vi.advanceTimersByTimeAsync(61_000);
+      releaseChild();
+      await track(await running);
+      expect(
+        logs.some((l) => /seed — still running after 1m \d+s/.test(l)),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not crash when ctx.onOutput is unset (no streaming)", async () => {
     execaImpl = async (cmd) => {
       if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };

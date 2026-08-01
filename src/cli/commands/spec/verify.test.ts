@@ -329,6 +329,7 @@ outcomes:
     expect(result.code).toBe(4);
     const parsed = JSON.parse(result.stdout);
     expect(parsed.status).toBe("invalid");
+    expect(parsed.referenceFindings).toBe(2);
     const errors = parsed.errors as string[];
     expect(errors.some((e) => e.includes("${env.NOT_SUPPLIED}"))).toBe(true);
     expect(errors.some((e) => e.includes("${secrets.UNDECLARED}"))).toBe(true);
@@ -374,6 +375,8 @@ outcomes:
       config: configPath,
     });
     expect(result.code).toBe(0);
-    expect(JSON.parse(result.stdout).status).toBe("valid");
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.status).toBe("valid");
+    expect(parsed.referenceFindings).toBe(0);
   });
 });

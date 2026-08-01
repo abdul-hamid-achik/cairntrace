@@ -31,6 +31,8 @@ interface VerifyResult {
   contractHash?: string;
   warnings: string[];
   errors: string[];
+  /** Placeholder reference findings from the static audit (0 when clean). */
+  referenceFindings?: number;
 }
 
 export async function verifyCommand(
@@ -88,6 +90,7 @@ export async function verifyCommand(
       const findings = auditPlaceholderReferences(auditFiles, {
         secretsRequired: runtime.config?.secrets?.required,
       });
+      result.referenceFindings = findings.length;
       for (const f of findings) {
         result.errors.push(`${f.file}: ${f.token} — ${f.message}`);
       }
@@ -133,6 +136,9 @@ export async function stampSpecContractHash(specPath: string): Promise<string> {
 function toMarkdown(r: VerifyResult): string {
   const lines = [`# Verify: ${r.path}`, `Status: ${r.status}`];
   if (r.contractHash) lines.push(`Contract hash: ${r.contractHash}`);
+  if (r.referenceFindings !== undefined) {
+    lines.push(`Reference audit: ${r.referenceFindings} finding(s)`);
+  }
   if (r.warnings.length > 0) {
     lines.push("", "## Warnings");
     for (const w of r.warnings) lines.push(`- ${w}`);

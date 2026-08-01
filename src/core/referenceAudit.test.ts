@@ -113,7 +113,7 @@ describe("auditPlaceholderReferences", () => {
       ],
       { env: {} },
     );
-    const tokens = findings.map((f: ReferenceFinding) => f.token).sort();
+    const tokens = findings.map((f: ReferenceFinding) => f.token).toSorted();
     expect(tokens).toEqual(["${env.A}", "${env.C}", "${secrets.B}"]);
   });
 });

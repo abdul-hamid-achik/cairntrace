@@ -7,7 +7,6 @@ import {
   makeServicesInteractiveListener,
   resolveProgressMode,
   SERVICES_GLYPH_ERROR,
-  SERVICES_GLYPH_STEP,
   SERVICES_GLYPH_SUCCESS,
   SERVICES_GLYPH_WARN,
   summarizeStepError,
@@ -260,6 +259,8 @@ describe("makeServicesInteractiveListener", () => {
     expect(text).toContain("importing rows…\n");
     expect(text).toContain(SERVICES_GLYPH_SUCCESS);
     expect(text).toContain("services: seed — complete");
+    // Terminal milestones carry their phase duration (B).
+    expect(text).toMatch(/services: seed — complete \d+ms/);
     // Raw stream must be untouched by ticker redraws in the same chunk.
     expect(text).toContain("importing rows…\n");
   });
@@ -301,7 +302,7 @@ describe("makeServicesInteractiveListener", () => {
     expect(text).toContain('tmux — waiting for "web"…\n');
     // Terminal event retires the ticker: the milestone starts on its own line.
     expect(text).toContain(
-      `\n${SERVICES_GLYPH_STEP}  tmux — session "cairn-graphite" ready`,
+      `\n${SERVICES_GLYPH_SUCCESS}  tmux — session "cairn-graphite" ready`,
     );
   });
 
@@ -379,5 +380,61 @@ describe("makeServicesInteractiveListener", () => {
     });
     nv.logDetail("[MONGO IMPORT] Restored `graphite.entities`\n");
     expect(writesVerbose.join("")).toContain("[MONGO IMPORT] Restored");
+  });
+
+  it("shows the whole services lifecycle duration on the tmux-ready milestone", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "docker",
+      event: "start",
+      message: "docker compose up -d",
+      timestamp: "t",
+    });
+    n.onEvent({
+      phase: "docker",
+      event: "ready",
+      message: "docker ready",
+      timestamp: "t",
+    });
+    n.onEvent({
+      phase: "tmux",
+      event: "start",
+      message: 'creating session "cairn-graphite"',
+      timestamp: "t",
+    });
+    n.log('tmux — session "cairn-graphite" ready');
+    expect(writes.join("")).toMatch(
+      /tmux — session "cairn-graphite" ready \d+ms/,
+    );
+  });
+
+  it("renders seed postCommand completions with their own duration", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.onEvent({
+      phase: "seed",
+      event: "start",
+      message: "postCommand: bash tools/ensure-fixture.js",
+      timestamp: "t",
+    });
+    n.onEvent({
+      phase: "seed",
+      event: "complete",
+      message: "postCommand ok: bash tools/ensure-fixture.js",
+      timestamp: "t",
+    });
+    const text = writes.join("");
+    expect(text).toContain(SERVICES_GLYPH_SUCCESS);
+    expect(text).toMatch(
+      /postCommand ok: bash tools\/ensure-fixture\.js \d+ms/,
+    );
+  });
+
+  it("filters seed heartbeats from the interactive view (ticker covers them)", () => {
+    const writes = captureStderr();
+    const n = makeServicesInteractiveListener({ color: false });
+    n.log("seed — still running after 5m 12s");
+    expect(writes.join("")).toBe("");
   });
 });

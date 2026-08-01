@@ -806,7 +806,22 @@ async function startSeed(
 
   ctx.log?.(redactor.text(`seed — running (${cfg.command})`));
   emit("seed", "start", redactor.text(cfg.command));
+  // A heavy import can run for many minutes; plain/CI runs have no ticker, so
+  // emit a bounded info heartbeat so the phase reads as "working, bounded"
+  // instead of a silent stall. The tty narrator filters these (its ticker
+  // already shows elapsed).
+  const seedStartedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const elapsed = Date.now() - seedStartedAt;
+    const m = Math.floor(elapsed / 60_000);
+    const s = Math.floor((elapsed - m * 60_000) / 1000);
+    ctx.log?.(
+      redactor.text(`seed — still running after ${m > 0 ? `${m}m ` : ""}${s}s`),
+    );
+  }, 60_000);
+  heartbeat.unref?.();
   const r = await runShellWithTimeout(cfg.command, { cwd, env }, timeout);
+  clearInterval(heartbeat);
   storeServiceCommandArtifactRecord(phases, "seed", {
     kind: "command",
     index: 0,

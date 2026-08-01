@@ -1027,6 +1027,47 @@ steps: []
 });
 
 describe("run stable exit codes (end-to-end via CLI)", () => {
+  it("narrates per-spec lines in plain mode and triages failures in the footer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-plain-batch-"));
+    const makeSpec = async (name: string): Promise<string> => {
+      const path = join(dir, `${name}.yml`);
+      await writeFile(
+        path,
+        `version: 1
+name: ${name}
+intent: The stamped contract no longer matches.
+contractHash: sha256:${"0".repeat(64)}
+outcomes:
+  - id: ok
+    description: no console errors
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+      );
+      return path;
+    };
+    const first = await makeSpec("plain_one");
+    const second = await makeSpec("plain_two");
+    const bin = join(process.cwd(), "bin", "cairn");
+
+    const batch = await execa(
+      bin,
+      ["run", first, second, "--mock", "--no-web-server"],
+      { reject: false },
+    );
+    expect(batch.exitCode).toBe(6);
+    // Plain mode (non-TTY md) narrates per-spec starting + completion lines
+    // on stderr; the errored line carries the canonical failure.
+    expect(batch.stderr).toContain("[1/2] plain_one — starting…");
+    expect(batch.stderr).toContain("[2/2] plain_two — starting…");
+    expect(batch.stderr).toContain(
+      "plain_one.yml: contract changed since seal",
+    );
+    // The footer lists failing specs with the canonical failure headline.
+    expect(batch.stdout).toContain("Failing specs:");
+    expect(batch.stdout).toContain("— contract changed since seal");
+  });
+
   it("returns 6 for a contract mismatch in both single and batch JSON runs", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-contract-exit-"));
     const makeSpec = async (name: string): Promise<string> => {

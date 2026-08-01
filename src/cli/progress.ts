@@ -486,6 +486,11 @@ export function makeServicesInteractiveListener(
   const DOCKER_BUFFER_MAX = 8_192;
   let dockerPhase = false;
   let dockerBuffer = "";
+  // Per-phase start (set on each `start` event) so terminal milestones can
+  // carry their duration; servicesStart pins the first start event so the
+  // tmux-ready milestone can show the whole lifecycle's total.
+  let phaseStart: number | undefined;
+  let servicesStart: number | undefined;
 
   function startTicker(label: string): void {
     stopTicker();
@@ -554,10 +559,34 @@ export function makeServicesInteractiveListener(
     return `${code}${symbol}${c.reset}`;
   }
 
+  /** Terminal milestones (success/warn/fail) carry a duration; steps don't. */
+  function isTerminalMark(symbol: string): boolean {
+    return (
+      symbol === SERVICES_GLYPH_SUCCESS ||
+      symbol === SERVICES_GLYPH_ERROR ||
+      symbol === SERVICES_GLYPH_WARN
+    );
+  }
+
   return {
     log(message) {
+      // Seed heartbeats are covered by the live ticker (elapsed); keep them
+      // out of the interactive milestone stream (plain mode still sees them
+      // via the leveled logger).
+      if (/still running after/.test(message)) return;
       stopTicker();
-      emit(mark(servicesMilestoneMark(message)), truncate(message, 240));
+      const symbol = servicesMilestoneMark(message);
+      let line = truncate(message, 240);
+      if (isTerminalMark(symbol) && phaseStart !== undefined) {
+        // The tmux-ready milestone summarizes the whole services lifecycle.
+        const elapsed =
+          servicesStart !== undefined &&
+          /^tmux — session .* ready$/.test(message)
+            ? Date.now() - servicesStart
+            : Date.now() - phaseStart;
+        line += ` ${c.dim}${formatMs(elapsed)}${c.reset}`;
+      }
+      emit(mark(symbol), line);
     },
     logDetail(message) {
       // Seed/play-by-play details are requested via --verbose: keep them out
@@ -584,10 +613,26 @@ export function makeServicesInteractiveListener(
         case "complete":
         case "skip":
         case "fail":
+          // Seed postCommands complete without a ctx.log milestone; render
+          // them from the event with their own duration.
+          if (
+            event.phase === "seed" &&
+            event.message.startsWith("postCommand")
+          ) {
+            const dur =
+              phaseStart !== undefined
+                ? ` ${c.dim}${formatMs(Date.now() - phaseStart)}${c.reset}`
+                : "";
+            emit(
+              mark(SERVICES_GLYPH_SUCCESS),
+              `${truncate(event.message, 220)}${dur}`,
+            );
+          }
           if (dockerPhase) {
             dockerPhase = false;
             dockerBuffer = "";
           }
+          phaseStart = undefined;
           // Terminal boundaries are rendered as milestone lines by `log`;
           // retire any ticker still in flight.
           stopTicker();
@@ -596,6 +641,10 @@ export function makeServicesInteractiveListener(
           if (event.phase === "docker" && event.event === "start") {
             dockerPhase = true;
             dockerBuffer = "";
+          }
+          if (event.event === "start") {
+            phaseStart = Date.now();
+            if (servicesStart === undefined) servicesStart = phaseStart;
           }
           // start / readiness-check / healthcheck / relaunch / ready-wait:
           // keep a live marker while the phase is in flight.
@@ -687,9 +736,10 @@ function servicesMilestoneMark(message: string): string {
       : SERVICES_GLYPH_ERROR;
   }
   if (
-    /— (ready|complete|reused|reuse)|already live|passed|committed|ok:|skipping|skipped|reusing/i.test(
+    /— (ready|complete|reused|reuse)|already live|passed|committed|ok:|skipping|skipped|reusing| ready"/.test(
       message,
-    )
+    ) ||
+    message.endsWith(" ready")
   ) {
     return SERVICES_GLYPH_SUCCESS;
   }

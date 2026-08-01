@@ -47,10 +47,13 @@ import {
 } from "../cleanup";
 import { emit, resolveFormat } from "../format";
 import {
+  clackLine,
   completionMark,
   makeProgressListener,
   makeServicesInteractiveListener,
   resolveProgressMode,
+  SERVICES_GLYPH_STEP,
+  SERVICES_GLYPH_WARN,
   type ProgressMode,
 } from "../progress";
 import {
@@ -296,18 +299,39 @@ export async function runHookCommands(
  *   (back-compat with v0.0 — existing JSON consumers still get RunResult).
  * - Multiple specs OR parallel>1 → BatchRunResult, per-spec one-liners only.
  */
+/**
+ * Narration mode for `cairn run`: only md format narrates (stdout stays the
+ * structured document), and the mode is its own axis (`--progress`/env/TTY).
+ * Resolved once at the top of the command so early narration (starting specs,
+ * prepared secrets) speaks the same visual language as the rest of the run.
+ */
+function resolveRunProgressMode(
+  opts: RunCommandOptions,
+): ProgressMode | undefined {
+  return resolveFormat(opts, "md") === "md"
+    ? resolveProgressMode(opts.progress)
+    : undefined;
+}
+
 export async function runCommand(
   specs: string[],
   opts: RunCommandOptions,
 ): Promise<void> {
+  const progressMode = resolveRunProgressMode(opts);
   // First output, before ANY resolution work (config, secrets, services,
   // browser). A wedged environment (dead docker socket, thrashing swap,
   // locked secret agent) can stall the later phases for minutes with no
   // other output; this line makes such hangs localizable from the log
   // instead of presenting as a 0-byte mystery. Kept compact by default (a
   // batch of absolute paths used to print every one of them); the full list
-  // is still one --verbose away.
-  runLog.info(summarizeStartingSpecs(specs, process.cwd()));
+  // is still one --verbose away. In tty narration the line renders with the
+  // same flat mark as the services milestones.
+  const startingLine = summarizeStartingSpecs(specs, process.cwd());
+  if (progressMode === "tty") {
+    clackLine(SERVICES_GLYPH_STEP, startingLine);
+  } else {
+    runLog.info(startingLine);
+  }
   runLog.debug(`starting: ${specs.join(", ")}`);
   const parallel = Math.max(1, Number(opts.parallel ?? "1"));
   let hookTimeoutMs: number;
@@ -785,8 +809,7 @@ async function runSingle(
   // the cursor renderer, plain is timestamped sequential lines for pipes/CI.
   // Structured formats (json/yaml) keep stdout for the document and skip
   // narration entirely, as before.
-  const progressMode: ProgressMode | undefined =
-    format === "md" ? resolveProgressMode(opts.progress) : undefined;
+  const progressMode: ProgressMode | undefined = resolveRunProgressMode(opts);
   const interactive = progressMode === "tty";
   const listener = progressMode
     ? makeProgressListener(progressMode, { color: colorEnabled() })
@@ -851,7 +874,18 @@ async function runSingle(
       return 2;
     }
 
-    await runPostRunIntegrations(result, specPath, opts);
+    await runPostRunIntegrations(
+      result,
+      specPath,
+      opts,
+      progressMode === "tty"
+        ? (message, kind) =>
+            clackLine(
+              kind === "warn" ? SERVICES_GLYPH_WARN : SERVICES_GLYPH_STEP,
+              message,
+            )
+        : undefined,
+    );
 
     if (!interactive) {
       process.stdout.write(emit(format, result, renderRunMarkdown));
@@ -887,8 +921,7 @@ async function runBatch(
   scopedSecrets?: ScopedSecrets,
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
-  const progressMode: ProgressMode | undefined =
-    format === "md" ? resolveProgressMode(opts.progress) : undefined;
+  const progressMode: ProgressMode | undefined = resolveRunProgressMode(opts);
   const interactive = progressMode === "tty";
   if (progressMode) setNarrationDefault(true);
   // Bold and colored marks only exist in the tty renderer; plain mode is a
@@ -1028,12 +1061,21 @@ async function runBatch(
           completedByIndex[idx] = r;
           if (progressMode) {
             log.raw(
-              `  ${completionMark(r.status, interactive)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${
-                r.outcomes.filter((o) => o.status === "passed").length
-              }/${r.outcomes.length} outcomes)\n`,
+              `  ${completionMark(r.status, interactive)} [${idx + 1}/${specs.length}] ${r.spec.name} (${formatMs(r.durationMs)}, ${r.outcomes.filter((o) => o.status === "passed").length}/${r.outcomes.length} outcomes)\n`,
             );
           }
-          await runPostRunIntegrations(r, specPath, opts);
+          await runPostRunIntegrations(
+            r,
+            specPath,
+            opts,
+            progressMode === "tty"
+              ? (message, kind) =>
+                  clackLine(
+                    kind === "warn" ? SERVICES_GLYPH_WARN : SERVICES_GLYPH_STEP,
+                    message,
+                  )
+              : undefined,
+          );
           return r;
         } catch (e) {
           // Synthesize an errored RunResult so the batch survives.
@@ -1174,9 +1216,12 @@ export async function maybeInjectTvaultSecrets(
     );
   }
   if (scoped.injectedKeys.length > 0) {
-    runLog.info(
-      `prepared ${scoped.injectedKeys.length} scoped secrets from tvault "${scoped.target}"`,
-    );
+    const msg = `prepared ${scoped.injectedKeys.length} scoped secrets from tvault "${scoped.target}"`;
+    if (resolveRunProgressMode(opts) === "tty") {
+      clackLine(SERVICES_GLYPH_STEP, msg);
+    } else {
+      runLog.info(msg);
+    }
   }
   return scoped;
 }
@@ -1269,6 +1314,7 @@ async function runPostRunIntegrations(
   result: RunResult,
   specPath: string,
   opts: RunCommandOptions,
+  narrate?: (message: string, kind: "info" | "warn") => void,
 ): Promise<void> {
   if (result.status !== "passed") {
     const automation = await resolveFailureAutomation(specPath, opts);
@@ -1279,6 +1325,7 @@ async function runPostRunIntegrations(
       {
         stashOnFailure: opts.stashOnFailure ?? false,
         ...(automation.stash ? { configStash: automation.stash } : {}),
+        narrate,
       },
     );
 
@@ -1900,8 +1947,11 @@ function renderBatchMarkdown(b: BatchRunResult): string {
   if (failed.length > 0) {
     lines.push("Failing specs:");
     for (const r of failed) {
+      const headline = r.failure?.message
+        ? ` — ${truncate(r.failure.message, 140)}`
+        : "";
       lines.push(
-        `  - ${r.spec.name} → ${r.runDir}/${r.artifacts.agentContext}`,
+        `  - ${r.spec.name} → ${r.runDir}/${r.artifacts.agentContext}${headline}`,
       );
     }
   }
@@ -1914,4 +1964,8 @@ function formatMs(ms: number): string {
   const m = Math.floor(ms / 60_000);
   const s = Math.floor((ms - m * 60_000) / 1000);
   return `${m}m ${s}s`;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }

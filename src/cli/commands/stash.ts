@@ -540,6 +540,8 @@ export async function maybeAutoStash(
   opts: {
     stashOnFailure?: boolean;
     configStash?: { enabled?: boolean; autoStash?: string; tags?: string[] };
+    /** When provided (tty narration), replaces the logger for stash lines. */
+    narrate?: (message: string, kind: "info" | "warn") => void;
   },
 ): Promise<StashDirectoryResult | undefined> {
   const shouldStash =
@@ -554,29 +556,38 @@ export async function maybeAutoStash(
     tags,
   });
   if (!result.ok) {
-    log
-      .scope("stash")
-      .warn(`auto-stash failed (non-fatal): ${result.error ?? "unknown"}`);
+    const msg = `auto-stash failed (non-fatal): ${result.error ?? "unknown"}`;
+    if (opts.narrate) opts.narrate(msg, "warn");
+    else log.scope("stash").warn(msg);
     return result;
   }
   if (result.warning) {
-    log.scope("stash").warn(`auto-stash warning: ${result.warning}`);
+    const msg = `auto-stash warning: ${result.warning}`;
+    if (opts.narrate) opts.narrate(msg, "warn");
+    else log.scope("stash").warn(msg);
   }
   try {
     await writeAutoStashReceipt(runDir, result);
   } catch (error) {
-    log
-      .scope("stash")
-      .warn(
-        `auto-stash receipt was not written (non-fatal): ${(error as Error).message}`,
-      );
+    const msg = `auto-stash receipt was not written (non-fatal): ${(error as Error).message}`;
+    if (opts.narrate) opts.narrate(msg, "warn");
+    else log.scope("stash").warn(msg);
   }
   const logSafeStashId = result.stashId
     ? createArtifactRedactor(undefined).text(result.stashId)
     : undefined;
-  log
-    .scope("stash")
-    .info(`auto-stashed run ${runId}`, { stashId: logSafeStashId });
+  if (opts.narrate) {
+    opts.narrate(
+      `auto-stashed run ${runId}${
+        logSafeStashId ? ` (stashId: ${logSafeStashId})` : ""
+      }`,
+      "info",
+    );
+  } else {
+    log
+      .scope("stash")
+      .info(`auto-stashed run ${runId}`, { stashId: logSafeStashId });
+  }
   return result;
 }
 
