@@ -916,6 +916,13 @@ async function runSingle(
       labels: parseLabelFlags(opts.label),
     });
     exitCode = result.exitCode;
+    if (isTuiMounted()) {
+      getTuiStore()?.push({
+        type: "run-end",
+        status: "errored",
+        durationMs: 0,
+      });
+    }
     if (!(await writeJUnitIfRequested(opts, [result]))) {
       return 2;
     }

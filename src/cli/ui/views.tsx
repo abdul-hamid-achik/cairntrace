@@ -17,6 +17,19 @@ import {
 
 /* ----- shared bits ----- */
 
+/** Live elapsed since a start timestamp, re-rendering each second. */
+function useElapsed(startedAt: number | undefined, intervalMs = 1000): number {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (startedAt === undefined) return;
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    // Do not hold the event loop open after the run finishes.
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }, [startedAt, intervalMs]);
+  return startedAt === undefined ? 0 : now - startedAt;
+}
+
 function StatusLine({
   status,
   children,
@@ -33,9 +46,10 @@ function Duration({ ms }: { ms?: number }) {
   return ms === undefined ? null : <Text dimColor> {formatDuration(ms)}</Text>;
 }
 
-function RowLine({ id, status, durationMs, error }: Row) {
+function RowLine({ id, status, startedAt, durationMs, error }: Row) {
+  const elapsed = useElapsed(startedAt);
   if (status === "running") {
-    return <Spinner label={id} />;
+    return <Spinner label={`${id} ${formatDuration(elapsed)}`} />;
   }
   return (
     <StatusLine status={status}>
@@ -69,40 +83,43 @@ function ServicesView({ phases }: { phases: PhaseRow[] }) {
   if (phases.length === 0) return null;
   return (
     <Box flexDirection="column" marginBottom={1}>
-      {phases.map((phase) => (
-        <Box key={phase.phase} flexDirection="column">
-          {phase.status === "running" ? (
-            <Spinner
-              label={`${phase.phase}${
-                phase.message ? ` — ${truncate(phase.message, 120)}` : ""
-              }`}
-            />
-          ) : (
-            <StatusLine status={phase.status}>
-              {phase.phase}
-              {phase.message ? (
-                <Text dimColor> — {truncate(phase.message, 120)}</Text>
-              ) : null}
-              <Duration
-                ms={
-                  phase.finishedAt !== undefined
-                    ? phase.finishedAt - phase.startedAt
-                    : undefined
-                }
+      {phases.map((phase) => {
+        const elapsed = useElapsed(phase.startedAt);
+        return (
+          <Box key={phase.phase} flexDirection="column">
+            {phase.status === "running" ? (
+              <Spinner
+                label={`${phase.phase}${
+                  phase.message ? ` — ${truncate(phase.message, 120)}` : ""
+                } ${formatDuration(elapsed)}`}
               />
-            </StatusLine>
-          )}
-          {phase.status === "running" && phase.output.length > 0 ? (
-            <Box flexDirection="column" marginLeft={2}>
-              {phase.output.slice(-10).map((line, i) => (
-                <Text key={i} dimColor>
-                  {line}
-                </Text>
-              ))}
-            </Box>
-          ) : null}
-        </Box>
-      ))}
+            ) : (
+              <StatusLine status={phase.status}>
+                {phase.phase}
+                {phase.message ? (
+                  <Text dimColor> — {truncate(phase.message, 120)}</Text>
+                ) : null}
+                <Duration
+                  ms={
+                    phase.finishedAt !== undefined
+                      ? phase.finishedAt - phase.startedAt
+                      : undefined
+                  }
+                />
+              </StatusLine>
+            )}
+            {phase.status === "running" && phase.output.length > 0 ? (
+              <Box flexDirection="column" marginLeft={2}>
+                {phase.output.slice(-10).map((line, i) => (
+                  <Text key={i} dimColor>
+                    {line}
+                  </Text>
+                ))}
+              </Box>
+            ) : null}
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -120,6 +137,7 @@ function RunHeader({ state }: { state: TuiState }) {
         run {state.run.runId} · env={state.run.environment} · backend=
         {state.run.backend}
       </Text>
+      <Text dimColor>{state.run.runDir}</Text>
     </Box>
   );
 }
@@ -152,8 +170,9 @@ function RunView({ state }: { state: TuiState }) {
 }
 
 function OutcomeLine({ outcome }: { outcome: OutcomeRow }) {
+  const elapsed = useElapsed(outcome.startedAt);
   if (outcome.status === "running") {
-    return <Spinner label={outcome.id} />;
+    return <Spinner label={`${outcome.id} ${formatDuration(elapsed)}`} />;
   }
   return (
     <StatusLine status={outcome.status}>
@@ -172,6 +191,8 @@ function OutcomeLine({ outcome }: { outcome: OutcomeRow }) {
 /* ----- batch rows + summary ----- */
 
 function BatchRowView({ row }: { row: BatchRow }) {
+  const running = row.status === "running";
+  const liveDuration = useElapsed(running ? row.startedAt : undefined);
   const label = row.name ?? row.label;
   const outcomes =
     row.passed !== undefined && row.totalOutcomes !== undefined
@@ -183,7 +204,7 @@ function BatchRowView({ row }: { row: BatchRow }) {
         [{row.idx + 1}/{row.total}]
       </Text>
       <Text> {label}</Text>
-      <Duration ms={row.durationMs} />
+      <Duration ms={running ? liveDuration : row.durationMs} />
       <Text dimColor>{outcomes}</Text>
       {row.status === "running" ? (
         <Spinner />
@@ -207,7 +228,10 @@ function BatchSummaryView({ state }: { state: TuiState }) {
   const banner = `${summary.passed}/${summary.total} passed  ${summary.failed} failed  ${summary.errored} errored  in ${formatDuration(summary.durationMs)}`;
   return (
     <Box flexDirection="column" marginTop={1}>
-      <Text bold color={hasFailures ? "red" : "green"}>
+      <Text
+        bold
+        color={hasFailures ? STATUS_COLOR.failed : STATUS_COLOR.passed}
+      >
         {banner}
       </Text>
       {failed.length > 0 ? (
@@ -253,7 +277,9 @@ export function App({ state }: { state: TuiState }) {
               <Text
                 bold
                 color={
-                  state.summary.passed === state.summary.total ? "green" : "red"
+                  state.summary.passed === state.summary.total
+                    ? STATUS_COLOR.passed
+                    : STATUS_COLOR.failed
                 }
               >
                 {state.summary.passed === state.summary.total

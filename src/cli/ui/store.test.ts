@@ -152,6 +152,50 @@ describe("reduceTui", () => {
     });
   });
 
+  it("tracks startedAt on running rows for the live elapsed", () => {
+    const state = run([
+      { type: "step-start", id: "slow_step" },
+      { type: "precondition-start", id: "gate" },
+      { type: "outcome-start", id: "verify" },
+      { type: "specs-count", count: 2 },
+      { type: "spec-start", idx: 0, total: 2, label: "a" },
+      { type: "services-start", phase: "seed", message: "importing" },
+    ]);
+    expect(state.steps[0]!.startedAt).toBeTypeOf("number");
+    expect(state.preconditions[0]!.startedAt).toBeTypeOf("number");
+    expect(state.outcomes[0]!.startedAt).toBeTypeOf("number");
+    expect(state.batch[0]!.startedAt).toBeTypeOf("number");
+    expect(state.services.phases[0]!.startedAt).toBeTypeOf("number");
+  });
+
+  it("keeps the phase duration from the first start (postCommands don't reset it)", () => {
+    const t0 = Date.now();
+    let state = run([
+      { type: "services-start", phase: "seed", message: "importing" },
+      {
+        type: "services-finish",
+        phase: "seed",
+        status: "passed",
+        message: "seed complete",
+      },
+    ]);
+    const firstStart = state.services.phases[0]!.startedAt;
+    expect(firstStart).toBeGreaterThanOrEqual(t0);
+    // A postCommand re-start must NOT move the phase start forward.
+    state = reduceTui(state, {
+      type: "services-start",
+      phase: "seed",
+      message: "postCommand: ensure-fixture",
+    });
+    state = reduceTui(state, {
+      type: "services-finish",
+      phase: "seed",
+      status: "passed",
+      message: "postCommand ok",
+    });
+    expect(state.services.phases[0]!.startedAt).toBe(firstStart);
+  });
+
   it("stores a fatal error", () => {
     const state = run([{ type: "fatal", message: "seed command failed" }]);
     expect(state.fatal).toBe("seed command failed");

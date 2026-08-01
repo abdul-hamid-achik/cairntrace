@@ -41,6 +41,7 @@ export interface RunInfo {
 export interface Row {
   id: string;
   status: RowStatus;
+  startedAt?: number;
   durationMs?: number;
   error?: string;
 }
@@ -48,6 +49,7 @@ export interface Row {
 export interface OutcomeRow {
   id: string;
   status: RowStatus;
+  startedAt?: number;
   expected?: string;
   actual?: string;
 }
@@ -57,6 +59,7 @@ export interface BatchRow {
   total: number;
   label: string;
   status: RowStatus;
+  startedAt?: number;
   name?: string;
   durationMs?: number;
   passed?: number;
@@ -249,7 +252,9 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
       upsertPhase(next, event.phase, (row) => {
         row.status = "running";
         row.message = event.message;
-        row.startedAt = Date.now();
+        // Keep the FIRST start time so postCommand re-starts don't reset the
+        // phase duration to the last sub-step.
+        if (row.startedAt === undefined) row.startedAt = Date.now();
         row.finishedAt = undefined;
       });
       return next;
@@ -297,6 +302,7 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
       next.preconditions = replaceRow(next.preconditions, event.id, {
         id: event.id,
         status: "running",
+        startedAt: Date.now(),
       });
       return next;
 
@@ -313,6 +319,7 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
       next.steps = replaceRow(next.steps, event.id, {
         id: event.id,
         status: "running",
+        startedAt: Date.now(),
       });
       return next;
 
@@ -329,6 +336,7 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
       next.outcomes = upsertOutcome(next.outcomes, {
         id: event.id,
         status: "running",
+        startedAt: Date.now(),
       });
       return next;
 
@@ -347,6 +355,7 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
         total: event.total,
         label: event.label,
         status: "running",
+        startedAt: Date.now(),
       };
       next.batch = [...state.batch, row];
       return next;
