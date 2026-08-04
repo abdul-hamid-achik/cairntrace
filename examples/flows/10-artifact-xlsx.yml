@@ -74,6 +74,13 @@ steps:
       by: label
       name: Upload data
       path: "${artifacts.invalidTemplate.path}"
+    postcondition:
+      network:
+        method: POST
+        urlContains: /api/import-preview
+        status:
+          equals: 200
+        timeoutMs: 5000
   - id: wait_for_row_error
     wait:
       text: "Row 2: Email must be unique"

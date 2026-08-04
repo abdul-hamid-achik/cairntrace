@@ -6,6 +6,28 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { chromium } from "playwright";
 import { PlaywrightAdapter } from "./PlaywrightAdapter";
 
+describe("PlaywrightAdapter focus", () => {
+  it("focuses a control through the shared locator vocabulary", async () => {
+    const adapter = new PlaywrightAdapter();
+    try {
+      expect(
+        await adapter.runStep({
+          open: "data:text/html,<label>Country<input id='country'></label>",
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        await adapter.runStep({
+          focus: { by: "selector", selector: "#country" },
+        }),
+      ).toMatchObject({ ok: true });
+      const active = await adapter.evaluate("document.activeElement?.id");
+      expect(active.stdout).toContain("country");
+    } finally {
+      await adapter.close();
+    }
+  });
+});
+
 describe("PlaywrightAdapter video", () => {
   it("finalizes the context before saving a native recording", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-video-test-"));

@@ -19,10 +19,16 @@ import type {
 import type {
   BatchSubStep,
   Locator,
+  NetworkPostcondition,
   Step,
   WaitCondition,
 } from "../../core/schema/spec.v1";
-import { clickLocator } from "../../core/schema/spec.v1";
+import { clickLocator, withoutPostcondition } from "../../core/schema/spec.v1";
+import {
+  DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS,
+  describeNetworkPostcondition,
+  matchesStatus,
+} from "../../core/networkPostcondition";
 import { bodyTextContainsExpression } from "../../core/textMatching";
 import type {
   BackendRequest,
@@ -105,7 +111,59 @@ export class PlaywrightAdapter implements BrowserBackend {
 
   /* ----- BrowserBackend impl ----- */
 
+  /**
+   * Arm Playwright's response listener before dispatching the action. The
+   * action is sent exactly once; callers use this instead of the resilient
+   * mutation path when duplicate effects would be unsafe.
+   */
+  async runStepWithNetworkPostcondition(
+    step: Step,
+    postcondition: NetworkPostcondition,
+  ): Promise<InvocationResult> {
+    const startedAt = Date.now();
+    const page = await this.ensurePage();
+    const timeoutMs =
+      postcondition.timeoutMs ?? DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS;
+    const responsePromise = page.waitForResponse(
+      (response) => matchesPostconditionResponse(response, postcondition),
+      { timeout: timeoutMs },
+    );
+    // Mark a rejection as observed immediately: a slow action may outlive the
+    // response timeout, but the original promise is still awaited below so the
+    // step retains fail-closed semantics.
+    void responsePromise.catch(() => undefined);
+
+    const action = await this.runStep(step);
+    if (!action.ok) {
+      return action;
+    }
+
+    try {
+      await responsePromise;
+      return {
+        ...action,
+        durationMs: Date.now() - startedAt,
+        stdout: `network postcondition matched ${describeNetworkPostcondition(postcondition)}`,
+      };
+    } catch (error) {
+      return {
+        ...action,
+        ok: false,
+        stdout: "",
+        stderr: `network postcondition timed out after ${timeoutMs}ms: ${describeNetworkPostcondition(postcondition)} (${(error as Error).message})`,
+        exitCode: 1,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+  }
+
   async runStep(step: Step): Promise<InvocationResult> {
+    if (step.postcondition?.network) {
+      return this.runStepWithNetworkPostcondition(
+        withoutPostcondition(step),
+        step.postcondition.network,
+      );
+    }
     const start = Date.now();
     const page = await this.ensurePage();
     try {
@@ -134,6 +192,10 @@ export class PlaywrightAdapter implements BrowserBackend {
         }
       } else if ("hover" in step) {
         await this.resolveLocator(step.hover).hover({
+          timeout: this.opts.defaultTimeoutMs,
+        });
+      } else if ("focus" in step) {
+        await this.resolveLocator(step.focus).focus({
           timeout: this.opts.defaultTimeoutMs,
         });
       } else if ("fill" in step) {
@@ -1089,6 +1151,8 @@ export class PlaywrightAdapter implements BrowserBackend {
         state: cond.state ?? "visible",
         timeout,
       });
+    } else if ("value" in cond) {
+      throw new Error("wait.value is handled by the cross-backend runner");
     } else {
       if (cond.load === "networkidle") {
         await this.waitForScaledNetworkIdle(page, timeout);
@@ -1297,6 +1361,22 @@ function waitForContinuousRequestQuiet(
     page.on("requestfailed", onRequestDone);
     armQuietTimer();
   });
+}
+
+function matchesPostconditionResponse(
+  response: Response,
+  postcondition: NetworkPostcondition,
+): boolean {
+  if (
+    postcondition.method !== undefined &&
+    response.request().method().toUpperCase() !== postcondition.method
+  ) {
+    return false;
+  }
+  if (!response.url().includes(postcondition.urlContains)) return false;
+  return postcondition.status === undefined
+    ? true
+    : matchesStatus(response.status(), postcondition.status);
 }
 
 function captureJsonPostData(

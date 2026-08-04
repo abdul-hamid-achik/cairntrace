@@ -1,4 +1,8 @@
-import type { Locator, Step } from "../core/schema/spec.v1";
+import type {
+  Locator,
+  NetworkPostcondition,
+  Step,
+} from "../core/schema/spec.v1";
 
 /**
  * Generic browser-backend interface. Implemented by AgentBrowserAdapter and
@@ -116,6 +120,17 @@ export interface BrowserBackend {
 
   /** Dispatch a behavioral step to the backend. */
   runStep(step: Step): Promise<InvocationResult>;
+
+  /**
+   * Dispatch one action while waiting for a matching network response.
+   * Implementations must arm the response observer before the action and must
+   * never retry the action. Backends without a native response-event API may
+   * omit this and the runner uses a bounded request-log baseline fallback.
+   */
+  runStepWithNetworkPostcondition?(
+    step: Step,
+    postcondition: NetworkPostcondition,
+  ): Promise<InvocationResult>;
 
   /** Capture the accessibility tree (compact text). */
   snapshot(opts?: { interactive?: boolean }): Promise<SnapshotResult>;

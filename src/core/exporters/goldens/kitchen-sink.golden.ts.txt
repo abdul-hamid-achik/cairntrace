@@ -44,9 +44,12 @@ test("golden_kitchen_sink", async ({ page }) => {
   // step: scroll_down
   await page.mouse.wheel(0, 300);
   // step: eval_probe
-  const title = await page.evaluate(async (args) => {
-    return document.title;
-  }, {});
+  const title = await page.evaluate(async ({ source, args }) => {
+    // Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
+    const execute = new AsyncFunction("args", source);
+    return await execute(args);
+  }, { source: "return document.title;", args: {} });
   // Note: later steps that splice ${evals.title…} are not rewritten — wire variables manually if needed.
 
   // --- outcomes (the contract) ---

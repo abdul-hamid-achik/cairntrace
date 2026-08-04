@@ -82,6 +82,7 @@ export const StepDocSchema = z
       "open",
       "click",
       "hover",
+      "focus",
       "fill",
       "type",
       "select",

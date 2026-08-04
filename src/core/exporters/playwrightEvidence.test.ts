@@ -48,7 +48,7 @@ describe("exported node verifier evidence", () => {
     expect(source).toContain(`runDir: cairnRunDir,`);
     expect(source).not.toContain("CAIRN_RUN_START_FLOOR_MS");
     expect(source.indexOf("persist(cairnRunDir)")).toBeLessThan(
-      source.indexOf("const mod = await import"),
+      source.indexOf("const importedVerifier = await import"),
     );
   });
 

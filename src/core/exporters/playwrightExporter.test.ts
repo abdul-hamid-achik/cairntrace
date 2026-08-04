@@ -1,9 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { Spec } from "../schema/spec.v1";
 import { exportPlaywright } from "./playwrightExporter";
 
 const srcOf = (...args: Parameters<typeof exportPlaywright>) =>
   exportPlaywright(...args).source;
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 const baseSpec = (overrides: Partial<Spec>): Spec =>
   ({
@@ -31,6 +42,71 @@ describe("exportPlaywright", () => {
     expect(src.trim().endsWith("});")).toBe(true);
   });
 
+  it("embeds an external browser verifier and passes fixtures as page data", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cairn-browser-verifier-"));
+    temporaryDirectories.push(directory);
+    const verifier = join(directory, "check-field.js");
+    writeFileSync(
+      verifier,
+      `return { ok: document.title === fixtures.title, evidence: { title: document.title } };`,
+    );
+
+    const result = exportPlaywright(
+      baseSpec({
+        outcomes: [
+          {
+            id: "external_browser_verifier",
+            description: "external browser verifier passes",
+            verify: {
+              script: {
+                runtime: "browser",
+                file: "../check-field.js",
+                fixtures: { title: "Expected" },
+              },
+            },
+          },
+        ],
+      }),
+      { sourcePath: join(directory, "flows", "external.yml") },
+    );
+
+    expect(result.coverage.outcomesExported).toBe(1);
+    expect(result.coverage.skips).toEqual([]);
+    expect(result.source).toContain(
+      `const result = await page.evaluate(async ({ source, scriptContext }) => {`,
+    );
+    expect(result.source).toContain(`new AsyncFunction(`);
+    expect(result.source).toContain(
+      `document.title === fixtures.title, evidence`,
+    );
+    expect(result.source).toContain(`"title": "Expected"`);
+  });
+
+  it("keeps an unreadable external browser verifier as an explicit skip", () => {
+    const result = exportPlaywright(
+      baseSpec({
+        outcomes: [
+          {
+            id: "missing_browser_verifier",
+            description: "missing verifier is visible",
+            verify: {
+              script: {
+                runtime: "browser",
+                file: "../missing.ts",
+              },
+            },
+          },
+        ],
+      }),
+      { sourcePath: "/tmp/flows/missing.yml" },
+    );
+
+    expect(result.coverage.outcomesExported).toBe(0);
+    expect(result.coverage.skips[0]?.reason).toContain(
+      "script.file ../missing.ts not inlined",
+    );
+  });
+
   it("warns when an authored budget reaches the four-hour ceiling", () => {
     const src = srcOf(
       baseSpec({
@@ -55,7 +131,7 @@ describe("exportPlaywright", () => {
     expect(src).toContain(`authored budgets exceed the 4h export ceiling`);
   });
 
-  it("translates open/click/hover/fill steps", () => {
+  it("translates open/click/hover/focus/fill steps", () => {
     const src = srcOf(
       baseSpec({
         steps: [
@@ -72,6 +148,10 @@ describe("exportPlaywright", () => {
             },
           },
           {
+            id: "focus",
+            focus: { by: "selector", selector: "#country" },
+          },
+          {
             id: "fill_email",
             fill: { by: "label", name: "Email", value: "a@b.c" },
           },
@@ -85,11 +165,95 @@ describe("exportPlaywright", () => {
     expect(src).toContain(
       `await page.locator(".question-table-wrap .table-title").hover();`,
     );
+    expect(src).toContain(`await page.locator("#country").focus();`);
     expect(src).toContain(
       `await page.getByLabel("Email").first().fill("a@b.c");`,
     );
     expect(src).toContain(
       `await expect(page.getByLabel("Email").first()).toHaveValue("a@b.c", { timeout: 500 });`,
+    );
+  });
+
+  it("arms network postconditions before upload without emitting mutation retries", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "upload_w9",
+            upload: {
+              by: "selector",
+              selector: "input[type=file]",
+              path: "./fixtures/w9.pdf",
+            },
+            postcondition: {
+              network: {
+                method: "POST",
+                urlContains: "/api/files/extract-content-by-package",
+                status: { in: [200, 201] },
+                timeoutMs: 45_000,
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    const arm = src.indexOf("page.waitForResponse");
+    const upload = src.indexOf("setInputFiles");
+    expect(arm).toBeGreaterThan(-1);
+    expect(upload).toBeGreaterThan(arm);
+    expect(src).toContain(
+      `response.request().method() === "POST" && response.url().includes("/api/files/extract-content-by-package")`,
+    );
+    expect(src).toContain(`[200, 201].includes(response.status())`);
+    expect(src).toContain(
+      `void networkPostconditionResponse1.catch(() => undefined);`,
+    );
+    expect(src).toContain(`await networkPostconditionResponse1;`);
+    expect(src).not.toContain("fillAttempt");
+  });
+
+  it("suppresses fill retries when a network postcondition owns completion", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            fill: { by: "selector", selector: "#name", value: "Ada" },
+            postcondition: {
+              network: {
+                urlContains: "/api/answers",
+                status: { equals: 204 },
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(src).toContain(`await page.locator("#name").fill("Ada");`);
+    expect(src).not.toContain("fillAttempt");
+  });
+
+  it("exports wait.value as a bounded value assertion", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            wait: {
+              value: {
+                by: "label",
+                name: "Country",
+                equals: "United States",
+              },
+              timeoutMs: 40_000,
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(src).toContain(
+      `await expect(page.getByLabel("Country").first()).toHaveValue("United States", { timeout: 40000 });`,
     );
   });
 
@@ -312,7 +476,9 @@ describe("exportPlaywright", () => {
         ],
       }),
     );
-    expect(src).toContain(`const result = await page.evaluate(() => {`);
+    expect(src).toContain(
+      `const result = await page.evaluate(async ({ source, scriptContext }) => {`,
+    );
     expect(src).toContain(`expect(result.ok).toBe(true);`);
   });
 
@@ -426,9 +592,10 @@ describe("exportPlaywright", () => {
       }),
     );
     expect(src).toContain(
-      `const seeded = await page.evaluate(async (args) => {`,
+      `const seeded = await page.evaluate(async ({ source, args }) => {`,
     );
-    expect(src).toContain(`return window.__X = 1;`);
+    expect(src).toContain(`source: "return window.__X = 1;"`);
+    expect(src).toContain(`new AsyncFunction("args", source)`);
   });
 
   it("flattens batch sub-steps", () => {

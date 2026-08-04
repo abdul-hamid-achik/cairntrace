@@ -23,12 +23,14 @@ import type {
   BatchSubStep,
   ClickUntil,
   Locator,
+  NetworkPostcondition,
   Outcome,
   Spec,
   Step,
 } from "../schema/spec.v1";
-import { clickLocator } from "../schema/spec.v1";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
+import { readFileSync } from "node:fs";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { bodyTextContainsExpression } from "../textMatching";
 import {
   blank,
@@ -131,6 +133,7 @@ export function exportPlaywright(
     usage: newRefUsage(),
     ...(opts.sourcePath ? { specDir: dirname(resolve(opts.sourcePath)) } : {}),
     ...(opts.outPath ? { outDir: dirname(resolve(opts.outPath)) } : {}),
+    postconditionCounter: 0,
   };
   const timeoutBudget = playwrightTestTimeoutBudget(spec);
   const needsNodeVerifierEvidence =
@@ -685,6 +688,8 @@ export interface EmitCtx {
   nodeVerifierRunDir?: string;
   /** Generated sanitized network recorder persisted before node verification. */
   nodeVerifierEvidence?: string;
+  /** Unique names for per-action network response promises. */
+  postconditionCounter?: number;
 }
 
 export function newEmitCtx(
@@ -701,6 +706,7 @@ export function newEmitCtx(
       skips: [],
     },
     usage: newRefUsage(),
+    postconditionCounter: 0,
     ...init,
   };
 }
@@ -739,13 +745,23 @@ export function renderStep(
   ctx: EmitCtx,
 ): Rendered {
   const whenWrap = "when" in step && step.when ? step.when : undefined;
-  const body = renderStepBody(step, specSettleMs, ctx);
+  const postcondition = step.postcondition?.network;
+  const action = postcondition ? withoutPostcondition(step) : step;
+  const body = renderStepBody(
+    action,
+    specSettleMs,
+    ctx,
+    postcondition !== undefined,
+  );
+  const guardedBody = postcondition
+    ? renderNetworkPostconditionAction(body, postcondition, ctx)
+    : body;
   const stmts = step.id
-    ? [comment(`step: ${oneLine(step.id)}`), ...body.stmts]
-    : body.stmts;
+    ? [comment(`step: ${oneLine(step.id)}`), ...guardedBody.stmts]
+    : guardedBody.stmts;
 
-  if (!whenWrap) return { stmts, exported: body.exported };
-  return wrapWhen(whenWrap, stmts, body.exported, ctx, step.id);
+  if (!whenWrap) return { stmts, exported: guardedBody.exported };
+  return wrapWhen(whenWrap, stmts, guardedBody.exported, ctx, step.id);
 }
 
 function wrapWhen(
@@ -797,10 +813,60 @@ function wrapWhen(
   };
 }
 
+function renderNetworkPostconditionAction(
+  body: Rendered,
+  postcondition: NetworkPostcondition,
+  ctx: EmitCtx,
+): Rendered {
+  if (!body.exported) return body;
+  const counter = (ctx.postconditionCounter ?? 0) + 1;
+  ctx.postconditionCounter = counter;
+  const promise = `networkPostconditionResponse${counter}`;
+  const predicate = renderNetworkPostconditionPredicate(postcondition, ctx);
+  const timeout = postcondition.timeoutMs ?? 30_000;
+  return {
+    exported: true,
+    stmts: [
+      raw(
+        `const ${promise} = page.waitForResponse((response) => ${predicate}, { timeout: ${timeout} });`,
+      ),
+      raw(`void ${promise}.catch(() => undefined);`),
+      ...body.stmts,
+      raw(`await ${promise};`),
+    ],
+  };
+}
+
+function renderNetworkPostconditionPredicate(
+  postcondition: NetworkPostcondition,
+  ctx: EmitCtx,
+): string {
+  const conditions = [
+    ...(postcondition.method
+      ? [
+          `response.request().method() === ${JSON.stringify(postcondition.method)}`,
+        ]
+      : []),
+    `response.url().includes(${emitStr(postcondition.urlContains, ctx.usage)})`,
+  ];
+  const status = postcondition.status;
+  if (status?.equals !== undefined) {
+    conditions.push(`response.status() === ${status.equals}`);
+  } else if (status?.below !== undefined) {
+    conditions.push(`response.status() < ${status.below}`);
+  } else if (status?.atLeast !== undefined) {
+    conditions.push(`response.status() >= ${status.atLeast}`);
+  } else if (status?.in !== undefined) {
+    conditions.push(`[${status.in.join(", ")}].includes(response.status())`);
+  }
+  return `(${conditions.join(" && ")})`;
+}
+
 function renderStepBody(
   step: Step,
   specSettleMs: number | undefined,
   ctx: EmitCtx,
+  suppressMutationRetries = false,
 ): Rendered {
   const str = (s: string) => emitStr(s, ctx.usage);
 
@@ -820,7 +886,7 @@ function renderStepBody(
   }
   if ("click" in step) {
     const settleMs = step.settleMs ?? specSettleMs;
-    if (step.click.until) {
+    if (step.click.until && !suppressMutationRetries) {
       return renderClickUntilStep(step, settleMs, ctx);
     }
     const stmts: Stmt[] = [
@@ -838,11 +904,14 @@ function renderStepBody(
   if ("hover" in step) {
     return one(raw(`await ${locator(step.hover, ctx)}.hover();`));
   }
+  if ("focus" in step) {
+    return one(raw(`await ${locator(step.focus, ctx)}.focus();`));
+  }
   if ("fill" in step) {
     const { value, ...loc } = step.fill;
     const target = locator(loc as Locator, ctx);
     const emittedValue = str(value);
-    if (step.verifyFill === false) {
+    if (suppressMutationRetries || step.verifyFill === false) {
       return one(raw(`await ${target}.fill(${emittedValue});`));
     }
     return renderVerifiedInput(target, emittedValue, "fill");
@@ -852,7 +921,7 @@ function renderStepBody(
     const opts = delayMs !== undefined ? `, { delay: ${delayMs} }` : "";
     const target = locator(loc as Locator, ctx);
     const emittedValue = str(value);
-    if (step.verifyFill === false) {
+    if (suppressMutationRetries || step.verifyFill === false) {
       return one(
         raw(`await ${target}.pressSequentially(${emittedValue}${opts});`),
       );
@@ -935,6 +1004,14 @@ function renderStepBody(
       return one(
         raw(
           `await page.waitForSelector(${str(w.selector)}, { timeout: ${timeout}, state: ${JSON.stringify(state)} });`,
+        ),
+      );
+    }
+    if ("value" in w) {
+      const { equals, ...loc } = w.value;
+      return one(
+        raw(
+          `await expect(${locator(loc as Locator, ctx)}).toHaveValue(${str(equals)}, { timeout: ${timeout} });`,
         ),
       );
     }
@@ -1124,11 +1201,24 @@ function renderEvalStep(
   const argsJson = emitValue(e.args ?? {}, ctx.usage);
   const varName = e.assign ? safeIdent(e.assign) : undefined;
 
+  const asyncFunctionType =
+    ctx.lang === "ts"
+      ? ` as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>`
+      : "";
   const evalCall = (prefix: string): Stmt[] => [
     block(
-      `${prefix}await page.evaluate(async (args) => {`,
-      [verbatim(js.split("\n"))],
-      `}, ${argsJson});`,
+      `${prefix}await page.evaluate(async ({ source, args }) => {`,
+      [
+        comment(
+          `Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.`,
+        ),
+        raw(
+          `const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor${asyncFunctionType};`,
+        ),
+        raw(`const execute = new AsyncFunction("args", source);`),
+        raw(`return await execute(args);`),
+      ],
+      `}, { source: ${JSON.stringify(js)}, args: ${argsJson} });`,
     ),
   ];
 
@@ -1526,19 +1616,44 @@ function renderScriptOutcome(
           raw(
             `await ${ctx.nodeVerifierEvidence}.persist(${ctx.nodeVerifierRunDir});`,
           ),
-          raw(`const mod = await import(${JSON.stringify(importPath)});`),
+          raw(
+            `const importedVerifier = await import(${JSON.stringify(importPath)});`,
+          ),
           comment(
             `ESM/CJS interop: Playwright transpiles TS imports to CJS, so a`,
           ),
-          comment(`default export may surface as mod.default.default.`),
+          comment(`default export may surface as namespace.default.default.`),
+          raw(
+            `const verifierNamespace = importedVerifier${
+              ctx.lang === "ts"
+                ? " as unknown as { verify?: unknown; default?: unknown }"
+                : ""
+            };`,
+          ),
+          raw(`const verifierDefault = verifierNamespace.default;`),
+          raw(
+            `const verifierDefaultNamespace = verifierDefault && typeof verifierDefault === "object"`,
+          ),
+          raw(
+            `  ? verifierDefault${
+              ctx.lang === "ts"
+                ? " as { verify?: unknown; default?: unknown }"
+                : ""
+            }`,
+          ),
+          raw(`  : undefined;`),
           raw(`const verify =`),
-          raw(`  mod.verify ??`),
+          raw(`  verifierNamespace.verify ??`),
+          raw(`  (typeof verifierDefault === "function"`),
+          raw(`    ? verifierDefault`),
           raw(
-            `  (typeof mod.default === "function" ? mod.default : (mod.default?.verify ?? mod.default?.default));`,
+            `    : (verifierDefaultNamespace?.verify ?? verifierDefaultNamespace?.default));`,
           ),
-          raw(
-            `expect(typeof verify, "verifier module must export verify()").toBe("function");`,
-          ),
+          block(`if (typeof verify !== "function") {`, [
+            raw(
+              `throw new Error("verifier module must export a verify() function");`,
+            ),
+          ]),
           block(
             `const res = await verify({`,
             [
@@ -1560,6 +1675,22 @@ function renderScriptOutcome(
       exported: true,
     };
   }
+  if (v.script.runtime !== "node" && v.script.file && ctx.specDir) {
+    const abs = isAbsolute(v.script.file)
+      ? v.script.file
+      : resolve(ctx.specDir, v.script.file);
+    const loaded = loadBrowserVerifierSource(abs);
+    if (loaded.error) {
+      return skipStmt(
+        ctx,
+        "outcome",
+        `script.file ${v.script.file} not inlined: ${loaded.error}`,
+        `browser verifier file could not be embedded. Keep the Cairntrace spec as the source of truth.`,
+        outcomeId,
+      );
+    }
+    return renderBrowserScriptOutcome(v, loaded.source!, ctx);
+  }
   if (v.script.runtime === "node" || v.script.file) {
     const reason = v.script.file
       ? `script.file ${v.script.file} not inlined`
@@ -1572,28 +1703,94 @@ function renderScriptOutcome(
       outcomeId,
     );
   }
+  return renderBrowserScriptOutcome(v, v.script.run ?? "", ctx);
+}
+
+function renderBrowserScriptOutcome(
+  v: import("../schema/verifier.v1").ScriptVerifier,
+  source: string,
+  ctx: EmitCtx,
+): Rendered {
+  const asyncFunctionType =
+    ctx.lang === "ts"
+      ? ` as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>`
+      : "";
+  const resultType =
+    ctx.lang === "ts" ? ` as { ok?: boolean; evidence?: unknown }` : "";
   return {
     stmts: [
       braces([
         block(
-          `const result = await page.evaluate(() => {`,
+          `const result = await page.evaluate(async ({ source, scriptContext }) => {`,
           [
-            raw(
-              `const fixtures = ${emitValue(v.script.fixtures ?? {}, ctx.usage)};`,
+            comment(
+              `Verifier source is authored JavaScript, not generated TypeScript.`,
             ),
-            block(
-              `return (function(){`,
-              [verbatim((v.script.run ?? "").split("\n"))],
-              `})();`,
+            raw(
+              `const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor${asyncFunctionType};`,
+            ),
+            raw(
+              `const execute = new AsyncFunction("fixtures", "artifacts", "vars", "run", source);`,
+            ),
+            raw(
+              `return await execute(scriptContext.fixtures, scriptContext.artifacts, scriptContext.vars, scriptContext.run);`,
             ),
           ],
-          `});`,
+          `}, { source: ${JSON.stringify(source)}, scriptContext: ${emitValue(
+            {
+              fixtures: v.script.fixtures ?? {},
+              artifacts: {},
+              vars: {},
+              run: { failedStep: null, lastSuccessfulStep: null },
+            },
+            ctx.usage,
+          )} })${resultType};`,
         ),
         raw(`expect(result.ok).toBe(true);`),
       ]),
     ],
     exported: true,
   };
+}
+
+function loadBrowserVerifierSource(absolutePath: string): {
+  source?: string;
+  error?: string;
+} {
+  let source: string;
+  try {
+    source = readFileSync(absolutePath, "utf8");
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+  if (extname(absolutePath) !== ".ts") return { source };
+
+  const bun = (
+    globalThis as typeof globalThis & {
+      Bun?: {
+        Transpiler?: new (opts: {
+          loader: "ts";
+        }) => {
+          transformSync(source: string): string;
+        };
+      };
+    }
+  ).Bun;
+  if (!bun?.Transpiler) {
+    return {
+      error:
+        "TypeScript browser verifier transpilation requires Bun.Transpiler",
+    };
+  }
+  try {
+    return {
+      source: new bun.Transpiler({ loader: "ts" }).transformSync(source),
+    };
+  } catch (error) {
+    return {
+      error: `TypeScript transpilation failed: ${(error as Error).message}`,
+    };
+  }
 }
 
 function renderHttpJsonOutcome(

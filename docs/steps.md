@@ -5,12 +5,13 @@ description: Reference typed Cairntrace steps for navigation, semantic interacti
 
 # Steps
 
-The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 18 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
+The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 19 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
 
 Every step also accepts two optional common keys:
 
 - `id: <name>` — a stable step label for cross-referencing in artifacts.
 - `when: <condition>` — skip the whole step (do not run, do not capture) when the condition string is false. Conditions are simple names like `notAuthenticated`, resolved by the runner.
+- `postcondition.network` — arm a response wait before the action and require a matching response after exactly one mutation.
 
 ## Navigation
 
@@ -36,6 +37,9 @@ An explicit polling step. Hard-bounded at 30000 ms by default; real Chromium run
 - wait: { text: "Saved", caseSensitive: true }
 - wait: { load: networkidle }
 - wait: { selector: "[data-testid='hydrated']", state: visible }
+- wait:
+    value: { by: label, name: Country, equals: United States }
+    timeoutMs: 40000
 ```
 
 Four condition shapes, exactly one per step:
@@ -46,6 +50,7 @@ Four condition shapes, exactly one per step:
 | `notText: <str>` | the page does not contain the text |
 | `load: networkidle\|load\|domcontentloaded` | a load state was reached |
 | `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached` |
+| `value: <locator + equals>` | a form control's live value exactly equals the string |
 
 `text` and `notText` collapse whitespace and match case-insensitively by
 default. Set `caseSensitive: true` when rendered casing is significant.
@@ -80,6 +85,15 @@ Move the pointer over a locator to reveal hover-only UI.
 
 ```yaml
 - hover: { by: selector, selector: ".question-table-wrap .table-title" }
+```
+
+### `focus`
+
+Focus a locator without clicking it. This is useful for custom comboboxes and
+controls that reveal dependent UI on focus.
+
+```yaml
+- focus: { by: selector, selector: '[data-answer-key="Entity_Country"] input' }
 ```
 
 ### `fill`
@@ -144,6 +158,28 @@ Set a file input from a local path.
 ```yaml
 - upload: { by: label, name: File, path: ./fixtures/sample.xlsx }
 ```
+
+For an upload that starts asynchronous server work, attach a typed network
+postcondition. Cairntrace observes the response before dispatching
+`setInputFiles` and does not retry the upload if the response times out:
+
+```yaml
+- upload:
+    by: selector
+    selector: "input[type=file]"
+    path: ./fixtures/w9.pdf
+  postcondition:
+    network:
+      method: POST
+      urlContains: /api/files/extract-content-by-package
+      status: { in: [200, 201] }
+      timeoutMs: 45000
+```
+
+`urlContains` is required; `method`, `status`, and `timeoutMs` are optional.
+`status` accepts `equals`, `below`, `atLeast`, or `in`. The same guard can
+cover `click`, `fill`, `type`, and `select`; it intentionally disables
+mutation retries for that action.
 
 ### `download`
 

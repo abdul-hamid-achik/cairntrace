@@ -1,0 +1,26 @@
+# Cairntrace example spec — focus + exact live-value wait
+version: 1
+name: focus_value
+intent: focus a control, type through the browser, and observe its exact live value without eval
+coldStart: guest
+contractHash: sha256:20179c5f61c54690a55c7578b7a58a1666dd710636763413bef1349f9ec7603f
+outcomes:
+  - id: country_label_visible
+    description: the focused control remains identifiable to a user
+    verify:
+      text: { contains: Country }
+  - id: no_console_errors
+    description: focusing and typing produced no console errors
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: open_control
+    open: 'data:text/html,%3Clabel%20for%3D%22country%22%3ECountry%3C%2Flabel%3E%3Cinput%20id%3D%22country%22%20aria-label%3D%22Country%22%3E'
+  - id: focus_country
+    focus: { by: label, name: Country }
+  - id: type_country
+    type: { by: label, name: Country, value: United States }
+  - id: wait_country_value
+    wait:
+      value: { by: label, name: Country, equals: United States }
+      timeoutMs: 5000

@@ -102,6 +102,55 @@ describe("runResilientBrowserStep", () => {
     expect(backend.stepLog).toHaveLength(1);
   });
 
+  it("waits until a control has the expected value", async () => {
+    const backend = new MockBrowserBackend();
+    backend.enqueueValue("");
+    backend.enqueueValue("United States");
+
+    const result = await runResilientBrowserStep(
+      {
+        wait: {
+          value: {
+            by: "selector",
+            selector: "#country",
+            equals: "United States",
+          },
+          timeoutMs: 500,
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result).toMatchObject({ ok: true, stdout: "United States" });
+    expect(backend.stepLog).toHaveLength(0);
+  });
+
+  it("fails wait.value with the last observed value", async () => {
+    const backend = new MockBrowserBackend();
+    backend.enqueueValue("Canada");
+
+    const result = await runResilientBrowserStep(
+      {
+        wait: {
+          value: {
+            by: "label",
+            name: "Country",
+            equals: "United States",
+          },
+          timeoutMs: 200,
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(
+      'expected "United States", got "" after 200ms',
+    );
+  });
+
   it("retries click until a selector disappears", async () => {
     const backend = new ClickEffectBackend(2, () =>
       backend.setCount("#editor", 0),
@@ -152,6 +201,98 @@ describe("runResilientBrowserStep", () => {
     );
     expect(backend.clicks).toBe(4);
   });
+
+  it("arms a network postcondition before one upload and never retries it", async () => {
+    const backend = new UploadResponseBackend();
+
+    const result = await runResilientBrowserStep(
+      {
+        upload: { by: "selector", selector: "#document", path: "./w9.pdf" },
+        postcondition: {
+          network: {
+            method: "POST",
+            urlContains: "/api/files/extract-content-by-package",
+            status: { equals: 200 },
+            timeoutMs: 100,
+          },
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(backend.stepLog).toHaveLength(1);
+    expect(backend.mutations).toBe(1);
+  });
+
+  it("does not retry a mutation when the postcondition times out", async () => {
+    const backend = new MockBrowserBackend();
+    let mutations = 0;
+    const original = backend.runStep.bind(backend);
+    backend.runStep = async (step) => {
+      mutations++;
+      return original(step);
+    };
+
+    const result = await runResilientBrowserStep(
+      {
+        upload: { by: "selector", selector: "#document", path: "./w9.pdf" },
+        postcondition: {
+          network: {
+            method: "POST",
+            urlContains: "/api/files/extract-content-by-package",
+            status: { equals: 200 },
+            timeoutMs: 5,
+          },
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("network postcondition timed out");
+    expect(mutations).toBe(1);
+  });
+
+  it("reports a request-log failure after the mutation without retrying it", async () => {
+    const backend = new MockBrowserBackend();
+    let reads = 0;
+    let mutations = 0;
+    const originalRunStep = backend.runStep.bind(backend);
+    backend.runStep = async (step) => {
+      mutations++;
+      return originalRunStep(step);
+    };
+    backend.getNetworkRequests = async () => {
+      reads++;
+      if (reads === 1) return [];
+      throw new Error("daemon unavailable");
+    };
+
+    const result = await runResilientBrowserStep(
+      {
+        upload: { by: "selector", selector: "#document", path: "./w9.pdf" },
+        postcondition: {
+          network: {
+            method: "POST",
+            urlContains: "/api/files/signup",
+            status: { equals: 200 },
+            timeoutMs: 100,
+          },
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain(
+      "could not observe network postcondition after the action: daemon unavailable",
+    );
+    expect(mutations).toBe(1);
+  });
 });
 
 describe("wait scaling", () => {
@@ -166,6 +307,26 @@ describe("wait scaling", () => {
     expect(
       applyWaitScale({ wait: { text: "Ready", timeoutMs: 1_000 } }, 3),
     ).toEqual({ wait: { text: "Ready", timeoutMs: 3_000 } });
+    expect(
+      applyWaitScale(
+        {
+          wait: {
+            value: {
+              by: "selector",
+              selector: "#country",
+              equals: "US",
+            },
+            timeoutMs: 1_000,
+          },
+        },
+        3,
+      ),
+    ).toEqual({
+      wait: {
+        value: { by: "selector", selector: "#country", equals: "US" },
+        timeoutMs: 3_000,
+      },
+    });
     expect(
       applyWaitScale({ open: { path: "/slow", waitUntil: "networkidle" } }, 3),
     ).toEqual({
@@ -288,6 +449,24 @@ class ClickEffectBackend extends MockBrowserBackend {
     if ("click" in step) {
       this.clicks++;
       if (this.clicks === this.triggerAt) this.effect();
+    }
+    return result;
+  }
+}
+
+class UploadResponseBackend extends MockBrowserBackend {
+  mutations = 0;
+
+  override async runStep(step: Step) {
+    const result = await super.runStep(step);
+    if ("upload" in step) {
+      this.mutations++;
+      this.pushNetworkEntry({
+        url: "http://localhost/api/files/extract-content-by-package",
+        method: "POST",
+        status: 200,
+        timestamp: Date.now(),
+      });
     }
     return result;
   }

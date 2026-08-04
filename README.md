@@ -237,7 +237,7 @@ part of the contract; regex `matches` keeps raw, case-sensitive semantics.
 
 Current step keys:
 
-`open`, `click`, `hover`, `fill`, `type`, `select`, `upload`, `download`,
+`open`, `click`, `hover`, `focus`, `fill`, `type`, `select`, `upload`, `download`,
 `transform`, `request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`,
 `eval`, `monitor`.
 
@@ -256,6 +256,17 @@ case-insensitive, visible elements only), scroll the target into view before
 acting, fail at the step with candidate diagnostics when nothing matches, and
 error on ambiguity. Disambiguate with `exact: true` (case-sensitive),
 `nth: <index>` (0-based), or a more specific name.
+
+Use `focus` for custom comboboxes or controls that reveal their options on
+focus without accepting a click. Use `wait.value` to poll a live control value
+without an inline `eval`:
+
+```yaml
+- focus: { by: label, name: Country }
+- wait:
+    value: { by: label, name: Country, equals: United States }
+    timeoutMs: 40000
+```
 
 `open` also takes an object form to wait out SPA hydration:
 

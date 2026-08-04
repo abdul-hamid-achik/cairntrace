@@ -9,6 +9,18 @@ import {
 } from "../commandBuilder";
 
 describe("locatorToArgv", () => {
+  it("focuses selector and semantic locators", () => {
+    expect(
+      stepToArgv({ focus: { by: "selector", selector: "#country" } }),
+    ).toEqual(["focus", "#country"]);
+    expect(stepToArgv({ focus: { by: "label", name: "Country" } })).toEqual([
+      "find",
+      "label",
+      "Country",
+      "focus",
+    ]);
+  });
+
   it("role with name → find role <role> <action> --name <name>", () => {
     expect(
       locatorToArgv({ by: "role", role: "button", name: "Apply" }, "click"),
@@ -89,6 +101,14 @@ describe("locatorToArgv", () => {
 });
 
 describe("waitConditionToArgv", () => {
+  it("refuses runner-owned value waits", () => {
+    expect(() =>
+      waitConditionToArgv({
+        value: { by: "selector", selector: "#country", equals: "US" },
+      }),
+    ).toThrow(/cross-backend runner/);
+  });
+
   it("text wait", () => {
     expect(waitConditionToArgv({ text: "Welcome" })).toEqual([
       "wait",
@@ -129,6 +149,22 @@ describe("waitConditionToArgv", () => {
         timeoutMs: 30000,
       }),
     ).toEqual(["wait", "#ready", "--timeout", "30000"]);
+  });
+
+  it("implements attached as a live DOM predicate", () => {
+    expect(
+      waitConditionToArgv({
+        selector: '[data-answer-key="Tax_US_W9"] input[type="file"]',
+        state: "attached",
+        timeoutMs: 25000,
+      }),
+    ).toEqual([
+      "wait",
+      "--fn",
+      'document.querySelector("[data-answer-key=\\\"Tax_US_W9\\\"] input[type=\\\"file\\\"]") !== null',
+      "--timeout",
+      "25000",
+    ]);
   });
 
   it("selector wait with state and timeout", () => {

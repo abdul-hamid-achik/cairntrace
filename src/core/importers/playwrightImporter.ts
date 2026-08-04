@@ -246,8 +246,25 @@ function mapStep(line: string, todos?: string[]): Step | undefined {
     }
   }
 
+  const waitValue =
+    /^await\s+expect\((page\..+?)\)\.toHaveValue\((.+?)\);?$/.exec(line);
+  if (waitValue) {
+    const loc = locator(waitValue[1]!, todos);
+    const args = splitTopLevelArgs(waitValue[2]!);
+    const equals = literal(args[0] ?? "");
+    const timeoutMs = objectNumberProperty(args[1], "timeout");
+    if (loc && equals !== undefined) {
+      return {
+        wait: {
+          value: { ...loc, equals },
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        },
+      };
+    }
+  }
+
   const action =
-    /^await\s+(page\..+?)\.(click|hover)\(\s*\);?$/.exec(line) ??
+    /^await\s+(page\..+?)\.(click|hover|focus)\(\s*\);?$/.exec(line) ??
     /^await\s+(page\..+?)\.(fill|pressSequentially)\((.+?)\);?$/.exec(line);
   if (!action) return undefined;
 
@@ -256,6 +273,7 @@ function mapStep(line: string, todos?: string[]): Step | undefined {
   const op = action[2]!;
   if (op === "click") return { click: loc };
   if (op === "hover") return { hover: loc };
+  if (op === "focus") return { focus: loc };
   // fill / pressSequentially carry a value (and pressSequentially → `type`).
   const args = splitTopLevelArgs(action[3] ?? "");
   const value = literal(args[0] ?? "");

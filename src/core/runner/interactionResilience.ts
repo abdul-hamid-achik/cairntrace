@@ -3,11 +3,21 @@ import type {
   ClickUntil,
   FillStep,
   Locator,
+  NetworkPostcondition,
   Step,
   TypeStep,
+  WaitStep,
 } from "../schema/spec.v1";
-import { clickLocator } from "../schema/spec.v1";
+import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
 import { textContains } from "../textMatching";
+import {
+  DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS,
+  NETWORK_POSTCONDITION_POLL_MS,
+  describeNetworkPostcondition,
+  matchesNetworkPostcondition,
+  networkEntryKey,
+  networkPostconditionFromStep,
+} from "../networkPostcondition";
 import type {
   BrowserBackend,
   InvocationResult,
@@ -19,6 +29,7 @@ export const FILL_VERIFY_SETTLE_MS = 500;
 export const CLICK_UNTIL_MAX_ATTEMPTS = 4;
 export const DEFAULT_CLICK_UNTIL_TIMEOUT_MS = 30_000;
 export const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+export const VALUE_WAIT_POLL_MS = 100;
 
 const CLICK_RETRY_BACKOFF_MS = [250, 500, 1_000] as const;
 const CONDITION_POLL_MS = 100;
@@ -48,6 +59,21 @@ export function applyWaitScale(step: Step, waitScale: number): Step {
   if (waitScale === 1) return step;
   const scale = (value: number): number =>
     Math.max(1, Math.round(value * waitScale));
+
+  if (step.postcondition?.network) {
+    return {
+      ...step,
+      postcondition: {
+        network: {
+          ...step.postcondition.network,
+          timeoutMs: scale(
+            step.postcondition.network.timeoutMs ??
+              DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS,
+          ),
+        },
+      },
+    } as Step;
+  }
 
   if ("wait" in step) {
     return {
@@ -101,6 +127,10 @@ export async function runResilientBrowserStep(
   backend: BrowserBackend,
   waitScale: number,
 ): Promise<InvocationResult> {
+  const postcondition = networkPostconditionFromStep(step);
+  if (postcondition !== undefined) {
+    return runNetworkPostconditionStep(step, postcondition, backend, waitScale);
+  }
   if ("fill" in step && step.verifyFill !== false) {
     return runVerifiedInputStep(step, backend, waitScale);
   }
@@ -110,7 +140,170 @@ export async function runResilientBrowserStep(
   if ("click" in step && step.click.until) {
     return runClickUntilStep(step, backend, waitScale);
   }
+  if ("wait" in step && "value" in step.wait) {
+    return runWaitValueStep(step, backend);
+  }
   return backend.runStep(step);
+}
+
+/**
+ * Run exactly one browser mutation, then wait for its network response.
+ *
+ * This deliberately bypasses fill hydration retries and click-until retries:
+ * once a postcondition is attached, repeating the mutation could create a
+ * duplicate upload, duplicate event, or duplicate server-side effect.
+ */
+async function runNetworkPostconditionStep(
+  step: Step,
+  postcondition: NetworkPostcondition,
+  backend: BrowserBackend,
+  waitScale: number,
+): Promise<InvocationResult> {
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(
+    1,
+    Math.round(
+      (postcondition.timeoutMs ?? DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS) *
+        waitScale,
+    ),
+  );
+  const action = withoutPostcondition(step);
+
+  if (backend.runStepWithNetworkPostcondition) {
+    return backend.runStepWithNetworkPostcondition(action, {
+      ...postcondition,
+      timeoutMs,
+    });
+  }
+
+  let before: Awaited<ReturnType<BrowserBackend["getNetworkRequests"]>>;
+  try {
+    before = await backend.getNetworkRequests();
+  } catch (error) {
+    return postconditionFailure(
+      startedAt,
+      `could not arm network postcondition: ${(error as Error).message}`,
+    );
+  }
+  const armedAt = Date.now();
+  const baselineCounts = countEntries(before);
+
+  // Important: direct backend dispatch, intentionally bypassing all mutation
+  // retry policies. The action is invoked once even if the response times out.
+  const actionResult = await backend.runStep(action);
+  if (!actionResult.ok) return actionResult;
+
+  const deadline = armedAt + timeoutMs;
+  for (;;) {
+    let observed: Awaited<ReturnType<BrowserBackend["getNetworkRequests"]>>;
+    try {
+      observed = await backend.getNetworkRequests();
+    } catch (error) {
+      return postconditionFailure(
+        startedAt,
+        `could not observe network postcondition after the action: ${(error as Error).message}`,
+      );
+    }
+    const match = observed.find((entry, index) => {
+      if (!matchesNetworkPostcondition(entry, postcondition)) return false;
+      if (entry.timestamp !== undefined) return entry.timestamp >= armedAt;
+      return (
+        index >= before.length ||
+        (countEntries(observed).get(networkEntryKey(entry)) ?? 0) >
+          (baselineCounts.get(networkEntryKey(entry)) ?? 0)
+      );
+    });
+    if (match) {
+      return {
+        ...actionResult,
+        durationMs: Date.now() - startedAt,
+        stdout: `network postcondition matched ${describeNetworkPostcondition(postcondition)}`,
+      };
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await backend.waitForTimeout(
+      Math.min(NETWORK_POSTCONDITION_POLL_MS, remaining),
+    );
+  }
+
+  return postconditionFailure(
+    startedAt,
+    `network postcondition timed out after ${timeoutMs}ms: ${describeNetworkPostcondition(postcondition)}`,
+  );
+}
+
+function countEntries(
+  entries: Awaited<ReturnType<BrowserBackend["getNetworkRequests"]>>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const key = networkEntryKey(entry);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function postconditionFailure(
+  startedAt: number,
+  error: string,
+): InvocationResult {
+  return {
+    ok: false,
+    stdout: "",
+    stderr: error,
+    exitCode: 1,
+    durationMs: Date.now() - startedAt,
+    argv: [],
+  };
+}
+
+async function runWaitValueStep(
+  step: WaitStep,
+  backend: BrowserBackend,
+): Promise<InvocationResult> {
+  if (!("value" in step.wait)) return backend.runStep(step);
+
+  const { equals, ...locator } = step.wait.value;
+  const timeoutMs = step.wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  let remaining = timeoutMs;
+  let actual = "";
+  let readError: string | undefined;
+
+  for (;;) {
+    try {
+      actual = await backend.getValue(locator as Locator);
+      readError = undefined;
+      if (actual === equals) {
+        return {
+          ok: true,
+          stdout: actual,
+          stderr: "",
+          exitCode: 0,
+          durationMs: timeoutMs - remaining,
+          argv: ["wait", "value"],
+        };
+      }
+    } catch (error) {
+      readError = (error as Error).message;
+    }
+
+    if (remaining <= 0) break;
+    const delay = Math.min(remaining, VALUE_WAIT_POLL_MS);
+    await backend.waitForTimeout(delay);
+    remaining -= delay;
+  }
+
+  return {
+    ok: false,
+    stdout: actual,
+    stderr: readError
+      ? `wait.value could not read ${JSON.stringify(equals)} within ${timeoutMs}ms: ${readError}`
+      : `wait.value expected ${JSON.stringify(equals)}, got ${JSON.stringify(actual)} after ${timeoutMs}ms`,
+    exitCode: 1,
+    durationMs: timeoutMs,
+    argv: ["wait", "value"],
+  };
 }
 
 async function runVerifiedInputStep(

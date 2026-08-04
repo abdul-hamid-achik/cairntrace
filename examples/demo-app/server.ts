@@ -15,6 +15,7 @@
  *   /table-actions.html→ hover-reveal row actions (batch step demo)
  *   /api/inventory     → 200 JSON with three items
  *   /api/broken        → 500 JSON error
+ *   /api/import-preview→ 200 after accepting one workbook body
  *   /template.xlsx     → generated workbook fixture
  */
 import { dirname, join } from "node:path";
@@ -49,6 +50,10 @@ const server = Bun.serve({
         { status: 500 },
       );
     }
+    if (url.pathname === "/api/import-preview" && req.method === "POST") {
+      const bytes = (await req.arrayBuffer()).byteLength;
+      return Response.json({ accepted: true, bytes });
+    }
     if (url.pathname === "/template.xlsx") {
       return new Response(makeTemplateWorkbook(), {
         headers: {
@@ -72,7 +77,7 @@ console.log(`Cairntrace demo serving at http://localhost:${server.port}/`);
 console.log(`  /                /api.html        /api-broken.html`);
 console.log(`  /dashboard.html  /import.html     /template.xlsx`);
 console.log(`  /table-actions.html`);
-console.log(`  /api/inventory   /api/broken`);
+console.log(`  /api/inventory   /api/broken      /api/import-preview`);
 
 function makeTemplateWorkbook(): Buffer {
   return makeZip({

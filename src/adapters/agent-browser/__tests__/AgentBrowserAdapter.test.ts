@@ -120,6 +120,35 @@ describe("AgentBrowserAdapter", () => {
     );
   });
 
+  it("focuses a semantic locator through its resolved snapshot ref", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- main\n  - combobox "Country" [ref=e4]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "focus-test" });
+
+    const result = await adapter.runStep({
+      focus: { by: "label", name: "Country" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement).toMatchObject({
+      role: "combobox",
+      name: "Country",
+      ref: "e4",
+    });
+    expect(execaMock).toHaveBeenNthCalledWith(
+      3,
+      "agent-browser",
+      ["--session", "focus-test", "focus", "@e4"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
   it("prefers the enclosing link ref when role=button is nested in a link", async () => {
     execaMock
       .mockResolvedValueOnce({

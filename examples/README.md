@@ -32,7 +32,8 @@ examples/
     ├── 08-conditional-step.yml        demonstrates when: urlContains:/login step skipping
     ├── 09-imported-drift.yml          drift inside an imported action; heal patches the action file
     ├── 10-artifact-xlsx.yml           download → Node verifier → xlsx verifier → transform → upload
-    └── 11-batch-hover-click.yml       batch step: hover → click a popover in one invocation
+    ├── 11-batch-hover-click.yml       batch step: hover → click a popover in one invocation
+    └── 12-focus-value.yml             focus + exact live-value wait without eval
 ```
 
 ## Heal demo (`cairn spec heal`)

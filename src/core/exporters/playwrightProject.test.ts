@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,6 +9,164 @@ import { exportPlaywrightProject } from "./playwrightProject";
 import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
 
 describe("exportPlaywrightProject timeout emission", () => {
+  it("emits an installable strict TypeScript Playwright project", () => {
+    const parsed: ParseResult = {
+      spec: baseSpec({}),
+      resolved: baseSpec({}),
+      path: "/tmp/project/flows/example.yml",
+      contractHashValid: true,
+      origins: [],
+      actionsByName: new Map(),
+    };
+
+    const result = exportPlaywrightProject([parsed]);
+    const packageJson = JSON.parse(
+      result.files.find((file) => file.relPath === "package.json")!.source,
+    ) as {
+      type: string;
+      scripts: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+    const tsconfig = JSON.parse(
+      result.files.find((file) => file.relPath === "tsconfig.json")!.source,
+    ) as { compilerOptions: Record<string, unknown> };
+    const readme = result.files.find(
+      (file) => file.relPath === "README.md",
+    )?.source;
+
+    expect(packageJson).toMatchObject({
+      type: "module",
+      scripts: { test: "playwright test", typecheck: "tsc --noEmit" },
+    });
+    expect(packageJson.devDependencies).toHaveProperty("@playwright/test");
+    expect(packageJson.devDependencies).toHaveProperty("@types/node");
+    expect(packageJson.devDependencies).toHaveProperty("typescript");
+    expect(tsconfig.compilerOptions).toMatchObject({
+      strict: true,
+      noEmit: true,
+      allowImportingTsExtensions: true,
+      moduleResolution: "Bundler",
+    });
+    expect(readme).toContain("npm install");
+    expect(readme).toContain("npm run typecheck");
+    expect(readme).toContain("npm test");
+
+    const javascript = exportPlaywrightProject([parsed], { lang: "js" });
+    expect(
+      javascript.files.some((file) => file.relPath === "tsconfig.json"),
+    ).toBe(false);
+    expect(
+      javascript.files.find((file) => file.relPath === "playwright.config.js")
+        ?.source,
+    ).toContain(`import { defineConfig } from "@playwright/test";`);
+    expect(
+      javascript.files.find((file) => file.relPath === "global-setup.js")
+        ?.source,
+    ).not.toContain("Promise<void>");
+  });
+
+  it("copies the bounded relative dependency closure of node verifiers", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cairn-verifier-graph-"));
+    try {
+      const flowsDir = join(directory, "flows");
+      const verifierDir = join(directory, "verifiers");
+      await mkdir(flowsDir, { recursive: true });
+      await mkdir(join(verifierDir, "support"), { recursive: true });
+      await writeFile(
+        join(verifierDir, "entry.ts"),
+        `import { check } from "./support/check.ts";\nexport default async function verify() { return { ok: check() }; }\n`,
+      );
+      await writeFile(
+        join(verifierDir, "support", "check.ts"),
+        `export function check(): boolean { return true; }\n`,
+      );
+      const spec = baseSpec({
+        outcomes: [
+          {
+            id: "node_verifier",
+            description: "node verifier passes",
+            verify: {
+              script: { runtime: "node", file: "../verifiers/entry.ts" },
+            },
+          },
+        ],
+      });
+      const parsed: ParseResult = {
+        spec,
+        resolved: spec,
+        path: join(flowsDir, "example.yml"),
+        contractHashValid: true,
+        origins: [],
+        actionsByName: new Map(),
+      };
+
+      const result = exportPlaywrightProject([parsed]);
+      expect(result.verifierFiles).toEqual([
+        {
+          sourcePath: join(verifierDir, "entry.ts"),
+          relPath: "verifiers/entry.ts",
+        },
+        {
+          sourcePath: join(verifierDir, "support", "check.ts"),
+          relPath: "verifiers/support/check.ts",
+        },
+      ]);
+      const testSource = result.files.find(
+        (file) => file.relPath === "tests/timeout_project.spec.ts",
+      )?.source;
+      expect(testSource).toContain(`import("../verifiers/entry.ts")`);
+      expect(testSource).toContain(
+        `const verifierNamespace = importedVerifier as unknown as`,
+      );
+      expect(testSource).toContain(`if (typeof verify !== "function")`);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects verifier dependencies that escape the entry directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cairn-verifier-escape-"));
+    try {
+      const flowsDir = join(directory, "flows");
+      const verifierDir = join(directory, "verifiers");
+      await mkdir(flowsDir, { recursive: true });
+      await mkdir(verifierDir, { recursive: true });
+      await writeFile(
+        join(verifierDir, "entry.ts"),
+        `export { unsafe } from "../outside.ts";\n`,
+      );
+      await writeFile(
+        join(directory, "outside.ts"),
+        `export const unsafe = 1;\n`,
+      );
+      const spec = baseSpec({
+        outcomes: [
+          {
+            id: "node_verifier",
+            description: "node verifier passes",
+            verify: {
+              script: { runtime: "node", file: "../verifiers/entry.ts" },
+            },
+          },
+        ],
+      });
+      const parsed: ParseResult = {
+        spec,
+        resolved: spec,
+        path: join(flowsDir, "example.yml"),
+        contractHashValid: true,
+        origins: [],
+        actionsByName: new Map(),
+      };
+
+      expect(() => exportPlaywrightProject([parsed])).toThrow(
+        /dependency escapes its module directory/,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("budgets imported action steps from the resolved spec", () => {
     const authored = baseSpec({ steps: [{ use: "slow_login" }] });
     const resolved = baseSpec({

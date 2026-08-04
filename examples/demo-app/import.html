@@ -34,6 +34,15 @@
       input.addEventListener("change", async () => {
         const file = input.files && input.files[0];
         if (!file) return;
+        const response = await fetch("/api/import-preview", {
+          method: "POST",
+          body: file,
+        });
+        if (!response.ok) {
+          result.className = "error";
+          result.textContent = `Upload failed (${response.status})`;
+          return;
+        }
         const text = await file.text();
         if (text.includes("duplicate@example.com")) {
           result.className = "error";

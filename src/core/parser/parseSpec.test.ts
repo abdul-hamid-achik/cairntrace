@@ -22,7 +22,7 @@ afterAll(async () => {
 });
 
 describe("parseSpec", () => {
-  it("accepts verifyFill opt-out and typed click.until conditions", async () => {
+  it("accepts focus, wait.value, verifyFill opt-out, and typed click.until conditions", async () => {
     const path = join(dir, "latency-resilience.yml");
     await writeFile(
       path,
@@ -35,6 +35,10 @@ outcomes:
     verify:
       console: { errorsMax: 0 }
 steps:
+  - focus: { by: selector, selector: "#country" }
+  - wait:
+      value: { by: selector, selector: "#country", equals: United States }
+      timeoutMs: 40000
   - fill:
       by: label
       name: Name
@@ -57,6 +61,17 @@ steps:
 
     const parsed = await parseSpec(path);
     expect(parsed.spec.steps).toEqual([
+      { focus: { by: "selector", selector: "#country" } },
+      {
+        wait: {
+          value: {
+            by: "selector",
+            selector: "#country",
+            equals: "United States",
+          },
+          timeoutMs: 40000,
+        },
+      },
       {
         fill: { by: "label", name: "Name", value: "Ada" },
         verifyFill: false,

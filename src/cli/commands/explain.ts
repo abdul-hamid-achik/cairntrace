@@ -1270,6 +1270,14 @@ export function buildExplain(): ExplainResult {
           'steps:\n  - hover: { by: selector, selector: ".question-table-wrap .table-title" }',
       },
       {
+        id: "focus",
+        kind: "interaction",
+        summary:
+          "Focus a locator without clicking it; useful for custom comboboxes and controls that reveal options on focus",
+        yamlExample:
+          'steps:\n  - focus: { by: selector, selector: "[data-answer-key=Entity_Country] input" }',
+      },
+      {
         id: "fill",
         kind: "interaction",
         summary:
@@ -1326,9 +1334,9 @@ export function buildExplain(): ExplainResult {
         id: "wait",
         kind: "wait",
         summary:
-          "Wait for text, notText, selector, or load state; text is whitespace-normalized and case-insensitive unless caseSensitive is true",
+          "Wait for text, notText, selector, exact control value, or load state; text is whitespace-normalized and case-insensitive unless caseSensitive is true",
         yamlExample:
-          "steps:\n  - wait: { text: Saved, timeoutMs: 10000, caseSensitive: false }",
+          "steps:\n  - wait: { text: Saved, timeoutMs: 10000, caseSensitive: false }\n  - wait: { value: { by: label, name: Country, equals: United States }, timeoutMs: 40000 }",
       },
       {
         id: "press",

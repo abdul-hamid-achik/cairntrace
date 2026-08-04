@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { ClipPointSchema, type ClipPoint } from "./config.v1";
 import { BackendSchema, ContractHashSchema } from "./shared";
-import { VerifierSchema } from "./verifier.v1";
+import {
+  HttpMethodSchema,
+  StatusMatcherSchema,
+  VerifierSchema,
+} from "./verifier.v1";
 export { ClipPointSchema };
 export type { ClipPoint };
 
@@ -211,6 +215,17 @@ export const WaitConditionSchema = z.union([
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
+  z
+    .object({
+      value: z.union([
+        RoleLocatorSchema.extend({ equals: z.string() }).strict(),
+        LabelLocatorSchema.extend({ equals: z.string() }).strict(),
+        TextLocatorSchema.extend({ equals: z.string() }).strict(),
+        SelectorLocatorSchema.extend({ equals: z.string() }).strict(),
+      ]),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
 
@@ -253,7 +268,48 @@ export type ClickUntil = z.infer<typeof ClickUntilSchema>;
 const stepCommon = {
   id: z.string().min(1).optional(),
   when: z.string().optional(), // simple condition string, e.g. "notAuthenticated"
+  /**
+   * A bounded response expected from this action. The runner arms the
+   * listener/baseline before dispatching the action and never retries the
+   * mutation when this guard is present.
+   */
+  postcondition: z
+    .object({
+      network: z
+        .object({
+          method: HttpMethodSchema.optional(),
+          urlContains: z.string().min(1),
+          status: StatusMatcherSchema.optional(),
+          timeoutMs: z.number().int().positive().optional(),
+        })
+        .strict(),
+    })
+    .strict()
+    .optional(),
 };
+
+export const NetworkPostconditionSchema = z
+  .object({
+    method: HttpMethodSchema.optional(),
+    urlContains: z.string().min(1),
+    status: StatusMatcherSchema.optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type NetworkPostcondition = z.infer<typeof NetworkPostconditionSchema>;
+
+export const PostconditionSchema = z
+  .object({ network: NetworkPostconditionSchema })
+  .strict();
+export type Postcondition = z.infer<typeof PostconditionSchema>;
+
+/** Remove the orchestration-only guard before dispatching the browser action. */
+export function withoutPostcondition(step: Step): Step {
+  const { postcondition: _postcondition, ...action } = step as Step & {
+    postcondition?: Postcondition;
+  };
+  return action as Step;
+}
 
 /**
  * `open: /path` or the object form with a post-navigation wait:
@@ -312,6 +368,12 @@ export const HoverStepSchema = z
   .object({ ...stepCommon, hover: LocatorSchema })
   .strict();
 export type HoverStep = z.infer<typeof HoverStepSchema>;
+
+/** Focus a control without clicking it (useful for custom comboboxes). */
+export const FocusStepSchema = z
+  .object({ ...stepCommon, focus: LocatorSchema })
+  .strict();
+export type FocusStep = z.infer<typeof FocusStepSchema>;
 
 export const FillStepSchema = z
   .object({
@@ -646,26 +708,55 @@ export const MonitorStepSchema = z
   .strict();
 export type MonitorStep = z.infer<typeof MonitorStepSchema>;
 
-export const StepSchema = z.union([
-  OpenStepSchema,
-  ClickStepSchema,
-  HoverStepSchema,
-  FillStepSchema,
-  TypeStepSchema,
-  SelectStepSchema,
-  UploadStepSchema,
-  DownloadStepSchema,
-  TransformStepSchema,
-  WaitStepSchema,
-  RequestStepSchema,
-  PressStepSchema,
-  ScrollStepSchema,
-  SnapshotStepSchema,
-  UseStepSchema,
-  BatchStepSchema,
-  EvalStepSchema,
-  MonitorStepSchema,
-]);
+const browserActionKeys = [
+  "open",
+  "click",
+  "hover",
+  "focus",
+  "fill",
+  "type",
+  "select",
+  "upload",
+  "download",
+  "press",
+  "scroll",
+  "batch",
+] as const;
+
+export const StepSchema = z
+  .union([
+    OpenStepSchema,
+    ClickStepSchema,
+    HoverStepSchema,
+    FocusStepSchema,
+    FillStepSchema,
+    TypeStepSchema,
+    SelectStepSchema,
+    UploadStepSchema,
+    DownloadStepSchema,
+    TransformStepSchema,
+    WaitStepSchema,
+    RequestStepSchema,
+    PressStepSchema,
+    ScrollStepSchema,
+    SnapshotStepSchema,
+    UseStepSchema,
+    BatchStepSchema,
+    EvalStepSchema,
+    MonitorStepSchema,
+  ])
+  .superRefine((step, ctx) => {
+    if (
+      step.postcondition !== undefined &&
+      !browserActionKeys.some((key) => key in step)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["postcondition"],
+        message: "postcondition.network is only valid on a browser action step",
+      });
+    }
+  });
 export type Step = z.infer<typeof StepSchema>;
 
 /* ----- outcome (the contract) ----- */

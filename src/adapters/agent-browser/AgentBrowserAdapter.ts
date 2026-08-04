@@ -178,6 +178,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
         step.settleMs,
       );
     if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
+    if ("focus" in step) return this.runInteractiveStep(step.focus, "focus");
     if ("fill" in step) {
       const { value, ...locator } = step.fill;
       return this.runInteractiveStep(locator as Locator, "fill", value);
@@ -955,7 +956,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private async runInteractiveStep(
     locator: Locator,
-    action: "click" | "hover" | "fill" | "type" | "select" | "upload",
+    action: "click" | "hover" | "focus" | "fill" | "type" | "select" | "upload",
     value?: string,
     settleMsOverride?: number,
   ): Promise<InvocationResult> {

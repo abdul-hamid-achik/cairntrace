@@ -314,10 +314,12 @@ test("golden_late_bound", async ({ page }, testInfo) => {
   let rescued;
   for (let evalAttempt = 0; ; evalAttempt++) {
     try {
-      rescued = await page.evaluate(async (args) => {
-        if (!document.querySelector('#card')) { location.reload(); }
-        return 'ok';
-      }, {});
+      rescued = await page.evaluate(async ({ source, args }) => {
+        // Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.
+        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
+        const execute = new AsyncFunction("args", source);
+        return await execute(args);
+      }, { source: "if (!document.querySelector('#card')) { location.reload(); }\nreturn 'ok';", args: {} });
       break;
     } catch (err) {
       if (evalAttempt >= 3 || !String(err).includes("Execution context was destroyed")) throw err;
@@ -331,13 +333,22 @@ test("golden_late_bound", async ({ page }, testInfo) => {
   {
     // node verifier (runs in the test's node context, not the browser)
     await cairnNetworkEvidence.persist(cairnRunDir);
-    const mod = await import("../../verifiers/check.ts");
+    const importedVerifier = await import("../../verifiers/check.ts");
     // ESM/CJS interop: Playwright transpiles TS imports to CJS, so a
-    // default export may surface as mod.default.default.
+    // default export may surface as namespace.default.default.
+    const verifierNamespace = importedVerifier as unknown as { verify?: unknown; default?: unknown };
+    const verifierDefault = verifierNamespace.default;
+    const verifierDefaultNamespace = verifierDefault && typeof verifierDefault === "object"
+      ? verifierDefault as { verify?: unknown; default?: unknown }
+      : undefined;
     const verify =
-      mod.verify ??
-      (typeof mod.default === "function" ? mod.default : (mod.default?.verify ?? mod.default?.default));
-    expect(typeof verify, "verifier module must export verify()").toBe("function");
+      verifierNamespace.verify ??
+      (typeof verifierDefault === "function"
+        ? verifierDefault
+        : (verifierDefaultNamespace?.verify ?? verifierDefaultNamespace?.default));
+    if (typeof verify !== "function") {
+      throw new Error("verifier module must export a verify() function");
+    }
     const res = await verify({
       fixtures: { "expectedRoute": "temporal", "token": `prefix-${RUN_TOKEN}`, "secret": `${process.env.API_KEY ?? ""}` },
       artifacts: {},

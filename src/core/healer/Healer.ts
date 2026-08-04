@@ -330,7 +330,7 @@ function tryWaitInsertion(
 }
 
 interface LocatorTarget {
-  key: "click" | "hover" | "fill" | "select" | "upload" | "download";
+  key: "click" | "hover" | "focus" | "fill" | "select" | "upload" | "download";
   locator: {
     by: string;
     role?: string;
@@ -343,6 +343,7 @@ interface LocatorTarget {
 function extractLocatorTarget(step: Step): LocatorTarget | undefined {
   if ("click" in step) return { key: "click", locator: step.click };
   if ("hover" in step) return { key: "hover", locator: step.hover };
+  if ("focus" in step) return { key: "focus", locator: step.focus };
   if ("fill" in step) return { key: "fill", locator: step.fill };
   if ("select" in step) return { key: "select", locator: step.select };
   if ("upload" in step) return { key: "upload", locator: step.upload };

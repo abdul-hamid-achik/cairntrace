@@ -2330,6 +2330,7 @@ async function captureDiagnostics(
   const selector =
     ("click" in step && step.click.by === "selector" && step.click.selector) ||
     ("hover" in step && step.hover.by === "selector" && step.hover.selector) ||
+    ("focus" in step && step.focus.by === "selector" && step.focus.selector) ||
     ("fill" in step && step.fill.by === "selector" && step.fill.selector) ||
     ("select" in step &&
       step.select.by === "selector" &&
@@ -2435,6 +2436,7 @@ async function captureDiagnostics(
 function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   if ("click" in step) return { kind: "click", locator: step.click };
   if ("hover" in step) return { kind: "hover", locator: step.hover };
+  if ("focus" in step) return { kind: "focus", locator: step.focus };
   if ("fill" in step) {
     const { value: _value, ...locator } = step.fill;
     return { kind: "fill", locator };
@@ -2510,6 +2512,7 @@ function diagnosticNeedles(step: Step): string[] {
   };
   if ("click" in step) add(locatorNeedle(step.click));
   if ("hover" in step) add(locatorNeedle(step.hover));
+  if ("focus" in step) add(locatorNeedle(step.focus));
   if ("fill" in step) add(locatorNeedle(step.fill));
   if ("type" in step) add(locatorNeedle(step.type));
   if ("select" in step) add(locatorNeedle(step.select));
@@ -2528,6 +2531,7 @@ function diagnosticNeedles(step: Step): string[] {
     if ("text" in step.wait) add(step.wait.text);
     if ("notText" in step.wait) add(step.wait.notText);
     if ("selector" in step.wait) add(step.wait.selector);
+    if ("value" in step.wait) add(locatorNeedle(step.wait.value));
   }
   if ("scroll" in step && "to" in step.scroll)
     add(locatorNeedle(step.scroll.to));

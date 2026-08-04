@@ -131,6 +131,9 @@ per-agent code paths.
   settle and retry up to three times when hydration wipes it. This is on by
   default; use sibling `verifyFill: false` only for masked/transformed controls
   whose DOM value intentionally differs from the authored text.
+- Use `focus` when a custom control reveals options on focus without accepting
+  a click. Use `wait: { value: { ...locator, equals: ... } }` for a bounded,
+  exact live-value poll instead of an inline DOM `eval`.
 - When a click can report success before its effect is delivered, use
   `click.until` with exactly one of `selectorGone`, `selector`, `text`, or
   `notText` plus optional `timeoutMs`. Cairntrace retries with backoff, at most

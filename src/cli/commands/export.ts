@@ -232,9 +232,9 @@ async function exportProject(
   }
   // Self-contained project: copy referenced node verifiers in.
   for (const v of result.verifierFiles) {
-    const dest = join(outDir, "verifiers", v.split("/").pop()!);
+    const dest = join(outDir, v.relPath);
     await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, await readFile(v, "utf8"));
+    await writeFile(dest, await readFile(v.sourcePath, "utf8"));
   }
 
   const report = {
@@ -242,7 +242,7 @@ async function exportProject(
     lang,
     outDir,
     files: result.files.map((f) => f.relPath),
-    verifiersCopied: result.verifierFiles.map((v) => v.split("/").pop()),
+    verifiersCopied: result.verifierFiles.map((v) => v.relPath),
     requiredEnv: result.requiredEnv,
     specs: result.specs.map((s) => ({
       name: s.name,
@@ -260,9 +260,7 @@ async function exportProject(
       `Out: \`${outDir}\``,
       ``,
       ...result.files.map((f) => `- ${f.relPath}`),
-      ...result.verifierFiles.map(
-        (v) => `- verifiers/${v.split("/").pop()} (copied)`,
-      ),
+      ...result.verifierFiles.map((v) => `- ${v.relPath} (copied)`),
       ``,
       `Required env: ${result.requiredEnv.join(", ") || "none"}`,
       ``,

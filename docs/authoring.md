@@ -41,7 +41,7 @@ outcomes:
 
 ## Steps are hints, not scripts
 
-A `step` is an instruction a code generator (you) or a runtime (cairn) might rewrite without changing the contract. Steps must use the typed step vocabulary too (`open`, `wait`, `click`, `hover`, `fill`, `type`, `press`, `scroll`, `upload`, `download`, `transform`, `request`, `snapshot`, `use`, `batch`, `eval`, `monitor`). Free-form prose inside an `eval:` step is allowed, but if you find yourself reaching for it, stop and ask whether one of the typed steps already encodes the intent.
+A `step` is an instruction a code generator (you) or a runtime (cairn) might rewrite without changing the contract. Steps must use the typed step vocabulary too (`open`, `wait`, `click`, `hover`, `focus`, `fill`, `type`, `press`, `scroll`, `upload`, `download`, `transform`, `request`, `snapshot`, `use`, `batch`, `eval`, `monitor`). Free-form prose inside an `eval:` step is allowed, but if you find yourself reaching for it, stop and ask whether one of the typed steps already encodes the intent.
 
 The same locator philosophy that drives `playwright` should drive cairn: prefer semantic locators (`by: role|label|text`), fall back to `data-testid`, and only touch CSS/XPath when nothing else survives.
 
