@@ -43,7 +43,7 @@ import {
   type Step,
   type TransformStep,
 } from "../schema/spec.v1";
-import type { RetentionConfig } from "../schema/config.v1";
+import type { MonitorTargetConfig, RetentionConfig } from "../schema/config.v1";
 import type {
   OutcomeResult,
   RunArtifacts,
@@ -557,7 +557,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // the backend's browserPid() and may start lazily — agent-browser spawns its
   // daemon on the first command, so the PID can be unavailable until after the
   // first step. Zero-cost when monitoring is disabled.
-  const monitorClient = opts.monitorClient ?? defaultMonitorClient();
+  const monitorClient =
+    opts.monitorClient ??
+    defaultMonitorClient(runtime.config?.diagnostics?.monitor?.binary);
   const monitorEnabled =
     opts.monitor !== undefined && opts.monitor !== false
       ? true
@@ -803,12 +805,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           client: monitorClient,
           writer,
           index: i + 1,
+          targets: runtime.config?.diagnostics?.monitor?.targets ?? {},
         });
         if (!mon.ok) {
           stepStatus = "failed";
           stepError = mon.error;
         } else {
-          stepArtifacts.push(mon.relativePath);
+          stepArtifacts.push(...mon.relativePaths);
           if (mon.assign) {
             namedArtifacts[mon.assign] = {
               kind: "monitor" as ArtifactRef["kind"],
@@ -2249,17 +2252,48 @@ async function runMonitorStep(opts: {
   client: MonitorClient;
   writer: ArtifactWriter;
   index: number;
+  targets: Record<string, MonitorTargetConfig>;
 }): Promise<
-  | { ok: true; action: string; relativePath: string; assign?: string }
+  | {
+      ok: true;
+      action: string;
+      relativePath: string;
+      relativePaths: string[];
+      assign?: string;
+    }
   | { ok: false; error: string }
 > {
   const target = opts.step.monitor;
-  const pid = opts.backend.browserPid?.();
+  let pid: number | undefined;
+  if (target.target) {
+    const selector = opts.targets[target.target];
+    if (!selector) {
+      return {
+        ok: false,
+        error: `monitor target ${JSON.stringify(target.target)} is not declared in diagnostics.monitor.targets`,
+      };
+    }
+    const resolved = await opts.client.resolveTarget(selector);
+    pid = resolved?.pid;
+    if (pid === undefined) {
+      return {
+        ok: false,
+        error: `monitor could not resolve exactly one process for target ${JSON.stringify(target.target)} (runtime=${selector.runtime}, codebaseRoot=${selector.codebaseRoot}${
+          selector.mainScriptSuffix
+            ? `, mainScriptSuffix=${selector.mainScriptSuffix}`
+            : ""
+        })`,
+      };
+    }
+  } else {
+    pid = opts.backend.browserPid?.();
+  }
   if (pid === undefined || pid <= 1) {
     return {
       ok: false,
-      error:
-        "monitor step needs a browser PID, but the backend has no spawned browser process (start the run with an `open` step first, or use a backend that exposes browserPid)",
+      error: target.target
+        ? `monitor target ${JSON.stringify(target.target)} resolved no usable PID`
+        : "monitor step needs a browser PID, but the backend has no spawned browser process (start the run with an `open` step first, or use a backend that exposes browserPid)",
     };
   }
   if (!(await opts.client.available())) {
@@ -2276,9 +2310,18 @@ async function runMonitorStep(opts: {
   const relativePath = `monitor/${base}.json`;
 
   if (target.action === "profile") {
+    const rawRelativePath = `monitor/${base}.profile`;
     const profile = await opts.client.captureProfile(
       pid,
       (target.type ?? "heap") as ProfileType,
+      {
+        ...(target.durationSeconds !== undefined
+          ? { durationSeconds: target.durationSeconds }
+          : {}),
+        outputPath: opts.writer.resolve(rawRelativePath),
+        stepId: opts.step.id ?? `step_${opts.index}`,
+        service: target.target ?? "browser",
+      },
     );
     if (!profile) {
       return {
@@ -2286,11 +2329,18 @@ async function runMonitorStep(opts: {
         error: `monitor profile <pid> --type ${target.type ?? "heap"} returned no result (process exited or profile failed)`,
       };
     }
+    if (profile.path) {
+      opts.writer.registerExisting(rawRelativePath, "monitor");
+      profile.path = rawRelativePath;
+    }
     await opts.writer.writeJson(relativePath, profile, "monitor");
     return {
       ok: true,
       action: `profile:${profile.type}`,
       relativePath,
+      relativePaths: profile.path
+        ? [relativePath, rawRelativePath]
+        : [relativePath],
       ...(target.assign ? { assign: target.assign } : {}),
     };
   }
@@ -2307,6 +2357,7 @@ async function runMonitorStep(opts: {
     ok: true,
     action: "snapshot",
     relativePath,
+    relativePaths: [relativePath],
     ...(target.assign ? { assign: target.assign } : {}),
   };
 }

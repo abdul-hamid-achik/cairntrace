@@ -694,7 +694,11 @@ export const MonitorStepSchema = z
     monitor: z
       .object({
         action: z.enum(["profile", "snapshot"]),
+        /** Named config diagnostics.monitor.targets entry; defaults to browser. */
+        target: z.string().min(1).optional(),
         type: z.enum(["heap", "cpu", "goroutine", "sample"]).optional(),
+        /** CPU sampling duration. Monitor bounds this to at most two minutes. */
+        durationSeconds: z.number().int().min(1).max(120).optional(),
         assign: z.string().min(1).optional(),
         label: z.string().optional(),
         timeoutMs: z.number().int().positive().optional(),

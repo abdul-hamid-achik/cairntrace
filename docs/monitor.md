@@ -21,20 +21,41 @@ shown below.
 Capture a process profile or a one-shot sample at a *specific point* in the flow — not just the run-wide summary.
 
 ```yaml
+diagnostics:
+  monitor:
+    binary: /opt/monitor/bin/monitor
+    targets:
+      worker:
+        runtime: node
+        codebaseRoot: /workspace/worker
+        mainScriptSuffix: dist/server.js
+
 steps:
   - open: /heavy-dashboard
   - monitor: { action: profile, type: heap, assign: heapAfterLoad }
+  - monitor:
+      target: worker
+      action: profile
+      type: cpu
+      durationSeconds: 10
+      assign: workerCpu
   - monitor: { action: snapshot, label: after-scroll }
 ```
 
-- `action: profile` with `type: heap|cpu|goroutine|sample` captures a profile
-  of the backend's browser process tree. Files use an ordinal/action name such
-  as `monitor/002_profile.json`. With `assign`, that path is also registered
-  as a named artifact, reusable via `${artifacts.<assign>.path}`.
+- `action: profile` with `type: heap|cpu|goroutine|sample` captures a profile.
+  Its JSON receipt and raw profile are both kept under `monitor/`. With
+  `assign`, the JSON receipt is registered as a named artifact, reusable via
+  `${artifacts.<assign>.path}`.
 - `action: snapshot` takes a one-shot sample and writes an ordinal/action path
   such as `monitor/003_snapshot_after-scroll.json`.
 
-The `monitor` step targets `backend.browserPid()`, so it fails if no browser has spawned yet or `monitor` is not on `$PATH`. It is handled by the runner *before* adapter dispatch — it is not a backend interaction.
+Without `target`, the step uses `backend.browserPid()`. With `target`, it
+resolves the corresponding `diagnostics.monitor.targets` selector through
+Monitor. Resolution is fail-closed: zero or multiple live matches fail the
+step, preventing a profile from silently attaching to the wrong service.
+Node/Bun/Deno CPU and heap profiles require a loopback inspector (`--inspect`
+or `--inspect=127.0.0.1:<port>`). The step also fails when `monitor` is not on
+`$PATH`; an explicitly requested capture is never silently skipped.
 
 ## The `process` verifier
 
@@ -51,7 +72,16 @@ RSS matchers compare against megabytes; CPU against summed tree CPU percent. The
 
 ## Binary configuration
 
-The monitor client defaults to `monitor` on `$PATH` and can be overridden:
+The monitor client defaults to `monitor` on `$PATH`. Configure one exact
+binary for reproducible service diagnostics:
+
+```yaml
+diagnostics:
+  monitor:
+    binary: /opt/monitor/bin/monitor
+```
+
+`CAIRN_MONITOR_BINARY` remains available as a process-wide fallback:
 
 ```bash
 CAIRN_MONITOR_BINARY=/opt/monitor/bin/monitor cairn run flows/x.yml --monitor

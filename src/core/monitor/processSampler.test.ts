@@ -23,6 +23,7 @@ function fakeClient(tree: ProcessTreeNode[]): MonitorClient {
       timestampMs: Date.now(),
     }),
     processTree: async () => tree,
+    resolveTarget: async () => undefined,
     captureProfile: async (pid, type) => ({
       pid,
       type,
@@ -178,6 +179,7 @@ describe("ProcessSampler", () => {
         available: async () => true,
         sampleProcess: async () => undefined,
         processTree: async () => undefined,
+        resolveTarget: async () => undefined,
         captureProfile: async () => undefined,
       };
       const sampler = new ProcessSampler({ pid: 999, intervalMs: 500, client });

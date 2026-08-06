@@ -6,7 +6,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BrowserBackend } from "../../adapters/browserBackend";
@@ -2568,6 +2568,7 @@ steps:
           is_protected: false,
         },
       ],
+      resolveTarget: async () => undefined,
       captureProfile: async (pid: number, type: string) => ({
         pid,
         type,
@@ -2638,6 +2639,7 @@ steps:
       available: async () => true,
       sampleProcess: async () => undefined,
       processTree: async () => [],
+      resolveTarget: async () => undefined,
       captureProfile: async () => undefined,
     };
     const prev = process.env["MONITOR"];
@@ -2661,6 +2663,104 @@ steps:
 });
 
 describe("runSpec monitor step", () => {
+  it("resolves and profiles a configured service target", async () => {
+    const specPath = await writeSpec(
+      "monitor_service_profile",
+      `version: 1
+name: monitor_service_profile
+intent: capture worker CPU at a behavioral checkpoint
+outcomes:
+  - id: clean
+    description: mock console stays clean
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - monitor:
+      target: worker
+      action: profile
+      type: cpu
+      durationSeconds: 7
+      assign: workerCpu
+`,
+    );
+    const configPath = join(workDir, "monitor-target.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local: {}
+diagnostics:
+  monitor:
+    targets:
+      worker:
+        runtime: node
+        codebaseRoot: /workspace/worker
+        mainScriptSuffix: dist/server.js
+`,
+    );
+    const fakeClient = {
+      available: async () => true,
+      sampleProcess: async () => undefined,
+      processTree: async () => [],
+      resolveTarget: async () => ({
+        pid: 9876,
+        name: "node",
+        runtime: "node",
+      }),
+      captureProfile: async (
+        pid: number,
+        type: string,
+        options?: {
+          durationSeconds?: number;
+          outputPath?: string;
+          stepId?: string;
+          service?: string;
+        },
+      ) => {
+        expect(pid).toBe(9876);
+        expect(type).toBe("cpu");
+        expect(options?.durationSeconds).toBe(7);
+        expect(options?.stepId).toBe("step_1");
+        expect(options?.service).toBe("worker");
+        await makeDir(dirname(options!.outputPath!), { recursive: true });
+        await writeFile(options!.outputPath!, "cpu-profile");
+        return {
+          pid,
+          type,
+          method: "inspector_cpu",
+          taken: "2026-01-01T00:00:00Z",
+          path: options!.outputPath!,
+          receipt: { verified: true, size_bytes: 11 },
+        };
+      },
+    };
+
+    const result = await runSpec({
+      specPath,
+      configPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      monitorClient: fakeClient,
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.steps[0]!.artifacts).toEqual(
+      expect.arrayContaining([
+        "monitor/001_profile.profile",
+        "monitor/001_profile.json",
+      ]),
+    );
+    const receipt = JSON.parse(
+      await readFile(join(result.runDir, "monitor/001_profile.json"), "utf8"),
+    );
+    expect(receipt).toMatchObject({
+      pid: 9876,
+      method: "inspector_cpu",
+      path: "monitor/001_profile.profile",
+      receipt: { verified: true },
+    });
+  });
+
   it("captures a snapshot and registers it as a named artifact", async () => {
     const specPath = await writeSpec(
       "monitor_snapshot",
@@ -2691,6 +2791,7 @@ steps:
         timestampMs: Date.now(),
       }),
       processTree: async () => [],
+      resolveTarget: async () => undefined,
       captureProfile: async () => undefined,
     };
     const result = await runSpec({
@@ -2732,6 +2833,7 @@ steps:
       available: async () => true,
       sampleProcess: async () => undefined,
       processTree: async () => [],
+      resolveTarget: async () => undefined,
       captureProfile: async () => undefined,
     };
     const result = await runSpec({

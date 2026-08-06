@@ -724,6 +724,37 @@ export const InvestigateConfigSchema = z
   .strict();
 export type InvestigateConfig = z.infer<typeof InvestigateConfigSchema>;
 
+/** Stable identity selectors for a non-browser process managed alongside a run. */
+export const MonitorTargetConfigSchema = z
+  .object({
+    runtime: z.enum(["node", "bun", "deno", "go", "python"]),
+    /** Exact codebase root detected from the live process cwd/entrypoint. */
+    codebaseRoot: z.string().min(1),
+    /** Optional suffix that disambiguates wrappers such as yarn from the app. */
+    mainScriptSuffix: z.string().min(1).optional(),
+  })
+  .strict();
+export type MonitorTargetConfig = z.infer<typeof MonitorTargetConfigSchema>;
+
+export const DiagnosticsConfigSchema = z
+  .object({
+    monitor: z
+      .object({
+        /** Monitor CLI used for explicit diagnostics (defaults to PATH/env). */
+        binary: z.string().min(1).optional(),
+        targets: z
+          .record(
+            z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+            MonitorTargetConfigSchema,
+          )
+          .default({}),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type DiagnosticsConfig = z.infer<typeof DiagnosticsConfigSchema>;
+
 export const AnnotateConfigSchema = z
   .object({
     /** Enable codemap annotate integration (default: false). */
@@ -768,6 +799,8 @@ export const ConfigSchema = z
     clips: ClipConfigSchema.optional(),
     /** Code investigation via fcheap connect (vecgrep) + vidtrace. */
     investigate: InvestigateConfigSchema.optional(),
+    /** Process targets available to explicit `monitor:` spec steps. */
+    diagnostics: DiagnosticsConfigSchema.optional(),
     /** codemap annotation integration (pin run findings to code symbols). */
     annotate: AnnotateConfigSchema.optional(),
   })
