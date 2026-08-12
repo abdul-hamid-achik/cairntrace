@@ -60,4 +60,9 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Publish to npm (trusted publisher + provenance)
+        # setup-node with registry-url injects NODE_AUTH_TOKEN. An empty
+        # secret wins over OIDC and npm returns 404 for the PUT. Trusted
+        # Publisher only works when that token is unset.
+        env:
+          NODE_AUTH_TOKEN: ""
         run: npm publish --provenance --access public
