@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@4bc047ad3df7f6d6f1f7e9a5c5b1d1c6b9f9a9f9 # v2
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
 
       - name: Assert tag matches package version
         # The release flow bumps package.json in the tag commit; publishing a
@@ -51,7 +51,7 @@ jobs:
         run: bun run verify
 
       - name: Set up Node (npm)
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c448adde47 # v4.2.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
