@@ -5,6 +5,22 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-08-12
+
+### Fixed
+
+- agent-browser `wait.selector` `state: hidden|detached` now polls a `--fn`
+  DOM predicate. agent-browser 0.34 treats `--state` as an auth-state file
+  path, so `--state hidden` failed with `Failed to read state from hidden`.
+- agent-browser `click: { by: text }` and locators with `near:` read the
+  full accessibility snapshot (not `-i`, which drops `StaticText`). A
+  text match with no `@ref` is promoted to the nearest ancestor that has
+  one, so a task-row title and a dialog "Delete" next to confirm copy
+  resolve.
+- Semantic names accept a trailing count badge (`Tasks` matches
+  `Tasks 11`) on both backends. This is not substring matching: `Pay`
+  still does not match `Pay for plan`.
+
 ## [2.8.0] - 2026-08-12
 
 Authoring primitives for user-like flows, plus the unpublished work already on

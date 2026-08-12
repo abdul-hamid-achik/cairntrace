@@ -19,6 +19,7 @@ import type {
 import { clickLocator } from "../../core/schema/spec.v1";
 import { resolveTestIdAttribute, testIdSelector } from "../../core/locators";
 import { pickNearestSnapshotMatches } from "../../core/locatorNear";
+import { accessibleNameMatches } from "../../core/textMatching";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -1746,10 +1747,15 @@ export class AgentBrowserAdapter implements BrowserBackend {
     };
     let lastShortfall: string | undefined;
 
-    // Poll the interactive snapshot until the locator resolves or the timeout
-    // expires — parity with Playwright's wait-for-visibility behavior.
+    // Poll until the locator resolves or the timeout expires — parity with
+    // Playwright's wait-for-visibility. `by: text` and `near:` need the full
+    // tree because agent-browser's `-i` snapshot drops StaticText; role/label
+    // without `near` still use the interactive slice.
+    const needsFullSnapshot =
+      locator.by === "text" || Boolean("near" in locator && locator.near);
+    const snapshotArgv = needsFullSnapshot ? ["snapshot"] : ["snapshot", "-i"];
     while (true) {
-      const snapshot = await this.invoke(["snapshot", "-i"]);
+      const snapshot = await this.invoke(snapshotArgv);
       lastSnapshot = snapshot;
       if (snapshot.ok) {
         const parsed = parseSnapshot(snapshot.stdout);
@@ -2741,15 +2747,48 @@ export function matchingSnapshotIndices(
   snapshot: SnapshotElement[],
 ): number[] {
   const out: number[] = [];
+  const seen = new Set<number>();
+  const add = (idx: number): void => {
+    if (seen.has(idx)) return;
+    seen.add(idx);
+    out.push(idx);
+  };
   for (let i = 0; i < snapshot.length; i++) {
     const el = snapshot[i]!;
-    if (!el.ref) continue;
     if (!matchesLocator(locator, el)) continue;
-    out.push(i);
+    if (el.ref) {
+      add(i);
+      continue;
+    }
+    // agent-browser StaticText has a name but no ref. `by: text` is "click
+    // the visible copy" — promote to the nearest ancestor that can be
+    // clicked (the task row wrapping the title, not the text node).
+    if (locator.by === "text") {
+      const ancestor = nearestAncestorWithRef(i, snapshot);
+      if (ancestor !== undefined) add(ancestor);
+    }
   }
+  out.sort((a, b) => a - b);
   const near = "near" in locator ? locator.near : undefined;
   if (!near) return out;
   return pickNearestSnapshotMatches(out, snapshot, near);
+}
+
+function nearestAncestorWithRef(
+  matchIndex: number,
+  snapshot: SnapshotElement[],
+): number | undefined {
+  const match = snapshot[matchIndex];
+  if (!match) return undefined;
+  if (match.ref) return matchIndex;
+  let currentLevel = match.level;
+  for (let i = matchIndex - 1; i >= 0; i--) {
+    const el = snapshot[i]!;
+    if (el.level >= currentLevel) continue;
+    currentLevel = el.level;
+    if (el.ref) return i;
+  }
+  return undefined;
 }
 
 function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
@@ -2781,14 +2820,7 @@ function nameMatches(
   wanted: string,
   exact: boolean | undefined,
 ): boolean {
-  const a = normalizeName(elName ?? "");
-  const b = normalizeName(wanted);
-  if (exact) return a === b;
-  return a.toLowerCase() === b.toLowerCase();
-}
-
-function normalizeName(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+  return accessibleNameMatches(elName, wanted, exact);
 }
 
 /**
@@ -2873,8 +2905,13 @@ export function buildLocatorDiagnostics(
     if (!el.ref) continue;
     if (targetRole && el.role !== targetRole) continue;
     if (!targetRole) {
-      // For label/text locators, fall back to interactive controls.
-      if (!INTERACTIVE_ROLES.has(el.role)) continue;
+      // label/text: interactive controls, plus named StaticText / clickable
+      // generics so a task-row title is visible in the candidate list.
+      if (locator.by === "text") {
+        if (!el.name && !INTERACTIVE_ROLES.has(el.role)) continue;
+      } else if (!INTERACTIVE_ROLES.has(el.role)) {
+        continue;
+      }
     }
     candidates.push({ el, dialog: enclosingDialog(i, snapshot) });
   }

@@ -424,6 +424,84 @@ describe("strict semantic interaction resolution", () => {
     );
   });
 
+  it("resolves by:text against the full snapshot and clicks the ancestor with a ref", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: [
+          "- complementary",
+          '  - StaticText "Open Tasks"',
+          "  - generic [ref=e2]",
+          '    - StaticText "Cairn task abc"',
+          '  - button "Create New Task" [ref=e3]',
+        ].join("\n"),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "text-click" });
+
+    const result = await adapter.runStep({
+      click: { by: "text", text: "Cairn task abc", exact: true },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement?.ref).toBe("e2");
+    expect(execaMock).toHaveBeenNthCalledWith(
+      1,
+      "agent-browser",
+      ["--session", "text-click", "snapshot"],
+      expect.objectContaining({ reject: false }),
+    );
+    expect(execaMock).toHaveBeenNthCalledWith(
+      5,
+      "agent-browser",
+      ["--session", "text-click", "click", "@e2"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("resolves near against the full snapshot so dialog StaticText can disambiguate", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: [
+          '- dialog "Dialog"',
+          '  - StaticText "Are you sure you want to delete this task?"',
+          '  - button "Cancel" [ref=e8]',
+          '  - button "Delete" [ref=e9]',
+          "- complementary",
+          '  - button "Delete" [ref=e18]',
+        ].join("\n"),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "near-click" });
+
+    const result = await adapter.runStep({
+      click: {
+        by: "role",
+        role: "button",
+        name: "Delete",
+        near: "Are you sure you want to delete this task?",
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement?.ref).toBe("e9");
+    expect(execaMock).toHaveBeenNthCalledWith(
+      1,
+      "agent-browser",
+      ["--session", "near-click", "snapshot"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
   it("fails the click loudly instead of silently no-op'ing when the target stays off-viewport after scrollIntoView", async () => {
     // The off-viewport confirmation polls (smooth-scroll tolerance), so the
     // mock must answer by command rather than by call order — the box/metrics
@@ -2599,6 +2677,40 @@ describe("matchingSnapshotIndices", () => {
       snap,
     );
     expect(idx).toEqual([]);
+  });
+
+  it("promotes a by:text StaticText match to the nearest ancestor with a ref", () => {
+    const snap = parseSnapshot(
+      [
+        "- complementary",
+        '  - StaticText "Open Tasks"',
+        "  - generic [ref=e2]",
+        '    - StaticText "Cairn task abc"',
+        '    - StaticText "description"',
+        '  - button "Create New Task" [ref=e3]',
+      ].join("\n"),
+    );
+    const idx = matchingSnapshotIndices(
+      { by: "text", text: "Cairn task abc", exact: true },
+      snap,
+    );
+    expect(idx).toEqual([2]);
+    expect(snap[2]?.ref).toBe("e2");
+  });
+
+  it("does not promote a role match that has no ref", () => {
+    const snap = parseSnapshot(
+      [
+        "- complementary [ref=e1]",
+        '  - button "Save"',
+        '  - button "Save" [ref=e2]',
+      ].join("\n"),
+    );
+    const idx = matchingSnapshotIndices(
+      { by: "role", role: "button", name: "Save" },
+      snap,
+    );
+    expect(idx).toEqual([2]);
   });
 
   it("scopes role matches to the card nearest the given text", () => {

@@ -30,7 +30,10 @@ import {
   describeNetworkPostcondition,
   matchesStatus,
 } from "../../core/networkPostcondition";
-import { bodyTextContainsExpression } from "../../core/textMatching";
+import {
+  bodyTextContainsExpression,
+  wholeNameRegex,
+} from "../../core/textMatching";
 import type {
   BackendRequest,
   BackendResponse,
@@ -1938,13 +1941,6 @@ function normalizeSameSite(value: string): CookieToAdd["sameSite"] | undefined {
  * agent-browser backend's strict whole-name resolution — an anchored
  * case-insensitive regex keeps the two backends agreeing on what matches.
  */
-function wholeNameRegex(name: string): RegExp {
-  return new RegExp(`^${escapeRegExp(name.replace(/\s+/g, " ").trim())}$`, "i");
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 function mapConsoleType(t: string): ConsoleEntry["type"] {
   if (t === "error" || t === "warning" || t === "info" || t === "debug")

@@ -176,7 +176,7 @@ describe("waitConditionToArgv", () => {
     ]);
   });
 
-  it("selector wait with state and timeout", () => {
+  it("implements hidden as a live DOM predicate", () => {
     expect(
       waitConditionToArgv({
         selector: ".loading-overlay",
@@ -185,11 +185,26 @@ describe("waitConditionToArgv", () => {
       }),
     ).toEqual([
       "wait",
-      ".loading-overlay",
-      "--state",
-      "hidden",
+      "--fn",
+      '!document.querySelector(".loading-overlay") || document.querySelector(".loading-overlay").getClientRects().length === 0',
       "--timeout",
       "15000",
+    ]);
+  });
+
+  it("implements detached as a live DOM predicate", () => {
+    expect(
+      waitConditionToArgv({
+        selector: '[id^="listbox-actor"]',
+        state: "detached",
+        timeoutMs: 10000,
+      }),
+    ).toEqual([
+      "wait",
+      "--fn",
+      'document.querySelector("[id^=\\"listbox-actor\\"]") === null',
+      "--timeout",
+      "10000",
     ]);
   });
 

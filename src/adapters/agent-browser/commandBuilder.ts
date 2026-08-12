@@ -190,30 +190,21 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
     );
     argv.push("--fn", `!(${expression})`);
   } else if ("selector" in w) {
+    // agent-browser 0.34's global `--state` is an auth-state file path
+    // (`Failed to read state from hidden`). `wait <selector>` already means
+    // visible. Every non-default visibility contract is a live `--fn` poll.
+    const sel = JSON.stringify(w.selector);
     if (w.state === "attached") {
-      // agent-browser 0.33.x accepts `--state hidden|detached`, but its help
-      // does not advertise `attached` and forwards that token as a storage
-      // state path (`Failed to read state from attached`). A plain selector
-      // wait is visibility-based, which is stronger than Playwright's
-      // attached contract and therefore wrong for hidden file inputs. Poll
-      // the live DOM explicitly so attached means present regardless of CSS.
+      argv.push("--fn", `document.querySelector(${sel}) !== null`);
+    } else if (w.state === "detached") {
+      argv.push("--fn", `document.querySelector(${sel}) === null`);
+    } else if (w.state === "hidden") {
       argv.push(
         "--fn",
-        `document.querySelector(${JSON.stringify(w.selector)}) !== null`,
+        `!document.querySelector(${sel}) || document.querySelector(${sel}).getClientRects().length === 0`,
       );
     } else {
       argv.push(w.selector);
-    }
-    // In agent-browser 0.33.1, `wait <selector>` already means "wait until
-    // visible". Passing `--state visible` is not accepted by this command and
-    // fails with "Failed to read state from visible". Non-default states such
-    // as hidden/detached/attached still need the explicit flag.
-    if (
-      w.state !== undefined &&
-      w.state !== "visible" &&
-      w.state !== "attached"
-    ) {
-      argv.push("--state", w.state);
     }
   } else {
     argv.push("--load", w.load);

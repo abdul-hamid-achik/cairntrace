@@ -43,6 +43,38 @@ export function textEquals(
  * directly to `waitForFunction`; agent-browser wraps it in `() => ...` for its
  * `wait --fn` command.
  */
+/**
+ * Accessible-name matching for semantic locators. Whole-name,
+ * whitespace-normalized, case-insensitive unless `exact`. A trailing
+ * count badge (`Tasks 11`) matches `Tasks`; `Pay` still does not match
+ * `Pay for plan`.
+ */
+export function accessibleNameMatches(
+  elName: string | undefined,
+  wanted: string,
+  exact?: boolean,
+): boolean {
+  const a = normalizeTextForMatching(elName ?? "", true);
+  const b = normalizeTextForMatching(wanted, true);
+  if (exact) return a === b;
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+  const al = a.toLowerCase();
+  const bl = b.toLowerCase();
+  if (!bl || !al.startsWith(`${bl} `)) return false;
+  return /^\d+$/.test(al.slice(bl.length + 1));
+}
+
+/** Playwright `name`/`text` regex with the same contract as accessibleNameMatches. */
+export function wholeNameRegex(name: string, exact?: boolean): RegExp {
+  const body = escapeRegExp(normalizeTextForMatching(name, true));
+  if (exact) return new RegExp(`^${body}$`);
+  return new RegExp(`^${body}(?: \\d+)?$`, "i");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function bodyTextContainsExpression(
   needle: string,
   caseSensitive = false,

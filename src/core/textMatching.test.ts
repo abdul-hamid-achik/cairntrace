@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  accessibleNameMatches,
   bodyTextContainsExpression,
   normalizeTextForMatching,
   textContains,
   textEquals,
+  wholeNameRegex,
 } from "./textMatching";
 
 describe("text matching", () => {
@@ -22,6 +24,15 @@ describe("text matching", () => {
       false,
     );
     expect(textEquals("Saved\n now", "Saved now", true)).toBe(true);
+  });
+
+  it("matches count-badge accessible names without becoming substring match", () => {
+    expect(accessibleNameMatches("Tasks 11", "Tasks")).toBe(true);
+    expect(accessibleNameMatches("Tasks 11", "Tasks", true)).toBe(false);
+    expect(accessibleNameMatches("Pay for plan", "Pay")).toBe(false);
+    expect(accessibleNameMatches("Pay", "Pay")).toBe(true);
+    expect(wholeNameRegex("Tasks").test("Tasks 11")).toBe(true);
+    expect(wholeNameRegex("Pay").test("Pay for plan")).toBe(false);
   });
 
   it("builds the same normalized browser expression used by both backends", () => {

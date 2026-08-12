@@ -52,7 +52,7 @@ Condition shapes, exactly one per step:
 | `text: <str>` | the page contains the text |
 | `notText: <str>` | the page does not contain the text |
 | `load: networkidle\|load\|domcontentloaded` | a load state was reached |
-| `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached` |
+| `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached`. On agent-browser, `hidden`/`detached`/`attached` are live DOM predicates (`--fn`) because that CLI's `--state` flag is an auth file, not visibility. |
 | `value: <locator + equals>` | a form control's live value exactly equals the string |
 | `url: { includes \| equals \| pattern }` | the current page URL matches; `pattern` is a JS regex |
 
@@ -63,7 +63,7 @@ default. Set `caseSensitive: true` when rendered casing is significant.
 
 ### `click`
 
-Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, and fail loudly on zero or ambiguous matches. `nth:` picks among several.
+Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive; a trailing count badge is allowed so `Tasks` matches `Tasks 11`, but `Pay` still does not match `Pay for plan`), scroll into view first, and fail loudly on zero or ambiguous matches. `nth:` picks among several.
 
 ```yaml
 - click: { by: role, role: button, name: Save }
@@ -73,9 +73,10 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 - click: { by: selector, selector: "button.primary" }
 - click: { by: role, role: link, name: Reports }
   settleMs: 15000
+- click: { by: text, text: "Cairn task abc", exact: true }
 ```
 
-`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page. Matching is whitespace-normalized and case-insensitive. `by: testid` reads `browser.testIdAttribute` (default `data-testid`).
+`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `by: testid` reads `browser.testIdAttribute` (default `data-testid`). `by: text` is the visible copy. On agent-browser, `by: text` and any locator with `near` read the full snapshot (not the interactive `-i` slice, which drops `StaticText`); a text match with no `@ref` clicks the nearest ancestor that has one.
 
 Agent-browser confirms same-tab link delivery from URL, document, or DOM
 evidence by default; it does not add an implicit network-idle wait. A positive
