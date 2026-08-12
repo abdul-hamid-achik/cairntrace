@@ -4,6 +4,10 @@
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abdul-hamid-achik/cairntrace.git"
+  },
   "publishConfig": {
     "access": "public"
   },

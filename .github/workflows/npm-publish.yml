@@ -54,15 +54,17 @@ jobs:
         run: bun run verify
 
       - name: Set up Node (npm)
+        # Node 24 ships npm 11.5+, which is required for Trusted Publisher
+        # OIDC. Node 22's npm 10 cannot complete the handshake and the
+        # registry answers 404 (anonymous PUT). Do not set registry-url:
+        # that writes NODE_AUTH_TOKEN into .npmrc and an empty token also
+        # makes the publish look anonymous.
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 24
 
       - name: Publish to npm (trusted publisher + provenance)
-        # setup-node with registry-url injects NODE_AUTH_TOKEN. An empty
-        # secret wins over OIDC and npm returns 404 for the PUT. Trusted
-        # Publisher only works when that token is unset.
-        env:
-          NODE_AUTH_TOKEN: ""
-        run: npm publish --provenance --access public
+        run: |
+          unset NODE_AUTH_TOKEN
+          npm --version
+          npm publish --provenance --access public

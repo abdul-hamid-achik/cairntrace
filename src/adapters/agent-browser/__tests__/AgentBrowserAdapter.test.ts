@@ -1165,7 +1165,9 @@ describe("child timeout enforcement", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.stderr).toContain("timed out after 6000ms");
+    // Slice budget is remaining-time, so the kill message is ~1s+5s grace
+    // (5999ms if the first Date.now() ticks 1ms into the wait).
+    expect(r.stderr).toMatch(/timed out after \d+ms/);
     expect(r.stderr).toContain("daemon may be unresponsive");
     // A kill is not a daemon-busy hiccup — no backoff retries.
     expect(execaMock).toHaveBeenCalledTimes(1);

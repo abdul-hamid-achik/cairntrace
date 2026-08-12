@@ -41,6 +41,9 @@ postconditions, service process profiles, npm Trusted Publisher).
 - Node verifiers and transforms no longer pass
   `--experimental-transform-types` on Node 26+, where the flag was removed
   (type stripping is the default). Node 22.6–25 still get the flag.
+- npm Trusted Publisher publish uses Node 24 (npm 11+) and no longer injects
+  an empty `NODE_AUTH_TOKEN`. `package.json` now has a `repository` URL so
+  OIDC can match the GitHub repo.
 
 ### Security
 
