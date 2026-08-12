@@ -126,6 +126,40 @@ describe("runResilientBrowserStep", () => {
     expect(backend.stepLog).toHaveLength(0);
   });
 
+  it("waits until the page URL includes a path", async () => {
+    const backend = new MockBrowserBackend();
+    backend.setUrl("http://localhost:8080/connection/abc");
+    const result = await runResilientBrowserStep(
+      {
+        wait: { url: { includes: "/connection/" }, timeoutMs: 500 },
+      },
+      backend,
+      1,
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      stdout: "http://localhost:8080/connection/abc",
+    });
+    expect(backend.stepLog).toHaveLength(0);
+  });
+
+  it("fails wait.url with the last observed URL", async () => {
+    const backend = new MockBrowserBackend();
+    backend.setUrl("http://localhost:8080/dash");
+
+    const result = await runResilientBrowserStep(
+      {
+        wait: { url: { includes: "/connection/" }, timeoutMs: 200 },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('includes "/connection/"');
+    expect(result.stderr).toContain("http://localhost:8080/dash");
+  });
+
   it("fails wait.value with the last observed value", async () => {
     const backend = new MockBrowserBackend();
     backend.enqueueValue("Canada");

@@ -138,7 +138,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Config Variables",
-        body: "`${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Vars merge in this order: config environment vars < top-level spec `vars:` < repeatable CLI `--var key=value`. Missing vars fail with a clear `missing vars.X` error. Built-ins `${worker.index}` and `${run.token}` are also available; use them in vars such as `testUser: player-${worker.index}-${run.token}` to isolate realtime/stateful backends. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
+        body: "`${vars.X}` placeholders are resolved before spec validation, so they can safely appear in required fields like `open`. Vars merge in this order: imported action `vars:` defaults < config environment vars < top-level spec `vars:` < repeatable CLI `--var key=value`. Missing vars fail with a clear `missing vars.X` error. Built-ins `${worker.index}` and `${run.token}` are also available; use them in vars such as `testUser: player-${worker.index}-${run.token}` to isolate realtime/stateful backends. Contract hashes are computed from the raw unresolved intent and outcomes, not environment-specific values. Config TEXT itself substitutes `${env.X}` (e.g. `baseUrl: http://localhost:${env.APP_PORT}`), so dynamic-port runners need no per-run YAML.",
       },
       {
         title: "Viewport And Retention",
@@ -231,7 +231,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
     sections: [
       {
         title: "Supported Steps",
-        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator (`click.until` retries up to four times until selectorGone|selector|text|notText holds), `hover` reveals hover-only controls, `focus` focuses a control without clicking, `fill` sets a field value, and `type` types character-by-character as real keyboard events (`delayMs` optionally paces keystrokes). Fill/type re-read the live value after a 500ms settle and retry three times if hydration wipes it; set sibling `verifyFill: false` only for controls whose transformed/masked DOM value intentionally differs. `select` chooses a native <select> option by `value` or `label` (exactly one), `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated API call and captures the response, `wait` waits for text/notText/selector/exact control value/load state, `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation. Any browser mutation may also carry `postcondition.network`, which arms a matching response listener/baseline before the action and never retries that mutation. Text/notText waits and click.until text conditions normalize whitespace and are case-insensitive.",
+        body: "`open` navigates (object form `{ path, waitUntil, timeoutMs }` waits out SPA hydration), `click` activates a locator (`click.until` retries up to four times until selectorGone|selector|text|notText holds), `hover` reveals hover-only controls, `focus` focuses a control without clicking, `fill` sets a field value, and `type` types character-by-character as real keyboard events (`delayMs` optionally paces keystrokes). Fill/type re-read the live value after a 500ms settle and retry three times if hydration wipes it; set sibling `verifyFill: false` only for controls whose transformed/masked DOM value intentionally differs. `select` chooses a native <select> option by `value` or `label` (exactly one), `upload` sets a file input, `download` clicks and captures a file artifact, `transform` runs a Node script to create a new artifact, `request` makes an authenticated API call and captures the response, `wait` waits for text/notText/selector/exact control value/load state/URL (`includes`|`equals`|`pattern`), `press` sends a keyboard key, `scroll` scrolls by direction or to a locator, `snapshot` captures the page, `use` invokes an imported reusable action, and `batch` runs a chain of selector interactions in one backend invocation. Any browser mutation may also carry `postcondition.network`, which arms a matching response listener/baseline before the action and never retries that mutation. Text/notText waits and click.until text conditions normalize whitespace and are case-insensitive.",
       },
       {
         title: "Network Postconditions",
@@ -243,7 +243,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Locators",
-        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), or a more specific name. Targets are scrolled into view automatically before the action.",
+        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, `by: testid`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), `near: <nearby visible text>` (the Open in the Turnvu DBA card), or a more specific name. `by: testid` reads `browser.testIdAttribute` (default `data-testid`). Targets are scrolled into view automatically before the action.",
       },
       {
         title: "Click Settling",
@@ -259,7 +259,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Reusable Actions",
-        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, `download.saveAs`, and `transform.saveAs`.",
+        body: "Reusable actions imported via `imports:` use the same step schemas as normal specs, including `hover`, `fill.value`, `upload.path`, `download.saveAs`, and `transform.saveAs`. An action may declare `vars:` defaults for `${vars.X}` in its steps; spec, config, and CLI vars override those defaults.",
       },
       {
         title: "Process Monitoring",
@@ -1146,7 +1146,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         title: "Step Recording",
         body: [
           "Each interaction is recorded as a spec-compatible step object using the same schema as real spec steps:",
-          "- click/fill/hover/type → { click/fill/hover/type: { by: role|label|text|selector, ... } }",
+          "- click/fill/hover/type → { click/fill/hover/type: { by: role|label|text|testid|selector, ... } }",
           "- select → { select: { by: ..., value } } or { select: { by: ..., label } } (native <select>; exactly one of value | label)",
           "- upload → { upload: { by: ..., path } } (sets a file on a file input)",
           "- scroll → { scroll: { direction: 'down', px: 500 } } or { scroll: { to: locator } }",

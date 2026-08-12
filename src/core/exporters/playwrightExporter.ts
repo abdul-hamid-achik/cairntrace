@@ -1015,6 +1015,28 @@ function renderStepBody(
         ),
       );
     }
+    if ("url" in w) {
+      const matcher = w.url;
+      if (matcher.equals !== undefined) {
+        return one(
+          raw(
+            `await page.waitForURL((url) => url.href === ${str(matcher.equals)}, { timeout: ${timeout} });`,
+          ),
+        );
+      }
+      if (matcher.includes !== undefined) {
+        return one(
+          raw(
+            `await page.waitForURL((url) => url.href.includes(${str(matcher.includes)}), { timeout: ${timeout} });`,
+          ),
+        );
+      }
+      return one(
+        raw(
+          `await page.waitForURL(new RegExp(${str(matcher.pattern ?? "")}), { timeout: ${timeout} });`,
+        ),
+      );
+    }
     return one(
       raw(
         `await page.waitForLoadState(${JSON.stringify(w.load)}, { timeout: ${timeout} });`,
@@ -1371,25 +1393,37 @@ function locator(loc: Locator, ctx: EmitCtx): string {
   // nth is given, emit .first() so the exported test keeps source semantics.
   const nth =
     "nth" in loc && loc.nth !== undefined ? `.nth(${loc.nth})` : ".first()";
+  const inner = locatorFromRoot("page", loc, ctx);
+  const near = "near" in loc ? loc.near : undefined;
+  if (!near) return loc.by === "selector" ? inner : `${inner}${nth}`;
+  const scoped = `page.getByText(${str(near)}).locator("xpath=ancestor-or-self::*").filter({ has: ${inner} }).last()`;
+  const scopedLocator = locatorFromRoot(scoped, loc, ctx);
+  return loc.by === "selector" ? scopedLocator : `${scopedLocator}${nth}`;
+}
+
+function locatorFromRoot(root: string, loc: Locator, ctx: EmitCtx): string {
+  const str = (s: string) => emitStr(s, ctx.usage);
   switch (loc.by) {
     case "role": {
       const opts: string[] = [];
       if (loc.name) opts.push(`name: ${str(loc.name)}`);
       if (loc.exact) opts.push("exact: true");
-      return `page.getByRole(${JSON.stringify(loc.role)}${
+      return `${root}.getByRole(${JSON.stringify(loc.role)}${
         opts.length > 0 ? `, { ${opts.join(", ")} }` : ""
-      })${nth}`;
+      })`;
     }
     case "label":
-      return `page.getByLabel(${str(loc.name)}${
+      return `${root}.getByLabel(${str(loc.name)}${
         loc.exact ? ", { exact: true }" : ""
-      })${nth}`;
+      })`;
     case "text":
-      return `page.getByText(${str(loc.text)}${
+      return `${root}.getByText(${str(loc.text)}${
         loc.exact ? ", { exact: true }" : ""
-      })${nth}`;
+      })`;
     case "selector":
-      return `page.locator(${str(loc.selector)})`;
+      return `${root}.locator(${str(loc.selector)})`;
+    case "testid":
+      return `${root}.getByTestId(${str(loc.testid)})`;
   }
 }
 

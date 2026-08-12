@@ -19,6 +19,7 @@ import {
   type WaitCondition,
   type WaitStep,
 } from "../../core/schema/spec.v1";
+import { testIdSelector } from "../../core/locators";
 import { bodyTextContainsExpression } from "../../core/textMatching";
 
 /**
@@ -68,6 +69,11 @@ export function locatorToArgv(
     }
     case "selector": {
       const argv = [action, loc.selector];
+      if (value !== undefined) argv.push(value);
+      return argv;
+    }
+    case "testid": {
+      const argv = [action, testIdSelector(loc.testid)];
       if (value !== undefined) argv.push(value);
       return argv;
     }
@@ -164,6 +170,9 @@ export function waitStepToArgv(step: WaitStep): string[] {
 export function waitConditionToArgv(w: WaitCondition): string[] {
   if ("value" in w) {
     throw new Error("wait.value is handled by the cross-backend runner");
+  }
+  if ("url" in w) {
+    throw new Error("wait.url is handled by the cross-backend runner");
   }
   const argv = ["wait"];
   if ("text" in w) {

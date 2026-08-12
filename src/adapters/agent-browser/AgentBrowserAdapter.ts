@@ -17,6 +17,8 @@ import type {
   WaitStep,
 } from "../../core/schema/spec.v1";
 import { clickLocator } from "../../core/schema/spec.v1";
+import { resolveTestIdAttribute, testIdSelector } from "../../core/locators";
+import { pickNearestSnapshotMatches } from "../../core/locatorNear";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -344,7 +346,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
   }
 
   /** `scroll: { to: <locator> }` — semantic locators resolve strictly first. */
+  private materializeLocator(locator: Locator): Locator {
+    if (locator.by !== "testid") return locator;
+    return {
+      by: "selector",
+      selector: testIdSelector(
+        locator.testid,
+        resolveTestIdAttribute(this.opts.testIdAttribute),
+      ),
+      ...(locator.near ? { near: locator.near } : {}),
+    };
+  }
+
   private async runScrollToStep(locator: Locator): Promise<InvocationResult> {
+    locator = this.materializeLocator(locator);
     if (locator.by === "selector") {
       return this.invoke(["scrollintoview", locator.selector]);
     }
@@ -910,7 +925,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
   }
 
   private async runDownloadStep(step: DownloadStep): Promise<InvocationResult> {
-    const { saveAs, assign: _assign, timeoutMs, ...locator } = step.download;
+    const { saveAs, assign: _assign, timeoutMs, ...rawLocator } = step.download;
+    const locator = this.materializeLocator(rawLocator as Locator);
     if (locator.by === "selector") {
       return this.invoke(["download", locator.selector, saveAs], {
         timeoutMs,
@@ -961,6 +977,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     settleMsOverride?: number,
   ): Promise<InvocationResult> {
     const start = Date.now();
+    locator = this.materializeLocator(locator);
     if (locator.by === "selector") {
       // Selector locators skip snapshot resolution (agent-browser errors on
       // missing selectors already) but still get the scroll-into-view guard.
@@ -2730,7 +2747,9 @@ export function matchingSnapshotIndices(
     if (!matchesLocator(locator, el)) continue;
     out.push(i);
   }
-  return out;
+  const near = "near" in locator ? locator.near : undefined;
+  if (!near) return out;
+  return pickNearestSnapshotMatches(out, snapshot, near);
 }
 
 function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
@@ -2746,6 +2765,7 @@ function matchesLocator(locator: Locator, el: SnapshotElement): boolean {
     case "text":
       return nameMatches(el.name, locator.text, locator.exact);
     case "selector":
+    case "testid":
       return false;
   }
 }
@@ -2923,5 +2943,7 @@ function describeLocator(locator: Locator): string {
       return `text=${JSON.stringify(locator.text)}`;
     case "selector":
       return `selector=${JSON.stringify(locator.selector)}`;
+    case "testid":
+      return `testid=${JSON.stringify(locator.testid)}`;
   }
 }

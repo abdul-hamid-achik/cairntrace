@@ -13,12 +13,11 @@ describe("runNodeScript", () => {
       await writeFile(
         file,
         `
-class Fixture {
-  constructor(public readonly value: string) {}
-}
+type Fixture = { value: string };
 
 export default async function verify() {
-  return { value: new Fixture("ready").value };
+  const fixture: Fixture = { value: "ready" };
+  return { value: fixture.value };
 }
 `,
       );

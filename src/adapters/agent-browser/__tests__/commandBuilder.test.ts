@@ -91,6 +91,9 @@ describe("locatorToArgv", () => {
 
   it("selector + value → <action> <selector> <value>", () => {
     expect(
+      locatorToArgv({ by: "testid", testid: "email" }, "fill", "x@y.z"),
+    ).toEqual(["fill", '[data-testid="email"]', "x@y.z"]);
+    expect(
       locatorToArgv(
         { by: "selector", selector: "[data-testid=email]" },
         "fill",
@@ -106,6 +109,12 @@ describe("waitConditionToArgv", () => {
       waitConditionToArgv({
         value: { by: "selector", selector: "#country", equals: "US" },
       }),
+    ).toThrow(/cross-backend runner/);
+  });
+
+  it("refuses runner-owned url waits", () => {
+    expect(() =>
+      waitConditionToArgv({ url: { includes: "/connection/" } }),
     ).toThrow(/cross-backend runner/);
   });
 

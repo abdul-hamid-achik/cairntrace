@@ -1325,6 +1325,9 @@ export function backendOpts(
     ...(browser?.postClickSettleMs !== undefined
       ? { postClickSettleMs: browser.postClickSettleMs }
       : {}),
+    ...(browser?.testIdAttribute !== undefined
+      ? { testIdAttribute: browser.testIdAttribute }
+      : {}),
   };
 }
 

@@ -24,11 +24,22 @@ export type { ClipPoint };
  * Default name matching is case-insensitive whole-name against the
  * accessibility tree; multiple visible matches are a hard error.
  */
+const locatorNear = {
+  /**
+   * Scope the locator to the control nearest this visible text (a card title,
+   * company name, row label). Matching is whitespace-normalized and
+   * case-insensitive. Use when the accessible name is repeated (three Opens)
+   * and a nearby heading distinguishes the one the user would click.
+   */
+  near: z.string().min(1).optional(),
+};
+
 const semanticLocatorExtras = {
   /** Case-sensitive whole-name match (default: case-insensitive whole-name). */
   exact: z.boolean().optional(),
   /** Pick the Nth match (0-based, document order) when several elements match. */
   nth: z.number().int().min(0).optional(),
+  ...locatorNear,
 };
 
 export const RoleLocatorSchema = z
@@ -57,6 +68,20 @@ export const SelectorLocatorSchema = z
   .object({
     by: z.literal("selector"),
     selector: z.string().min(1),
+    ...locatorNear,
+  })
+  .strict();
+
+/**
+ * Attribute-based test id. Default attribute is `data-testid`; override per
+ * project with `browser.testIdAttribute` (e.g. Graphite's `data-answer-key`).
+ */
+export const TestIdLocatorSchema = z
+  .object({
+    by: z.literal("testid"),
+    testid: z.string().min(1),
+    nth: z.number().int().min(0).optional(),
+    ...locatorNear,
   })
   .strict();
 
@@ -65,6 +90,7 @@ export const LocatorSchema = z.union([
   LabelLocatorSchema,
   TextLocatorSchema,
   SelectorLocatorSchema,
+  TestIdLocatorSchema,
 ]);
 export type Locator = z.infer<typeof LocatorSchema>;
 
@@ -73,6 +99,7 @@ const fillTargetSchema = z.union([
   LabelLocatorSchema.extend({ value: z.string() }).strict(),
   TextLocatorSchema.extend({ value: z.string() }).strict(),
   SelectorLocatorSchema.extend({ value: z.string() }).strict(),
+  TestIdLocatorSchema.extend({ value: z.string() }).strict(),
 ]);
 
 const uploadTargetSchema = z.union([
@@ -80,45 +107,25 @@ const uploadTargetSchema = z.union([
   LabelLocatorSchema.extend({ path: z.string().min(1) }).strict(),
   TextLocatorSchema.extend({ path: z.string().min(1) }).strict(),
   SelectorLocatorSchema.extend({ path: z.string().min(1) }).strict(),
+  TestIdLocatorSchema.extend({ path: z.string().min(1) }).strict(),
 ]);
 
+const downloadAssignExtras = {
+  saveAs: z.string().min(1),
+  assign: z
+    .string()
+    .min(1)
+    .regex(/^[a-z][A-Za-z0-9_]*$/)
+    .optional(),
+  timeoutMs: z.number().int().positive().optional(),
+};
+
 const downloadTargetSchema = z.union([
-  RoleLocatorSchema.extend({
-    saveAs: z.string().min(1),
-    assign: z
-      .string()
-      .min(1)
-      .regex(/^[a-z][A-Za-z0-9_]*$/)
-      .optional(),
-    timeoutMs: z.number().int().positive().optional(),
-  }).strict(),
-  LabelLocatorSchema.extend({
-    saveAs: z.string().min(1),
-    assign: z
-      .string()
-      .min(1)
-      .regex(/^[a-z][A-Za-z0-9_]*$/)
-      .optional(),
-    timeoutMs: z.number().int().positive().optional(),
-  }).strict(),
-  TextLocatorSchema.extend({
-    saveAs: z.string().min(1),
-    assign: z
-      .string()
-      .min(1)
-      .regex(/^[a-z][A-Za-z0-9_]*$/)
-      .optional(),
-    timeoutMs: z.number().int().positive().optional(),
-  }).strict(),
-  SelectorLocatorSchema.extend({
-    saveAs: z.string().min(1),
-    assign: z
-      .string()
-      .min(1)
-      .regex(/^[a-z][A-Za-z0-9_]*$/)
-      .optional(),
-    timeoutMs: z.number().int().positive().optional(),
-  }).strict(),
+  RoleLocatorSchema.extend(downloadAssignExtras).strict(),
+  LabelLocatorSchema.extend(downloadAssignExtras).strict(),
+  TextLocatorSchema.extend(downloadAssignExtras).strict(),
+  SelectorLocatorSchema.extend(downloadAssignExtras).strict(),
+  TestIdLocatorSchema.extend(downloadAssignExtras).strict(),
 ]);
 
 const artifactAssignSchema = z
@@ -185,6 +192,38 @@ const requestTargetSchema = z
  * deadline, so a page caught in navigation churn fails the step instead of
  * waiting on Playwright's own timeout forever.
  */
+/**
+ * Poll the current page URL. Exactly one of `includes` | `equals` | `pattern`.
+ * `pattern` is a JavaScript regular expression source. Use this instead of
+ * an `eval` that reads `location.pathname` after a click that navigates.
+ */
+export const WaitUrlMatcherSchema = z
+  .object({
+    includes: z.string().min(1).optional(),
+    equals: z.string().min(1).optional(),
+    pattern: z
+      .string()
+      .min(1)
+      .refine((value) => {
+        try {
+          const compiled = new RegExp(value);
+          return compiled instanceof RegExp;
+        } catch {
+          return false;
+        }
+      }, "url.pattern must be a valid JavaScript regular expression")
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      [value.includes, value.equals, value.pattern].filter(
+        (part) => part !== undefined,
+      ).length === 1,
+    { message: "wait.url needs exactly one of includes | equals | pattern" },
+  );
+export type WaitUrlMatcher = z.infer<typeof WaitUrlMatcherSchema>;
+
 export const WaitConditionSchema = z.union([
   z
     .object({
@@ -222,7 +261,14 @@ export const WaitConditionSchema = z.union([
         LabelLocatorSchema.extend({ equals: z.string() }).strict(),
         TextLocatorSchema.extend({ equals: z.string() }).strict(),
         SelectorLocatorSchema.extend({ equals: z.string() }).strict(),
+        TestIdLocatorSchema.extend({ equals: z.string() }).strict(),
       ]),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      url: WaitUrlMatcherSchema,
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
@@ -346,6 +392,7 @@ const clickTargetSchema = z.union([
   LabelLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
   TextLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
   SelectorLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+  TestIdLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
 ]);
 
 export const ClickStepSchema = z
@@ -402,23 +449,17 @@ export type FillStep = z.infer<typeof FillStepSchema>;
  * `delayMs` adds a per-keystroke delay (useful for slow debounced validators).
  * Defaults to 0 (as fast as Playwright can send keys).
  */
+const typeTargetExtras = {
+  value: z.string(),
+  delayMs: z.number().int().min(0).optional(),
+};
+
 const typeTargetSchema = z.union([
-  RoleLocatorSchema.extend({
-    value: z.string(),
-    delayMs: z.number().int().min(0).optional(),
-  }).strict(),
-  LabelLocatorSchema.extend({
-    value: z.string(),
-    delayMs: z.number().int().min(0).optional(),
-  }).strict(),
-  TextLocatorSchema.extend({
-    value: z.string(),
-    delayMs: z.number().int().min(0).optional(),
-  }).strict(),
-  SelectorLocatorSchema.extend({
-    value: z.string(),
-    delayMs: z.number().int().min(0).optional(),
-  }).strict(),
+  RoleLocatorSchema.extend(typeTargetExtras).strict(),
+  LabelLocatorSchema.extend(typeTargetExtras).strict(),
+  TextLocatorSchema.extend(typeTargetExtras).strict(),
+  SelectorLocatorSchema.extend(typeTargetExtras).strict(),
+  TestIdLocatorSchema.extend(typeTargetExtras).strict(),
 ]);
 
 export const TypeStepSchema = z
@@ -464,6 +505,9 @@ const selectTargetSchema = z.union([
     .strict()
     .refine(exactlyOneSelectChoice, selectChoiceMessage),
   SelectorLocatorSchema.extend(selectOptionExtras)
+    .strict()
+    .refine(exactlyOneSelectChoice, selectChoiceMessage),
+  TestIdLocatorSchema.extend(selectOptionExtras)
     .strict()
     .refine(exactlyOneSelectChoice, selectChoiceMessage),
 ]);
@@ -954,6 +998,13 @@ export const ReusableActionSchema = z
       .string()
       .min(1)
       .regex(/^[a-z][a-z0-9_]*$/),
+    /**
+     * Default `${vars.X}` values for this action. Merged under the spec's
+     * vars: action defaults < config env vars < spec vars < CLI `--var`.
+     */
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional(),
     steps: z.array(StepSchema).min(1),
   })
   .strict();

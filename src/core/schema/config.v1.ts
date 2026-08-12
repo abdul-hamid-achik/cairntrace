@@ -704,6 +704,19 @@ export const BrowserConfigSchema = z
     provider: z.string().optional(),
     /** iOS device name (`--device`), e.g. "iPhone 15 Pro" (with `provider: ios`). */
     device: z.string().optional(),
+    /**
+     * Attribute used by `by: testid` and Playwright `getByTestId`.
+     * Default `data-testid`. Set to `data-answer-key` (or similar) when the
+     * product's stable hook is not the Playwright default.
+     */
+    testIdAttribute: z
+      .string()
+      .min(1)
+      .regex(
+        /^[A-Za-z_][\w:-]*$/,
+        "browser.testIdAttribute must be a valid HTML attribute name",
+      )
+      .optional(),
   })
   .strict();
 export type BrowserConfig = z.infer<typeof BrowserConfigSchema>;

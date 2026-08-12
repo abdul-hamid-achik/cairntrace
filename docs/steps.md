@@ -40,9 +40,12 @@ An explicit polling step. Hard-bounded at 30000 ms by default; real Chromium run
 - wait:
     value: { by: label, name: Country, equals: United States }
     timeoutMs: 40000
+- wait: { url: { includes: "/connection/" } }
+- wait: { url: { equals: "http://localhost:8080/dash" } }
+- wait: { url: { pattern: "/app/?$" } }
 ```
 
-Four condition shapes, exactly one per step:
+Condition shapes, exactly one per step:
 
 | Shape | Asserts |
 |---|---|
@@ -51,6 +54,7 @@ Four condition shapes, exactly one per step:
 | `load: networkidle\|load\|domcontentloaded` | a load state was reached |
 | `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached` |
 | `value: <locator + equals>` | a form control's live value exactly equals the string |
+| `url: { includes \| equals \| pattern }` | the current page URL matches; `pattern` is a JS regex |
 
 `text` and `notText` collapse whitespace and match case-insensitively by
 default. Set `caseSensitive: true` when rendered casing is significant.
@@ -64,10 +68,14 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 ```yaml
 - click: { by: role, role: button, name: Save }
 - click: { by: role, role: button, name: Pay, nth: 1 }
+- click: { by: role, role: button, name: Open, near: "Turnvu DBA" }
+- click: { by: testid, testid: Entity_Website }
 - click: { by: selector, selector: "button.primary" }
 - click: { by: role, role: link, name: Reports }
   settleMs: 15000
 ```
+
+`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page. Matching is whitespace-normalized and case-insensitive. `by: testid` reads `browser.testIdAttribute` (default `data-testid`).
 
 Agent-browser confirms same-tab link delivery from URL, document, or DOM
 evidence by default; it does not add an implicit network-idle wait. A positive
@@ -242,6 +250,23 @@ Invoke an imported reusable action by name. See [Snippets](/snippets) for the `i
 
 ```yaml
 - use: login_admin
+```
+
+An action file may declare `vars:` defaults for `${vars.X}` placeholders in its steps. Those defaults sit under the spec's vars: action defaults < config env vars < spec `vars:` < CLI `--var`. The action can ship a company name or answer key; the spec overrides only what it must.
+
+```yaml
+# actions/open_home_connection.yml
+version: 1
+name: open_home_connection
+vars:
+  connectionCompanyName: Turnvu DBA
+steps:
+  - open: /dash
+  - click:
+      by: role
+      role: button
+      name: Open
+      near: "${vars.connectionCompanyName}"
 ```
 
 ### `eval`

@@ -2583,6 +2583,11 @@ function diagnosticNeedles(step: Step): string[] {
     if ("notText" in step.wait) add(step.wait.notText);
     if ("selector" in step.wait) add(step.wait.selector);
     if ("value" in step.wait) add(locatorNeedle(step.wait.value));
+    if ("url" in step.wait) {
+      add(step.wait.url.includes);
+      add(step.wait.url.equals);
+      add(step.wait.url.pattern);
+    }
   }
   if ("scroll" in step && "to" in step.scroll)
     add(locatorNeedle(step.scroll.to));
@@ -2610,8 +2615,15 @@ function locatorNeedle(locator: {
   text?: string;
   role?: string;
   selector?: string;
+  testid?: string;
 }): string | undefined {
-  return locator.name ?? locator.text ?? locator.selector ?? locator.role;
+  return (
+    locator.name ??
+    locator.text ??
+    locator.selector ??
+    locator.testid ??
+    locator.role
+  );
 }
 
 /**

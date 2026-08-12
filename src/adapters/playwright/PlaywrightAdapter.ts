@@ -4,7 +4,8 @@ import { existsSync, unlinkSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright";
+import { chromium, selectors } from "playwright";
+import { resolveTestIdAttribute } from "../../core/locators";
 import { targetChildEnv } from "../../core/processEnv";
 import type {
   APIRequestContext,
@@ -62,6 +63,11 @@ export interface PlaywrightAdapterOptions {
   launchArgs?: string[];
   /** Internal/test override for the isolated subprocess fetch program. */
   isolatedFetchScript?: string;
+  /**
+   * Attribute read by `by: testid` / `getByTestId`. Default `data-testid`.
+   * Must be set before the first page is created.
+   */
+  testIdAttribute?: string;
 }
 
 type RequestMode = "api" | "cookie-bridge" | "subprocess-cookie-bridge";
@@ -774,6 +780,9 @@ export class PlaywrightAdapter implements BrowserBackend {
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
     await this.ensureBrowser();
+    selectors.setTestIdAttribute(
+      resolveTestIdAttribute(this.opts.testIdAttribute),
+    );
     this.context = await this.browser!.newContext({
       ...(this.opts.initialStatePath
         ? { storageState: this.opts.initialStatePath }
@@ -953,32 +962,43 @@ export class PlaywrightAdapter implements BrowserBackend {
     if (!this.page) throw new Error("page not yet initialized");
     const nth = (l: PlaywrightLocator): PlaywrightLocator =>
       "nth" in loc && loc.nth !== undefined ? l.nth(loc.nth) : l;
+    const near = "near" in loc ? loc.near : undefined;
+    if (near) {
+      const inner = this.locatorFrom(this.page, loc);
+      const container = this.page
+        .getByText(near)
+        .locator("xpath=ancestor-or-self::*")
+        .filter({ has: inner })
+        .last();
+      return nth(this.locatorFrom(container, loc));
+    }
+    return nth(this.locatorFrom(this.page, loc));
+  }
+
+  private locatorFrom(
+    root: Page | PlaywrightLocator,
+    loc: Locator,
+  ): PlaywrightLocator {
     switch (loc.by) {
       case "role": {
         const role = loc.role as Parameters<Page["getByRole"]>[0];
-        if (loc.name === undefined) return nth(this.page.getByRole(role));
+        if (loc.name === undefined) return root.getByRole(role);
         if (loc.exact)
-          return nth(
-            this.page.getByRole(role, { name: loc.name, exact: true }),
-          );
-        return nth(
-          this.page.getByRole(role, { name: wholeNameRegex(loc.name) }),
-        );
+          return root.getByRole(role, { name: loc.name, exact: true });
+        return root.getByRole(role, { name: wholeNameRegex(loc.name) });
       }
       case "label":
-        return nth(
-          loc.exact
-            ? this.page.getByLabel(loc.name, { exact: true })
-            : this.page.getByLabel(wholeNameRegex(loc.name)),
-        );
+        return loc.exact
+          ? root.getByLabel(loc.name, { exact: true })
+          : root.getByLabel(wholeNameRegex(loc.name));
       case "text":
-        return nth(
-          loc.exact
-            ? this.page.getByText(loc.text, { exact: true })
-            : this.page.getByText(wholeNameRegex(loc.text)),
-        );
+        return loc.exact
+          ? root.getByText(loc.text, { exact: true })
+          : root.getByText(wholeNameRegex(loc.text));
       case "selector":
-        return this.page.locator(loc.selector);
+        return root.locator(loc.selector);
+      case "testid":
+        return root.getByTestId(loc.testid);
     }
   }
 
@@ -1153,6 +1173,8 @@ export class PlaywrightAdapter implements BrowserBackend {
       });
     } else if ("value" in cond) {
       throw new Error("wait.value is handled by the cross-backend runner");
+    } else if ("url" in cond) {
+      throw new Error("wait.url is handled by the cross-backend runner");
     } else {
       if (cond.load === "networkidle") {
         await this.waitForScaledNetworkIdle(page, timeout);

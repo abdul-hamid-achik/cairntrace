@@ -1334,9 +1334,9 @@ export function buildExplain(): ExplainResult {
         id: "wait",
         kind: "wait",
         summary:
-          "Wait for text, notText, selector, exact control value, or load state; text is whitespace-normalized and case-insensitive unless caseSensitive is true",
+          "Wait for text, notText, selector, exact control value, load state, or URL (includes/equals/pattern); text is whitespace-normalized and case-insensitive unless caseSensitive is true",
         yamlExample:
-          "steps:\n  - wait: { text: Saved, timeoutMs: 10000, caseSensitive: false }\n  - wait: { value: { by: label, name: Country, equals: United States }, timeoutMs: 40000 }",
+          "steps:\n  - wait: { text: Saved, timeoutMs: 10000, caseSensitive: false }\n  - wait: { value: { by: label, name: Country, equals: United States }, timeoutMs: 40000 }\n  - wait: { url: { includes: /connection/ } }",
       },
       {
         id: "press",

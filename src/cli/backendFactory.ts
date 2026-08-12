@@ -20,6 +20,8 @@ export interface BackendOptions {
   verifyAfterClick?: boolean;
   /** Config opt-in networkidle budget (agent-browser only). Unset by default. */
   postClickSettleMs?: number;
+  /** Attribute for `by: testid`. Default `data-testid`. */
+  testIdAttribute?: string;
 }
 
 /**
@@ -42,6 +44,9 @@ export function createBackend(opts: BackendOptions): BrowserBackend {
         // demos sit on each failing locator for half a minute.
         defaultTimeoutMs: 10_000,
         ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
+        ...(opts.testIdAttribute !== undefined
+          ? { testIdAttribute: opts.testIdAttribute }
+          : {}),
       });
     case "agent-browser":
       return new AgentBrowserAdapter({
@@ -55,6 +60,9 @@ export function createBackend(opts: BackendOptions): BrowserBackend {
           : {}),
         ...(opts.postClickSettleMs !== undefined
           ? { postClickSettleMs: opts.postClickSettleMs }
+          : {}),
+        ...(opts.testIdAttribute !== undefined
+          ? { testIdAttribute: opts.testIdAttribute }
           : {}),
       });
   }

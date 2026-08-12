@@ -2598,6 +2598,25 @@ describe("matchingSnapshotIndices", () => {
     );
     expect(idx).toEqual([]);
   });
+
+  it("scopes role matches to the card nearest the given text", () => {
+    const snap = parseSnapshot(
+      [
+        "- main",
+        "  - generic",
+        '    - heading "Turnvu DBA" [ref=e1]',
+        '    - button "Open" [ref=e2]',
+        "  - generic",
+        '    - heading "Adobe-TEST" [ref=e3]',
+        '    - button "Open" [ref=e4]',
+      ].join("\n"),
+    );
+    const idx = matchingSnapshotIndices(
+      { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+      snap,
+    );
+    expect(idx).toEqual([3]);
+  });
 });
 
 describe("preferActionableAncestor", () => {

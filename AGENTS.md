@@ -95,7 +95,12 @@ per-agent code paths.
   whole-name, case-insensitive, visible-only matching; zero matches fail the
   step with diagnostics; multiple matches are an error unless the locator
   carries `nth:`. Use `exact: true` for case-sensitive matching. Targets are
-  auto-scrolled into view.
+  auto-scrolled into view. `near: <text>` keeps the match whose snapshot
+  ancestor is nearest that copy (a card title next to three identical Opens).
+  `by: testid` is first-class (`browser.testIdAttribute`, default
+  `data-testid`). `wait.url` (`includes` / `equals` / `pattern`) polls the
+  current page URL; do not eval `location.pathname` for that. Reusable
+  actions may declare `vars:` defaults; spec/config/CLI vars override them.
 - `wait` text/notText and outcome `text`/`notText` equals/contains checks
   normalize whitespace and match case-insensitively by default, so rendered
   CSS casing does not make source-cased assertions fail. Set

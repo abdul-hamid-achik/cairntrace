@@ -1,5 +1,76 @@
 import { describe, expect, it } from "vitest";
-import { StepSchema, withoutPostcondition } from "./spec.v1";
+import {
+  LocatorSchema,
+  ReusableActionSchema,
+  StepSchema,
+  WaitConditionSchema,
+  withoutPostcondition,
+} from "./spec.v1";
+
+describe("authoring locators and waits", () => {
+  it("accepts by:testid, near, and wait.url", () => {
+    expect(
+      LocatorSchema.parse({
+        by: "testid",
+        testid: "Entity_Website",
+        near: "Website",
+      }),
+    ).toMatchObject({
+      by: "testid",
+      testid: "Entity_Website",
+      near: "Website",
+    });
+    expect(
+      StepSchema.parse({
+        click: { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+      }),
+    ).toMatchObject({
+      click: { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+    });
+    expect(
+      WaitConditionSchema.parse({ url: { includes: "/connection/" } }),
+    ).toEqual({ url: { includes: "/connection/" } });
+    expect(
+      WaitConditionSchema.parse({
+        url: { equals: "https://app.example/dash" },
+      }),
+    ).toEqual({ url: { equals: "https://app.example/dash" } });
+    expect(WaitConditionSchema.parse({ url: { pattern: "/app/?$" } })).toEqual({
+      url: { pattern: "/app/?$" },
+    });
+  });
+
+  it("rejects wait.url with two matchers or a broken pattern", () => {
+    expect(
+      WaitConditionSchema.safeParse({
+        url: { includes: "/a", equals: "https://x" },
+      }).success,
+    ).toBe(false);
+    expect(
+      WaitConditionSchema.safeParse({ url: { pattern: "(" } }).success,
+    ).toBe(false);
+  });
+
+  it("accepts action-local vars on reusable actions", () => {
+    expect(
+      ReusableActionSchema.parse({
+        version: 1,
+        name: "open_named",
+        vars: { companyName: "Turnvu DBA" },
+        steps: [
+          {
+            click: {
+              by: "role",
+              role: "button",
+              name: "Open",
+              near: "${vars.companyName}",
+            },
+          },
+        ],
+      }).vars,
+    ).toEqual({ companyName: "Turnvu DBA" });
+  });
+});
 
 describe("network postconditions", () => {
   it("accepts a typed upload response postcondition and strips only orchestration metadata", () => {

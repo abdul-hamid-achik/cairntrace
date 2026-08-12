@@ -655,6 +655,63 @@ steps:
     });
   });
 
+  it("uses action-local vars as defaults under spec vars", async () => {
+    await writeFile(
+      join(dir, "open_named.yml"),
+      `version: 1
+name: open_named
+vars:
+  companyName: Turnvu DBA
+  extra: from-action
+steps:
+  - click:
+      by: role
+      role: button
+      name: Open
+      near: "\${vars.companyName}"
+  - click:
+      by: text
+      text: "\${vars.extra}"
+`,
+    );
+    const specPath = join(dir, "uses_action_vars.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: uses_action_vars
+intent: action defaults fill missing vars
+imports:
+  - ./open_named.yml
+vars:
+  extra: from-spec
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - use: open_named
+`,
+    );
+    const r = await parseSpec(specPath);
+    expect(r.resolved.steps).toEqual([
+      {
+        click: {
+          by: "role",
+          role: "button",
+          name: "Open",
+          near: "Turnvu DBA",
+        },
+      },
+      {
+        click: {
+          by: "text",
+          text: "from-spec",
+        },
+      },
+    ]);
+  });
+
   it("tracks origins back to imported action files", async () => {
     const actionPath = join(dir, "open_dashboard_action.yml");
     await writeFile(

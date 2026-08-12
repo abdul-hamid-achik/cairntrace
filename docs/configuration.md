@@ -58,6 +58,7 @@ browser:                              # browser-backend tuning (agent-browser)
   verifyAfterClick: true              # confirm same-tab link delivery (default: true)
   postClickSettleMs: 20000            # opt in to network-idle after every click
                                       # click settleMs > spec settleMs > this value
+  testIdAttribute: data-testid        # attribute read by by: testid (e.g. data-answer-key)
 
 webServer:                            # optional single-server lifecycle for `cairn run`
   command: "node .output/server/index.mjs"
@@ -110,7 +111,9 @@ settling; click/spec values take precedence over config. Playwright honors
 explicit click/spec values and otherwise keeps its native waits. A resolved
 value of `0` skips both the extra settle and the link-delivery probe at that
 scope. `browser.verifyAfterClick: false` disables the agent-browser guard
-globally.
+globally. `browser.testIdAttribute` (default `data-testid`) is the attribute
+`by: testid` and Playwright `getByTestId` read — set it to `data-answer-key`
+when that is the product's stable hook.
 
 ## Environments
 
@@ -132,7 +135,7 @@ For every `${baseUrl}`, `${env.X}`, `${vars.X}`, or `${secrets.X}` in a spec:
 
 - `${baseUrl}` → the active environment's `baseUrl`.
 - `${env.X}` → the invocation environment. With `secrets.provider: tvault`, only `secrets.keys`, `secrets.required`, and names referenced in the root spec or its imported actions are resolved; they never mutate global `process.env`. `${env.X:-default}` resolves a default expression when the var is missing or empty; nested placeholders inside the default work.
-- `${vars.X}` → merged vars, in priority order: CLI `--var key=value` (highest) > spec `vars:` > `environments.<env>.vars`.
+- `${vars.X}` → merged vars, in priority order: CLI `--var key=value` (highest) > spec `vars:` > `environments.<env>.vars` > imported action `vars:` defaults.
 - `${secrets.X}` → the secrets bag (env or tvault-resolved).
 
 Each placeholder is resolved exactly once and emitted verbatim — a value that itself contains `${...}` stays inert, so there is no cross-secret injection. An unresolved `${vars.X}` fails at parse time with a typed error pointing at the spec line.

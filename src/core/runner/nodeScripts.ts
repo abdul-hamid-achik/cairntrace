@@ -1,4 +1,4 @@
-import { execa } from "execa";
+import { execa, execaSync } from "execa";
 import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
 
 const RESULT_MARKER = "__CAIRNTRACE_RESULT__";
@@ -26,6 +26,28 @@ export interface NodeScriptResult {
   exitCode: number;
 }
 
+/**
+ * Node 22.6–25 accept `--experimental-transform-types` (enums, parameter
+ * properties). Node 26 removed that flag; type *stripping* is the default
+ * and the old flag is a hard "bad option" that failed every verifier.
+ */
+let transformTypesArgs: string[] | undefined;
+
+function nodeTransformTypesArgs(): string[] {
+  if (transformTypesArgs) return transformTypesArgs;
+  try {
+    execaSync("node", ["--experimental-transform-types", "--version"], {
+      reject: true,
+      extendEnv: false,
+      env: process.env,
+    });
+    transformTypesArgs = ["--experimental-transform-types"];
+  } catch {
+    transformTypesArgs = [];
+  }
+  return transformTypesArgs;
+}
+
 export async function runNodeScript(
   invocation: NodeScriptInvocation,
 ): Promise<NodeScriptResult> {
@@ -34,12 +56,7 @@ export async function runNodeScript(
   const { env, selectedTvaultKeys, ...payload } = invocation;
   const r = await execa(
     "node",
-    [
-      "--experimental-transform-types",
-      "--input-type=module",
-      "-e",
-      NODE_BOOTSTRAP,
-    ],
+    [...nodeTransformTypesArgs(), "--input-type=module", "-e", NODE_BOOTSTRAP],
     {
       cwd: invocation.cwd,
       input: JSON.stringify(payload),

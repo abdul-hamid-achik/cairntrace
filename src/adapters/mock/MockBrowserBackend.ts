@@ -413,6 +413,8 @@ function locatorKey(locator: Locator): string {
       return `text:${locator.text}:${locator.nth ?? ""}`;
     case "selector":
       return `selector:${locator.selector}`;
+    case "testid":
+      return `testid:${locator.testid}:${locator.nth ?? ""}:${locator.near ?? ""}`;
   }
 }
 

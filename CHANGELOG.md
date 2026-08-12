@@ -5,6 +5,48 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-08-12
+
+Authoring primitives for user-like flows, plus the unpublished work already on
+`main` since 2.7.1 (Ink TUI, portable Playwright export, network
+postconditions, service process profiles, npm Trusted Publisher).
+
+### Added
+
+- `wait.url` — poll the current page URL with exactly one of `includes`,
+  `equals`, or `pattern` (JS regex). Cross-backend, same as `wait.value`.
+  Use this after a click that navigates instead of an `eval` on
+  `location.pathname`.
+- `by: testid` — first-class locator. `browser.testIdAttribute` (default
+  `data-testid`) is the attribute Playwright `getByTestId` and agent-browser
+  selectors read. Inventory emits `{ by: testid, testid: … }`.
+- Locator `near: <text>` — keep the control nearest that visible copy (the
+  Open button in the Turnvu DBA card, not the other Opens on the page).
+  Snapshot backends score shared ancestors; Playwright scopes to the
+  innermost ancestor of the text that still contains the target.
+- Reusable action `vars:` defaults for `${vars.X}`. Precedence: action
+  defaults < config env vars < spec `vars:` < CLI `--var`.
+- Ink TUI for run / services / batch narration.
+- Portable Playwright export and typed `postcondition.network` on browser
+  mutations.
+- Process profiles captured from declared services.
+
+### Changed
+
+- TUI/output polish: live elapsed, phase durations, seed heartbeats, stash
+  narration, failure-cleanup rows.
+
+### Fixed
+
+- Node verifiers and transforms no longer pass
+  `--experimental-transform-types` on Node 26+, where the flag was removed
+  (type stripping is the default). Node 22.6–25 still get the flag.
+
+### Security
+
+- Pin `fast-uri` 3.1.5, `hono` 4.12.34, `ip-address` 10.3.1, and `nanoid`
+  3.3.17 so `bun audit --production` is clean on the release tag.
+
 ## [2.6.2] - 2026-07-31
 
 ### Changed

@@ -62,4 +62,9 @@ export interface AgentBrowserOptions {
    * networkidle wait is added.
    */
   postClickSettleMs?: number;
+  /**
+   * Attribute used when compiling `by: testid` to a CSS selector.
+   * Default `data-testid`.
+   */
+  testIdAttribute?: string;
 }

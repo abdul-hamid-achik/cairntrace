@@ -9,6 +9,7 @@ import type {
   WaitStep,
 } from "../schema/spec.v1";
 import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
+import { describeWaitUrl, matchWaitUrl } from "../locators";
 import { textContains } from "../textMatching";
 import {
   DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS,
@@ -142,6 +143,9 @@ export async function runResilientBrowserStep(
   }
   if ("wait" in step && "value" in step.wait) {
     return runWaitValueStep(step, backend);
+  }
+  if ("wait" in step && "url" in step.wait) {
+    return runWaitUrlStep(step, backend);
   }
   return backend.runStep(step);
 }
@@ -303,6 +307,55 @@ async function runWaitValueStep(
     exitCode: 1,
     durationMs: timeoutMs,
     argv: ["wait", "value"],
+  };
+}
+
+async function runWaitUrlStep(
+  step: WaitStep,
+  backend: BrowserBackend,
+): Promise<InvocationResult> {
+  if (!("url" in step.wait)) return backend.runStep(step);
+
+  const matcher = step.wait.url;
+  const timeoutMs = step.wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  let remaining = timeoutMs;
+  let actual = "";
+  let readError: string | undefined;
+
+  for (;;) {
+    try {
+      actual = await backend.getUrl();
+      readError = undefined;
+      if (matchWaitUrl(actual, matcher)) {
+        return {
+          ok: true,
+          stdout: actual,
+          stderr: "",
+          exitCode: 0,
+          durationMs: timeoutMs - remaining,
+          argv: ["wait", "url"],
+        };
+      }
+    } catch (error) {
+      readError = (error as Error).message;
+    }
+
+    if (remaining <= 0) break;
+    const delay = Math.min(remaining, VALUE_WAIT_POLL_MS);
+    await backend.waitForTimeout(delay);
+    remaining -= delay;
+  }
+
+  const expected = describeWaitUrl(matcher);
+  return {
+    ok: false,
+    stdout: actual,
+    stderr: readError
+      ? `wait.url could not read URL ${expected} within ${timeoutMs}ms: ${readError}`
+      : `wait.url expected ${expected}, got ${JSON.stringify(actual)} after ${timeoutMs}ms`,
+    exitCode: 1,
+    durationMs: timeoutMs,
+    argv: ["wait", "url"],
   };
 }
 

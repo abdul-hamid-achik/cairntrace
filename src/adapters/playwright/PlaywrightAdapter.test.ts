@@ -28,6 +28,57 @@ describe("PlaywrightAdapter focus", () => {
   });
 });
 
+describe("PlaywrightAdapter locators", () => {
+  it("clicks by:testid and a role locator scoped with near", async () => {
+    const adapter = new PlaywrightAdapter({
+      testIdAttribute: "data-answer-key",
+    });
+    try {
+      expect(
+        await adapter.runStep({
+          open:
+            "data:text/html," +
+            encodeURIComponent(`
+              <article>
+                <h2>Turnvu DBA</h2>
+                <button>Open</button>
+                <div data-answer-key="Entity_Website">https://turnvu.example</div>
+              </article>
+              <article>
+                <h2>Adobe-TEST</h2>
+                <button>Open</button>
+              </article>
+            `),
+        }),
+      ).toMatchObject({ ok: true });
+
+      expect(
+        await adapter.runStep({
+          click: {
+            by: "role",
+            role: "button",
+            name: "Open",
+            near: "Turnvu DBA",
+          },
+        }),
+      ).toMatchObject({ ok: true });
+
+      const website = await adapter.evaluate(
+        `document.querySelector('[data-answer-key="Entity_Website"]')?.textContent`,
+      );
+      expect(website.stdout).toContain("https://turnvu.example");
+
+      expect(
+        await adapter.runStep({
+          click: { by: "testid", testid: "Entity_Website" },
+        }),
+      ).toMatchObject({ ok: true });
+    } finally {
+      await adapter.close();
+    }
+  });
+});
+
 describe("PlaywrightAdapter video", () => {
   it("finalizes the context before saving a native recording", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-video-test-"));

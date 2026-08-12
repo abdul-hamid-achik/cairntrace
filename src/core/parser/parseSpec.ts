@@ -121,7 +121,7 @@ export async function parseSpec(
   const actionsByName = new Map<string, LoadedAction>();
   for (const importPath of spec.imports ?? []) {
     const resolvedImport = resolveImportPath(importPath, dirname(absPath));
-    const importRaw = await loadAndParse(
+    const importRaw = await loadAndParseAction(
       resolvedImport,
       env,
       vars,
@@ -262,7 +262,7 @@ export class MissingTemplateVariableError extends Error {
   }
 }
 
-async function loadAndParse(
+async function loadAndParseAction(
   absPath: string,
   env: Record<string, string | undefined>,
   vars: Record<string, string | number | boolean>,
@@ -271,15 +271,36 @@ async function loadAndParse(
   secretRef?: (name: string) => string,
 ): Promise<unknown> {
   const text = await readFile(absPath, "utf8");
+  const rawDocument = parseYaml(text);
+  // Action-local defaults sit under spec/config/CLI vars so an action can
+  // ship `${vars.companyName}` without forcing every consumer to redeclare it.
+  const mergedVars = { ...extractPlainVars(rawDocument), ...vars };
   return loadAndParseSource(
     text,
     absPath,
     env,
-    vars,
+    mergedVars,
     baseUrl,
     runtime,
     secretRef,
   );
+}
+
+function extractPlainVars(
+  value: unknown,
+): Record<string, string | number | boolean> {
+  if (!isRecord(value) || !isRecord(value.vars)) return {};
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, entry] of Object.entries(value.vars)) {
+    if (
+      typeof entry === "string" ||
+      typeof entry === "number" ||
+      typeof entry === "boolean"
+    ) {
+      out[key] = entry;
+    }
+  }
+  return out;
 }
 
 function loadAndParseSource(

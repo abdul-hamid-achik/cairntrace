@@ -1,6 +1,7 @@
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import { parseSnapshot } from "../healer/snapshotParser";
 import type { Locator } from "../schema/spec.v1";
+import { DEFAULT_TEST_ID_ATTRIBUTE } from "../locators";
 
 export interface RoleInventoryEntry {
   role: string;
@@ -15,7 +16,7 @@ export interface TestIdInventoryEntry {
   count: number;
   selector: string;
   /** Ready-to-paste spec locator (symmetric with RoleInventoryEntry.locator). */
-  locator: Extract<Locator, { by: "selector" }>;
+  locator: Extract<Locator, { by: "testid" }>;
   tagNames: string[];
   textSamples: string[];
 }
@@ -34,6 +35,8 @@ export interface LocatorInventory {
 export interface LocatorInventoryOptions {
   roles?: boolean;
   testids?: boolean;
+  /** Attribute scanned for test ids. Default `data-testid`. */
+  testIdAttribute?: string;
 }
 
 export async function collectLocatorInventory(
@@ -61,7 +64,9 @@ export async function collectLocatorInventory(
   }
 
   if (opts.testids) {
-    const evaluated = await backend.evaluate(TEST_ID_INVENTORY_SCRIPT);
+    const evaluated = await backend.evaluate(
+      testIdInventoryScript(opts.testIdAttribute ?? DEFAULT_TEST_ID_ATTRIBUTE),
+    );
     if (!evaluated.ok) {
       throw new Error(
         `testid inventory failed: ${evaluated.stderr || evaluated.stdout}`,
@@ -126,7 +131,7 @@ export function parseTestIdInventory(stdout: string): TestIdInventoryEntry[] {
         testId: item.testId,
         count: 0,
         selector: item.selector,
-        locator: { by: "selector", selector: item.selector },
+        locator: { by: "testid", testid: item.testId },
         tagNames: [],
         textSamples: [],
       } satisfies TestIdInventoryEntry);
@@ -145,21 +150,27 @@ export function parseTestIdInventory(stdout: string): TestIdInventoryEntry[] {
   );
 }
 
-export const TEST_ID_INVENTORY_SCRIPT = `(() => {
+export function testIdInventoryScript(
+  attribute: string = DEFAULT_TEST_ID_ATTRIBUTE,
+): string {
+  const attrLiteral = JSON.stringify(attribute);
+  return `(() => {
+  const attr = ${attrLiteral};
   const escapeAttr = (value) => String(value).replace(/[\\\\"]/g, "\\\\$&");
-  return Array.from(document.querySelectorAll("[data-testid]"))
+  return Array.from(document.querySelectorAll("[" + attr + "]"))
     .slice(0, 200)
     .map((el) => {
-      const testId = el.getAttribute("data-testid") || "";
+      const testId = el.getAttribute(attr) || "";
       const text = (el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 120);
       return {
         testId,
         tagName: el.tagName.toLowerCase(),
         text,
-        selector: '[data-testid="' + escapeAttr(testId) + '"]'
+        selector: "[" + attr + '=\\"' + escapeAttr(testId) + '\\"]'
       };
     });
 })()`;
+}
 
 function shouldIncludeRole(role: string, name: string | undefined): boolean {
   if (name && name.trim().length > 0) return true;
