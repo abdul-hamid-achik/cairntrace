@@ -174,6 +174,9 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
   if ("url" in w) {
     throw new Error("wait.url is handled by the cross-backend runner");
   }
+  if ("ms" in w) {
+    throw new Error("wait.ms is handled by the cross-backend runner");
+  }
   const argv = ["wait"];
   if ("text" in w) {
     const expression = bodyTextContainsExpression(
@@ -194,7 +197,16 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
     // (`Failed to read state from hidden`). `wait <selector>` already means
     // visible. Every non-default visibility contract is a live `--fn` poll.
     const sel = JSON.stringify(w.selector);
-    if (w.state === "attached") {
+    if (w.hasText) {
+      // Poll for a visible node whose text contains the needle. Bare
+      // `wait.text` reads body.innerText and false-positives on card
+      // concat / invite headers before the <button> exists.
+      const needle = JSON.stringify(w.hasText);
+      argv.push(
+        "--fn",
+        `[].some.call(document.querySelectorAll(${sel}),function(el){var s=window.getComputedStyle(el);if(s.display==="none"||s.visibility==="hidden")return false;var t=String(el.textContent||"").replace(/\\s+/g," ").trim().toLowerCase();return t.indexOf(String(${needle}).replace(/\\s+/g," ").trim().toLowerCase())!==-1;})`,
+      );
+    } else if (w.state === "attached") {
       argv.push("--fn", `document.querySelector(${sel}) !== null`);
     } else if (w.state === "detached") {
       argv.push("--fn", `document.querySelector(${sel}) === null`);

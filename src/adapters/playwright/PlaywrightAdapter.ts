@@ -248,7 +248,13 @@ export class PlaywrightAdapter implements BrowserBackend {
       } else if ("wait" in step) {
         await this.applyWait(page, step.wait);
       } else if ("press" in step) {
-        await page.keyboard.press(step.press);
+        if (step.target) {
+          await this.resolveLocator(step.target).press(step.press, {
+            timeout: this.opts.defaultTimeoutMs,
+          });
+        } else {
+          await page.keyboard.press(step.press);
+        }
       } else if ("scroll" in step) {
         if ("to" in step.scroll) {
           await this.resolveLocator(step.scroll.to).scrollIntoViewIfNeeded({
@@ -965,6 +971,10 @@ export class PlaywrightAdapter implements BrowserBackend {
     if (!this.page) throw new Error("page not yet initialized");
     const nth = (l: PlaywrightLocator): PlaywrightLocator =>
       "nth" in loc && loc.nth !== undefined ? l.nth(loc.nth) : l;
+    const withText = (l: PlaywrightLocator): PlaywrightLocator => {
+      const hasText = "hasText" in loc ? loc.hasText : undefined;
+      return hasText ? l.filter({ hasText }) : l;
+    };
     const near = "near" in loc ? loc.near : undefined;
     if (near) {
       const inner = this.locatorFrom(this.page, loc);
@@ -973,9 +983,9 @@ export class PlaywrightAdapter implements BrowserBackend {
         .locator("xpath=ancestor-or-self::*")
         .filter({ has: inner })
         .last();
-      return nth(this.locatorFrom(container, loc));
+      return nth(withText(this.locatorFrom(container, loc)));
     }
-    return nth(this.locatorFrom(this.page, loc));
+    return nth(withText(this.locatorFrom(this.page, loc)));
   }
 
   private locatorFrom(
@@ -1143,7 +1153,10 @@ export class PlaywrightAdapter implements BrowserBackend {
   }
 
   private async applyWait(page: Page, cond: WaitCondition): Promise<void> {
-    const timeout = cond.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+    const timeout =
+      "timeoutMs" in cond
+        ? (cond.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
+        : DEFAULT_WAIT_TIMEOUT_MS;
     await this.hardBoundPageOperation(
       () => this.applyPlaywrightWait(page, cond, timeout),
       timeout,
@@ -1178,6 +1191,8 @@ export class PlaywrightAdapter implements BrowserBackend {
       throw new Error("wait.value is handled by the cross-backend runner");
     } else if ("url" in cond) {
       throw new Error("wait.url is handled by the cross-backend runner");
+    } else if ("ms" in cond) {
+      throw new Error("wait.ms is handled by the cross-backend runner");
     } else {
       if (cond.load === "networkidle") {
         await this.waitForScaledNetworkIdle(page, timeout);

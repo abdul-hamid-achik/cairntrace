@@ -21,6 +21,14 @@ describe("parseWhen", () => {
       kind: "notText",
       arg: "Loading",
     });
+    expect(parseWhen("selector:.invite-entity-blade")).toEqual({
+      kind: "selector",
+      arg: ".invite-entity-blade",
+    });
+    expect(parseWhen("notSelector:.invite-entity-blade button")).toEqual({
+      kind: "notSelector",
+      arg: ".invite-entity-blade button",
+    });
   });
 
   it("rejects unknown kinds", () => {
@@ -77,5 +85,17 @@ describe("evaluateWhen", () => {
     expect(await evaluateWhen("text:Bienvenido de nuevo", b)).toBe(true);
     expect(await evaluateWhen("notText:Bienvenido de nuevo", b)).toBe(false);
     expect(await evaluateWhen("notText:Cerrar sesión", b)).toBe(true);
+  });
+
+  it("selector / notSelector read evaluate stdout", async () => {
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult(true);
+    expect(await evaluateWhen("selector:.invite-entity-blade", b)).toBe(true);
+    b.enqueueEvalResult(false);
+    expect(await evaluateWhen("selector:.invite-entity-blade", b)).toBe(false);
+    b.enqueueEvalResult(false);
+    expect(await evaluateWhen("notSelector:.invite-entity-blade", b)).toBe(
+      true,
+    );
   });
 });

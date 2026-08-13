@@ -8,6 +8,50 @@ import {
 } from "./spec.v1";
 
 describe("authoring locators and waits", () => {
+  it("accepts nth on a selector locator", () => {
+    expect(
+      LocatorSchema.parse({
+        by: "selector",
+        selector: '[data-testid^="entity-switch-item-"]',
+        nth: 1,
+      }),
+    ).toMatchObject({
+      by: "selector",
+      selector: '[data-testid^="entity-switch-item-"]',
+      nth: 1,
+    });
+  });
+
+  it("accepts wait.ms", () => {
+    expect(WaitConditionSchema.parse({ ms: 20000 })).toEqual({ ms: 20000 });
+    expect(WaitConditionSchema.safeParse({ ms: 0 }).success).toBe(false);
+  });
+
+  it("accepts hasText and press.target", () => {
+    expect(
+      LocatorSchema.parse({
+        by: "selector",
+        selector: '[data-answer-key="Owner"] .radio-label',
+        hasText: "Yes",
+      }),
+    ).toMatchObject({
+      by: "selector",
+      selector: '[data-answer-key="Owner"] .radio-label',
+      hasText: "Yes",
+    });
+    expect(
+      StepSchema.parse({
+        press: "Enter",
+        target: { by: "selector", selector: "#search" },
+        until: { selector: ".company-link", timeoutMs: 180000 },
+      }),
+    ).toMatchObject({
+      press: "Enter",
+      target: { by: "selector", selector: "#search" },
+      until: { selector: ".company-link", timeoutMs: 180000 },
+    });
+  });
+
   it("accepts by:testid, near, and wait.url", () => {
     expect(
       LocatorSchema.parse({

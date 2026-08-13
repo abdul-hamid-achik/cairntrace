@@ -18,7 +18,10 @@ import type {
 } from "../../core/schema/spec.v1";
 import { clickLocator } from "../../core/schema/spec.v1";
 import { resolveTestIdAttribute, testIdSelector } from "../../core/locators";
-import { pickNearestSnapshotMatches } from "../../core/locatorNear";
+import {
+  normalizeNearText,
+  pickNearestSnapshotMatches,
+} from "../../core/locatorNear";
 import { accessibleNameMatches } from "../../core/textMatching";
 import type {
   BrowserBackend,
@@ -225,7 +228,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
       const waitStartedAt = Date.now();
       const wait = await this.invoke(
         openReadinessArgv(step.open.waitUntil, step.open.timeoutMs),
-        { timeoutMs: childDeadline(step.open.timeoutMs) },
+        {
+          timeoutMs: childDeadline(step.open.timeoutMs),
+        },
       );
       // `networkidle` has no readyState equivalent; a quiet page never re-fires
       // idle, so agent-browser's `--load networkidle` times out even on a healthy
@@ -245,6 +250,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
         : wait;
     }
     if ("wait" in step) return this.runWaitStep(step);
+    if ("press" in step) {
+      if (step.target) {
+        const focused = await this.runInteractiveStep(step.target, "focus");
+        if (!focused.ok) return focused;
+      }
+      return this.invoke(["press", step.press]);
+    }
     return this.invoke(stepToArgv(step));
   }
 
@@ -258,7 +270,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private async runWaitStep(step: WaitStep): Promise<InvocationResult> {
     const w = step.wait;
-    const budgetMs = w.timeoutMs;
+    const budgetMs = "timeoutMs" in w ? w.timeoutMs : undefined;
     if ("load" in w || budgetMs === undefined) {
       // Cairn enforces the wait deadline itself: the child gets the spec's
       // timeout plus a grace period, so agent-browser's own (richer) timeout
@@ -328,7 +340,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
       const wedgedBefore = this.sawChildTimeout;
       last = await this.invoke(
         waitConditionToArgv({ ...w, timeoutMs: sliceMs }),
-        { timeoutMs: childDeadline(sliceMs) },
+        {
+          timeoutMs: childDeadline(sliceMs),
+        },
       );
       if (last.ok) return last;
       const childKilledThisSlice = !wedgedBefore && this.sawChildTimeout;
@@ -356,13 +370,81 @@ export class AgentBrowserAdapter implements BrowserBackend {
         resolveTestIdAttribute(this.opts.testIdAttribute),
       ),
       ...(locator.near ? { near: locator.near } : {}),
+      ...(locator.hasText ? { hasText: locator.hasText } : {}),
+      ...("nth" in locator && locator.nth !== undefined
+        ? { nth: locator.nth }
+        : {}),
+    };
+  }
+
+  /**
+   * `by: selector` + `nth` is document-order `querySelectorAll` — CSS cannot
+   * express "the second [data-testid^=…]". Pin the Nth node to a unique
+   * selector (its data-testid, id, or a one-shot marker) so the existing
+   * click/scroll path stays one target.
+   */
+  private async pinSelectorNth(
+    locator: Extract<Locator, { by: "selector" }>,
+  ): Promise<{ ok: true; selector: string } | { ok: false; detail: string }> {
+    if (locator.nth === undefined && !locator.hasText) {
+      return { ok: true, selector: locator.selector };
+    }
+    const script = `(() => {
+      const needle = ${JSON.stringify(locator.hasText ?? "")};
+      const nth = ${JSON.stringify(locator.nth ?? null)};
+      const normalize = (s) => (s || "").replace(/\\s+/g, " ").trim().toLowerCase();
+      // Do not require opacity/box size: NSJ drawer buttons are often
+      // opacity:0 or 0x0 mid-slide but still the click target.
+      const hidden = (el) => {
+        const style = window.getComputedStyle(el);
+        return style.display === "none" || style.visibility === "hidden";
+      };
+      let nodes = Array.from(document.querySelectorAll(${JSON.stringify(locator.selector)}));
+      if (needle) {
+        const n = normalize(needle);
+        nodes = nodes.filter((el) => !hidden(el) && normalize(el.textContent).includes(n));
+      }
+      const el = nth === null ? (nodes.length === 1 ? nodes[0] : null) : nodes[nth];
+      if (!(el instanceof Element)) {
+        return { ok: false, count: nodes.length };
+      }
+      const testid = el.getAttribute("data-testid");
+      if (testid) {
+        return { ok: true, selector: "[data-testid=" + JSON.stringify(testid) + "]" };
+      }
+      if (el.id) {
+        return { ok: true, selector: "#" + CSS.escape(el.id) };
+      }
+      document.querySelectorAll("[data-cairn-nth-pick]").forEach((n) => {
+        n.removeAttribute("data-cairn-nth-pick");
+      });
+      el.setAttribute("data-cairn-nth-pick", "1");
+      return { ok: true, selector: "[data-cairn-nth-pick=\\"1\\"]" };
+    })()`;
+    const r = await this.invoke(["eval", script, "--json"]);
+    if (!r.ok) return { ok: false, detail: r.stderr || "nth pin eval failed" };
+    const parsed = parseEvalResult<{
+      ok?: boolean;
+      selector?: string;
+      count?: number;
+    }>(r.stdout);
+    if (parsed?.ok && typeof parsed.selector === "string") {
+      return { ok: true, selector: parsed.selector };
+    }
+    return {
+      ok: false,
+      detail: `nth=${locator.nth} but only ${parsed?.count ?? 0} match(es) for ${JSON.stringify(locator.selector)}`,
     };
   }
 
   private async runScrollToStep(locator: Locator): Promise<InvocationResult> {
     locator = this.materializeLocator(locator);
     if (locator.by === "selector") {
-      return this.invoke(["scrollintoview", locator.selector]);
+      const pinned = await this.pinSelectorNth(locator);
+      if (!pinned.ok) {
+        return this.unresolvedFailure("scroll", Date.now(), [pinned.detail]);
+      }
+      return this.invoke(["scrollintoview", pinned.selector]);
     }
     const resolved = await this.resolveInteractiveRef(
       locator,
@@ -555,9 +637,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // a PASS, so a run in which every request 500'd would certify green.
     if (!r.ok) {
       throw new Error(
-        `could not read network requests: ${
-          r.stderr.trim() || `exit ${r.exitCode}`
-        }`,
+        `could not read network requests: ${r.stderr.trim() || `exit ${r.exitCode}`}`,
       );
     }
     const entries = parseEnvelope<NetworkEntry>(r.stdout, "requests");
@@ -586,9 +666,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // `safe()` and keeps its best-effort behaviour; verdict paths must not.
     if (!r.ok) {
       throw new Error(
-        `could not read the console log: ${
-          r.stderr.trim() || `exit ${r.exitCode}`
-        }`,
+        `could not read the console log: ${r.stderr.trim() || `exit ${r.exitCode}`}`,
       );
     }
     return parseEnvelope<ConsoleEntry>(r.stdout, "messages");
@@ -624,9 +702,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
     if (!consoleR.ok) {
       throw new Error(
-        `could not read the console log: ${
-          consoleR.stderr.trim() || `exit ${consoleR.exitCode}`
-        }`,
+        `could not read the console log: ${consoleR.stderr.trim() || `exit ${consoleR.exitCode}`}`,
       );
     }
     const pageErrors: ConsoleEntry[] = parseEnvelope<ConsoleEntry>(
@@ -685,7 +761,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
   ): Promise<InvocationResult> {
     return this.invoke(
       ["wait", "--text", text, "--timeout", String(timeoutMs)],
-      { timeoutMs: childDeadline(timeoutMs) },
+      {
+        timeoutMs: childDeadline(timeoutMs),
+      },
     );
   }
 
@@ -695,7 +773,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
   ): Promise<InvocationResult> {
     return this.invoke(
       ["wait", "--url", pattern, "--timeout", String(timeoutMs)],
-      { timeoutMs: childDeadline(timeoutMs) },
+      {
+        timeoutMs: childDeadline(timeoutMs),
+      },
     );
   }
 
@@ -980,6 +1060,29 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const start = Date.now();
     locator = this.materializeLocator(locator);
     if (locator.by === "selector") {
+      const needsPin = locator.nth !== undefined || Boolean(locator.hasText);
+      let pinned:
+        | { ok: true; selector: string }
+        | { ok: false; detail: string };
+      if (needsPin) {
+        // hasText/nth can miss mid-transition (invite fade, drawer slide).
+        // Poll like semantic locators instead of failing on the first frame.
+        const deadline = start + this.locatorTimeoutMs();
+        while (true) {
+          pinned = await this.pinSelectorNth(locator);
+          if (pinned.ok) break;
+          if (Date.now() >= deadline) {
+            return this.unresolvedFailure(action, start, [pinned.detail]);
+          }
+          await sleep(POLL_INTERVAL_MS);
+        }
+      } else {
+        pinned = await this.pinSelectorNth(locator);
+        if (!pinned.ok) {
+          return this.unresolvedFailure(action, start, [pinned.detail]);
+        }
+      }
+      locator = { ...locator, selector: pinned.selector };
       // Selector locators skip snapshot resolution (agent-browser errors on
       // missing selectors already) but still get the scroll-into-view guard.
       // For a click with the probe enabled, the scroll AND the link-kind
@@ -1650,7 +1753,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
       try {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return false;
-        el.scrollIntoView({ block: "center", inline: "center" });
+        ${overflowAncestorScrollJs()}
+        __scrollOverflowAncestors(el);
         return true;
       } catch (_) {
         return false;
@@ -1673,7 +1777,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
       try {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return null;
-        try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+        ${overflowAncestorScrollJs()}
+        __scrollOverflowAncestors(el);
         ${rectSettleJs()}
         return await __rectSettle(el);
       } catch (_) {
@@ -2391,6 +2496,37 @@ export function describeBatchFailure(
  * `{ stable, inViewport, cx, cy, innerWidth, innerHeight }` report, or null
  * when the check couldn't run (inconclusive → never blocks the click).
  */
+/**
+ * Walk overflow:auto/scroll ancestors and shift their scrollLeft/Top so
+ * `el`'s center sits in each ancestor's client box, then the window.
+ * `scrollIntoView` alone leaves horizontally-off-screen nodes in a
+ * nested overflow pane (Locations instance_details at x≈2100 on a 1600
+ * viewport) — agent-browser then refuses the click as off-viewport.
+ */
+function overflowAncestorScrollJs(): string {
+  return `const __scrollOverflowAncestors = (el) => {
+      try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+      let node = el.parentElement;
+      while (node && node !== document.body && node !== document.documentElement) {
+        const style = window.getComputedStyle(node);
+        const ox = style.overflowX;
+        const oy = style.overflowY;
+        const canX = (ox === "auto" || ox === "scroll" || ox === "overlay") &&
+          node.scrollWidth > node.clientWidth + 1;
+        const canY = (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+          node.scrollHeight > node.clientHeight + 1;
+        if (canX || canY) {
+          const er = el.getBoundingClientRect();
+          const pr = node.getBoundingClientRect();
+          if (canX) node.scrollLeft += (er.left + er.width / 2) - (pr.left + pr.width / 2);
+          if (canY) node.scrollTop += (er.top + er.height / 2) - (pr.top + pr.height / 2);
+        }
+        node = node.parentElement;
+      }
+      try { el.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (_) {}
+    };`;
+}
+
 function rectSettleJs(): string {
   return `const __rectSettle = async (el) => {
       try {
@@ -2424,7 +2560,7 @@ function rectSettleJs(): string {
           const out = report(cur, same(prev, cur));
           if ((out.stable && out.inViewport) || Date.now() >= deadline) return out;
           if (out.stable) {
-            try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {}
+            try { __scrollOverflowAncestors(el); } catch (_) {}
           }
           prev = cur;
         }
@@ -2465,9 +2601,10 @@ function linkClickProbeScript(opts: {
       return matches.length === 1 ? matches[0] : null;
     };
     const raw = ${findExpr};
+    ${opts.scroll ? overflowAncestorScrollJs() : ""}
     ${
       opts.scroll
-        ? 'if (raw) { try { raw.scrollIntoView({ block: "center", inline: "center" }); } catch (_) {} }'
+        ? "if (raw) { try { __scrollOverflowAncestors(raw); } catch (_) {} }"
         : ""
     }
     ${opts.scroll ? rectSettleJs() : ""}
@@ -2769,6 +2906,15 @@ export function matchingSnapshotIndices(
     }
   }
   out.sort((a, b) => a - b);
+  const hasText = "hasText" in locator ? locator.hasText : undefined;
+  if (hasText) {
+    const needle = normalizeNearText(hasText);
+    const filtered = out.filter((idx) => {
+      const name = snapshot[idx]?.name;
+      return Boolean(name && normalizeNearText(name).includes(needle));
+    });
+    out.splice(0, out.length, ...filtered);
+  }
   const near = "near" in locator ? locator.near : undefined;
   if (!near) return out;
   return pickNearestSnapshotMatches(out, snapshot, near);

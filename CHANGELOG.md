@@ -5,6 +5,42 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-08-13
+
+### Added
+
+- `eval` args `filePath` / `fixtureFiles` — host files are read and
+  injected as `bytesBase64` / `fixtureBytes` so a page can build a
+  readable `File` without copying into the app `public/` directory.
+- `when: selector:<css>` / `when: notSelector:<css>` — skip a step based
+  on a live `querySelector`, not body text (invite card concat made
+  `when: text:Connect as Supplier` fire with no `<button>`).
+- `wait.selector` + `hasText` — poll until a visible node matching the
+  selector contains that text. Prefer this over `wait.text` when the same
+  copy also lives in a card accessible-name concat or invite header before
+  the actual `<button>` exists.
+- Locator `nth` on `by: selector` (0-based `querySelectorAll` document
+  order). Semantic locators already had it; CSS cannot express "the second
+  `[data-testid^=…]`" without this.
+- Locator `hasText` — keep only matches whose visible text contains the
+  string. On selector locators the agent-browser adapter also drops hidden
+  nodes, so a Vue radio / vue-multiselect option can be authored without
+  eval.
+- `press.target` — focus a locator before sending the key so SPA
+  `@keyup.enter` on an input fires. `press.until` already retries the key.
+- `wait.ms` — pause with no predicate (e.g. wait for a search index after
+  create) so a later type+Enter search is not forced to cheat via API.
+
+### Fixed
+
+- agent-browser `by: selector` + `hasText`/`nth` pin now polls until
+  `locatorTimeoutMs` instead of failing on the first empty frame (invite
+  fade / drawer slide).
+
+### Security
+
+- Pin the production `nanoid` override to `3.3.18` (GHSA-2v37-7h3g-55p8).
+
 ## [2.8.1] - 2026-08-12
 
 ### Fixed
@@ -430,7 +466,6 @@ Playwright, Cargo) and a DX review of a real 6-spec, multi-hour run.
   under agent-browser vs Playwright strict-mode `.first()`. Prefer unambiguous
   selectors in specs destined for export.
 
-
 ## [1.41.0] - 2026-07-17
 
 ### Added
@@ -599,7 +634,7 @@ is bounded.
   of being retained forever — the newest interrupted run is preserved up to the
   cap and older ones age out. `pruneRuns`/`cairn clean` also sweep stale
   `aborted-<ts>-<pid>.json` batch summaries under the same cap; `cairn clean
-  --all` remains authoritative.
+--all` remains authoritative.
 - **Documentation site refresh.** The landing page, navigation, metadata,
   social preview, manifest, and responsive theme were overhauled.
 
@@ -633,6 +668,7 @@ post-failure a11y snapshot) were correct — the page genuinely showed the fallb
 This release makes the next such incident survivable and self-diagnosing.
 
 ### Added
+
 - **Sliced live-document waits (agent-browser).** Budgeted `text` / `notText` /
   `selector` waits are re-issued as fresh ≤5s subprocess slices until the spec
   budget is spent, instead of one daemon-side wait holding the whole budget. Each
@@ -643,7 +679,7 @@ This release makes the next such incident survivable and self-diagnosing.
   waits and waits without a spec budget keep the single invocation (`--load`
   observes only future transitions; re-arming per slice would miss the one it
   needs). Exhaustion stderr records the true total: `wait exhausted its <N>ms
-  budget across <k> fresh live-document polls`.
+budget across <k> fresh live-document polls`.
 - **`retention.keepFailedRuns` (default 10).** The newest N `failed`/`errored`
   runs per spec now survive pruning on their own quota, beyond `keepRuns` —
   routine pruning can no longer destroy the only evidence of a failure that has
@@ -659,6 +695,7 @@ This release makes the next such incident survivable and self-diagnosing.
   "stream aborted" / "committed but empty" from one JSON artifact.
 
 ### Changed
+
 - The agent-browser adapter header documents the verified CLI version (0.31.1)
   and that the binary is resolved from `$PATH` unpinned — first thing to check
   when wait/snapshot behavior changes after an update.
@@ -666,6 +703,7 @@ This release makes the next such incident survivable and self-diagnosing.
 ## [1.33.0]
 
 ### Added
+
 - **`cairn spec heal --verify` — verified transactional heal (SPEC §7.2).**
   Proposes selector-drift ops, applies them to the owning file, cold-start reruns
   the spec, and accepts only if the rerun passes (all outcomes pass). On failure
@@ -676,11 +714,10 @@ This release makes the next such incident survivable and self-diagnosing.
   `HealVerifyResult` in Healer.ts; `HealOutput` gains `owningFile` (always
   populated when ops > 0); CLI `--verify` flag on `cairn spec heal`.
 
-
-
 ## [1.32.0]
 
 ### Added
+
 - **`replay.json` exact-replay manifest (SPEC §7.3).** Every run now writes
   `replay.json` alongside `run.json`: the exact `cairn run <spec> --json`
   command, backend, environment, base URL, viewport, resolved capture policy,
@@ -696,6 +733,7 @@ This release makes the next such incident survivable and self-diagnosing.
 ## [1.31.0]
 
 ### Added
+
 - **`nextActions` on non-passing RunResults** (SPEC §7.1 verification contracts).
   The `cairn run` / `cairn_run` MCP result now carries an additive `nextActions`
   array on failed/errored runs — one actionable next step (command + reason +
@@ -704,6 +742,7 @@ This release makes the next such incident survivable and self-diagnosing.
   rerun command instead of an ambiguous error. Passed runs omit it (byte-identical).
 
 ### Changed
+
 - **MCP `structuredContent` is now Zod-validated before sending (SPEC §7.1).**
   Every tool result that was cast through `as unknown as Record<string, unknown>`
   now routes through its declared Zod schema's `.parse()` first, so wire-shape
@@ -713,9 +752,11 @@ This release makes the next such incident survivable and self-diagnosing.
   raw `HealOutput`. New permissive `mcp.v1` schemas cover the discovery /
   config / services surfaces that had no declared schema. `BackendSchema` gains
   `mock` (the mock backend is a real `cairn run --mock` option the schema omitted).
+
 ## [1.29.1]
 
 ### Fixed
+
 - **Off-viewport click guard double-subtracted the page scroll.** `get box`
   returns viewport-relative coordinates (verified against
   `getBoundingClientRect` on agent-browser 0.31.1), but 1.28.x's
@@ -738,6 +779,7 @@ This release makes the next such incident survivable and self-diagnosing.
 ## [1.29.0]
 
 ### Added
+
 - **Config `browser:` block — project-level tuning for the verify-after-click
   guard.** 1.28.1's `verifyAfterClick` (5s networkidle settle folded into every
   click) shipped adapter-only with no way to configure it from a project:
@@ -750,8 +792,8 @@ This release makes the next such incident survivable and self-diagnosing.
 
   ```yaml
   browser:
-    verifyAfterClick: true     # default: true
-    postClickSettleMs: 20000   # default: 5000
+    verifyAfterClick: true # default: true
+    postClickSettleMs: 20000 # default: 5000
   ```
 
   Resolved once per `cairn run` invocation (same scope as `webServer`/
@@ -764,6 +806,7 @@ This release makes the next such incident survivable and self-diagnosing.
 Two agent-browser reliability fixes that both manifested as silent no-ops.
 
 ### Fixed
+
 - **`viewport:` was silently ignored under the agent-browser backend.**
   `AgentBrowserAdapter.setViewport` sent `agent-browser viewport <w> <h>`, but
   browser-settings mutators are namespaced under `set` — there is no bare
@@ -784,7 +827,7 @@ Two agent-browser reliability fixes that both manifested as silent no-ops.
   `click` all report success — the click never lands and
   `document.elementFromPoint` at the target returns `null`. `click` (only)
   now runs an independent post-scroll viewport-membership check via `get
-  box` + `eval`, and fails the step loudly with a diagnostic when the
+box` + `eval`, and fails the step loudly with a diagnostic when the
   target's center is confirmed outside the live viewport, instead of
   silently passing. The check is best-effort: an inconclusive result (older
   agent-browser version, parse failure) never blocks the action. `hover` /
@@ -796,20 +839,22 @@ Two agent-browser reliability fixes that both manifested as silent no-ops.
 The three follow-ups deferred from the v1.23.6 review.
 
 ### Fixed
+
 - **`notText` no longer passes vacuously over a missing region.** When a
   specific region was targeted (`notText: { contains, region: "#typo" }`) but
   the region didn't exist, `getText` returned `""` and the absence check passed
   silently, masking a broken assertion. It now confirms the region resolves to
-  an element first and fails clearly if it doesn't. *A spec asserting absence
-  over a missing region will now correctly fail.*
+  an element first and fails clearly if it doesn't. _A spec asserting absence
+  over a missing region will now correctly fail._
 - **`count: { role }` counts native semantic elements, not just explicit
   `[role]` attributes.** `role: row` now matches `<tr>` (and `button` → native
   `<button>`, `link` → `<a href>`, `heading` → `<h1>`–`<h6>`, etc.), so a count
   over a normal `<table>` works. This is a heuristic CSS expansion — for exact
-  ARIA semantics use a `selector`. *Role counts that were silently returning 0
-  on native markup will now return the real count.*
+  ARIA semantics use a `selector`. _Role counts that were silently returning 0
+  on native markup will now return the real count._
 
 ### Added
+
 - **Playwright importer round-trip coverage** for the steps the exporter
   already emits: `type` (`pressSequentially`, with `delay`), selector waits
   (`waitForSelector` → `wait: { selector, state, timeoutMs }`), and `.nth(N)` on
@@ -819,20 +864,21 @@ The three follow-ups deferred from the v1.23.6 review.
 ## [1.23.6]
 
 A correctness pass over the healer and verifiers. Some fixes tighten checks, so
-a spec that was passing on a *wrong* result may now correctly fail — see notes.
+a spec that was passing on a _wrong_ result may now correctly fail — see notes.
 
 ### Fixed
+
 - **`cairn spec heal --apply` could corrupt the spec file.** When the healer
   inserted a wait step, it used `addIn(["steps", N], …)`, which merged the new
-  step *into* `steps[N]` as a complex mapping key instead of splicing a sibling
+  step _into_ `steps[N]` as a complex mapping key instead of splicing a sibling
   — producing an unparseable file. It now splices a proper sibling seq item.
 - **`noFailedRequests` missed transport-level failures.** It only flagged
   requests with a 4xx/5xx status, so an aborted / blocked / DNS-failed /
   connection-refused request (which never gets a status) passed silently, and
   the evidence falsely read "returned <400". Failed requests are now marked by
   the Playwright adapter and counted; genuinely-pending/streaming requests are
-  not flagged. *A spec that was silently ignoring a failed request may now
-  fail.*
+  not flagged. _A spec that was silently ignoring a failed request may now
+  fail._
 - **`count: { text }` is rejected at parse time.** It was accepted but silently
   matched zero elements (an `atMost`/`equals: 0` always passed, an `atLeast`
   always failed). Counting by text needs the a11y tree; use the `text` verifier
@@ -853,8 +899,9 @@ a spec that was passing on a *wrong* result may now correctly fail — see notes
 ## [1.23.5]
 
 ### Fixed
+
 - **Placeholder substitution no longer breaks when a resolved value contains
-  YAML metacharacters.** Substitution previously rewrote the raw YAML *text*
+  YAML metacharacters.** Substitution previously rewrote the raw YAML _text_
   and re-parsed it, so a secret/env/var value containing `:`, `"`, `{`, `#`, or
   newlines could corrupt the document (e.g. a quoted `"${env.X}"` resolving to
   `a: b "c"` produced invalid YAML). Substitution now resolves into the parsed
@@ -867,6 +914,7 @@ a spec that was passing on a *wrong* result may now correctly fail — see notes
 ## [1.23.4]
 
 ### Added
+
 - **Warnings for clip/video misconfigurations that would silently produce
   nothing.** A run now emits an `artifact.video` warning event when
   `clipPoints` are configured but `artifacts.capture.video` is `never` (so no
@@ -875,11 +923,13 @@ a spec that was passing on a *wrong* result may now correctly fail — see notes
   "run → video → vidtrace clip" loop no longer fails silently.
 
 ### Changed
-- **Config `${env.X:-default}` now falls back on an *empty* env var, not just
+
+- **Config `${env.X:-default}` now falls back on an _empty_ env var, not just
   an unset one** — matching shell `:-` semantics and the spec parser, so
   `cairntrace.config.yml` and specs resolve the same placeholder identically.
 
 ### Internal
+
 - Added GitHub Actions CI (`bun run verify` on push/PR + a real-Chromium
   end-to-end smoke); previously verification ran only via local git hooks.
 - Added backend step-shape guards (opt-in strict `MockBrowserBackend`
@@ -890,6 +940,7 @@ a spec that was passing on a *wrong* result may now correctly fail — see notes
 ## [1.23.3]
 
 ### Fixed
+
 - **MCP server now disposes its signal handlers on close.** `buildMcpServer`
   registered process-level `SIGINT`/`SIGTERM` handlers but never removed them,
   so building many servers in one process (e.g. across a test run) accumulated
@@ -905,8 +956,9 @@ A review-and-fix pass over the v1.12–v1.23 DX/UX work. All fixes; no CLI/schem
 surface changes.
 
 ### Fixed
+
 - **Tvault secret values could leak unredacted into artifacts.** The artifact
-  redactor only scrubbed env values whose *key* matched a sensitive-name
+  redactor only scrubbed env values whose _key_ matched a sensitive-name
   heuristic (`token`, `secret`, `password`, …). Vault secrets with ordinary
   key names — `MONGO_URI`, `DATABASE_URL`, `STRIPE_*`, `SMTP_URL` — were
   injected into the environment but never registered for redaction, so their
@@ -964,6 +1016,7 @@ surface changes.
 ## [1.23.1]
 
 ### Fixed
+
 - **`--env` flag now propagates to `CAIRN_TVAULT_ENV`** — when `cairn run --env dev`
   is used with `secrets.provider: tvault` in group/env mode, the tvault env
   was resolved from `${env.CAIRN_TVAULT_ENV:-local}` in the config. Since
@@ -976,9 +1029,10 @@ surface changes.
 ## [1.23.0]
 
 ### Added
+
 - **Tvault secret shadowing warning** — when `secrets.provider: tvault` is
   configured, `cairn run` now warns if any tvault secret key is already set
-  in the process environment with a *different* value (e.g. from bun's
+  in the process environment with a _different_ value (e.g. from bun's
   automatic `.env` loading). Previously, stale `.env` credentials silently
   shadowed tvault values with no diagnostic, causing authentication failures
   that were hard to trace. The warning names the affected keys and suggests
@@ -987,6 +1041,7 @@ surface changes.
 ## [1.22.0]
 
 ### Added
+
 - **`${env.X:-default}` fallback syntax** — spec placeholders now support
   shell-style default values when an env var is missing or empty:
   `${env.MISSING:-fallback}`. Defaults can themselves contain runtime
@@ -996,6 +1051,7 @@ surface changes.
 ## [1.21.0]
 
 ### Added
+
 - **Discovery sessions** — interactive page exploration and spec authoring
   via `cairn discover open/navigate/interact/snapshot/export`. Create a
   stateful browser session, navigate, take accessibility snapshots, perform
@@ -1005,6 +1061,7 @@ surface changes.
 ## [1.16.0]
 
 ### Added
+
 - **`eval` step type** — a page-context JavaScript escape hatch that runs
   arbitrary JS in the browser via `backend.evaluate()` and optionally captures
   the JSON-serializable return value as `evals/<assign>.json`. Captured values
@@ -1030,6 +1087,7 @@ surface changes.
   values via `ctx.evals` / `${evals.*}` fixture interpolation.
 
 ### Changed
+
 - **`healSpec` skips eval steps** — returns `no-heal-possible` with a clear
   "eval steps are not healable — escape hatch" message instead of attempting
   locator-based repair.
@@ -1042,9 +1100,10 @@ surface changes.
 ## [1.15.0]
 
 ### Added
+
 - **Per-run codemap auto-annotation (pass + fail)** — `cairn run --auto-annotate on-run`
   emits one codemap annotation per run with run context: `{ specName, contractHash,
-  runId, status, outcomes, failedVerifier }`. The `contractHash` lets codemap
+runId, status, outcomes, failedVerifier }`. The `contractHash` lets codemap
   consumers invalidate stale green badges when the spec's contract changes. This
   generalizes the existing `on-investigate` annotate seam from failure-only to
   bidirectional (pass + fail), closing the loop with future impact-driven spec
@@ -1060,6 +1119,7 @@ surface changes.
 ## [1.14.1]
 
 ### Fixed
+
 - **tvault availability checks** in `doctor`, `secrets`, and the MCP server used
   `tvault version` (a non-existent subcommand). tvault expects `tvault --version`.
   The old call always failed, so tvault was misreported as unavailable even when
@@ -1068,11 +1128,12 @@ surface changes.
 ## [1.14.0]
 
 ### Added
+
 - **Services lifecycle block** — `cairn run` can now own the full multi-service
   environment lifecycle via the `services:` config block:
   - **Docker**: `docker compose up -d` with `reuseExisting` detection,
     `readinessCheck` command, and `healthcheck` (command + startPeriod + interval
-    + timeout + retries).
+    - timeout + retries).
   - **Conditional seed**: runs once, then skips if fresh (three-layer check:
     fingerprint + TTL + optional `freshnessCheck`). State tracked at
     `~/.cairntrace/services/<project>.seed.json`.
@@ -1103,19 +1164,20 @@ surface changes.
   `spawnProcess` for reuse by `services.ts`.
 
 ### Fixed
+
 - **`script` verifier no longer rejects numeric/boolean `fixtures` values with a misleading error.**
   `verify.script.fixtures` previously required string values (`z.record(string, string)`). Spec
   authors routinely supply numbers/booleans — most often through `${var}` interpolation (e.g. an
   expected row count of `0`, which YAML parses as a number). Because `ScriptVerifierSchema` is one
   member of the **strict** `VerifierSchema` `z.union`, a single non-string fixture value made the
-  whole `script` member fail to parse, and Zod then surfaced the *sibling* members' rejection of
+  whole `script` member fail to parse, and Zod then surfaced the _sibling_ members' rejection of
   the unmatched `script` key as:
 
   ```
   Unrecognized key(s) in object: 'script'
   ```
 
-  i.e. a valid-looking spec read as *"the `script` verifier isn't supported."* This was easy to
+  i.e. a valid-looking spec read as _"the `script` verifier isn't supported."_ This was easy to
   misdiagnose as a parser/schema "cold-init" defect (it appeared intermittent because it depended
   on whether a given spec's fixture values happened to be strings or numbers).
 
@@ -1127,15 +1189,18 @@ surface changes.
     (`expectedRowCount: "${vars.count}"`); `expectedRowCount: ${vars.count}` works.
 
 ### Investigation note
+
 - An earlier hypothesis blamed a TDZ / circular-import in `src/core/schema/*` causing union members
   to be dropped at construction. This was **refuted**: the schema dependency graph is an acyclic
   DAG, `VerifierSchema`/`StepSchema` build with all members, and the defect did not reproduce
   against source. The true cause was the strict-union error masking a fixture type mismatch (above).
 
 ### Tests
+
 - Added `src/core/schema/verifier.v1.test.ts` covering string/number/boolean fixtures, object/array
   rejection, and the `run`/`file` exclusivity rule.
 
 ## [1.12.0]
+
 - Video capture (`artifacts.capture.video`), fcheap stash integration, `investigate`/`audit`,
   codemap + TinyVault integration, doctor checks. (See release notes.)

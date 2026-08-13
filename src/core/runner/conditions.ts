@@ -14,11 +14,15 @@ import { textContains } from "../textMatching";
  *   - urlMatches:<regex>
  *   - text:<substring>          ← body text, whitespace-normalized + case-insensitive
  *   - notText:<substring>       ← same normalization as text:
+ *   - selector:<css>            ← document.querySelector is non-null
+ *   - notSelector:<css>         ← document.querySelector is null
  *
  * `urlContains`/`urlNotContains` stay raw (URLs are case- and
  * whitespace-significant); `text`/`notText` share the rendered-text
  * normalization used by the `text`/`notText` verifiers so a `when:` gate and an
  * outcome assertion on the same copy agree. `urlMatches` regex stays raw.
+ * `selector`/`notSelector` are live DOM checks — use them when the same copy
+ * also lives in a card concat (body `text:` false-positives).
  */
 
 export type WhenCondition =
@@ -26,15 +30,18 @@ export type WhenCondition =
   | { kind: "urlNotContains"; arg: string }
   | { kind: "urlMatches"; arg: string }
   | { kind: "text"; arg: string }
-  | { kind: "notText"; arg: string };
+  | { kind: "notText"; arg: string }
+  | { kind: "selector"; arg: string }
+  | { kind: "notSelector"; arg: string };
 
-const KIND_PATTERN = /^(urlContains|urlNotContains|urlMatches|text|notText):/;
+const KIND_PATTERN =
+  /^(urlContains|urlNotContains|urlMatches|text|notText|selector|notSelector):/;
 
 export function parseWhen(when: string): WhenCondition {
   const m = KIND_PATTERN.exec(when);
   if (!m) {
     throw new Error(
-      `invalid when: "${when}" — expected one of urlContains|urlNotContains|urlMatches|text|notText followed by ":<arg>"`,
+      `invalid when: "${when}" — expected one of urlContains|urlNotContains|urlMatches|text|notText|selector|notSelector followed by ":<arg>"`,
     );
   }
   const kind = m[1] as WhenCondition["kind"];
@@ -73,5 +80,36 @@ export async function evaluateWhen(
       const body = await backend.getText("page");
       return !textContains(body, cond.arg);
     }
+    case "selector":
+      return evalDocumentPredicate(
+        backend,
+        `document.querySelector(${JSON.stringify(cond.arg)}) !== null`,
+      );
+    case "notSelector":
+      return !(await evalDocumentPredicate(
+        backend,
+        `document.querySelector(${JSON.stringify(cond.arg)}) !== null`,
+      ));
+  }
+}
+
+async function evalDocumentPredicate(
+  backend: BrowserBackend,
+  expression: string,
+): Promise<boolean> {
+  const result = await backend.evaluate(expression);
+  if (!result.ok) return false;
+  const trimmed = (result.stdout || "").trim();
+  if (trimmed === "true") return true;
+  if (trimmed === "false" || trimmed === "") return false;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      data?: { result?: unknown };
+      result?: unknown;
+    };
+    const value = parsed.data?.result ?? parsed.result ?? parsed;
+    return value === true;
+  } catch {
+    return false;
   }
 }

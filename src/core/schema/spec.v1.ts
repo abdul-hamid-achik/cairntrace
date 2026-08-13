@@ -32,6 +32,12 @@ const locatorNear = {
    * and a nearby heading distinguishes the one the user would click.
    */
   near: z.string().min(1).optional(),
+  /**
+   * Keep only matches whose visible text contains this string
+   * (whitespace-normalized, case-insensitive). Use with a CSS root to pick
+   * "Yes" inside `[data-answer-key="…"]` without an eval.
+   */
+  hasText: z.string().min(1).optional(),
 };
 
 const semanticLocatorExtras = {
@@ -68,6 +74,8 @@ export const SelectorLocatorSchema = z
   .object({
     by: z.literal("selector"),
     selector: z.string().min(1),
+    /** Pick the Nth CSS match (0-based, document order). */
+    nth: z.number().int().min(0).optional(),
     ...locatorNear,
   })
   .strict();
@@ -227,6 +235,12 @@ export type WaitUrlMatcher = z.infer<typeof WaitUrlMatcherSchema>;
 export const WaitConditionSchema = z.union([
   z
     .object({
+      /** Pause with no predicate. Use after a create so a search index can catch up. */
+      ms: z.number().int().positive().max(300_000),
+    })
+    .strict(),
+  z
+    .object({
       text: z.string().min(1),
       /** Default false; rendered text matching also normalizes whitespace. */
       caseSensitive: z.boolean().optional(),
@@ -251,6 +265,13 @@ export const WaitConditionSchema = z.union([
     .object({
       selector: z.string().min(1),
       state: z.enum(["attached", "visible", "hidden", "detached"]).optional(),
+      /**
+       * Keep only matches whose visible text contains this string
+       * (whitespace-normalized, case-insensitive). Use instead of
+       * `wait.text` when the same copy also lives in a card concat or
+       * header before the actual control exists.
+       */
+      hasText: z.string().min(1).optional(),
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
@@ -279,7 +300,8 @@ export type WaitCondition = z.infer<typeof WaitConditionSchema>;
  * Post-click condition used by `click.until`. The runner re-issues the click
  * (at most four total attempts) until this condition holds or its timeout is
  * exhausted. Text checks use the same normalized, case-insensitive semantics
- * as `wait` text/notText.
+ * as `wait` text/notText. `url` reuses the wait.url matcher so a click that
+ * should navigate can be authored without an eval.
  */
 export const ClickUntilSchema = z.union([
   z
@@ -303,6 +325,12 @@ export const ClickUntilSchema = z.union([
   z
     .object({
       notText: z.string().min(1),
+      timeoutMs: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      url: WaitUrlMatcherSchema,
       timeoutMs: z.number().int().positive().optional(),
     })
     .strict(),
@@ -593,9 +621,17 @@ export type RequestStep = z.infer<typeof RequestStepSchema>;
 /**
  * Keyboard key press, e.g. `press: Enter` or `press: Control+a`.
  * Useful for Enter-to-submit flows and as a below-fold submit fallback.
+ * Optional `target` focuses that locator first so Vue `@keyup.enter` on an
+ * input actually fires. Optional `until` retries the key (same budget as
+ * click.until) so a search that waits on an index can be authored without eval.
  */
 export const PressStepSchema = z
-  .object({ ...stepCommon, press: z.string().min(1) })
+  .object({
+    ...stepCommon,
+    press: z.string().min(1),
+    target: LocatorSchema.optional(),
+    until: ClickUntilSchema.optional(),
+  })
   .strict();
 export type PressStep = z.infer<typeof PressStepSchema>;
 

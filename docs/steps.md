@@ -38,23 +38,29 @@ An explicit polling step. Hard-bounded at 30000 ms by default; real Chromium run
 - wait: { load: networkidle }
 - wait: { selector: "[data-testid='hydrated']", state: visible }
 - wait:
+    selector: ".invite-entity-blade button"
+    hasText: Connect as Supplier
+    timeoutMs: 30000
+- wait:
     value: { by: label, name: Country, equals: United States }
     timeoutMs: 40000
 - wait: { url: { includes: "/connection/" } }
 - wait: { url: { equals: "http://localhost:8080/dash" } }
 - wait: { url: { pattern: "/app/?$" } }
+- wait: { ms: 20000 }
 ```
 
 Condition shapes, exactly one per step:
 
-| Shape | Asserts |
-|---|---|
-| `text: <str>` | the page contains the text |
-| `notText: <str>` | the page does not contain the text |
-| `load: networkidle\|load\|domcontentloaded` | a load state was reached |
-| `selector: <css> + state?` | an element matches; `state` is `attached\|visible\|hidden\|detached`. On agent-browser, `hidden`/`detached`/`attached` are live DOM predicates (`--fn`) because that CLI's `--state` flag is an auth file, not visibility. |
-| `value: <locator + equals>` | a form control's live value exactly equals the string |
-| `url: { includes \| equals \| pattern }` | the current page URL matches; `pattern` is a JS regex |
+| Shape                                       | Asserts                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text: <str>`                               | the page contains the text                                                                                                                                                                                                                                                                                                                                                               |
+| `notText: <str>`                            | the page does not contain the text                                                                                                                                                                                                                                                                                                                                                       |
+| `load: networkidle\|load\|domcontentloaded` | a load state was reached                                                                                                                                                                                                                                                                                                                                                                 |
+| `selector: <css> + state? + hasText?`       | an element matches; `state` is `attached\|visible\|hidden\|detached`. `hasText` keeps only visible nodes whose text contains the string (use this instead of `wait.text` when the same copy also lives in a card concat). On agent-browser, `hidden`/`detached`/`attached`/`hasText` are live DOM predicates (`--fn`) because that CLI's `--state` flag is an auth file, not visibility. |
+| `value: <locator + equals>`                 | a form control's live value exactly equals the string                                                                                                                                                                                                                                                                                                                                    |
+| `url: { includes \| equals \| pattern }`    | the current page URL matches; `pattern` is a JS regex                                                                                                                                                                                                                                                                                                                                    |
+| `ms: <n>`                                   | pause with no predicate (search-index catch-up); max 300000                                                                                                                                                                                                                                                                                                                              |
 
 `text` and `notText` collapse whitespace and match case-insensitively by
 default. Set `caseSensitive: true` when rendered casing is significant.
@@ -71,12 +77,30 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 - click: { by: role, role: button, name: Open, near: "Turnvu DBA" }
 - click: { by: testid, testid: Entity_Website }
 - click: { by: selector, selector: "button.primary" }
+- click: { by: selector, selector: '[data-testid^="entity-switch-item-"]', nth: 1 }
 - click: { by: role, role: link, name: Reports }
   settleMs: 15000
 - click: { by: text, text: "Cairn task abc", exact: true }
+- click:
+    by: selector
+    selector: ".company-link"
+    until:
+      url: { includes: "/connection/" }
+      timeoutMs: 60000
 ```
 
-`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `by: testid` reads `browser.testIdAttribute` (default `data-testid`). `by: text` is the visible copy. On agent-browser, `by: text` and any locator with `near` read the full snapshot (not the interactive `-i` slice, which drops `StaticText`); a text match with no `@ref` clicks the nearest ancestor that has one.
+`click.until` retries the click at most four times until `selectorGone`, `selector`, `text`, `notText`, or `url` (same matcher as `wait.url`) holds.
+
+`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `hasText: <str>` keeps only matches whose visible text contains that string (also whitespace-normalized, case-insensitive). Use it to pick `Yes` inside `[data-answer-key="…"]` without an eval:
+
+```yaml
+- click:
+    by: selector
+    selector: '[data-answer-key="ADBE_Supplier_Request_Business_Owner"] .radio-label'
+    hasText: "Yes"
+```
+
+`by: testid` reads `browser.testIdAttribute` (default `data-testid`). `by: text` is the visible copy. On agent-browser, `by: text` and any locator with `near` read the full snapshot (not the interactive `-i` slice, which drops `StaticText`); a text match with no `@ref` clicks the nearest ancestor that has one. `hasText` on a selector locator also drops `display:none` / zero-size nodes so a vue-multiselect option that stays in the a11y tree is not clicked while hidden.
 
 Agent-browser confirms same-tab link delivery from URL, document, or DOM
 evidence by default; it does not add an implicit network-idle wait. A positive
@@ -142,11 +166,18 @@ Type text character-by-character into a field, sending each character as a real 
 
 ### `press`
 
-A single keyboard key press — `Enter` to submit, `Control+a` to select, `Escape` to dismiss.
+A single keyboard key press — `Enter` to submit, `Control+a` to select, `Escape` to dismiss. Without `target`, the key goes to the currently focused element (page-level). With `target`, the runner focuses that locator first so Vue `@keyup.enter` on an input actually fires.
 
 ```yaml
 - press: Enter
 - press: "Control+a"
+- press: Enter
+  target:
+    by: selector
+    selector: "#search-filter-header-search"
+  until:
+    selector: ".company-link"
+    timeoutMs: 180000
 ```
 
 ### `scroll`
@@ -195,7 +226,8 @@ mutation retries for that action.
 Click a locator and capture the resulting download. `saveAs` names the file in the artifact dir; `assign` registers it as a named artifact so later steps and verifiers reference it via `${artifacts.<assign>.path}`.
 
 ```yaml
-- download: { by: role, role: button, name: "Download template", saveAs: template.xlsx, assign: template }
+- download:
+    { by: role, role: button, name: "Download template", saveAs: template.xlsx, assign: template }
 ```
 
 `assign` must be a lowerCamel identifier (`/^[a-z][A-Za-z0-9_]*$/`). `timeoutMs` bounds the wait for the download to start.
@@ -326,7 +358,7 @@ Capture a process profile or a one-shot sample of the backend's browser process 
 - `action: profile` requires `type: heap | cpu | goroutine | sample`. With `assign`, the result is written to `monitor/<assign>.json` and registered as a named artifact, reusable via `${artifacts.<assign>.path}`.
 - `action: snapshot` captures a single `monitor process <pid>` sample, optionally labeled.
 
-`monitor` is handled by the runner *before* adapter dispatch — it is not a backend interaction. Pair it with the run-wide `--monitor` flag and the `process` verifier (see [Process monitoring](/monitor)) to turn "the spec got slow" into an assertable budget.
+`monitor` is handled by the runner _before_ adapter dispatch — it is not a backend interaction. Pair it with the run-wide `--monitor` flag and the `process` verifier (see [Process monitoring](/monitor)) to turn "the spec got slow" into an assertable budget.
 
 ## Step output
 

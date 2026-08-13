@@ -978,7 +978,12 @@ function renderStepBody(
   }
   if ("wait" in step) {
     const w = step.wait;
-    const timeout = w.timeoutMs ?? 30_000;
+    if ("ms" in w) {
+      return one(
+        raw(`await new Promise((resolve) => setTimeout(resolve, ${w.ms}));`),
+      );
+    }
+    const timeout = "timeoutMs" in w ? (w.timeoutMs ?? 30_000) : 30_000;
     if ("text" in w) {
       return one(
         raw(
@@ -1000,6 +1005,13 @@ function renderStepBody(
       );
     }
     if ("selector" in w) {
+      if (w.hasText) {
+        return one(
+          raw(
+            `await expect(page.locator(${str(w.selector)}).filter({ hasText: ${str(w.hasText)} })).not.toHaveCount(0, { timeout: ${timeout} });`,
+          ),
+        );
+      }
       const state = w.state ?? "visible";
       return one(
         raw(
@@ -1039,11 +1051,16 @@ function renderStepBody(
     }
     return one(
       raw(
-        `await page.waitForLoadState(${JSON.stringify(w.load)}, { timeout: ${timeout} });`,
+        `await page.waitForLoadState(${JSON.stringify("load" in w ? w.load : "load")}, { timeout: ${timeout} });`,
       ),
     );
   }
   if ("press" in step) {
+    if (step.target) {
+      return one(
+        raw(`await ${locator(step.target, ctx)}.press(${str(step.press)});`),
+      );
+    }
     return one(raw(`await page.keyboard.press(${str(step.press)});`));
   }
   if ("scroll" in step) {
@@ -1176,6 +1193,10 @@ function renderClickUntilStep(
   };
 }
 
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function clickUntilAssertion(until: ClickUntil, ctx: EmitCtx): string {
   const str = (value: string): string => emitStr(value, ctx.usage);
   if ("selectorGone" in until) {
@@ -1183,6 +1204,15 @@ function clickUntilAssertion(until: ClickUntil, ctx: EmitCtx): string {
   }
   if ("selector" in until) {
     return `await expect(page.locator(${str(until.selector)})).not.toHaveCount(0, { timeout: clickUntilAttemptTimeout });`;
+  }
+  if ("url" in until) {
+    if (until.url.equals !== undefined) {
+      return `await expect(page).toHaveURL(${str(until.url.equals)}, { timeout: clickUntilAttemptTimeout });`;
+    }
+    if (until.url.includes !== undefined) {
+      return `await expect(page).toHaveURL(new RegExp(${str(escapeRegExpLiteral(until.url.includes))}), { timeout: clickUntilAttemptTimeout });`;
+    }
+    return `await expect(page).toHaveURL(new RegExp(${str(until.url.pattern!)}), { timeout: clickUntilAttemptTimeout });`;
   }
   if ("text" in until) {
     return `await expect(page.locator("body")).toContainText(${str(until.text)}, { ignoreCase: true, useInnerText: true, timeout: clickUntilAttemptTimeout });`;
@@ -1393,12 +1423,20 @@ function locator(loc: Locator, ctx: EmitCtx): string {
   // nth is given, emit .first() so the exported test keeps source semantics.
   const nth =
     "nth" in loc && loc.nth !== undefined ? `.nth(${loc.nth})` : ".first()";
+  const hasText = "hasText" in loc ? loc.hasText : undefined;
+  const textFilter = hasText ? `.filter({ hasText: ${str(hasText)} })` : "";
   const inner = locatorFromRoot("page", loc, ctx);
   const near = "near" in loc ? loc.near : undefined;
-  if (!near) return loc.by === "selector" ? inner : `${inner}${nth}`;
+  if (!near) {
+    return loc.by === "selector"
+      ? `${inner}${textFilter}`
+      : `${inner}${textFilter}${nth}`;
+  }
   const scoped = `page.getByText(${str(near)}).locator("xpath=ancestor-or-self::*").filter({ has: ${inner} }).last()`;
   const scopedLocator = locatorFromRoot(scoped, loc, ctx);
-  return loc.by === "selector" ? scopedLocator : `${scopedLocator}${nth}`;
+  return loc.by === "selector"
+    ? `${scopedLocator}${textFilter}`
+    : `${scopedLocator}${textFilter}${nth}`;
 }
 
 function locatorFromRoot(root: string, loc: Locator, ctx: EmitCtx): string {

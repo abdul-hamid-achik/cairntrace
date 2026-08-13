@@ -323,6 +323,53 @@ describe("exportPlaywright", () => {
     );
   });
 
+  it("exports press.target and locator hasText", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            press: "Enter",
+            target: { by: "selector", selector: "#search" },
+          },
+          {
+            click: {
+              by: "selector",
+              selector: '[data-answer-key="Owner"] .radio-label',
+              hasText: "Yes",
+            },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(`await page.locator("#search").press("Enter");`);
+    expect(src).toContain(
+      `await page.locator("[data-answer-key=\\"Owner\\"] .radio-label").filter({ hasText: "Yes" }).click();`,
+    );
+  });
+
+  it("exports click.until.url as toHaveURL", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            click: {
+              by: "selector",
+              selector: ".company-link",
+              until: {
+                url: { pattern: "/connection/[0-9a-f]{24}" },
+                timeoutMs: 15_000,
+              },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(src).toContain(
+      `await expect(page).toHaveURL(new RegExp("/connection/[0-9a-f]{24}"), { timeout: clickUntilAttemptTimeout });`,
+    );
+  });
+
   it("translates select steps to selectOption by value or label", () => {
     const src = srcOf(
       baseSpec({
@@ -480,6 +527,26 @@ describe("exportPlaywright", () => {
       `const result = await page.evaluate(async ({ source, scriptContext }) => {`,
     );
     expect(src).toContain(`expect(result.ok).toBe(true);`);
+  });
+
+  it("translates selector wait with hasText", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "wait_connect",
+            wait: {
+              selector: ".invite-entity-blade button",
+              hasText: "Connect as Supplier",
+              timeoutMs: 30000,
+            },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `await expect(page.locator(".invite-entity-blade button").filter({ hasText: "Connect as Supplier" })).not.toHaveCount(0, { timeout: 30000 });`,
+    );
   });
 
   it("translates selector wait steps", () => {

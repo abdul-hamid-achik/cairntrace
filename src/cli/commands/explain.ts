@@ -1258,9 +1258,9 @@ export function buildExplain(): ExplainResult {
         id: "click",
         kind: "interaction",
         summary:
-          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Agent-browser confirms same-tab link delivery by default without network-idle. Optional click.until retries at most four clicks until selectorGone|selector|text|notText holds. A positive sibling/spec settleMs or browser.postClickSettleMs opts into network-idle; click/spec values take precedence and 0 skips both the settle and link probe",
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Agent-browser confirms same-tab link delivery by default without network-idle. Optional click.until retries at most four clicks until selectorGone|selector|text|notText|url holds. A positive sibling/spec settleMs or browser.postClickSettleMs opts into network-idle; click/spec values take precedence and 0 skips both the settle and link probe",
         yamlExample:
-          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: role, role: button, name: Pay, nth: 1 }\n    settleMs: 0",
+          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: selector, selector: '.company-link', until: { url: { includes: '/connection/' }, timeoutMs: 60000 } }\n    settleMs: 0",
       },
       {
         id: "hover",
@@ -1341,8 +1341,10 @@ export function buildExplain(): ExplainResult {
       {
         id: "press",
         kind: "interaction",
-        summary: "Keyboard key press (e.g. Enter to submit, Control+a)",
-        yamlExample: "steps:\n  - press: Enter",
+        summary:
+          "Keyboard key press (e.g. Enter to submit, Control+a). Optional target focuses a locator first so Vue @keyup.enter fires; optional until retries the key",
+        yamlExample:
+          'steps:\n  - press: Enter\n    target: { by: selector, selector: "#search" }\n    until: { selector: ".company-link", timeoutMs: 180000 }',
       },
       {
         id: "scroll",

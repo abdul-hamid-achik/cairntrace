@@ -56,6 +56,22 @@ steps:
       until:
         selectorGone: "#editor"
         timeoutMs: 12000
+  - click:
+      by: selector
+      selector: ".company-link"
+      until:
+        url:
+          pattern: "/connection/[0-9a-f]{24}"
+        timeoutMs: 60000
+  - press: Enter
+    target: { by: selector, selector: "#search-filter-header-search" }
+    until:
+      selector: ".company-link"
+      timeoutMs: 180000
+  - click:
+      by: selector
+      selector: '[data-answer-key="Owner"] .radio-label'
+      hasText: "Yes"
 `,
     );
 
@@ -86,6 +102,31 @@ steps:
           role: "button",
           name: "Save",
           until: { selectorGone: "#editor", timeoutMs: 12000 },
+        },
+      },
+      {
+        click: {
+          by: "selector",
+          selector: ".company-link",
+          until: {
+            url: { pattern: "/connection/[0-9a-f]{24}" },
+            timeoutMs: 60000,
+          },
+        },
+      },
+      {
+        press: "Enter",
+        target: {
+          by: "selector",
+          selector: "#search-filter-header-search",
+        },
+        until: { selector: ".company-link", timeoutMs: 180000 },
+      },
+      {
+        click: {
+          by: "selector",
+          selector: '[data-answer-key="Owner"] .radio-label',
+          hasText: "Yes",
         },
       },
     ]);

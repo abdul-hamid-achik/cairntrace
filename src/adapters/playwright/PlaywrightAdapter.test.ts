@@ -831,6 +831,24 @@ describe("PlaywrightAdapter type", () => {
     ]);
   });
 
+  it("sends press.target to the locator, not the page keyboard", async () => {
+    const press = vi.fn().mockResolvedValue(undefined);
+    const keyboardPress = vi.fn().mockResolvedValue(undefined);
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 100 });
+    installPage(adapter, {
+      locator: () => ({ press, filter: () => ({ press }) }),
+      keyboard: { press: keyboardPress },
+    });
+
+    const result = await adapter.runStep({
+      press: "Enter",
+      target: { by: "selector", selector: "#search" },
+    });
+    expect(result.ok).toBe(true);
+    expect(press).toHaveBeenCalledWith("Enter", { timeout: 100 });
+    expect(keyboardPress).not.toHaveBeenCalled();
+  });
+
   it("honors explicit click settleMs and lets zero skip it", async () => {
     const click = vi.fn().mockResolvedValue(undefined);
     const waitForLoadState = vi.fn().mockResolvedValue(undefined);

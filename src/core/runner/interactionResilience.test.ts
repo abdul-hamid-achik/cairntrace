@@ -214,6 +214,84 @@ describe("runResilientBrowserStep", () => {
     });
   });
 
+  it("retries Enter until a selector appears", async () => {
+    const backend = new PressEffectBackend(1, () =>
+      backend.setCount(".company-link", 1),
+    );
+
+    const result = await runResilientBrowserStep(
+      {
+        press: "Enter",
+        until: { selector: ".company-link", timeoutMs: 200 },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(backend.presses).toBe(1);
+  });
+
+  it("wait.ms sleeps without touching the backend", async () => {
+    const backend = new PressEffectBackend();
+    const started = Date.now();
+    const result = await runResilientBrowserStep(
+      { wait: { ms: 40 } },
+      backend,
+      1,
+    );
+    expect(result.ok).toBe(true);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35);
+    expect(backend.stepLog).toEqual([]);
+  });
+
+  it("retries a targeted Enter until a selector appears", async () => {
+    const backend = new PressEffectBackend(1, () =>
+      backend.setCount(".company-link", 1),
+    );
+
+    const result = await runResilientBrowserStep(
+      {
+        press: "Enter",
+        target: { by: "selector", selector: "#search" },
+        until: { selector: ".company-link", timeoutMs: 200 },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(backend.stepLog[0]).toEqual({
+      press: "Enter",
+      target: { by: "selector", selector: "#search" },
+    });
+  });
+
+  it("retries click until the page URL matches", async () => {
+    const backend = new ClickEffectBackend(2, () =>
+      backend.setUrl("http://localhost:8080/connection/abc"),
+    );
+    backend.setUrl("http://localhost:8080/connections/companies-seller");
+
+    const result = await runResilientBrowserStep(
+      {
+        click: {
+          by: "selector",
+          selector: ".company-link",
+          until: { url: { includes: "/connection/" }, timeoutMs: 50 },
+        },
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.stderr).toContain(
+      "click.until satisfied after 2 click attempts",
+    );
+    expect(backend.clicks).toBe(2);
+  });
+
   it("fails click.until after at most four click attempts", async () => {
     const backend = new ClickEffectBackend();
 
@@ -467,6 +545,26 @@ describe("latency resilience in real Chromium", () => {
     }
   }, 20_000);
 });
+
+class PressEffectBackend extends MockBrowserBackend {
+  presses = 0;
+
+  constructor(
+    private readonly triggerAt = Number.POSITIVE_INFINITY,
+    private readonly effect: () => void = () => {},
+  ) {
+    super();
+  }
+
+  override async runStep(step: Step) {
+    const result = await super.runStep(step);
+    if ("press" in step) {
+      this.presses++;
+      if (this.presses === this.triggerAt) this.effect();
+    }
+    return result;
+  }
+}
 
 class ClickEffectBackend extends MockBrowserBackend {
   clicks = 0;

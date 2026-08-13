@@ -150,6 +150,47 @@ describe("waitConditionToArgv", () => {
     ).toEqual(["wait", "#element_69d53d5dabbab17b1fede24f"]);
   });
 
+  it("selector wait with hasText polls a visible-text predicate", () => {
+    const argv = waitConditionToArgv({
+      selector: ".invite-entity-blade button",
+      hasText: "Connect as Supplier",
+      timeoutMs: 30000,
+    });
+    expect(argv[0]).toBe("wait");
+    expect(argv[1]).toBe("--fn");
+    expect(argv[2]).toContain("querySelectorAll");
+    expect(argv[2]).toContain("Connect as Supplier");
+    expect(argv[2]).toContain("indexOf");
+    expect(argv.slice(3)).toEqual(["--timeout", "30000"]);
+
+    const evaluate = new Function(
+      "document",
+      "window",
+      `return (${argv[2]});`,
+    ) as (doc: unknown, win: unknown) => boolean;
+    const visibleButton = {
+      textContent: "Connect as Supplier",
+    };
+    const hiddenButton = {
+      textContent: "Connect as Supplier",
+    };
+    const styles = new Map<object, { display: string; visibility: string }>([
+      [visibleButton, { display: "flex", visibility: "visible" }],
+      [hiddenButton, { display: "none", visibility: "visible" }],
+    ]);
+    const win = {
+      getComputedStyle: (el: object) =>
+        styles.get(el) ?? { display: "block", visibility: "visible" },
+    };
+    const doc = {
+      querySelectorAll: () => [hiddenButton, visibleButton],
+    };
+    expect(evaluate(doc, win)).toBe(true);
+    expect(evaluate({ querySelectorAll: () => [hiddenButton] }, win)).toBe(
+      false,
+    );
+  });
+
   it("selector wait omits the redundant unsupported visible state", () => {
     expect(
       waitConditionToArgv({

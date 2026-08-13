@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { execa } from "execa";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
@@ -2143,6 +2144,57 @@ async function runTransformStep(opts: {
  * If `assign` is set, the captured value is written to `evals/<assign>.json`
  * (after redaction) and made available for `${evals.<name>.…}` interpolation.
  */
+
+/** Resolve a host fixture path: absolute, cwd, then specDir. */
+export function resolveEvalHostFile(filePath: string, specDir: string): string {
+  const candidates = isAbsolute(filePath)
+    ? [filePath]
+    : [resolve(process.cwd(), filePath), resolve(specDir, filePath)];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `host file not found: ${filePath} (cwd=${process.cwd()} specDir=${specDir})`,
+  );
+}
+
+/**
+ * Turn eval args.filePath / args.fixtureFiles into in-page base64 so the
+ * browser never fetches `/cairn-fixtures/…`.
+ */
+export function loadEvalHostFiles(
+  args: Record<string, unknown>,
+  specDir: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...args };
+  if (typeof args.filePath === "string" && args.filePath.length > 0) {
+    const absolute = resolveEvalHostFile(args.filePath, specDir);
+    out.bytesBase64 = readFileSync(absolute).toString("base64");
+    out.filePath = absolute;
+  }
+  if (
+    args.fixtureFiles &&
+    typeof args.fixtureFiles === "object" &&
+    args.fixtureFiles !== null &&
+    !Array.isArray(args.fixtureFiles)
+  ) {
+    const fixtureBytes: Record<string, string> = {};
+    for (const [name, raw] of Object.entries(
+      args.fixtureFiles as Record<string, unknown>,
+    )) {
+      if (typeof raw !== "string" || raw.length === 0) {
+        throw new Error(`fixtureFiles.${name} must be a host path`);
+      }
+      fixtureBytes[name] = readFileSync(
+        resolveEvalHostFile(raw, specDir),
+      ).toString("base64");
+    }
+    out.fixtureBytes = fixtureBytes;
+    delete out.fixtureFiles;
+  }
+  return out;
+}
+
 async function runEvalStep(opts: {
   step: EvalStep;
   backend: BrowserBackend;
@@ -2172,7 +2224,19 @@ async function runEvalStep(opts: {
   }
 
   // Wrap so `args` is the single argument and the value is returned.
-  const argsJson = JSON.stringify(target.args ?? {});
+  // Host paths (`filePath` / `fixtureFiles`) are read here and injected as
+  // base64 so the page can build a readable File without staging into the
+  // app's public/ directory (CDP path upload is ACCESS_DENIED).
+  let pageArgs: Record<string, unknown>;
+  try {
+    pageArgs = loadEvalHostFiles(target.args ?? {}, opts.specDir);
+  } catch (e) {
+    return {
+      ok: false,
+      error: `eval: ${(e as Error).message}`,
+    };
+  }
+  const argsJson = JSON.stringify(pageArgs);
   const wrapped = `(async (args) => { ${source} })(${argsJson})`;
 
   let result;

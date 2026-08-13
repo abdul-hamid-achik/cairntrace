@@ -134,6 +134,7 @@ function stepBudgetMs(step: Step, specSettleMs: number | undefined): number {
     );
   }
   if ("wait" in step) {
+    if ("ms" in step.wait) return step.wait.ms;
     return step.wait.timeoutMs ?? DEFAULT_STEP_BUDGET_MS;
   }
   if ("request" in step) {

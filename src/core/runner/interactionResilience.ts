@@ -28,11 +28,15 @@ import type {
 export const FILL_VERIFY_RETRIES = 3;
 export const FILL_VERIFY_SETTLE_MS = 500;
 export const CLICK_UNTIL_MAX_ATTEMPTS = 4;
+export const PRESS_UNTIL_MAX_ATTEMPTS = 8;
 export const DEFAULT_CLICK_UNTIL_TIMEOUT_MS = 30_000;
 export const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 export const VALUE_WAIT_POLL_MS = 100;
 
 const CLICK_RETRY_BACKOFF_MS = [250, 500, 1_000] as const;
+const PRESS_RETRY_BACKOFF_MS = [
+  5_000, 10_000, 15_000, 20_000, 20_000, 20_000, 20_000,
+] as const;
 const CONDITION_POLL_MS = 100;
 
 /** Resolve config + environment precedence and reject unusable multipliers. */
@@ -77,6 +81,12 @@ export function applyWaitScale(step: Step, waitScale: number): Step {
   }
 
   if ("wait" in step) {
+    if ("ms" in step.wait) {
+      return {
+        ...step,
+        wait: { ms: scale(step.wait.ms) },
+      };
+    }
     return {
       ...step,
       wait: {
@@ -105,11 +115,18 @@ export function applyWaitScale(step: Step, waitScale: number): Step {
       ...step,
       batch: step.batch.map((sub) => {
         if (!("wait" in sub)) return sub;
+        if ("ms" in sub.wait) {
+          return { ...sub, wait: { ms: scale(sub.wait.ms) } };
+        }
         return {
           ...sub,
           wait: {
             ...sub.wait,
-            timeoutMs: scale(sub.wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+            timeoutMs: scale(
+              "timeoutMs" in sub.wait
+                ? (sub.wait.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
+                : DEFAULT_WAIT_TIMEOUT_MS,
+            ),
           },
         };
       }),
@@ -140,6 +157,12 @@ export async function runResilientBrowserStep(
   }
   if ("click" in step && step.click.until) {
     return runClickUntilStep(step, backend, waitScale);
+  }
+  if ("press" in step && step.until) {
+    return runPressUntilStep(step, backend, waitScale);
+  }
+  if ("wait" in step && "ms" in step.wait) {
+    return runWaitMsStep(step);
   }
   if ("wait" in step && "value" in step.wait) {
     return runWaitValueStep(step, backend);
@@ -257,6 +280,30 @@ function postconditionFailure(
     stdout: "",
     stderr: error,
     exitCode: 1,
+    durationMs: Date.now() - startedAt,
+    argv: [],
+  };
+}
+
+async function runWaitMsStep(step: WaitStep): Promise<InvocationResult> {
+  if (!("ms" in step.wait)) {
+    return {
+      ok: false,
+      stdout: "",
+      stderr: "wait.ms missing",
+      exitCode: 1,
+      durationMs: 0,
+      argv: [],
+    };
+  }
+  const ms = step.wait.ms;
+  const startedAt = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  return {
+    ok: true,
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
     durationMs: Date.now() - startedAt,
     argv: [],
   };
@@ -431,6 +478,84 @@ async function runVerifiedInputStep(
   };
 }
 
+async function runPressUntilStep(
+  step: Extract<Step, { press: string }>,
+  backend: BrowserBackend,
+  waitScale: number,
+): Promise<InvocationResult> {
+  const until = step.until!;
+  const timeoutMs = Math.max(
+    1,
+    Math.round((until.timeoutMs ?? DEFAULT_CLICK_UNTIL_TIMEOUT_MS) * waitScale),
+  );
+  const deadline = Date.now() + timeoutMs;
+  const baseStep = {
+    id: step.id,
+    press: step.press,
+    ...(step.target ? { target: step.target } : {}),
+  };
+  let durationMs = 0;
+  let lastResult: InvocationResult | undefined;
+  let lastObserved = "condition not checked";
+  let pressAttempts = 0;
+
+  for (let attempt = 0; attempt < PRESS_UNTIL_MAX_ATTEMPTS; attempt++) {
+    const result = await backend.runStep(baseStep);
+    pressAttempts++;
+    durationMs += result.durationMs;
+    lastResult = result;
+    if (!result.ok) return mergeInvocation(result, durationMs, undefined);
+
+    const remaining = Math.max(0, deadline - Date.now());
+    const waitBudgetMs =
+      attempt === PRESS_UNTIL_MAX_ATTEMPTS - 1
+        ? remaining
+        : Math.min(
+            remaining,
+            Math.max(
+              1,
+              Math.round(
+                (PRESS_RETRY_BACKOFF_MS[attempt] ?? 20_000) * waitScale,
+              ),
+            ),
+          );
+    const observed = await waitForClickCondition(
+      backend,
+      until,
+      waitBudgetMs,
+      waitScale,
+    );
+    lastObserved = observed.detail;
+    if (observed.ok) {
+      return {
+        ...result,
+        durationMs,
+        ...(attempt > 0
+          ? {
+              stderr: appendDiagnostic(
+                result.stderr,
+                `press.until satisfied after ${attempt + 1} key presses`,
+              ),
+            }
+          : {}),
+      };
+    }
+    if (Date.now() >= deadline) break;
+  }
+
+  const basis = lastResult ?? emptyFailure();
+  return {
+    ...basis,
+    ok: false,
+    exitCode: basis.exitCode === 0 ? 1 : basis.exitCode,
+    durationMs,
+    stderr: appendDiagnostic(
+      basis.stderr,
+      `press.until ${describeClickUntil(until)} was not satisfied after ${pressAttempts} key presses within ${timeoutMs}ms (${lastObserved})`,
+    ),
+  };
+}
+
 async function runClickUntilStep(
   step: ClickStep,
   backend: BrowserBackend,
@@ -548,6 +673,14 @@ async function clickConditionHolds(
     const count = await backend.getCount(until.selector);
     return { ok: count > 0, detail: `selector count was ${count}` };
   }
+  if ("url" in until) {
+    const url = await backend.getUrl();
+    const ok = matchWaitUrl(url, until.url);
+    return {
+      ok,
+      detail: `url ${ok ? "matched" : "was"} ${JSON.stringify(url)}`,
+    };
+  }
   const text = await backend.getText("page");
   if ("text" in until) {
     const ok = textContains(text, until.text);
@@ -586,6 +719,7 @@ function describeClickUntil(until: ClickUntil): string {
   if ("selectorGone" in until)
     return `selectorGone=${JSON.stringify(until.selectorGone)}`;
   if ("selector" in until) return `selector=${JSON.stringify(until.selector)}`;
+  if ("url" in until) return `url ${describeWaitUrl(until.url)}`;
   if ("text" in until) return `text=${JSON.stringify(until.text)}`;
   return `notText=${JSON.stringify(until.notText)}`;
 }

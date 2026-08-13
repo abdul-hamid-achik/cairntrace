@@ -3359,6 +3359,40 @@ steps:
     expect(backend.lastEvaluatedScript).toContain('"n":21');
   });
 
+  it("injects host filePath as bytesBase64 into eval args", async () => {
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const dir = join(artifactRoot, "eval-file-host");
+    await mkdir(dir, { recursive: true });
+    const pdf = join(dir, "tiny.pdf");
+    await writeFile(pdf, Buffer.from("%PDF-1.4 host fixture"));
+    const specPath = await writeSpec(
+      "eval_file_path",
+      `version: 1
+name: eval_file_path
+intent: eval loads host filePath as bytesBase64
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: with_file
+    eval:
+      js: "return { hasBytes: typeof args.bytesBase64 === 'string' && args.bytesBase64.length > 8 }"
+      args: { filePath: ${JSON.stringify(pdf)} }
+      assign: loaded
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult({ hasBytes: true });
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(backend.lastEvaluatedScript).toContain("bytesBase64");
+    expect(backend.lastEvaluatedScript).not.toContain("/cairn-fixtures/");
+  });
+
   it("works without assign (fire-and-forget eval)", async () => {
     const specPath = await writeSpec(
       "eval_no_assign",

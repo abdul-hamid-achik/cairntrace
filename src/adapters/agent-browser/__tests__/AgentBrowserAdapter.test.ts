@@ -2374,6 +2374,13 @@ describe("selector click rect-settle guard", () => {
     expect(result.stderr).toContain("(1384, 400)");
     expect(result.stderr).toContain("1280x800");
     expect(result.stderr).toContain("viewport: { width, height }");
+    expect(
+      execaMock.mock.calls.some((call) =>
+        String((call[1] as string[] | undefined)?.join(" ") ?? "").includes(
+          "__scrollOverflowAncestors",
+        ),
+      ),
+    ).toBe(true);
     // The click is never dispatched at a coordinate the target has left.
     expect(
       execaMock.mock.calls.some((call) =>
