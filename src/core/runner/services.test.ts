@@ -619,7 +619,7 @@ describe("startServices — indefinite wait + live output", () => {
       if (cmd === "tmux" && args[0] === "capture-pane") {
         return {
           exitCode: 0,
-          stdout: "starting worker\nfatal: temporal connection refused\n$",
+          stdout: "starting worker\nfatal: redis connection refused\n$",
           stderr: "",
         };
       }
@@ -652,7 +652,7 @@ describe("startServices — indefinite wait + live output", () => {
         },
       ),
     ).rejects.toThrow(
-      /service command exited before readiness; pane returned to idle shell "zsh"[\s\S]*fatal: temporal connection refused/,
+      /service command exited before readiness; pane returned to idle shell "zsh"[\s\S]*fatal: redis connection refused/,
     );
 
     expect(
@@ -676,7 +676,7 @@ describe("startServices — indefinite wait + live output", () => {
     );
     await expect(
       readFile(join(paneLogRoot, "test-worker.pane.log"), "utf8"),
-    ).resolves.toContain("fatal: temporal connection refused");
+    ).resolves.toContain("fatal: redis connection refused");
   });
 
   it("captures a Fatal line emitted between the periodic capture and pane exit detection", async () => {
@@ -1818,7 +1818,7 @@ describe("startServices — teardown", () => {
     );
     await handle.stop();
     // Reuse is the default → leave tmux alive AND keep docker infra up so the
-    // next run can reuse both (Go/Node panes need mongo/rabbit/postgres).
+    // next run can reuse both (Go/Node panes need mongo/redis/postgres).
     expect(tmuxKilled).toBe(false);
     expect(dockerDownRan).toBe(false);
   });

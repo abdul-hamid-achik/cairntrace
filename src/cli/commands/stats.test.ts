@@ -63,9 +63,9 @@ describe("formatBarLine", () => {
 describe("renderStatsCharts", () => {
   it("renders pass-rate and duration charts", () => {
     const charts = renderStatsCharts([
-      group({ key: "rabbit", passRate: 1, duration: { n: 1, p50: 50_000 } }),
+      group({ key: "legacy", passRate: 1, duration: { n: 1, p50: 50_000 } }),
       group({
-        key: "temporal",
+        key: "next",
         passRate: 0.5,
         duration: { n: 1, p50: 80_000 },
         metric: { n: 1, p50: 12_000 },
@@ -77,8 +77,8 @@ describe("renderStatsCharts", () => {
     expect(text).toContain("### Duration p50");
     expect(text).toContain("### Metric p50");
     expect(text).toContain("processingDurationMS");
-    expect(text).toContain("rabbit");
-    expect(text).toContain("temporal");
+    expect(text).toContain("legacy");
+    expect(text).toContain("next");
     expect(text).toContain("```");
   });
 
@@ -116,14 +116,14 @@ describe("renderStatsMarkdown", () => {
       matched: 3,
       groups: [
         group({
-          key: "rabbit",
+          key: "legacy",
           passRate: 1,
           duration: { n: 2, p50: 50_000, p95: 55_000 },
           metric: { n: 2, p50: 40_000, p95: 45_000 },
           metricName: "processingDurationMS",
         }),
         group({
-          key: "temporal",
+          key: "next",
           passRate: 0.5,
           passed: 1,
           failed: 1,
@@ -134,8 +134,8 @@ describe("renderStatsMarkdown", () => {
       ],
       deltas: [
         {
-          baseline: "rabbit",
-          against: "temporal",
+          baseline: "legacy",
+          against: "next",
           passRateDelta: -0.5,
           durationP50Ratio: 1.6,
           metricP50Ratio: 1.75,
@@ -145,8 +145,8 @@ describe("renderStatsMarkdown", () => {
     const md = renderStatsMarkdown(s);
     expect(md).toContain("# Stats by `path`");
     expect(md).toContain("suite=ab");
-    expect(md).toContain("| rabbit |");
-    expect(md).toContain("| temporal |");
+    expect(md).toContain("| legacy |");
+    expect(md).toContain("| next |");
     expect(md).toContain("## Charts");
     expect(md).toContain("## Deltas vs baseline");
     expect(md).toContain("×1.6");
@@ -213,9 +213,9 @@ describe("cairn stats CLI", () => {
       }
     }
 
-    await putRun("r1", { path: "rabbit", suite: "cli" }, "passed", 1000, 400);
-    await putRun("r2", { path: "rabbit", suite: "cli" }, "failed", 2000, 500);
-    await putRun("t1", { path: "temporal", suite: "cli" }, "passed", 3000, 900);
+    await putRun("r1", { path: "legacy", suite: "cli" }, "passed", 1000, 400);
+    await putRun("r2", { path: "legacy", suite: "cli" }, "failed", 2000, 500);
+    await putRun("t1", { path: "next", suite: "cli" }, "passed", 3000, 900);
 
     const result = await execa(
       join(process.cwd(), "bin", "cairn"),
@@ -226,7 +226,7 @@ describe("cairn stats CLI", () => {
         "--label",
         "suite=cli",
         "--baseline",
-        "rabbit",
+        "legacy",
         "--artifact-root",
         runs,
         "--format",
@@ -237,8 +237,8 @@ describe("cairn stats CLI", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("## Charts");
     expect(result.stdout).toContain("Pass rate");
-    expect(result.stdout).toContain("rabbit");
-    expect(result.stdout).toContain("temporal");
+    expect(result.stdout).toContain("legacy");
+    expect(result.stdout).toContain("next");
     expect(result.stdout).toContain("Deltas vs baseline");
 
     const json = await execa(

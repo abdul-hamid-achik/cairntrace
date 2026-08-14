@@ -401,7 +401,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       const needle = ${JSON.stringify(locator.hasText ?? "")};
       const nth = ${JSON.stringify(locator.nth ?? null)};
       const normalize = (s) => (s || "").replace(/\\s+/g, " ").trim().toLowerCase();
-      // Do not require opacity/box size: NSJ drawer buttons are often
+      // Do not require opacity/box size: custom drawer buttons are often
       // opacity:0 or 0x0 mid-slide but still the click target.
       const hidden = (el) => {
         const style = window.getComputedStyle(el);

@@ -149,13 +149,13 @@ export function buildExplain(): ExplainResult {
             name: "--label",
             type: "string",
             description:
-              "Stamp free-form cohort labels onto each run.json as key=value (repeatable). Used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit, suite=answer-change-ab).",
+              "Stamp free-form cohort labels onto each run.json as key=value (repeatable). Used by `cairn stats --group-by` for A/B cohorts (e.g. path=legacy, suite=checkout-ab).",
           },
           {
             name: "--before",
             type: "string",
             description:
-              "Shell command run once after services/secrets and before the first spec (repeatable). Use for domain setup like flipping Temporal/Rabbit path. Failures abort.",
+              "Shell command run once after services/secrets and before the first spec (repeatable). Use for domain setup like flipping a feature path. Failures abort.",
           },
           {
             name: "--after",
@@ -500,7 +500,7 @@ export function buildExplain(): ExplainResult {
             name: "--group-by",
             type: "string",
             description:
-              "Label key to cohort by (required), e.g. path for path=rabbit|temporal",
+              "Label key to cohort by (required), e.g. path for path=legacy|next",
           },
           {
             name: "--label",
@@ -1275,7 +1275,7 @@ export function buildExplain(): ExplainResult {
         summary:
           "Focus a locator without clicking it; useful for custom comboboxes and controls that reveal options on focus",
         yamlExample:
-          'steps:\n  - focus: { by: selector, selector: "[data-answer-key=Entity_Country] input" }',
+          'steps:\n  - focus: { by: selector, selector: "[data-qa=country] input" }',
       },
       {
         id: "fill",

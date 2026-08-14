@@ -334,7 +334,7 @@ describe("exportPlaywright", () => {
           {
             click: {
               by: "selector",
-              selector: '[data-answer-key="Owner"] .radio-label',
+              selector: '[data-qa="Owner"] .radio-label',
               hasText: "Yes",
             },
           },
@@ -343,7 +343,7 @@ describe("exportPlaywright", () => {
     );
     expect(src).toContain(`await page.locator("#search").press("Enter");`);
     expect(src).toContain(
-      `await page.locator("[data-answer-key=\\"Owner\\"] .radio-label").filter({ hasText: "Yes" }).click();`,
+      `await page.locator("[data-qa=\\"Owner\\"] .radio-label").filter({ hasText: "Yes" }).click();`,
     );
   });
 
@@ -700,6 +700,72 @@ describe("exportPlaywright", () => {
     expect(src).toContain(
       `await page.getByRole("button", { name: "OK" }).first().click();`,
     );
+  });
+
+  it("exports when: object selector+hasText and notSelector", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            id: "maybe_card",
+            when: { selector: ".invite-card", hasText: "Acme" },
+            click: { by: "role", role: "button", name: "Connect" },
+          },
+          {
+            id: "if_missing",
+            when: { notSelector: ".drawer" },
+            click: { by: "role", role: "button", name: "Next" },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `if (await page.locator(".invite-card").filter({ hasText: "Acme" }).count() > 0) {`,
+    );
+    expect(src).toContain(
+      `if ((await page.locator(".drawer").count()) === 0) {`,
+    );
+  });
+
+  it("emits includeHidden for visible:false role locators", () => {
+    const src = srcOf(
+      baseSpec({
+        steps: [
+          {
+            click: {
+              by: "role",
+              role: "option",
+              name: "Hardware",
+              visible: false,
+            },
+          },
+        ],
+      }),
+    );
+    expect(src).toContain(
+      `await page.getByRole("option", { name: "Hardware", includeHidden: true }).first().click();`,
+    );
+  });
+
+  it("embeds eval.file contents when the source is readable", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cairn-eval-file-"));
+    temporaryDirectories.push(directory);
+    const evalFile = join(directory, "pick.js");
+    writeFileSync(evalFile, `return args.label;`);
+    const result = exportPlaywright(
+      baseSpec({
+        steps: [
+          {
+            id: "pick",
+            eval: { file: "./pick.js", args: { label: "Yes" } },
+          },
+        ],
+      }),
+      { sourcePath: join(directory, "flow.yml") },
+    );
+    expect(result.coverage.skips).toEqual([]);
+    expect(result.source).toContain("return args.label;");
+    expect(result.source).not.toContain("eval.file");
   });
 
   it("exports request with body headers and expectStatus", () => {

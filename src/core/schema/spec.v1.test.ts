@@ -34,12 +34,12 @@ describe("authoring locators and waits", () => {
     expect(
       LocatorSchema.parse({
         by: "selector",
-        selector: '[data-answer-key="Owner"] .radio-label',
+        selector: '[data-qa="Owner"] .radio-label',
         hasText: "Yes",
       }),
     ).toMatchObject({
       by: "selector",
-      selector: '[data-answer-key="Owner"] .radio-label',
+      selector: '[data-qa="Owner"] .radio-label',
       hasText: "Yes",
     });
     expect(
@@ -59,20 +59,20 @@ describe("authoring locators and waits", () => {
     expect(
       LocatorSchema.parse({
         by: "testid",
-        testid: "Entity_Website",
+        testid: "product_name",
         near: "Website",
       }),
     ).toMatchObject({
       by: "testid",
-      testid: "Entity_Website",
+      testid: "product_name",
       near: "Website",
     });
     expect(
       StepSchema.parse({
-        click: { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+        click: { by: "role", role: "button", name: "Open", near: "Acme Corp" },
       }),
     ).toMatchObject({
-      click: { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+      click: { by: "role", role: "button", name: "Open", near: "Acme Corp" },
     });
     expect(
       WaitConditionSchema.parse({ url: { includes: "/connection/" } }),
@@ -103,7 +103,7 @@ describe("authoring locators and waits", () => {
       ReusableActionSchema.parse({
         version: 1,
         name: "open_named",
-        vars: { companyName: "Turnvu DBA" },
+        vars: { companyName: "Acme Corp" },
         steps: [
           {
             click: {
@@ -115,7 +115,7 @@ describe("authoring locators and waits", () => {
           },
         ],
       }).vars,
-    ).toEqual({ companyName: "Turnvu DBA" });
+    ).toEqual({ companyName: "Acme Corp" });
   });
 
   it("accepts string and object use: forms", () => {

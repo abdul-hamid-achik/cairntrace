@@ -157,7 +157,7 @@ describe("exportPlaywright goldens", () => {
               runtime: "node",
               file: "../verifiers/check.ts",
               fixtures: {
-                expectedRoute: "temporal",
+                expectedRoute: "next",
                 token: "prefix-__CAIRN_RUN_TOKEN__",
                 secret: "__CAIRN_SECRET_REF__API_KEY__",
               },

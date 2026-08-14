@@ -141,12 +141,12 @@ export interface RunCommandOptions {
   tag?: string[];
   /**
    * Repeatable `--label key=value`: free-form cohort labels stamped into each
-   * run.json (e.g. path=rabbit, suite=answer-change-ab). Consumed by `cairn stats`.
+   * run.json (e.g. path=legacy, suite=checkout-ab). Consumed by `cairn stats`.
    */
   label?: string[];
   /**
    * Repeatable `--before <shell>`: run once after services/secrets, before the
-   * first spec (e.g. flip Temporal/Rabbit path, warm caches). Failures abort.
+   * first spec (e.g. flip a feature path, warm caches). Failures abort.
    */
   before?: string[];
   /**
@@ -527,7 +527,7 @@ export async function runCommand(
   // webServer/services. Best-effort: no config → undefined → adapter defaults.
   const browser = await resolveBrowserConfig(expandedSpecs[0]!, opts);
 
-  // Domain hooks (e.g. tools/set-answer-change-path.sh temporal) run AFTER
+  // Domain hooks (e.g. tools/flip-path.sh next) run AFTER
   // services+secrets so they can restart tmux panes, and BEFORE the first spec.
   try {
     await runHookCommands("before", opts.before, {
@@ -1492,7 +1492,7 @@ function emitErroredResult(result: RunResult, format: string): void {
 /**
  * Compact form of the opening "starting: ..." line: a count plus (when the
  * specs share a directory) that directory relative to `cwd`, e.g.
- * `starting 6 specs (flows/answer-change)`. Falls back to just the count
+ * `starting 6 specs (flows/checkout)`. Falls back to just the count
  * when there's no useful shared directory (single spec with nothing to add,
  * or specs scattered with only the filesystem root in common). The full
  * absolute path list is still logged separately at debug level.

@@ -30,7 +30,7 @@ export interface PlaywrightTimeoutBudget {
  *
  * Steps and outcomes execute serially, so their budgets are summed rather than
  * maxed. A node file verifier contributes its full `script.timeoutMs`; this is
- * the important distinction for specs with several long Temporal observers.
+ * the important distinction for specs with several long-running observers.
  */
 export function playwrightTestTimeoutBudget(
   spec: Spec,

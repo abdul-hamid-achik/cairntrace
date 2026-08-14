@@ -74,8 +74,8 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 ```yaml
 - click: { by: role, role: button, name: Save }
 - click: { by: role, role: button, name: Pay, nth: 1 }
-- click: { by: role, role: button, name: Open, near: "Turnvu DBA" }
-- click: { by: testid, testid: Entity_Website }
+- click: { by: role, role: button, name: Open, near: "Acme Corp" }
+- click: { by: testid, testid: product_name }
 - click: { by: selector, selector: "button.primary" }
 - click: { by: selector, selector: '[data-testid^="entity-switch-item-"]', nth: 1 }
 - click: { by: role, role: link, name: Reports }
@@ -91,12 +91,12 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 
 `click.until` retries the click at most four times until `selectorGone`, `selector`, `text`, `notText`, or `url` (same matcher as `wait.url`) holds.
 
-`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Turnvu DBA, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `hasText: <str>` keeps only matches whose visible text contains that string (also whitespace-normalized, case-insensitive). Use it to pick `Yes` inside `[data-answer-key="…"]` without an eval:
+`near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Acme Corp, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `hasText: <str>` keeps only matches whose visible text contains that string (also whitespace-normalized, case-insensitive). Use it to pick `Yes` inside `[data-qa="…"]` without an eval:
 
 ```yaml
 - click:
     by: selector
-    selector: '[data-answer-key="ADBE_Supplier_Request_Business_Owner"] .radio-label'
+    selector: '[data-qa="business_owner"] .radio-label'
     hasText: "Yes"
 ```
 
@@ -126,7 +126,7 @@ Focus a locator without clicking it. This is useful for custom comboboxes and
 controls that reveal dependent UI on focus.
 
 ```yaml
-- focus: { by: selector, selector: '[data-answer-key="Entity_Country"] input' }
+- focus: { by: selector, selector: '[data-qa="country"] input' }
 ```
 
 ### `fill`
@@ -311,7 +311,7 @@ An action file may declare `vars:` defaults for `${vars.X}` placeholders in its 
 version: 1
 name: open_home_connection
 vars:
-  connectionCompanyName: Turnvu DBA
+  connectionCompanyName: Acme Corp
 steps:
   - open: /dash
   - click:

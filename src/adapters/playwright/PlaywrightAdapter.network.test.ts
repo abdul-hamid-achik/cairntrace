@@ -11,7 +11,7 @@ describe("PlaywrightAdapter native network evidence", () => {
     const request = fakeRequest({
       contentType: "application/problem+json; charset=utf-8",
       body: JSON.stringify({
-        Entity_Website: "cairn.example",
+        product_name: "cairn.example",
         code: "public-result-code",
         nested: {
           password: "do-not-persist",
@@ -45,7 +45,7 @@ describe("PlaywrightAdapter native network evidence", () => {
       entry!.responseTimestamp! - entry!.timestamp!,
     );
     expect(JSON.parse(entry!.postData!)).toEqual({
-      Entity_Website: "cairn.example",
+      product_name: "cairn.example",
       code: "public-result-code",
       nested: {
         password: "[redacted]",

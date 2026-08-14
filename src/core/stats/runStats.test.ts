@@ -45,8 +45,8 @@ async function writeRun(
 
 describe("parseLabelFlags", () => {
   it("parses key=value pairs", () => {
-    expect(parseLabelFlags(["path=rabbit", "suite=ab"])).toEqual({
-      path: "rabbit",
+    expect(parseLabelFlags(["path=legacy", "suite=ab"])).toEqual({
+      path: "legacy",
       suite: "ab",
     });
   });
@@ -82,21 +82,21 @@ describe("aggregateRunStats", () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-"));
     await writeRun(join(root, "r1"), {
       runId: "r1",
-      labels: { path: "rabbit", suite: "ab" },
+      labels: { path: "legacy", suite: "ab" },
       status: "passed",
       durationMs: 1000,
       exitCode: 0,
     });
     await writeRun(join(root, "r2"), {
       runId: "r2",
-      labels: { path: "rabbit", suite: "ab" },
+      labels: { path: "legacy", suite: "ab" },
       status: "failed",
       durationMs: 2000,
       exitCode: 1,
     });
     await writeRun(join(root, "t1"), {
       runId: "t1",
-      labels: { path: "temporal", suite: "ab" },
+      labels: { path: "next", suite: "ab" },
       status: "passed",
       durationMs: 3000,
       exitCode: 0,
@@ -104,7 +104,7 @@ describe("aggregateRunStats", () => {
     // wrong suite — filtered out
     await writeRun(join(root, "other"), {
       runId: "other",
-      labels: { path: "temporal", suite: "other" },
+      labels: { path: "next", suite: "other" },
       status: "passed",
       durationMs: 999,
       exitCode: 0,
@@ -125,23 +125,23 @@ describe("aggregateRunStats", () => {
     });
 
     expect(stats.matched).toBe(3);
-    expect(stats.groups.map((g) => g.key)).toEqual(["rabbit", "temporal"]);
-    const rabbit = stats.groups.find((g) => g.key === "rabbit")!;
-    expect(rabbit.runs).toBe(2);
-    expect(rabbit.passed).toBe(1);
-    expect(rabbit.failed).toBe(1);
-    expect(rabbit.passRate).toBe(0.5);
-    expect(rabbit.duration.n).toBe(2);
-    expect(rabbit.duration.min).toBe(1000);
-    expect(rabbit.duration.max).toBe(2000);
+    expect(stats.groups.map((g) => g.key)).toEqual(["legacy", "next"]);
+    const legacy = stats.groups.find((g) => g.key === "legacy")!;
+    expect(legacy.runs).toBe(2);
+    expect(legacy.passed).toBe(1);
+    expect(legacy.failed).toBe(1);
+    expect(legacy.passRate).toBe(0.5);
+    expect(legacy.duration.n).toBe(2);
+    expect(legacy.duration.min).toBe(1000);
+    expect(legacy.duration.max).toBe(2000);
 
-    const temporal = stats.groups.find((g) => g.key === "temporal")!;
-    expect(temporal.runs).toBe(1);
-    expect(temporal.passRate).toBe(1);
+    const next = stats.groups.find((g) => g.key === "next")!;
+    expect(next.runs).toBe(1);
+    expect(next.passRate).toBe(1);
 
     expect(stats.deltas?.length).toBe(1);
-    expect(stats.deltas?.[0]?.baseline).toBe("rabbit");
-    expect(stats.deltas?.[0]?.against).toBe("temporal");
+    expect(stats.deltas?.[0]?.baseline).toBe("legacy");
+    expect(stats.deltas?.[0]?.against).toBe("next");
     expect(stats.runs?.length).toBe(3);
   });
 
@@ -150,7 +150,7 @@ describe("aggregateRunStats", () => {
     const runDir = join(root, "m1");
     await writeRun(runDir, {
       runId: "m1",
-      labels: { path: "temporal" },
+      labels: { path: "next" },
       status: "passed",
       durationMs: 5000,
       outcomes: [
@@ -166,7 +166,7 @@ describe("aggregateRunStats", () => {
     await writeFile(
       join(runDir, "outcomes/wf.raw.json"),
       JSON.stringify({
-        event: { processingDurationMS: 12345, routedTo: "temporal" },
+        event: { processingDurationMS: 12345, routedTo: "next" },
       }),
     );
 
@@ -183,21 +183,21 @@ describe("aggregateRunStats", () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-base-"));
     await writeRun(join(root, "r"), {
       runId: "r",
-      labels: { path: "rabbit" },
+      labels: { path: "legacy" },
       durationMs: 100,
     });
     await writeRun(join(root, "t"), {
       runId: "t",
-      labels: { path: "temporal" },
+      labels: { path: "next" },
       durationMs: 200,
     });
     const stats = await aggregateRunStats({
       artifactRoot: root,
       groupBy: "path",
-      baseline: "temporal",
+      baseline: "next",
     });
-    expect(stats.deltas?.[0]?.baseline).toBe("temporal");
-    expect(stats.deltas?.[0]?.against).toBe("rabbit");
+    expect(stats.deltas?.[0]?.baseline).toBe("next");
+    expect(stats.deltas?.[0]?.against).toBe("legacy");
   });
 
   it("does not harvest generic durationMs as domain metric", async () => {
@@ -205,7 +205,7 @@ describe("aggregateRunStats", () => {
     const runDir = join(root, "x");
     await writeRun(runDir, {
       runId: "x",
-      labels: { path: "rabbit" },
+      labels: { path: "legacy" },
       durationMs: 9999,
       outcomes: [
         { id: "o", status: "passed", evidenceRaw: "outcomes/o.raw.json" },
@@ -230,7 +230,7 @@ describe("aggregateRunStats", () => {
     const runDir = join(root, "c");
     await writeRun(runDir, {
       runId: "c",
-      labels: { path: "temporal" },
+      labels: { path: "next" },
       outcomes: [
         { id: "o", status: "passed", evidenceRaw: "outcomes/o.raw.json" },
       ],
@@ -271,14 +271,14 @@ describe("aggregateRunStats", () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-errored-"));
     await writeRun(join(root, "e"), {
       runId: "e",
-      labels: { path: "temporal" },
+      labels: { path: "next" },
       status: "errored",
       durationMs: 10,
       exitCode: 2,
     });
     await writeRun(join(root, "f"), {
       runId: "f",
-      labels: { path: "temporal" },
+      labels: { path: "next" },
       status: "failed",
       durationMs: 20,
       exitCode: 1,

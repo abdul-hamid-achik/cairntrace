@@ -350,7 +350,7 @@ test("golden_late_bound", async ({ page }, testInfo) => {
       throw new Error("verifier module must export a verify() function");
     }
     const res = await verify({
-      fixtures: { "expectedRoute": "temporal", "token": `prefix-${RUN_TOKEN}`, "secret": `${process.env.API_KEY ?? ""}` },
+      fixtures: { "expectedRoute": "next", "token": `prefix-${RUN_TOKEN}`, "secret": `${process.env.API_KEY ?? ""}` },
       artifacts: {},
       vars: {},
       runDir: cairnRunDir,

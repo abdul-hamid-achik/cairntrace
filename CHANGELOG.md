@@ -5,8 +5,26 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-08-14
+
 ### Added
 
+- Playwright `--project` export emits parameterized action helpers
+  (`fn(page, vars?)`) for declared `action.vars`, and extracts shared
+  runtime into `lib/` (network evidence, fill/type retry, `click.until`,
+  verifier loader). Call-site `use: { action, vars }` is a function call,
+  not an inlined expansion.
+- `cairn export playwright --into <dir>` writes actions/lib/tests/verifiers
+  into an existing Playwright tree without overwriting host config.
+  MCP `cairn_export_playwright` now accepts `project`, `into`, `config`,
+  `env`, and `var`.
+- Project tests keep source folders, wrap steps/outcomes in `test.step`,
+  honor `metadata.feature` / `metadata.tags`, skip `echo` preconditions,
+  relocate precondition cwd via `CAIRN_PROJECT_ROOT`, and stamp
+  `viewport` / `testIdAttribute` / screenshot / trace from config+specs.
+- `eval.file` is copied into `evals/` and embedded; `when:` object form
+  (`selector`/`hasText`/`notSelector`) and locator `visible` export;
+  skipped real interactions mark the generated test `test.fixme`.
 - `type.delayMs` now maps to agent-browser `type --delay` (both backends).
 - `cairn run` starts agent-browser sessions with `--idle-timeout 0` so a
   long script outcome cannot idle-kill the daemon.
@@ -97,7 +115,7 @@ postconditions, service process profiles, npm Trusted Publisher).
   `data-testid`) is the attribute Playwright `getByTestId` and agent-browser
   selectors read. Inventory emits `{ by: testid, testid: … }`.
 - Locator `near: <text>` — keep the control nearest that visible copy (the
-  Open button in the Turnvu DBA card, not the other Opens on the page).
+  Open button in the Acme Corp card, not the other Opens on the page).
   Snapshot backends score shared ancestors; Playwright scopes to the
   innermost ancestor of the text that still contains the target.
 - Reusable action `vars:` defaults for `${vars.X}`. Precedence: action
@@ -501,8 +519,8 @@ Playwright, Cargo) and a DX review of a real 6-spec, multi-hour run.
   and per-selected `tags` (from the spec) for fancy JSON/markdown output.
 
   ```bash
-  cairn run flows/ --tag answer-change --select-only --json
-  cairn run flows/ --tag answer-change --headed --cold-start
+  cairn run flows/ --tag checkout --select-only --json
+  cairn run flows/ --tag checkout --headed --cold-start
   ```
 
 ## [1.40.3] - 2026-07-17
@@ -525,7 +543,7 @@ Playwright, Cargo) and a DX review of a real 6-spec, multi-hour run.
 
 - **Recreate tmux when docker was refreshed this run.** A leftover session with
   still-running `node`/`go` panes looked "live" after `docker compose up`
-  recreated containers, but those processes held dead rabbit/mongo/temporal
+  recreated containers, but those processes held dead mongo/redis/postgres
   connections and spammed reconnect errors. If docker actually started (not
   reused) this run, cairn kills and recreates the tmux session so app services
   reconnect cleanly.
@@ -545,7 +563,7 @@ Playwright, Cargo) and a DX review of a real 6-spec, multi-hour run.
   (command never started or process died) are re-launched, and panes already
   running a non-shell process are left alone.
 - **teardown no longer runs `docker compose down` while reusing tmux.** Live
-  dev-server panes need mongo/rabbit/postgres; tearing docker down while
+  dev-server panes need mongo/redis/postgres; tearing docker down while
   leaving the session alive was orphaning Go/Node services against dead ports.
   With `tmux.reuseExisting: false`, full teardown (tmux kill + docker down)
   still runs.

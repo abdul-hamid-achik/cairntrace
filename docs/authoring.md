@@ -59,21 +59,21 @@ Put stable labels on a spec under `metadata.tags`. Agents and humans then run a 
 
 ```yaml
 metadata:
-  feature: answer-change-temporal
+  feature: checkout-next
   priority: high
   tags:
     - checkout-regression
-    - temporal
-    - answer-change
+    - next
+    - checkout
 ```
 
 ```bash
 # preview which specs match (no browser)
-cairn run flows/ --tag answer-change --select-only --json
+cairn run flows/ --tag checkout --select-only --json
 
 # run every matching spec (AND if you pass multiple --tag)
-cairn run flows/ --tag answer-change --cold-start --headed
-cairn run flows/ --tag temporal --tag checkout-regression --cold-start
+cairn run flows/ --tag checkout --cold-start --headed
+cairn run flows/ --tag next --tag checkout-regression --cold-start
 ```
 
 Matching is **case-insensitive**. Multiple `--tag` flags mean **AND** (the spec must declare every listed tag). Specs with no `metadata.tags` never match a tag filter.
@@ -83,10 +83,10 @@ Matching is **case-insensitive**. Multiple `--tag` flags mean **AND** (the spec 
 Stamp free-form **cohort labels** on every run in an invocation:
 
 ```bash
-cairn run flows/ --tag answer-change \
-  --label path=temporal \
-  --label suite=answer-change-ab \
-  --before 'tools/set-answer-change-path.sh temporal' \
+cairn run flows/ --tag checkout \
+  --label path=next \
+  --label suite=checkout-ab \
+  --before 'tools/flip-path.sh next' \
   --cold-start
 ```
 
@@ -99,7 +99,7 @@ cairn run flows/ --tag answer-change \
 Aggregate cohorts:
 
 ```bash
-cairn stats --group-by path --label suite=answer-change-ab --baseline rabbit --format md
+cairn stats --group-by path --label suite=checkout-ab --baseline legacy --format md
 ```
 
 Markdown output includes a table, ASCII bar charts (pass rate / duration p50 / optional domain metric), and pairwise deltas. JSON/YAML use schema `urn:cairntrace.dev:stats:v1`. Domain latency is harvested from `outcomes/*.raw.json` when fields like `processingDurationMS` are present.

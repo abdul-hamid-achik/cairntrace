@@ -70,7 +70,7 @@ steps:
       timeoutMs: 180000
   - click:
       by: selector
-      selector: '[data-answer-key="Owner"] .radio-label'
+      selector: '[data-qa="Owner"] .radio-label'
       hasText: "Yes"
 `,
     );
@@ -125,7 +125,7 @@ steps:
       {
         click: {
           by: "selector",
-          selector: '[data-answer-key="Owner"] .radio-label',
+          selector: '[data-qa="Owner"] .radio-label',
           hasText: "Yes",
         },
       },
@@ -702,7 +702,7 @@ steps:
       `version: 1
 name: open_named
 vars:
-  companyName: Turnvu DBA
+  companyName: Acme Corp
   extra: from-action
 steps:
   - click:
@@ -741,7 +741,7 @@ steps:
           by: "role",
           role: "button",
           name: "Open",
-          near: "Turnvu DBA",
+          near: "Acme Corp",
         },
       },
       {

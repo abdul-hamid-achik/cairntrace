@@ -38,6 +38,12 @@ export interface ParseResult {
   origins: StepOrigin[];
   /** Actions loaded from `imports:`, keyed by action name. */
   actionsByName: Map<string, LoadedAction>;
+  /**
+   * Merged `${vars.X}` bag used while parsing this spec (spec `vars:` then
+   * `ParseOptions.vars`). Exporters use it to pass spec-level overrides into
+   * parameterized action calls without re-expanding the action body.
+   */
+  vars?: Record<string, string | number | boolean>;
 }
 
 export interface LoadedAction {
@@ -232,7 +238,37 @@ export async function parseSpec(
     contractHashValid,
     origins,
     actionsByName,
+    vars,
   };
+}
+
+/**
+ * Re-parse an action YAML with an explicit vars bag. The Playwright exporter
+ * uses this to keep declared `action.vars` as late-bound sentinels so the
+ * generated helper stays parameterized.
+ */
+export function parseReusableAction(
+  rawSource: string,
+  absPath: string,
+  opts: {
+    vars?: Record<string, string | number | boolean>;
+    env?: Record<string, string | undefined>;
+    baseUrl?: string;
+    runtime?: RuntimeTemplateContext;
+    secretRef?: (name: string) => string;
+  } = {},
+): ReusableAction {
+  const importRaw = loadAndParseSource(
+    rawSource,
+    absPath,
+    opts.env ?? {},
+    opts.vars ?? {},
+    opts.baseUrl,
+    opts.runtime,
+    opts.secretRef,
+  );
+  assertBatchSelectorLocators(importRaw, absPath);
+  return ReusableActionSchema.parse(importRaw);
 }
 
 export class ContractHashMismatchError extends Error {

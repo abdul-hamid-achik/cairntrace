@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   exportExtension,
@@ -14,6 +14,11 @@ import { expandSpecArgs, parseVarFlags } from "./run";
 export interface ExportPlaywrightOptions {
   /** Generate a structured project (actions/, verifiers/, config, setup). */
   project?: boolean;
+  /**
+   * Write actions/lib/tests/verifiers into an existing Playwright tree
+   * without package.json / playwright.config / global-setup.
+   */
+  into?: string;
   out?: string;
   outDir?: string;
   lang?: string;
@@ -81,14 +86,24 @@ export async function exportPlaywrightCommand(
     return;
   }
 
-  if (opts.project) {
-    if (!opts.outDir) {
+  if (opts.into && opts.project) {
+    process.stderr.write(
+      "cairn export playwright: use either --project or --into, not both\n",
+    );
+    process.exit(2);
+  }
+
+  if (opts.project || opts.into) {
+    const dest = opts.into ?? opts.outDir;
+    if (!dest) {
       process.stderr.write(
-        "cairn export playwright: --project requires --out-dir <dir>\n",
+        opts.into
+          ? "cairn export playwright: --into requires a directory\n"
+          : "cairn export playwright: --project requires --out-dir <dir>\n",
       );
       process.exit(2);
     }
-    await exportProject(paths, lang, opts);
+    await exportProject(paths, lang, { ...opts, outDir: dest }, specPath);
     return;
   }
 
@@ -183,6 +198,9 @@ async function parseForExport(
 ): Promise<{
   parsed: Awaited<ReturnType<typeof parseSpec>>;
   baseUrl?: string;
+  projectRoot?: string;
+  testIdAttribute?: string;
+  viewport?: { width: number; height: number };
 }> {
   const varOverrides = parseVarFlags(opts.var);
   const runtime = await resolveSpecRuntimeContext(specPath, {
@@ -197,13 +215,25 @@ async function parseForExport(
     secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
     runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
   });
-  return { parsed, ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}) };
+  const viewport = parsed.spec.viewport ?? runtime.viewport;
+  return {
+    parsed,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+    ...(runtime.configPath
+      ? { projectRoot: dirname(runtime.configPath) }
+      : { projectRoot: dirname(parsed.path) }),
+    ...(runtime.config?.browser?.testIdAttribute
+      ? { testIdAttribute: runtime.config.browser.testIdAttribute }
+      : {}),
+    ...(viewport ? { viewport } : {}),
+  };
 }
 
 async function exportProject(
   paths: string[],
   lang: ExportLang,
   opts: ExportPlaywrightOptions,
+  inputPath: string,
 ): Promise<void> {
   const { exportPlaywrightProject } = await import(
     "../../core/exporters/playwrightProject"
@@ -214,15 +244,34 @@ async function exportProject(
 
   const parsedSpecs = [];
   let baseUrl: string | undefined;
+  let projectRoot: string | undefined;
+  let testIdAttribute: string | undefined;
+  let viewport: { width: number; height: number } | undefined;
   for (const p of paths) {
     const r = await parseForExport(p, opts);
     parsedSpecs.push(r.parsed);
     baseUrl = baseUrl ?? r.baseUrl;
+    projectRoot = projectRoot ?? r.projectRoot;
+    testIdAttribute = testIdAttribute ?? r.testIdAttribute;
+    viewport = viewport ?? r.viewport;
   }
+
+  const absInput = isAbsolute(inputPath)
+    ? inputPath
+    : resolve(process.cwd(), inputPath);
+  const sourceRoot = (await stat(absInput)).isDirectory()
+    ? absInput
+    : dirname(absInput);
 
   const result = exportPlaywrightProject(parsedSpecs, {
     lang,
+    outDir,
+    sourceRoot,
     ...(baseUrl ? { baseUrl } : {}),
+    ...(projectRoot ? { projectRoot } : {}),
+    ...(testIdAttribute ? { testIdAttribute } : {}),
+    ...(viewport ? { viewport } : {}),
+    ...(opts.into ? { into: true } : {}),
   });
 
   for (const f of result.files) {
@@ -231,7 +280,7 @@ async function exportProject(
     await writeFile(abs, f.source);
   }
   // Self-contained project: copy referenced node verifiers in.
-  for (const v of result.verifierFiles) {
+  for (const v of [...result.verifierFiles, ...result.evalFiles]) {
     const dest = join(outDir, v.relPath);
     await mkdir(dirname(dest), { recursive: true });
     await writeFile(dest, await readFile(v.sourcePath, "utf8"));
@@ -261,6 +310,7 @@ async function exportProject(
       ``,
       ...result.files.map((f) => `- ${f.relPath}`),
       ...result.verifierFiles.map((v) => `- ${v.relPath} (copied)`),
+      ...result.evalFiles.map((v) => `- ${v.relPath} (copied)`),
       ``,
       `Required env: ${result.requiredEnv.join(", ") || "none"}`,
       ``,
@@ -382,8 +432,8 @@ function renderReadme(
     "  that blocks exported string-eval steps.",
     "- `workers: 1, fullyParallel: false` - shared backend state.",
     "- Node-context verifiers (imported relatively from the spec repo) reach",
-    "  MongoDB via `MONGO_URI` (or a local `docker exec` fallback) and the",
-    "  Temporal UI API via their fixtures - keep those endpoints reachable.",
+    "  databases via `MONGO_URI` (or a local `docker exec` fallback) and any",
+    "  app APIs via their fixtures — keep those endpoints reachable.",
     "",
     "## Preconditions (NOT exported - wire into globalSetup or a CI step)",
     "",

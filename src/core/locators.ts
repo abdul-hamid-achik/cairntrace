@@ -7,7 +7,7 @@ export const DEFAULT_TEST_ID_ATTRIBUTE = "data-testid";
 
 const ATTR_NAME_RE = /^[A-Za-z_][\w:-]*$/;
 
-/** Validate a Playwright-style test id attribute name (e.g. data-answer-key). */
+/** Validate a Playwright-style test id attribute name (e.g. data-qa). */
 export function isTestIdAttribute(value: string): boolean {
   return ATTR_NAME_RE.test(value);
 }

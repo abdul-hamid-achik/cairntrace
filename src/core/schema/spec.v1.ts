@@ -35,7 +35,7 @@ const locatorNear = {
   /**
    * Keep only matches whose visible text contains this string
    * (whitespace-normalized, case-insensitive). Use with a CSS root to pick
-   * "Yes" inside `[data-answer-key="…"]` without an eval.
+   * "Yes" inside `[data-qa="…"]` without an eval.
    */
   hasText: z.string().min(1).optional(),
   /**
@@ -87,7 +87,7 @@ export const SelectorLocatorSchema = z
 
 /**
  * Attribute-based test id. Default attribute is `data-testid`; override per
- * project with `browser.testIdAttribute` (e.g. Graphite's `data-answer-key`).
+ * project with `browser.testIdAttribute` (e.g. a custom `data-qa`).
  */
 export const TestIdLocatorSchema = z
   .object({

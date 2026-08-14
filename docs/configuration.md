@@ -58,7 +58,7 @@ browser:                              # browser-backend tuning (agent-browser)
   verifyAfterClick: true              # confirm same-tab link delivery (default: true)
   postClickSettleMs: 20000            # opt in to network-idle after every click
                                       # click settleMs > spec settleMs > this value
-  testIdAttribute: data-testid        # attribute read by by: testid (e.g. data-answer-key)
+  testIdAttribute: data-testid        # attribute read by by: testid (e.g. data-qa)
 
 webServer:                            # optional single-server lifecycle for `cairn run`
   command: "node .output/server/index.mjs"
@@ -112,7 +112,7 @@ explicit click/spec values and otherwise keeps its native waits. A resolved
 value of `0` skips both the extra settle and the link-delivery probe at that
 scope. `browser.verifyAfterClick: false` disables the agent-browser guard
 globally. `browser.testIdAttribute` (default `data-testid`) is the attribute
-`by: testid` and Playwright `getByTestId` read — set it to `data-answer-key`
+`by: testid` and Playwright `getByTestId` read — set it to `data-qa`
 when that is the product's stable hook.
 
 ## Environments

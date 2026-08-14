@@ -90,11 +90,11 @@ describe("synthesizeErroredResult", () => {
 
   it("stamps optional labels onto errored results", () => {
     const result = synthesizeErroredResult("/abs/spec.yml", new Error("x"), {
-      labels: { path: "rabbit", suite: "ab" },
+      labels: { path: "legacy", suite: "ab" },
     });
-    expect(result.labels).toEqual({ path: "rabbit", suite: "ab" });
+    expect(result.labels).toEqual({ path: "legacy", suite: "ab" });
     expect(RunResultSchema.parse(result).labels).toEqual({
-      path: "rabbit",
+      path: "legacy",
       suite: "ab",
     });
   });
@@ -183,19 +183,19 @@ describe("summarizeStartingSpecs", () => {
   it("adds the common parent dir (relative to cwd) when specs share one", () => {
     expect(
       summarizeStartingSpecs(
-        ["/repo/flows/answer-change/a.yml", "/repo/flows/answer-change/b.yml"],
+        ["/repo/flows/checkout/a.yml", "/repo/flows/checkout/b.yml"],
         "/repo",
       ),
-    ).toBe("starting 2 specs (flows/answer-change)");
+    ).toBe("starting 2 specs (flows/checkout)");
   });
 
   it("resolves relative spec args against cwd before computing the common dir", () => {
     expect(
       summarizeStartingSpecs(
-        ["flows/answer-change/a.yml", "flows/answer-change/b.yml"],
+        ["flows/checkout/a.yml", "flows/checkout/b.yml"],
         "/repo",
       ),
-    ).toBe("starting 2 specs (flows/answer-change)");
+    ).toBe("starting 2 specs (flows/checkout)");
   });
 
   it("uses singular 'spec' for a single path", () => {
@@ -233,19 +233,16 @@ describe("tag selection (metadata.tags)", () => {
   });
 
   it("specMatchesTags is case-insensitive AND", () => {
+    expect(specMatchesTags(["checkout-regression", "next"], ["next"])).toBe(
+      true,
+    );
+    expect(specMatchesTags(["checkout-regression", "next"], ["NEXT"])).toBe(
+      true,
+    );
     expect(
-      specMatchesTags(["checkout-regression", "temporal"], ["temporal"]),
-    ).toBe(true);
-    expect(
-      specMatchesTags(["checkout-regression", "temporal"], ["TEMPORAL"]),
-    ).toBe(true);
-    expect(
-      specMatchesTags(
-        ["checkout-regression", "temporal"],
-        ["temporal", "buyer-path"],
-      ),
+      specMatchesTags(["checkout-regression", "next"], ["next", "buyer-path"]),
     ).toBe(false);
-    expect(specMatchesTags([], ["temporal"])).toBe(false);
+    expect(specMatchesTags([], ["next"])).toBe(false);
     expect(specMatchesTags(["x"], [])).toBe(true);
   });
 
@@ -256,7 +253,7 @@ describe("tag selection (metadata.tags)", () => {
     const c = join(dir, "c.yml");
     await writeFile(
       a,
-      `version: 1\nname: a\nintent: a\nmetadata:\n  tags: [answer-change, temporal]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+      `version: 1\nname: a\nintent: a\nmetadata:\n  tags: [checkout, next]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
     );
     await writeFile(
       b,
@@ -267,7 +264,7 @@ describe("tag selection (metadata.tags)", () => {
       `version: 1\nname: c\nintent: c\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
     );
 
-    const r = await selectSpecsByTags([a, b, c], ["answer-change"]);
+    const r = await selectSpecsByTags([a, b, c], ["checkout"]);
     expect(r.selected).toEqual([a]);
     expect(r.skipped).toHaveLength(2);
     expect(r.skipped.map((s) => basename(s.path)).toSorted()).toEqual([
@@ -286,7 +283,7 @@ describe("tag selection (metadata.tags)", () => {
     const b = join(dir, "miss.yml");
     await writeFile(
       a,
-      `version: 1\nname: hit\nintent: hit\nmetadata:\n  tags: [answer-change, checkout-regression]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
+      `version: 1\nname: hit\nintent: hit\nmetadata:\n  tags: [checkout, checkout-regression]\noutcomes: [{id: o, verify: {text: {contains: x}}}]\n`,
     );
     await writeFile(
       b,
@@ -294,16 +291,16 @@ describe("tag selection (metadata.tags)", () => {
     );
 
     const result = await buildSelectionResult([a, b], undefined, undefined, [
-      "answer-change",
+      "checkout",
     ]);
     expect(SelectionResultSchema.parse(result)).toMatchObject({
-      tags: ["answer-change"],
+      tags: ["checkout"],
       codemapAvailable: false,
     });
     expect(result.selected).toHaveLength(1);
     expect(result.selected[0]!.name).toBe("hit");
     expect(result.selected[0]!.tags).toEqual(
-      expect.arrayContaining(["answer-change", "checkout-regression"]),
+      expect.arrayContaining(["checkout", "checkout-regression"]),
     );
     expect(result.skipped).toHaveLength(1);
     expect(result.skipped[0]!.name).toBe("miss");
@@ -313,7 +310,7 @@ describe("tag selection (metadata.tags)", () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-tag-cli-"));
     await writeFile(
       join(dir, "yes.yml"),
-      `version: 1\nname: yes_spec\nintent: yes\nmetadata:\n  tags: [answer-change]\noutcomes:\n  - id: o\n    verify:\n      text: { contains: x }\n`,
+      `version: 1\nname: yes_spec\nintent: yes\nmetadata:\n  tags: [checkout]\noutcomes:\n  - id: o\n    verify:\n      text: { contains: x }\n`,
     );
     await writeFile(
       join(dir, "no.yml"),
@@ -324,7 +321,7 @@ describe("tag selection (metadata.tags)", () => {
       "run",
       dir,
       "--tag",
-      "answer-change",
+      "checkout",
       "--select-only",
       "--format",
       "json",
@@ -336,7 +333,7 @@ describe("tag selection (metadata.tags)", () => {
       skipped: { name: string }[];
       tags: string[];
     };
-    expect(body.tags).toEqual(["answer-change"]);
+    expect(body.tags).toEqual(["checkout"]);
     // Selection names come from the file basename, not the YAML `name:` field.
     expect(body.selected.map((s) => s.name)).toEqual(["yes"]);
     expect(body.skipped.map((s) => s.name)).toEqual(["no"]);
@@ -576,8 +573,8 @@ describe("run opening line (end-to-end via CLI)", () => {
     const dir = await realpath(
       await mkdtemp(join(tmpdir(), "cairntrace-starting-line-")),
     );
-    const a = join(dir, "flows", "answer-change", "a.yml");
-    const b = join(dir, "flows", "answer-change", "b.yml");
+    const a = join(dir, "flows", "checkout", "a.yml");
+    const b = join(dir, "flows", "checkout", "b.yml");
 
     const result = await execa(
       binCairn,
@@ -585,7 +582,7 @@ describe("run opening line (end-to-end via CLI)", () => {
       { cwd: dir, reject: false },
     );
 
-    expect(result.stderr).toContain("starting 2 specs (flows/answer-change)");
+    expect(result.stderr).toContain("starting 2 specs (flows/checkout)");
     // --verbose (debug level) still surfaces the full absolute path list.
     expect(result.stderr).toContain(`starting: ${a}, ${b}`);
   });
@@ -831,7 +828,7 @@ steps:
         "--artifact-root",
         artifactRoot,
         "--label",
-        "path=rabbit",
+        "path=legacy",
         "--label",
         "suite=batch",
         "--json",
@@ -844,11 +841,11 @@ steps:
     };
     expect(batch.results).toHaveLength(2);
     for (const r of batch.results) {
-      expect(r.labels).toEqual({ path: "rabbit", suite: "batch" });
+      expect(r.labels).toEqual({ path: "legacy", suite: "batch" });
       const onDisk = JSON.parse(
         await readFile(join(r.runDir, "run.json"), "utf8"),
       ) as { labels?: Record<string, string> };
-      expect(onDisk.labels).toEqual({ path: "rabbit", suite: "batch" });
+      expect(onDisk.labels).toEqual({ path: "legacy", suite: "batch" });
     }
   });
 });
@@ -884,7 +881,7 @@ steps:
         "--artifact-root",
         artifactRoot,
         "--label",
-        "path=temporal",
+        "path=next",
         "--label",
         "suite=ab",
         "--json",
@@ -897,11 +894,11 @@ steps:
       labels?: Record<string, string>;
       runDir: string;
     };
-    expect(body.labels).toEqual({ path: "temporal", suite: "ab" });
+    expect(body.labels).toEqual({ path: "next", suite: "ab" });
     const onDisk = JSON.parse(
       await readFile(join(body.runDir, "run.json"), "utf8"),
     ) as { labels?: Record<string, string> };
-    expect(onDisk.labels).toEqual({ path: "temporal", suite: "ab" });
+    expect(onDisk.labels).toEqual({ path: "next", suite: "ab" });
   });
 });
 

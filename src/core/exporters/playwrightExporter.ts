@@ -51,9 +51,11 @@ import {
   emitValue,
   hasRefSentinel,
   newRefUsage,
+  parseTemplateValue,
   type RefUsage,
 } from "./templateValue";
 import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
+import type { PlaywrightLibModule } from "./playwrightRuntime";
 
 export type ExportLang = "ts" | "js";
 
@@ -76,6 +78,8 @@ export interface ExportCoverageSkip {
   kind: "step" | "outcome" | "when";
   id?: string;
   reason: string;
+  /** Soft skips (snapshots, traces) do not mark the generated test as fixme. */
+  soft?: boolean;
 }
 
 export interface ExportCoverage {
@@ -692,6 +696,16 @@ export interface EmitCtx {
   nodeVerifierEvidence?: string;
   /** Unique names for per-action network response promises. */
   postconditionCounter?: number;
+  /** Wrap each step/outcome in `test.step(...)` (project mode). */
+  wrapSteps?: boolean;
+  /** Absolute eval.file paths to copy into `evals/` (project mode). */
+  evalFiles?: Set<string>;
+  /**
+   * `--project` mode: import shared helpers from this prefix (`../lib`)
+   * instead of inlining fill-retry / click.until / verifier interop.
+   */
+  libImportPrefix?: string;
+  usedLib?: Set<PlaywrightLibModule>;
 }
 
 export function newEmitCtx(
@@ -709,8 +723,13 @@ export function newEmitCtx(
     },
     usage: newRefUsage(),
     postconditionCounter: 0,
+    usedLib: new Set(),
     ...init,
   };
+}
+
+function markLib(ctx: EmitCtx, name: PlaywrightLibModule): void {
+  (ctx.usedLib ?? (ctx.usedLib = new Set())).add(name);
 }
 
 interface Rendered {
@@ -719,13 +738,23 @@ interface Rendered {
   exported: boolean;
 }
 
+export function coverageHasHardSkip(coverage: ExportCoverage): boolean {
+  return coverage.skips.some((entry) => !entry.soft);
+}
+
 function skip(
   ctx: EmitCtx,
   kind: ExportCoverageSkip["kind"],
   reason: string,
   id?: string,
+  soft = false,
 ): void {
-  ctx.coverage.skips.push({ kind, id, reason });
+  ctx.coverage.skips.push({
+    kind,
+    id,
+    reason,
+    ...(soft ? { soft: true } : {}),
+  });
 }
 
 function skipStmt(
@@ -734,8 +763,9 @@ function skipStmt(
   reason: string,
   note: string,
   id?: string,
+  soft = false,
 ): Rendered {
-  skip(ctx, kind, reason, id);
+  skip(ctx, kind, reason, id, soft);
   return { stmts: [comment(note)], exported: false };
 }
 
@@ -762,8 +792,27 @@ export function renderStep(
     ? [comment(`step: ${oneLine(step.id)}`), ...guardedBody.stmts]
     : guardedBody.stmts;
 
-  if (!whenWrap) return { stmts, exported: guardedBody.exported };
-  return wrapWhen(whenWrap, stmts, guardedBody.exported, ctx, step.id);
+  const rendered = !whenWrap
+    ? { stmts, exported: guardedBody.exported }
+    : wrapWhen(whenWrap, stmts, guardedBody.exported, ctx, step.id);
+  return wrapTestStep(step, rendered, ctx);
+}
+
+function wrapTestStep(step: Step, rendered: Rendered, ctx: EmitCtx): Rendered {
+  if (!ctx.wrapSteps || !step.id) return rendered;
+  const inner = rendered.stmts.filter(
+    (stmt) => !(stmt.kind === "comment" && stmt.text.startsWith("step:")),
+  );
+  return {
+    stmts: [
+      block(
+        `await test.step(${JSON.stringify(oneLine(step.id))}, async () => {`,
+        inner.length > 0 ? inner : [comment("no-op")],
+        `});`,
+      ),
+    ],
+    exported: rendered.exported,
+  };
 }
 
 function wrapWhen(
@@ -774,7 +823,6 @@ function wrapWhen(
   stepId?: string,
 ): Rendered {
   const serialized = formatWhen(when);
-  const colon = serialized.indexOf(":");
   const fallthrough = (): Rendered => {
     skip(ctx, "when", `unrecognized when predicate: ${serialized}`, stepId);
     return {
@@ -787,31 +835,56 @@ function wrapWhen(
       exported,
     };
   };
-  if (colon < 0) return fallthrough();
-
-  const kind = serialized.slice(0, colon);
-  const arg = serialized.slice(colon + 1);
   const str = (s: string) => emitStr(s, ctx.usage);
   let condition: string | undefined;
-  switch (kind) {
-    case "urlContains":
-      condition = `page.url().includes(${str(arg)})`;
-      break;
-    case "urlNotContains":
-      condition = `!page.url().includes(${str(arg)})`;
-      break;
-    case "urlMatches":
-      condition = `new RegExp(${str(arg)}).test(page.url())`;
-      break;
-    case "text":
-      condition = `await page.evaluate(() => ${bodyTextContainsExpression(arg, false)})`;
-      break;
-    case "notText":
-      condition = `await page.evaluate(() => !(${bodyTextContainsExpression(arg, false)}))`;
-      break;
-    default:
-      return fallthrough();
+  if (typeof when !== "string") {
+    if (when.urlContains !== undefined) {
+      condition = `page.url().includes(${str(when.urlContains)})`;
+    } else if (when.urlNotContains !== undefined) {
+      condition = `!page.url().includes(${str(when.urlNotContains)})`;
+    } else if (when.urlMatches !== undefined) {
+      condition = `new RegExp(${str(when.urlMatches)}).test(page.url())`;
+    } else if (when.text !== undefined) {
+      condition = `await page.evaluate(() => ${bodyTextContainsExpression(when.text, false)})`;
+    } else if (when.notText !== undefined) {
+      condition = `await page.evaluate(() => !(${bodyTextContainsExpression(when.notText, false)}))`;
+    } else if (when.selector !== undefined) {
+      condition = when.hasText
+        ? `await page.locator(${str(when.selector)}).filter({ hasText: ${str(when.hasText)} }).count() > 0`
+        : `await page.locator(${str(when.selector)}).count() > 0`;
+    } else if (when.notSelector !== undefined) {
+      condition = `(await page.locator(${str(when.notSelector)}).count()) === 0`;
+    }
+  } else {
+    const colon = serialized.indexOf(":");
+    if (colon < 0) return fallthrough();
+    const kind = serialized.slice(0, colon);
+    const arg = serialized.slice(colon + 1);
+    switch (kind) {
+      case "urlContains":
+        condition = `page.url().includes(${str(arg)})`;
+        break;
+      case "urlNotContains":
+        condition = `!page.url().includes(${str(arg)})`;
+        break;
+      case "urlMatches":
+        condition = `new RegExp(${str(arg)}).test(page.url())`;
+        break;
+      case "text":
+        condition = `await page.evaluate(() => ${bodyTextContainsExpression(arg, false)})`;
+        break;
+      case "notText":
+        condition = `await page.evaluate(() => !(${bodyTextContainsExpression(arg, false)}))`;
+        break;
+      case "selector":
+        condition = `await page.locator(${str(arg)}).count() > 0`;
+        break;
+      case "notSelector":
+        condition = `(await page.locator(${str(arg)}).count()) === 0`;
+        break;
+    }
   }
+  if (!condition) return fallthrough();
   return {
     stmts: [comment(`when: ${oneLine(serialized)}`), iff(condition, body)],
     exported,
@@ -919,7 +992,7 @@ function renderStepBody(
     if (suppressMutationRetries || step.verifyFill === false) {
       return one(raw(`await ${target}.fill(${emittedValue});`));
     }
-    return renderVerifiedInput(target, emittedValue, "fill");
+    return renderVerifiedInput(target, emittedValue, "fill", "", ctx);
   }
   if ("type" in step) {
     const { value, delayMs, ...loc } = step.type;
@@ -931,7 +1004,7 @@ function renderStepBody(
         raw(`await ${target}.pressSequentially(${emittedValue}${opts});`),
       );
     }
-    return renderVerifiedInput(target, emittedValue, "type", opts);
+    return renderVerifiedInput(target, emittedValue, "type", opts, ctx);
   }
   if ("select" in step) {
     const { value, label, ...loc } = step.select;
@@ -970,6 +1043,7 @@ function renderStepBody(
       `transform step not exportable (${step.transform.file})`,
       `transform step skipped — Cairntrace runs ${JSON.stringify(step.transform.file)} in Node`,
       step.id,
+      true,
     );
   }
   if ("request" in step) {
@@ -1087,6 +1161,7 @@ function renderStepBody(
       "snapshot step not exportable",
       `snapshot step skipped — Playwright traces cover this via context.tracing`,
       step.id,
+      true,
     );
   }
   if ("monitor" in step) {
@@ -1096,6 +1171,7 @@ function renderStepBody(
       "monitor step not exportable (external CLI)",
       `monitor step skipped — no Playwright equivalent for the monitor CLI`,
       step.id,
+      true,
     );
   }
   if ("use" in step) {
@@ -1124,7 +1200,17 @@ function renderVerifiedInput(
   value: string,
   action: "fill" | "type",
   typeOptions = "",
+  ctx?: EmitCtx,
 ): Rendered {
+  if (ctx?.libImportPrefix) {
+    markLib(ctx, "hydration");
+    const helper = action === "fill" ? "verifiedFill" : "verifiedType";
+    const extra =
+      action === "type" && typeOptions
+        ? `, ${typeOptions.replace(/^, /, "")}`
+        : "";
+    return one(raw(`await ${helper}(page, ${target}, ${value}${extra});`));
+  }
   const invoke =
     action === "fill"
       ? `await ${target}.fill(${value});`
@@ -1166,6 +1252,19 @@ function renderClickUntilStep(
 ): Rendered {
   const until = step.click.until!;
   const timeoutMs = until.timeoutMs ?? 30_000;
+  if (ctx.libImportPrefix) {
+    markLib(ctx, "clickUntil");
+    const fields = [`timeoutMs: ${timeoutMs}`];
+    if (settleMs !== undefined && settleMs > 0) {
+      fields.push(`settleMs: ${settleMs}`);
+    }
+    fields.push(...clickUntilOptionFields(until, ctx));
+    return one(
+      raw(
+        `await clickUntil(page, ${locator(clickLocator(step), ctx)}, { ${fields.join(", ")} });`,
+      ),
+    );
+  }
   const loop: Stmt[] = [
     raw(`await clickTarget.click();`),
     ...(settleMs !== undefined && settleMs > 0
@@ -1200,6 +1299,29 @@ function renderClickUntilStep(
   };
 }
 
+function clickUntilOptionFields(until: ClickUntil, ctx: EmitCtx): string[] {
+  const str = (value: string): string => emitStr(value, ctx.usage);
+  if ("selectorGone" in until) {
+    return [`selectorGone: ${str(until.selectorGone)}`];
+  }
+  if ("selector" in until) {
+    return [`selector: ${str(until.selector)}`];
+  }
+  if ("url" in until) {
+    if (until.url.equals !== undefined) {
+      return [`urlEquals: ${str(until.url.equals)}`];
+    }
+    if (until.url.includes !== undefined) {
+      return [`urlIncludes: ${str(until.url.includes)}`];
+    }
+    return [`urlPattern: ${str(until.url.pattern!)}`];
+  }
+  if ("text" in until) {
+    return [`text: ${str(until.text)}`];
+  }
+  return [`notText: ${str(until.notText)}`];
+}
+
 function escapeRegExpLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1232,21 +1354,40 @@ function renderEvalStep(
   ctx: EmitCtx,
 ): Rendered {
   const e = step.eval;
+  let js = e.js ?? "";
   if (e.file) {
-    skip(ctx, "step", `eval.file not inlined (${e.file})`, step.id);
-    return {
-      stmts: [
-        comment(
-          `eval.file ${JSON.stringify(e.file)} is not inlined by the exporter.`,
-        ),
-        comment(
-          `Copy the file body into an eval.js step, or keep the Cairntrace spec as SoT.`,
-        ),
-      ],
-      exported: false,
-    };
+    if (!ctx.specDir) {
+      skip(ctx, "step", `eval.file not inlined (${e.file})`, step.id);
+      return {
+        stmts: [
+          comment(
+            `eval.file ${JSON.stringify(e.file)} is not inlined — specDir unknown.`,
+          ),
+        ],
+        exported: false,
+      };
+    }
+    const abs = isAbsolute(e.file) ? e.file : resolve(ctx.specDir, e.file);
+    try {
+      js = readFileSync(abs, "utf8");
+      ctx.evalFiles?.add(abs);
+    } catch (error) {
+      skip(
+        ctx,
+        "step",
+        `eval.file not readable (${e.file}): ${(error as Error).message}`,
+        step.id,
+      );
+      return {
+        stmts: [
+          comment(
+            `eval.file ${JSON.stringify(e.file)} could not be read; keep the Cairntrace spec as SoT.`,
+          ),
+        ],
+        exported: false,
+      };
+    }
   }
-  const js = e.js ?? "";
   if (hasRefSentinel(js)) {
     // Secrets can't reach the browser context (`process.env` doesn't exist
     // there) — refuse loudly instead of emitting a broken sentinel.
@@ -1258,6 +1399,7 @@ function renderEvalStep(
     );
   }
   const argsJson = emitValue(e.args ?? {}, ctx.usage);
+  const sourceExpr = emitEvalSource(js, ctx.usage);
   const varName = e.assign ? safeIdent(e.assign) : undefined;
 
   const asyncFunctionType =
@@ -1277,7 +1419,7 @@ function renderEvalStep(
         raw(`const execute = new AsyncFunction("args", source);`),
         raw(`return await execute(args);`),
       ],
-      `}, { source: ${JSON.stringify(js)}, args: ${argsJson} });`,
+      `}, { source: ${sourceExpr}, args: ${argsJson} });`,
     ),
   ];
 
@@ -1432,18 +1574,20 @@ function locator(loc: Locator, ctx: EmitCtx): string {
     "nth" in loc && loc.nth !== undefined ? `.nth(${loc.nth})` : ".first()";
   const hasText = "hasText" in loc ? loc.hasText : undefined;
   const textFilter = hasText ? `.filter({ hasText: ${str(hasText)} })` : "";
+  const visibleFilter =
+    "visible" in loc && loc.visible === true ? `.locator("visible=true")` : "";
   const inner = locatorFromRoot("page", loc, ctx);
   const near = "near" in loc ? loc.near : undefined;
   if (!near) {
     return loc.by === "selector"
-      ? `${inner}${textFilter}`
-      : `${inner}${textFilter}${nth}`;
+      ? `${inner}${textFilter}${visibleFilter}`
+      : `${inner}${textFilter}${visibleFilter}${nth}`;
   }
   const scoped = `page.getByText(${str(near)}).locator("xpath=ancestor-or-self::*").filter({ has: ${inner} }).last()`;
   const scopedLocator = locatorFromRoot(scoped, loc, ctx);
   return loc.by === "selector"
-    ? `${scopedLocator}${textFilter}`
-    : `${scopedLocator}${textFilter}${nth}`;
+    ? `${scopedLocator}${textFilter}${visibleFilter}`
+    : `${scopedLocator}${textFilter}${visibleFilter}${nth}`;
 }
 
 function locatorFromRoot(root: string, loc: Locator, ctx: EmitCtx): string {
@@ -1453,6 +1597,7 @@ function locatorFromRoot(root: string, loc: Locator, ctx: EmitCtx): string {
       const opts: string[] = [];
       if (loc.name) opts.push(`name: ${str(loc.name)}`);
       if (loc.exact) opts.push("exact: true");
+      if (loc.visible === false) opts.push("includeHidden: true");
       return `${root}.getByRole(${JSON.stringify(loc.role)}${
         opts.length > 0 ? `, { ${opts.join(", ")} }` : ""
       })`;
@@ -1695,44 +1840,55 @@ function renderScriptOutcome(
           raw(
             `await ${ctx.nodeVerifierEvidence}.persist(${ctx.nodeVerifierRunDir});`,
           ),
-          raw(
-            `const importedVerifier = await import(${JSON.stringify(importPath)});`,
-          ),
-          comment(
-            `ESM/CJS interop: Playwright transpiles TS imports to CJS, so a`,
-          ),
-          comment(`default export may surface as namespace.default.default.`),
-          raw(
-            `const verifierNamespace = importedVerifier${
-              ctx.lang === "ts"
-                ? " as unknown as { verify?: unknown; default?: unknown }"
-                : ""
-            };`,
-          ),
-          raw(`const verifierDefault = verifierNamespace.default;`),
-          raw(
-            `const verifierDefaultNamespace = verifierDefault && typeof verifierDefault === "object"`,
-          ),
-          raw(
-            `  ? verifierDefault${
-              ctx.lang === "ts"
-                ? " as { verify?: unknown; default?: unknown }"
-                : ""
-            }`,
-          ),
-          raw(`  : undefined;`),
-          raw(`const verify =`),
-          raw(`  verifierNamespace.verify ??`),
-          raw(`  (typeof verifierDefault === "function"`),
-          raw(`    ? verifierDefault`),
-          raw(
-            `    : (verifierDefaultNamespace?.verify ?? verifierDefaultNamespace?.default));`,
-          ),
-          block(`if (typeof verify !== "function") {`, [
-            raw(
-              `throw new Error("verifier module must export a verify() function");`,
-            ),
-          ]),
+          ...(ctx.libImportPrefix
+            ? (markLib(ctx, "verifier"),
+              [
+                raw(
+                  `const verify = await loadCairnVerifier(await import(${JSON.stringify(importPath)}));`,
+                ),
+              ])
+            : [
+                raw(
+                  `const importedVerifier = await import(${JSON.stringify(importPath)});`,
+                ),
+                comment(
+                  `ESM/CJS interop: Playwright transpiles TS imports to CJS, so a`,
+                ),
+                comment(
+                  `default export may surface as namespace.default.default.`,
+                ),
+                raw(
+                  `const verifierNamespace = importedVerifier${
+                    ctx.lang === "ts"
+                      ? " as unknown as { verify?: unknown; default?: unknown }"
+                      : ""
+                  };`,
+                ),
+                raw(`const verifierDefault = verifierNamespace.default;`),
+                raw(
+                  `const verifierDefaultNamespace = verifierDefault && typeof verifierDefault === "object"`,
+                ),
+                raw(
+                  `  ? verifierDefault${
+                    ctx.lang === "ts"
+                      ? " as { verify?: unknown; default?: unknown }"
+                      : ""
+                  }`,
+                ),
+                raw(`  : undefined;`),
+                raw(`const verify =`),
+                raw(`  verifierNamespace.verify ??`),
+                raw(`  (typeof verifierDefault === "function"`),
+                raw(`    ? verifierDefault`),
+                raw(
+                  `    : (verifierDefaultNamespace?.verify ?? verifierDefaultNamespace?.default));`,
+                ),
+                block(`if (typeof verify !== "function") {`, [
+                  raw(
+                    `throw new Error("verifier module must export a verify() function");`,
+                  ),
+                ]),
+              ]),
           block(
             `const res = await verify({`,
             [
@@ -1924,6 +2080,14 @@ function toRelativeImport(fromDir: string, absTarget: string): string {
 }
 
 /* ----- helpers ----- */
+
+function emitEvalSource(js: string, usage: RefUsage): string {
+  const parts = parseTemplateValue(js);
+  if (parts.some((part) => part.kind === "env" || part.kind === "runToken")) {
+    return JSON.stringify(js);
+  }
+  return emitStr(js, usage);
+}
 
 function one(stmt: Stmt): Rendered {
   return { stmts: [stmt], exported: true };

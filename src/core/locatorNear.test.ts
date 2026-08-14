@@ -8,35 +8,35 @@ describe("pickNearestSnapshotMatches", () => {
       [
         "- main",
         "  - generic",
-        '    - heading "Turnvu DBA" [ref=e1]',
+        '    - heading "Acme Corp" [ref=e1]',
         '    - button "Open" [ref=e2]',
         "  - generic",
-        '    - heading "Adobe-TEST" [ref=e3]',
+        '    - heading "Beta Inc" [ref=e3]',
         '    - button "Open" [ref=e4]',
       ].join("\n"),
     );
     const opens = [3, 6];
-    expect(pickNearestSnapshotMatches(opens, snap, "Turnvu DBA")).toEqual([3]);
-    expect(pickNearestSnapshotMatches(opens, snap, "Adobe-TEST")).toEqual([6]);
+    expect(pickNearestSnapshotMatches(opens, snap, "Acme Corp")).toEqual([3]);
+    expect(pickNearestSnapshotMatches(opens, snap, "Beta Inc")).toEqual([6]);
   });
 
   it("on a flat list picks the closest sibling by snapshot distance", () => {
     const snap = parseSnapshot(
       [
         "- main",
-        '  - heading "Turnvu DBA" [ref=e1]',
+        '  - heading "Acme Corp" [ref=e1]',
         '  - button "Open" [ref=e2]',
-        '  - heading "Adobe-TEST" [ref=e3]',
+        '  - heading "Beta Inc" [ref=e3]',
         '  - button "Open" [ref=e4]',
       ].join("\n"),
     );
     const opens = [2, 4];
-    expect(pickNearestSnapshotMatches(opens, snap, "Turnvu DBA")).toEqual([2]);
-    expect(pickNearestSnapshotMatches(opens, snap, "Adobe-TEST")).toEqual([4]);
+    expect(pickNearestSnapshotMatches(opens, snap, "Acme Corp")).toEqual([2]);
+    expect(pickNearestSnapshotMatches(opens, snap, "Beta Inc")).toEqual([4]);
   });
 
   it("returns nothing when the near text is absent", () => {
     const snap = parseSnapshot('- main\n  - button "Open" [ref=e1]\n');
-    expect(pickNearestSnapshotMatches([1], snap, "Turnvu DBA")).toEqual([]);
+    expect(pickNearestSnapshotMatches([1], snap, "Acme Corp")).toEqual([]);
   });
 });

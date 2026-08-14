@@ -240,7 +240,7 @@ export function buildMcpServer(): McpServer {
           .record(z.string(), z.string())
           .optional()
           .describe(
-            "Free-form cohort labels stamped into run.json (e.g. { path: 'temporal', suite: 'ab' })",
+            "Free-form cohort labels stamped into run.json (e.g. { path: 'next', suite: 'ab' })",
           ),
         since: z
           .string()
@@ -2725,9 +2725,36 @@ export function buildMcpServer(): McpServer {
           .describe(
             "When true and path is a single file, return source in content (no write)",
           ),
+        project: z
+          .boolean()
+          .optional()
+          .describe("Emit a structured Playwright project (requires outDir)"),
+        into: z
+          .string()
+          .optional()
+          .describe(
+            "Write actions/lib/tests/verifiers into an existing Playwright tree",
+          ),
+        config: z.string().optional().describe("cairntrace.config.yml path"),
+        env: z.string().optional().describe("Config environment name"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X}"),
       },
     },
-    async ({ path: inputPath, out, outDir, lang, stdout }) => {
+    async ({
+      path: inputPath,
+      out,
+      outDir,
+      lang,
+      stdout,
+      project,
+      into,
+      config,
+      env,
+      var: varFlags,
+    }) => {
       const { exportPlaywrightCommand } = await import(
         "../cli/commands/export"
       );
@@ -2740,6 +2767,132 @@ export function buildMcpServer(): McpServer {
       const resolvedLang = lang ?? "ts";
 
       try {
+        if (project || into) {
+          if (into && project) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "use either project or into, not both",
+                },
+              ],
+              isError: true,
+            };
+          }
+          const dest = into ?? outDir;
+          if (!dest) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: project
+                    ? "project export requires outDir"
+                    : "into requires a directory",
+                },
+              ],
+              isError: true,
+            };
+          }
+          const projectPaths = await expandSpecArgs([inputPath]);
+          if (projectPaths.length === 0) {
+            return {
+              content: [
+                { type: "text", text: `no specs found at ${inputPath}` },
+              ],
+              isError: true,
+            };
+          }
+          const { exportPlaywrightProject } = await import(
+            "../core/exporters/playwrightProject"
+          );
+          const { parseVarFlags } = await import("../cli/commands/run");
+          const { stat } = await import("node:fs/promises");
+          const varOverrides = parseVarFlags(varFlags);
+          const parsedSpecs = [];
+          let baseUrl: string | undefined;
+          let projectRoot: string | undefined;
+          let testIdAttribute: string | undefined;
+          let viewport: { width: number; height: number } | undefined;
+          for (const specFile of projectPaths) {
+            const runtime = await resolveSpecRuntimeContext(specFile, {
+              ...(env !== undefined ? { envOverride: env } : {}),
+              ...(config !== undefined ? { configPath: config } : {}),
+              ...(Object.keys(varOverrides).length > 0
+                ? { vars: varOverrides }
+                : {}),
+              envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+            });
+            parsedSpecs.push(
+              await parseSpec(specFile, {
+                vars: runtime.vars,
+                ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+                secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+                runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
+              }),
+            );
+            baseUrl = baseUrl ?? runtime.baseUrl;
+            projectRoot =
+              projectRoot ??
+              (runtime.configPath
+                ? dirname(runtime.configPath)
+                : dirname(specFile));
+            testIdAttribute =
+              testIdAttribute ?? runtime.config?.browser?.testIdAttribute;
+            viewport =
+              viewport ?? parsedSpecs.at(-1)?.spec.viewport ?? runtime.viewport;
+          }
+          const absInput = isAbsolute(inputPath)
+            ? inputPath
+            : resolvePath(process.cwd(), inputPath);
+          const sourceRoot = (await stat(absInput)).isDirectory()
+            ? absInput
+            : dirname(absInput);
+          const destDir = isAbsolute(dest)
+            ? dest
+            : resolvePath(process.cwd(), dest);
+          const projectResult = exportPlaywrightProject(parsedSpecs, {
+            lang: resolvedLang,
+            outDir: destDir,
+            sourceRoot,
+            ...(baseUrl ? { baseUrl } : {}),
+            ...(projectRoot ? { projectRoot } : {}),
+            ...(testIdAttribute ? { testIdAttribute } : {}),
+            ...(viewport ? { viewport } : {}),
+            ...(into ? { into: true } : {}),
+          });
+          for (const file of projectResult.files) {
+            const abs = join(destDir, file.relPath);
+            await mkdir(dirname(abs), { recursive: true });
+            await writeFile(abs, file.source);
+          }
+          for (const copied of [
+            ...projectResult.verifierFiles,
+            ...projectResult.evalFiles,
+          ]) {
+            const destFile = join(destDir, copied.relPath);
+            await mkdir(dirname(destFile), { recursive: true });
+            await writeFile(
+              destFile,
+              await readFile(copied.sourcePath, "utf8"),
+            );
+          }
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Exported Playwright ${
+                  into ? "into" : "project"
+                } at ${destDir}`,
+              },
+            ],
+            structuredContent: {
+              status: "written",
+              outDir: destDir,
+              files: projectResult.files.map((file) => file.relPath),
+              requiredEnv: projectResult.requiredEnv,
+            },
+          };
+        }
         const paths = await expandSpecArgs([inputPath]);
         if (paths.length === 0) {
           return {
@@ -2759,7 +2912,22 @@ export function buildMcpServer(): McpServer {
               isError: true,
             };
           }
-          const parsed = await parseSpec(paths[0]!);
+          const { parseVarFlags } = await import("../cli/commands/run");
+          const varOverrides = parseVarFlags(varFlags);
+          const runtime = await resolveSpecRuntimeContext(paths[0]!, {
+            ...(env !== undefined ? { envOverride: env } : {}),
+            ...(config !== undefined ? { configPath: config } : {}),
+            ...(Object.keys(varOverrides).length > 0
+              ? { vars: varOverrides }
+              : {}),
+            envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+          });
+          const parsed = await parseSpec(paths[0]!, {
+            vars: runtime.vars,
+            ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+            secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+            runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
+          });
           const result = exportPlaywright(parsed.resolved, {
             sourcePath: parsed.path,
             lang: resolvedLang,
@@ -2795,8 +2963,23 @@ export function buildMcpServer(): McpServer {
           coverage: ReturnType<typeof exportPlaywright>["coverage"];
           status: "written" | "partial";
         }> = [];
+        const { parseVarFlags } = await import("../cli/commands/run");
+        const varOverrides = parseVarFlags(varFlags);
         for (const p of paths) {
-          const parsed = await parseSpec(p);
+          const runtime = await resolveSpecRuntimeContext(p, {
+            ...(env !== undefined ? { envOverride: env } : {}),
+            ...(config !== undefined ? { configPath: config } : {}),
+            ...(Object.keys(varOverrides).length > 0
+              ? { vars: varOverrides }
+              : {}),
+            envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+          });
+          const parsed = await parseSpec(p, {
+            vars: runtime.vars,
+            ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+            secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
+            runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
+          });
           const result = exportPlaywright(parsed.resolved, {
             sourcePath: parsed.path,
             lang: resolvedLang,

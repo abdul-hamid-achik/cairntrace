@@ -216,12 +216,12 @@ environments:
 browser:
   verifyAfterClick: true
   postClickSettleMs: 20000
-  testIdAttribute: data-answer-key
+  testIdAttribute: data-qa
 `,
     );
     expect(loaded?.config.browser?.verifyAfterClick).toBe(true);
     expect(loaded?.config.browser?.postClickSettleMs).toBe(20000);
-    expect(loaded?.config.browser?.testIdAttribute).toBe("data-answer-key");
+    expect(loaded?.config.browser?.testIdAttribute).toBe("data-qa");
   });
 
   it("is optional (absent → undefined, adapter defaults apply)", async () => {

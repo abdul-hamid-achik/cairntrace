@@ -220,7 +220,7 @@ export const RunResultSchema = z
     /**
      * Optional free-form labels stamped by `cairn run --label key=value`
      * (repeatable). Used by `cairn stats --group-by <key>` to build A/B
-     * cohorts (e.g. path=rabbit vs path=temporal) without inventing a separate
+     * cohorts (e.g. path=legacy vs path=next) without inventing a separate
      * benchmark format. Keys/values are plain strings; empty object is omitted.
      */
     labels: z.record(z.string(), z.string()).optional(),

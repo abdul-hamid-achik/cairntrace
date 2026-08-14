@@ -3,7 +3,7 @@ import { AbsolutePathSchema, RunStatusSchema } from "./shared";
 
 /**
  * Wire schema for `cairn stats`.
- * Aggregate run cohorts (by label) for A/B comparisons such as rabbit vs temporal.
+ * Aggregate run cohorts (by label) for A/B comparisons such as legacy vs next.
  */
 
 export const StatsRunRefSchema = z
@@ -36,7 +36,7 @@ export type StatsPercentiles = z.infer<typeof StatsPercentilesSchema>;
 
 export const StatsGroupSchema = z
   .object({
-    /** Value of the group-by label for this cohort (e.g. "rabbit"). */
+    /** Value of the group-by label for this cohort (e.g. "legacy"). */
     key: z.string().min(1),
     runs: z.number().int().nonnegative(),
     passed: z.number().int().nonnegative(),

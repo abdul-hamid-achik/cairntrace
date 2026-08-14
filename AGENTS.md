@@ -260,7 +260,7 @@ Key rules:
   re-launched — panes already running a non-shell process are left alone. If
   docker was freshly started this run (not reused), the whole tmux session is
   recreated so app processes reconnect to the new containers instead of holding
-  dead rabbit/mongo/temporal connections. Commands are sent only after the
+  dead mongo/redis/postgres connections. Commands are sent only after the
   interactive shell settles (avoids direnv/zsh swallowing `send-keys`), and pane
   history is cleared first so `readyOn` text cannot match residual scrollback.
   At end-of-run the session is LEFT ALIVE so the next run reuses it — cairn

@@ -98,7 +98,7 @@ describe("cairn logs", () => {
 
   it("streams a pane log matched by tmux window name", async () => {
     await writeFile(
-      join(servicesRoot, "graphite-web-api.pane.log"),
+      join(servicesRoot, "app-web-api.pane.log"),
       "Listening on port 9001\n",
     );
 
@@ -149,7 +149,7 @@ describe("cairn logs", () => {
       "run-local web api\n",
     );
     await writeFile(
-      join(servicesRoot, "graphite-web-api.pane.log"),
+      join(servicesRoot, "app-web-api.pane.log"),
       "legacy web api\n",
     );
 
@@ -182,7 +182,7 @@ describe("cairn logs", () => {
   it("falls back to legacy pane logs when the selected run has no local pack", async () => {
     await writeRun("legacy_fallback_run", 0);
     await writeFile(
-      join(servicesRoot, "graphite-worker.pane.log"),
+      join(servicesRoot, "app-worker.pane.log"),
       "legacy worker output\n",
     );
 
@@ -198,7 +198,7 @@ describe("cairn logs", () => {
   it("lists legacy pane logs when no run-local service pack exists", async () => {
     await writeRun("legacy_list_fallback_run", 0);
     await writeFile(
-      join(servicesRoot, "graphite-worker.pane.log"),
+      join(servicesRoot, "app-worker.pane.log"),
       "legacy worker output\n",
     );
 
@@ -207,7 +207,7 @@ describe("cairn logs", () => {
       services: true,
     });
 
-    expect(captured.join("")).toContain("graphite-worker.pane.log");
+    expect(captured.join("")).toContain("app-worker.pane.log");
     expect(process.exitCode).toBe(0);
   });
 

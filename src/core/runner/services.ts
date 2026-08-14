@@ -371,7 +371,7 @@ export async function startServices(
       // in reuse mode, cairn OWNS its lifecycle (leaves it alive for the next
       // run) — so skip any teardown command that would kill that session, and
       // also skip docker-compose-down style commands: the live tmux services
-      // depend on that infra (mongo/rabbit/postgres). Killing docker while
+      // depend on that infra (mongo/redis/postgres). Killing docker while
       // leaving tmux alive is what orphaned Go/Node panes against dead ports.
       const managedSession = phases.tmuxSessionName;
       for (const [index, cmd] of phases.teardownCommands.entries()) {
@@ -1002,7 +1002,7 @@ async function startTmux(
   //
   // Exception: if docker containers were actually down and got brought up
   // this run, leftover pane processes still hold dead connections to the old
-  // mongo/rabbit/temporal. Kill and recreate so app services reconnect.
+  // mongo/redis/postgres. Kill and recreate so app services reconnect.
   // (cold-start re-running `compose up` against already-running containers
   // does NOT count — that is not a refresh.)
   if (reuse) {
@@ -1922,7 +1922,7 @@ function killsTmuxSession(cmd: string, session: string): boolean {
 
 /**
  * True if a teardown command would tear down docker compose infra that
- * reused tmux services still need (mongo/rabbit/postgres/etc.).
+ * reused tmux services still need (mongo/redis/postgres/etc.).
  */
 function tearsDownDocker(cmd: string): boolean {
   return (

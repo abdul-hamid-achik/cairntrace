@@ -25,7 +25,7 @@ describe("ArtifactWriter network redaction", () => {
         method: "PATCH",
         timestamp: 1_785_326_400_000,
         postData: JSON.stringify({
-          Entity_Website: "cairn.example",
+          product_name: "cairn.example",
           password: "raw-password",
           code: "public-result-code",
           nested: {
@@ -53,7 +53,7 @@ describe("ArtifactWriter network redaction", () => {
     const persisted = JSON.parse(raw);
     expect(persisted.timestamp).toBe(1_785_326_400_000);
     expect(JSON.parse(persisted.postData)).toEqual({
-      Entity_Website: "cairn.example",
+      product_name: "cairn.example",
       password: "[redacted]",
       code: "public-result-code",
       nested: {

@@ -2805,15 +2805,15 @@ describe("matchingSnapshotIndices", () => {
       [
         "- main",
         "  - generic",
-        '    - heading "Turnvu DBA" [ref=e1]',
+        '    - heading "Acme Corp" [ref=e1]',
         '    - button "Open" [ref=e2]',
         "  - generic",
-        '    - heading "Adobe-TEST" [ref=e3]',
+        '    - heading "Beta Inc" [ref=e3]',
         '    - button "Open" [ref=e4]',
       ].join("\n"),
     );
     const idx = matchingSnapshotIndices(
-      { by: "role", role: "button", name: "Open", near: "Turnvu DBA" },
+      { by: "role", role: "button", name: "Open", near: "Acme Corp" },
       snap,
     );
     expect(idx).toEqual([3]);

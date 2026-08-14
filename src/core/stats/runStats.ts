@@ -287,7 +287,7 @@ async function harvestMetricFromRun(
     }
   }
   if (samples.length === 0) return undefined;
-  // Prefer the first metric sample (usually the primary temporal outcome).
+  // Prefer the first metric sample (usually the primary duration outcome).
   return samples[0];
 }
 

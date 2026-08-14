@@ -96,7 +96,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Machine-Readable Surfaces",
-        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn snapshot`, `cairn import playwright`, `cairn spec verify`, `cairn spec heal`, `cairn diff`, and `cairn stats` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing. Use `cairn run --label path=temporal` then `cairn stats --group-by path` for A/B cohort stats (rabbit vs temporal).",
+        body: "`cairn explain`, `cairn docs`, `cairn run`, `cairn snapshot`, `cairn import playwright`, `cairn spec verify`, `cairn spec heal`, `cairn diff`, and `cairn stats` all support structured output formats where applicable. MCP tools return the same structured content without shell parsing. Use `cairn run --label path=next` then `cairn stats --group-by path` for A/B cohort stats (legacy vs next).",
       },
     ],
     examples: [
@@ -243,7 +243,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Locators",
-        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, `by: testid`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), `near: <nearby visible text>` (the Open in the Turnvu DBA card), or a more specific name. `by: testid` reads `browser.testIdAttribute` (default `data-testid`). Targets are scrolled into view automatically before the action.",
+        body: "Interactive steps use locators with `by: role`, `by: label`, `by: text`, `by: testid`, or `by: selector`. Prefer role or label locators because they are easier to heal and easier for agents to understand. Semantic locators match ACCESSIBLE names (what the snapshot shows, post-CSS-text-transform): whole-name, case-insensitive, visible elements only. Substring matching is not supported. Zero matches fail the step with candidate diagnostics; multiple matches are a hard error — disambiguate with `exact: true` (case-sensitive), `nth: <index>` (0-based, document order), `near: <nearby visible text>` (the Open in the Acme Corp card), or a more specific name. `by: testid` reads `browser.testIdAttribute` (default `data-testid`). Targets are scrolled into view automatically before the action.",
       },
       {
         title: "Click Settling",
@@ -1245,11 +1245,11 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "Fidelity (what exports well)",
-        body: "Well supported: open, click (including click.until retry loops), hover, focus, fill/type (including verify-after-settle retry loops and verifyFill opt-out), select, upload, `postcondition.network` (response listener before the mutation; mutation emitted once), download, wait (text/notText/selector/value/load), press, scroll, request (page.request with cookies + body/headers/expectStatus), eval (inline js, including location.reload() retry), batch (flattened sequential steps — hover atomicity is lost), when: urlContains|urlNotContains|urlMatches|text|notText as real if-blocks, text/notText/url/count/network/console outcomes, browser script.run and browser script.file outcomes, node file verifiers (script.runtime: node + file: — imported and invoked directly), basic httpJson, ${vars.*} via --config/--env/--var, ${secrets.*}/unset ${env.*}/${run.token} as env/RUN_TOKEN references. Skipped or partial: eval.file, unreadable browser script.file, inline runtime: node scripts (no file), transform, snapshot, monitor, process/xlsx verifiers, preconditions (surfaced as a comment/README instead), ${requests.*}/${evals.*} splicing in later steps, advanced httpJson matchers (matches/atLeast/atMost).",
+        body: "Well supported: open, click (including click.until retry loops), hover, focus, fill/type (including verify-after-settle retry loops and verifyFill opt-out), select, upload, `postcondition.network` (response listener before the mutation; mutation emitted once), download, wait (text/notText/selector/value/load), press, scroll, request (page.request with cookies + body/headers/expectStatus), eval (inline js and eval.file, including location.reload() retry), batch (flattened sequential steps — hover atomicity is lost), when: urlContains|urlNotContains|urlMatches|text|notText|selector|notSelector (string or object form, including selector+hasText) as real if-blocks, locator visible/includeHidden, text/notText/url/count/network/console outcomes, browser script.run and browser script.file outcomes, node file verifiers (script.runtime: node + file: — imported and invoked directly), basic httpJson, ${vars.*} via --config/--env/--var, ${secrets.*}/unset ${env.*}/${run.token} as env/RUN_TOKEN references. Skipped or partial: unreadable eval.file / browser script.file, inline runtime: node scripts (no file), transform, snapshot, monitor, process/xlsx verifiers, documentary echo preconditions, ${requests.*}/${evals.*} splicing in later steps, advanced httpJson matchers (matches/atLeast/atMost). A skipped real interaction marks the generated test `test.fixme`.",
       },
       {
         title: "MCP",
-        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout. structuredContent is the same report schema as `--format json`. `--config`/`--env`/`--var`/`--project` are CLI-only for now.",
+        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout, project, into, config, env, var. structuredContent is the same report schema as `--format json`.",
       },
       {
         title: "Import (reverse direction)",

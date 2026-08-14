@@ -162,13 +162,13 @@ addFormatFlags(
     )
     .option(
       "--label <key=value>",
-      "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=rabbit)",
+      "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=legacy)",
       collectRepeatable,
       [] as string[],
     )
     .option(
       "--before <shell>",
-      "run a shell command after services/secrets and before the first spec (repeatable; e.g. tools/set-answer-change-path.sh temporal). Failures abort the run.",
+      "run a shell command after services/secrets and before the first spec (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
       collectRepeatable,
       [] as string[],
     )
@@ -320,7 +320,7 @@ addFormatFlags(
     )
     .option(
       "--group-by <key>",
-      "label key to cohort by (required; e.g. path for path=rabbit|temporal)",
+      "label key to cohort by (required; e.g. path for path=legacy|next)",
     )
     .option(
       "--label <key=value>",
@@ -403,6 +403,10 @@ addFormatFlags(
       "--project",
       "generate a structured project (actions/, verifiers/, config, global-setup) instead of standalone spec files",
       false,
+    )
+    .option(
+      "--into <dir>",
+      "write actions/lib/tests/verifiers into an existing Playwright tree (no package.json or playwright.config)",
     ),
 ).action((p: string, opts) => exportPlaywrightCommand(p, opts));
 

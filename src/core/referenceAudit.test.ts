@@ -38,15 +38,15 @@ describe("auditPlaceholderReferences", () => {
 
   it("accepts ${env.X} declared in config secrets.required", () => {
     const findings = auditPlaceholderReferences(
-      [spec('open: "${env.GRAPHITE_E2E_EMAIL}"')],
-      { env: {}, secretsRequired: ["GRAPHITE_E2E_EMAIL"] },
+      [spec('open: "${env.E2E_EMAIL}"')],
+      { env: {}, secretsRequired: ["E2E_EMAIL"] },
     );
     expect(findings).toEqual([]);
   });
 
   it("accepts the CAIRN_* framework namespace without a default", () => {
     const findings = auditPlaceholderReferences(
-      [spec('open: "${env.CAIRN_ANSWER_CHANGE_ROUTE}"')],
+      [spec('open: "${env.CAIRN_CHECKOUT_ROUTE}"')],
       { env: {} },
     );
     expect(findings).toEqual([]);
@@ -55,7 +55,7 @@ describe("auditPlaceholderReferences", () => {
   it("flags ${secrets.X} not in config secrets.required", () => {
     const findings = auditPlaceholderReferences(
       [spec('open: "${secrets.MONGO_URI}"')],
-      { secretsRequired: ["GRAPHITE_E2E_EMAIL"] },
+      { secretsRequired: ["E2E_EMAIL"] },
     );
     expect(findings).toHaveLength(1);
     expect(findings[0]!.token).toBe("${secrets.MONGO_URI}");

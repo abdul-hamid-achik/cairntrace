@@ -14,12 +14,18 @@
 export const SECRET_REF_SENTINEL = /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__/;
 export const RUN_TOKEN_SENTINEL = "__CAIRN_RUN_TOKEN__";
 
-const SPLIT_RE = /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__|__CAIRN_RUN_TOKEN__/g;
+const SPLIT_RE =
+  /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__|__CAIRN_RUN_TOKEN__|__CAIRN_VAR_REF__([A-Za-z0-9_]+)__/g;
 
 export type TemplatePart =
   | { kind: "lit"; text: string }
   | { kind: "env"; name: string }
+  | { kind: "var"; name: string }
   | { kind: "runToken" };
+
+export function varRefSentinel(name: string): string {
+  return `__CAIRN_VAR_REF__${name}__`;
+}
 
 /** Split a resolved spec string into literal / late-bound reference parts. */
 export function parseTemplateValue(s: string): TemplatePart[] {
@@ -29,6 +35,7 @@ export function parseTemplateValue(s: string): TemplatePart[] {
     if (m.index > last)
       parts.push({ kind: "lit", text: s.slice(last, m.index) });
     if (m[1] !== undefined) parts.push({ kind: "env", name: m[1] });
+    else if (m[2] !== undefined) parts.push({ kind: "var", name: m[2] });
     else parts.push({ kind: "runToken" });
     last = m.index + m[0].length;
   }
@@ -41,11 +48,12 @@ export function parseTemplateValue(s: string): TemplatePart[] {
 /** Collects which late-bound references the generated file actually uses. */
 export interface RefUsage {
   envNames: Set<string>;
+  varNames: Set<string>;
   runToken: boolean;
 }
 
 export function newRefUsage(): RefUsage {
-  return { envNames: new Set(), runToken: false };
+  return { envNames: new Set(), varNames: new Set(), runToken: false };
 }
 
 /**
@@ -57,6 +65,11 @@ export function emitStr(s: string, usage: RefUsage): string {
   if (parts.length === 1 && parts[0]!.kind === "lit") {
     return JSON.stringify(s);
   }
+  const only = parts.length === 1 ? parts[0] : undefined;
+  if (only?.kind === "var") {
+    usage.varNames.add(only.name);
+    return only.name;
+  }
   let out = "`";
   for (const p of parts) {
     if (p.kind === "lit") {
@@ -67,6 +80,9 @@ export function emitStr(s: string, usage: RefUsage): string {
     } else if (p.kind === "env") {
       usage.envNames.add(p.name);
       out += `\${process.env.${p.name} ?? ""}`;
+    } else if (p.kind === "var") {
+      usage.varNames.add(p.name);
+      out += `\${${p.name}}`;
     } else {
       usage.runToken = true;
       out += `\${RUN_TOKEN}`;

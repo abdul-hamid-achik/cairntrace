@@ -25,9 +25,13 @@ cairn export playwright flows/login.yml --stdout > tests/login.spec.ts
 
 # Portable project (package.json, tsconfig.json, config, tests, actions, verifiers)
 cairn export playwright flows/ --project --out-dir playwright-export
+
+# Into an existing Playwright suite (no package.json / playwright.config)
+cairn export playwright flows/ --into e2e/suites/cairn --config cairntrace.config.yml --env local
 ```
 
-MCP: `cairn_export_playwright` with `path`, optional `out` / `outDir`, `lang`, `stdout`.
+MCP: `cairn_export_playwright` with `path`, optional `out` / `outDir`, `lang`,
+`stdout`, `project`, `into`, `config`, `env`, `var`.
 
 Coverage reports list **skips** (e.g. `eval.file`, inline Node `script`
 verifiers, `monitor`) so agents know the handoff is partial. External browser
@@ -54,6 +58,13 @@ precondition also preserves its spec-relative `cwd`, applies its own
 `timeoutMs`, and layers authored `preconditions.env` over a filtered child
 environment. The generated runner strips publisher/TinyVault control
 credentials and kills the owned shell plus descendants at the hard deadline.
+
+`--project` actions are parameterized: declared `vars:` on a reusable
+action become `fn(page, vars?)` arguments, and `use: { action, vars }`
+emits a call instead of inlining the expanded steps. Shared runtime
+(`lib/hydration.ts`, `lib/clickUntil.ts`, `lib/verifier.ts`,
+`lib/networkEvidence.ts`) is imported once instead of being copied into
+every spec.
 
 Structured TypeScript projects are directly installable and typecheckable:
 

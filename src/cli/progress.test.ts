@@ -99,7 +99,7 @@ describe("onRunStart env header", () => {
   // spec.yml --env do` still printed `(env=local, ...)`. It must show the
   // environment the run actually resolved to (Runner.ts passes it as the
   // 5th onRunStart argument), independent of what the spec itself declares.
-  const spec = { name: "answer_change", environment: "local" } as never;
+  const spec = { name: "checkout", environment: "local" } as never;
 
   it("plain listener: shows the resolved environment, not spec.environment", () => {
     const lines: string[] = [];
@@ -107,7 +107,7 @@ describe("onRunStart env header", () => {
     listener.onRunStart?.(spec, "run_1", "/tmp/run_1", "agent-browser", "do");
     const text = lines.join("");
     expect(text).toContain(
-      "run start: answer_change (env=do, backend=agent-browser)",
+      "run start: checkout (env=do, backend=agent-browser)",
     );
     expect(text).not.toContain("env=local");
   });

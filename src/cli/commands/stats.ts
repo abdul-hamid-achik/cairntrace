@@ -27,8 +27,8 @@ export interface StatsCommandOptions {
 /**
  * `cairn stats --group-by path [--label suite=…]`
  *
- * Aggregate labeled runs into cohorts for A/B comparison (e.g. rabbit vs
- * temporal). Reads run.json under the artifact root; optionally harvests
+ * Aggregate labeled runs into cohorts for A/B comparison (e.g. legacy vs
+ * next). Reads run.json under the artifact root; optionally harvests
  * processingDurationMS from outcomes/*.raw.json.
  */
 export async function statsCommand(opts: StatsCommandOptions): Promise<void> {

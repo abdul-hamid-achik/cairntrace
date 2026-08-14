@@ -204,14 +204,14 @@ describe("waitConditionToArgv", () => {
   it("implements attached as a live DOM predicate", () => {
     expect(
       waitConditionToArgv({
-        selector: '[data-answer-key="Tax_US_W9"] input[type="file"]',
+        selector: '[data-qa="tax-form"] input[type="file"]',
         state: "attached",
         timeoutMs: 25000,
       }),
     ).toEqual([
       "wait",
       "--fn",
-      'document.querySelector("[data-answer-key=\\\"Tax_US_W9\\\"] input[type=\\\"file\\\"]") !== null',
+      'document.querySelector("[data-qa=\\\"tax-form\\\"] input[type=\\\"file\\\"]") !== null',
       "--timeout",
       "25000",
     ]);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { ParseResult } from "../parser/parseSpec";
+import { parseSpec, type ParseResult } from "../parser/parseSpec";
 import type { Spec } from "../schema/spec.v1";
 import { exportPlaywrightProject } from "./playwrightProject";
 import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
@@ -116,9 +116,14 @@ describe("exportPlaywrightProject timeout emission", () => {
       )?.source;
       expect(testSource).toContain(`import("../verifiers/entry.ts")`);
       expect(testSource).toContain(
-        `const verifierNamespace = importedVerifier as unknown as`,
+        `const verify = await loadCairnVerifier(await import("../verifiers/entry.ts"));`,
       );
-      expect(testSource).toContain(`if (typeof verify !== "function")`);
+      expect(testSource).toContain(
+        `import { loadCairnVerifier } from "../lib/verifier";`,
+      );
+      expect(
+        result.files.some((file) => file.relPath === "lib/verifier.ts"),
+      ).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -321,11 +326,21 @@ describe("exportPlaywrightProject timeout emission", () => {
     expect(source).toContain(
       `cairnNetworkEvidence.recordApiRequest({ url: patch.url(), method: "PATCH", status: patch.status(), timestamp: patchCairnRequestTimestamp, body: { "answer": "exact-value" }, contentType: "application/json" });`,
     );
+    expect(source).toContain(
+      `import { createCairnNetworkEvidence } from "../lib/networkEvidence";`,
+    );
+    expect(source).toContain(
+      `import { loadCairnVerifier } from "../lib/verifier";`,
+    );
+    expect(source).not.toContain("export function createCairnNetworkEvidence");
     expect(source?.match(/runDir: cairnRunDir,/g)).toHaveLength(2);
     expect(
       source?.match(/await cairnNetworkEvidence\.persist\(cairnRunDir\);/g),
     ).toHaveLength(2);
     expect(source).not.toContain("CAIRN_RUN_START_FLOOR_MS");
+    expect(
+      result.files.some((file) => file.relPath === "lib/networkEvidence.ts"),
+    ).toBe(true);
   });
 
   it("installs listener evidence for network outcomes without node verifiers", () => {
@@ -539,6 +554,185 @@ describe("exportPlaywrightProject timeout emission", () => {
       }
     },
   );
+
+  it("parameterizes declared action vars instead of inlining call-site expansions", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "cairn-export-action-vars-"),
+    );
+    try {
+      await mkdir(join(directory, "actions"), { recursive: true });
+      await mkdir(join(directory, "flows"), { recursive: true });
+      await writeFile(
+        join(directory, "actions", "edit_field.yml"),
+        `version: 1
+name: edit_field
+vars:
+  fieldSelector: "[data-field=default]"
+  fieldValue: default-value
+steps:
+  - id: fill_field
+    fill:
+      by: selector
+      selector: "\${vars.fieldSelector}"
+      value: "\${vars.fieldValue}"
+  - id: save
+    click:
+      by: role
+      role: button
+      name: Save
+      until:
+        selectorGone: ".editor"
+        timeoutMs: 5000
+`,
+      );
+      await writeFile(
+        join(directory, "flows", "two_edits.yml"),
+        `version: 1
+name: two_edits
+intent: same action twice with different vars
+imports:
+  - ../actions/edit_field.yml
+outcomes:
+  - id: saved
+    description: both values saved
+    verify:
+      text: { contains: saved }
+steps:
+  - id: first
+    use:
+      action: edit_field
+      vars:
+        fieldSelector: "#website"
+        fieldValue: first.example
+  - id: second
+    use:
+      action: edit_field
+      vars:
+        fieldSelector: "#social"
+        fieldValue: second.example
+`,
+      );
+
+      const parsed = await parseSpec(join(directory, "flows", "two_edits.yml"));
+      const result = exportPlaywrightProject([parsed]);
+      const action = result.files.find(
+        (file) => file.relPath === "actions/edit_field.ts",
+      )?.source;
+      const testSource = result.files.find(
+        (file) => file.relPath === "tests/two_edits.spec.ts",
+      )?.source;
+
+      expect(action).toContain(
+        `export async function edit_field(page: Page, vars: { fieldSelector?: string; fieldValue?: string } = {}): Promise<void>`,
+      );
+      expect(action).toContain(
+        `const fieldSelector = vars.fieldSelector ?? "[data-field=default]";`,
+      );
+      expect(action).toContain(
+        `const fieldValue = vars.fieldValue ?? "default-value";`,
+      );
+      expect(action).toContain(
+        `await verifiedFill(page, page.locator(fieldSelector), fieldValue);`,
+      );
+      expect(action).toContain(
+        `await clickUntil(page, page.getByRole("button", { name: "Save" }).first(), { timeoutMs: 5000, selectorGone: ".editor" });`,
+      );
+      expect(action).toContain(
+        `import { verifiedFill, verifiedType } from "../lib/hydration";`,
+      );
+      expect(action).toContain(
+        `import { clickUntil } from "../lib/clickUntil";`,
+      );
+      expect(testSource).toContain(
+        `await edit_field(page, { "fieldSelector": "#website", "fieldValue": "first.example" });`,
+      );
+      expect(testSource).toContain(
+        `await edit_field(page, { "fieldSelector": "#social", "fieldValue": "second.example" });`,
+      );
+      expect(testSource).not.toContain("call-site vars — inlined");
+      expect(testSource).not.toContain('page.locator("#website")');
+      expect(testSource).toContain(`await test.step("first", async () => {`);
+      expect(
+        result.files.some((file) => file.relPath === "lib/hydration.ts"),
+      ).toBe(true);
+      expect(
+        result.files.some((file) => file.relPath === "lib/clickUntil.ts"),
+      ).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves source folders, tags, and skips echo preconditions", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cairn-export-structure-"));
+    try {
+      await mkdir(join(directory, "flows", "resilience"), { recursive: true });
+      await writeFile(
+        join(directory, "flows", "resilience", "guard.yml"),
+        `version: 1
+name: checkout_guard
+intent: a tagged resilience spec
+metadata:
+  feature: checkout-resilience
+  tags: [billing, resilience]
+preconditions:
+  commands:
+    - name: note
+      run: echo "stack is assumed up"
+    - name: wait
+      run: bash ../../tools/wait.sh
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: ok }
+steps:
+  - id: open
+    open: /dash
+`,
+      );
+      const parsed = await parseSpec(
+        join(directory, "flows", "resilience", "guard.yml"),
+      );
+      const result = exportPlaywrightProject([parsed], {
+        sourceRoot: join(directory, "flows"),
+        projectRoot: directory,
+        into: true,
+        testIdAttribute: "data-testid",
+        viewport: { width: 1600, height: 900 },
+      });
+      expect(
+        result.files.some((file) => file.relPath === "playwright.config.ts"),
+      ).toBe(false);
+      expect(result.files.some((file) => file.relPath === "package.json")).toBe(
+        false,
+      );
+      const testFile = result.files.find(
+        (file) => file.relPath === "tests/resilience/checkout_guard.spec.ts",
+      );
+      expect(testFile?.source).toContain(
+        `test.describe("checkout-resilience", () => {`,
+      );
+      expect(testFile?.source).toContain(
+        `test("checkout_guard", { tag: ["@billing","@resilience"] }, async ({ page }) => {`,
+      );
+      expect(testFile?.source).toContain(
+        `await test.step("open", async () => {`,
+      );
+      expect(testFile?.source).toContain(`from "../../preconditions`);
+      expect(testFile?.source).not.toContain(`echo "stack is assumed up"`);
+      expect(testFile?.source).toContain(`bash ../../tools/wait.sh`);
+      expect(testFile?.source).toContain(`join(cairnProjectRoot()`);
+      expect(
+        result.files.some((file) => file.relPath === "lib/projectRoot.ts"),
+      ).toBe(true);
+      expect(
+        result.files.find((file) => file.relPath === "README.md")?.source,
+      ).toContain("Add a Playwright project");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 async function expectProcessDead(pid: number): Promise<void> {

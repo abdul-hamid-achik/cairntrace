@@ -15,20 +15,18 @@ describe("testIdSelector", () => {
   });
 
   it("honors a configured attribute and escapes quotes", () => {
-    expect(testIdSelector("Entity_Website", "data-answer-key")).toBe(
-      '[data-answer-key="Entity_Website"]',
+    expect(testIdSelector("product_name", "data-qa")).toBe(
+      '[data-qa="product_name"]',
     );
     expect(testIdSelector('quote"value')).toBe('[data-testid="quote\\"value"]');
   });
 
   it("validates and defaults the attribute name", () => {
-    expect(isTestIdAttribute("data-answer-key")).toBe(true);
+    expect(isTestIdAttribute("data-qa")).toBe(true);
     expect(isTestIdAttribute("data:id")).toBe(true);
     expect(isTestIdAttribute("[onclick]")).toBe(false);
     expect(resolveTestIdAttribute(undefined)).toBe("data-testid");
-    expect(resolveTestIdAttribute("  data-answer-key  ")).toBe(
-      "data-answer-key",
-    );
+    expect(resolveTestIdAttribute("  data-qa  ")).toBe("data-qa");
   });
 });
 

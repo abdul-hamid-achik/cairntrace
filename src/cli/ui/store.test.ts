@@ -31,7 +31,7 @@ describe("reduceTui", () => {
       { type: "services-start", phase: "docker", message: "docker compose up" },
       {
         type: "services-output",
-        chunk: "Container graphite-mongo-1 Started\n",
+        chunk: "Container app-mongo-1 Started\n",
       },
     ]);
     // Docker status spam is dropped (kept in service-log artifacts).
