@@ -10,6 +10,7 @@ import {
   RunStatusSchema,
   StepStatusSchema,
 } from "./shared";
+import { BriefMissPacketSchema } from "./brief.v1";
 
 /**
  * Wire schema for `cairn run --json` (plan §13c).
@@ -131,6 +132,11 @@ export const RunFailureSchema = z
     timedOut: z.boolean().optional(),
     /** Termination signal reported by the child-process runner, when present. */
     signal: z.string().min(1).optional(),
+    /**
+     * Agent brief for the failed interactive step (search approximations +
+     * authored values). Present on locator-style step failures.
+     */
+    brief: BriefMissPacketSchema.optional(),
   })
   .strict();
 export type RunFailure = z.infer<typeof RunFailureSchema>;
@@ -183,6 +189,11 @@ export const buildRunNextActions = (
       {
         command: `cairn spec heal ${result.spec.path} --verify --json`,
         reason: `step "${f.step}" did not complete (likely locator drift): heal repairs the selector from a fresh snapshot and re-verifies before writing`,
+        safeToAutoRun: false,
+      },
+      {
+        command: `cairn export brief ${result.spec.path} --format md`,
+        reason: `step "${f.step}" failed: emit an agent brief (search approximations + authored values) with cairn export brief`,
         safeToAutoRun: false,
       },
     ];

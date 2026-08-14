@@ -5,6 +5,22 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-08-14
+
+### Added
+
+- `cairn export brief` (MCP `cairn_export_brief`) compiles a spec into an
+  agent-neutral journey brief (`urn:cairntrace.dev:brief:v1`): operator
+  goals, locator approximations, setup/cold-start, and redacted secrets.
+  `--from-run latest` attaches `StepResult.resolved` from the last passed
+  run of that spec.
+- MCP `cairn_accompany_open` / `_choose` / `_status` / `_list` / `_close`
+  run a spec with try-then-ask: authored locators first; on miss the
+  harness picks WHERE and Cairntrace retries the authored value.
+- Locator-miss `cairn run` failures attach `failure.brief` and suggest
+  `cairn export brief`. `agent_context.md` renders the parked step.
+- Docs topic `brief` and site page [Journey briefs](https://cairntrace.dev/brief).
+
 ## [2.10.1] - 2026-08-14
 
 ### Added

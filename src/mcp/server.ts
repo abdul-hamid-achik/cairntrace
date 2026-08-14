@@ -33,7 +33,8 @@ import {
 } from "../cli/commands/fcheapContract";
 import { resolveFcheapBinary, runFcheap } from "../cli/commands/fcheapClient";
 import { getTvaultKeys, resolveScopedSecrets } from "../cli/commands/secrets";
-import { selectSpecsByBlastRadius } from "../cli/commands/run";
+import { parseVarFlags, selectSpecsByBlastRadius } from "../cli/commands/run";
+import { randomUUID } from "node:crypto";
 import {
   resolveArtifactRoot,
   resolveRunRef,
@@ -59,6 +60,20 @@ import { buildSpecYaml, deriveSpecName } from "../core/discovery/specExporter";
 import { toHealResult } from "../cli/commands/spec/heal";
 import { stampSpecContractHash } from "../cli/commands/spec/verify";
 import { createBackend } from "../cli/backendFactory";
+import {
+  chooseAccompany,
+  closeAllAccompany,
+  closeAccompany,
+  listAccompany,
+  locatorFromSnapshotRef,
+  openAccompany,
+  statusAccompany,
+  sweepExpiredAccompany,
+  terminateAllAccompanySync,
+} from "../core/accompany/AccompanySession";
+import { renderBriefStepMarkdown } from "../core/exporters/briefExporter";
+import { exportOneBrief } from "../cli/commands/exportBrief";
+import type { Locator } from "../core/schema/spec.v1";
 import { healSpec, healVerify } from "../core/healer/Healer";
 import { collectLocatorInventory } from "../core/snapshot/locatorInventory";
 import { parseSpec } from "../core/parser/parseSpec";
@@ -110,6 +125,24 @@ function stashMcpError(input: z.input<typeof StashToolErrorSchema>): {
     structuredContent: error,
     isError: true,
   };
+}
+
+function locatorFromAccompanyRef(
+  sessionId: string,
+  ref: string | undefined,
+): Locator {
+  if (!ref) {
+    throw new Error("accompany choose needs locator or ref");
+  }
+  const handle = statusAccompany(sessionId);
+  if (!handle?.lastSnapshot) {
+    throw new Error(`snapshot ref ${ref} not found in session ${sessionId}`);
+  }
+  try {
+    return locatorFromSnapshotRef(handle.lastSnapshot, ref, handle.backend);
+  } catch {
+    throw new Error(`snapshot ref ${ref} not found in session ${sessionId}`);
+  }
 }
 
 /**
@@ -1911,6 +1944,7 @@ export function buildMcpServer(): McpServer {
   // Auto-sweep expired sessions every 60s
   const sweepTimer = setInterval(() => {
     void sweepSessions(sessions);
+    void sweepExpiredAccompany();
   }, 60_000);
   sweepTimer.unref?.();
 
@@ -1943,7 +1977,9 @@ export function buildMcpServer(): McpServer {
         // best-effort — keep terminating the remaining sessions
       }
     }
+    terminateAllAccompanySync();
     void closeAllSessions(sessions);
+    void closeAllAccompany();
   }
   function onSigint(): void {
     shutdownDiscovery();
@@ -1963,6 +1999,7 @@ export function buildMcpServer(): McpServer {
         // best-effort — keep terminating the remaining sessions
       }
     }
+    terminateAllAccompanySync();
   }
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
@@ -1979,6 +2016,7 @@ export function buildMcpServer(): McpServer {
   server.server.onclose = () => {
     disposeSignalState();
     void closeAllSessions(sessions);
+    void closeAllAccompany();
     prevOnClose?.();
   };
 
@@ -2686,6 +2724,265 @@ export function buildMcpServer(): McpServer {
         structuredContent: DiscoveryListResultSchema.parse({
           sessions: list,
         }) as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_export_brief",
+    {
+      title: "Export a journey brief",
+      description:
+        "Compile a Cairntrace spec into an agent-neutral brief (what to fill, " +
+        "what to look for, locator approximations). JSON is urn:cairntrace.dev:brief:v1. " +
+        "Use when authored locators will not replay and a harness must complete the journey. " +
+        "See `cairn docs brief`.",
+      inputSchema: {
+        path: z.string().min(1).describe("Path to a single spec YAML"),
+        fromRun: z
+          .string()
+          .optional()
+          .describe(
+            "Run dir or 'latest' to attach seenLocally from StepResult.resolved",
+          ),
+        config: z.string().optional().describe("cairntrace.config.yml path"),
+        env: z.string().optional().describe("Config environment name"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X}"),
+      },
+    },
+    async ({ path: inputPath, fromRun, config, env, var: varFlags }) => {
+      try {
+        const { document, markdown } = await exportOneBrief(inputPath, {
+          ...(fromRun ? { fromRun } : {}),
+          ...(config ? { config } : {}),
+          ...(env ? { env } : {}),
+          ...(varFlags ? { var: varFlags } : {}),
+        });
+        return {
+          content: [{ type: "text", text: markdown }],
+          structuredContent: document as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `export brief failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_accompany_open",
+    {
+      title: "Open an accompanied spec run",
+      description:
+        "Run a spec with try-then-ask: authored locators are attempted first. " +
+        "On a miss the session parks with a brief + live inventory. Choose a locator " +
+        "with cairn_accompany_choose. The harness chooses WHERE; values stay authored.",
+      inputSchema: {
+        path: z.string().min(1).describe("Path to the spec YAML"),
+        env: z.string().optional().describe("Environment name override"),
+        mock: z.boolean().optional().describe("Use the in-memory backend"),
+        backend: z
+          .enum(["agent-browser", "playwright", "mock"])
+          .optional()
+          .describe("Browser backend"),
+        coldStart: z
+          .boolean()
+          .optional()
+          .describe("Wipe browser state before steps"),
+        headed: z
+          .boolean()
+          .optional()
+          .describe("Show the browser window (real backends only)"),
+        config: z.string().optional().describe("cairntrace.config.yml path"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X}"),
+      },
+    },
+    async ({
+      path,
+      env,
+      mock,
+      backend: backendChoice,
+      coldStart,
+      headed,
+      config,
+      var: varFlags,
+    }) => {
+      const backend = createBackend({
+        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+        mock,
+        session: `cairntrace-accompany-${process.pid}-${randomUUID()}`,
+        ...(headed !== undefined ? { headed } : {}),
+      });
+      try {
+        const varOverrides = parseVarFlags(varFlags);
+        const scopedSecrets = await resolveScopedSecrets(path, {
+          ...(env !== undefined ? { environmentOverride: env } : {}),
+          ...(config !== undefined ? { configPath: config } : {}),
+          ...(Object.keys(varOverrides).length > 0
+            ? { vars: varOverrides }
+            : {}),
+        });
+        const { open } = await openAccompany({
+          specPath: path,
+          backend,
+          env: scopedSecrets.env,
+          childEnv: scopedSecrets.childEnv,
+          secretValues: scopedSecrets.secretValues,
+          selectedTvaultKeys: scopedSecrets.selectedKeys,
+          ...(env !== undefined ? { environmentOverride: env } : {}),
+          ...(coldStart !== undefined ? { coldStart } : {}),
+          ...(config !== undefined ? { configPath: config } : {}),
+          ...(Object.keys(varOverrides).length > 0
+            ? { vars: varOverrides }
+            : {}),
+        });
+        const text =
+          open.status === "needs_choice" && open.parked
+            ? renderBriefStepMarkdown(open.parked.step)
+            : `accompany ${open.status}`;
+        return {
+          content: [{ type: "text", text }],
+          structuredContent: open as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        await backend.close().catch(() => undefined);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `accompany open failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_accompany_choose",
+    {
+      title: "Choose a locator for a parked accompany step",
+      description:
+        "Supply a Locator or a snapshot ref (e12 / @e12) for the parked step. " +
+        "Cairntrace retries the same authored value against that locator.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Accompany session ID"),
+        locator: LocatorSchema.optional().describe("Chosen locator (WHERE)"),
+        ref: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Snapshot ref from the miss packet (e12 or @e12)"),
+      },
+    },
+    async ({ sessionId, locator, ref }) => {
+      try {
+        const chosen = locator ?? locatorFromAccompanyRef(sessionId, ref);
+        const open = await chooseAccompany(sessionId, chosen);
+        return {
+          content: [{ type: "text", text: `accompany ${open.status}` }],
+          structuredContent: open as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `accompany choose failed: ${(e as Error).message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_accompany_status",
+    {
+      title: "Accompany session status",
+      description: "Current cursor, parked miss packet, and outcomes so far.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Accompany session ID"),
+      },
+    },
+    async ({ sessionId }) => {
+      const handle = statusAccompany(sessionId);
+      if (!handle) {
+        return {
+          content: [
+            { type: "text", text: `accompany session not found: ${sessionId}` },
+          ],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: `accompany ${handle.status}` }],
+        structuredContent: handle as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_accompany_close",
+    {
+      title: "Close an accompany session",
+      description:
+        "Abort a parked miss if needed, write the run if it finished, free the backend.",
+      inputSchema: {
+        sessionId: z.string().min(1).describe("Accompany session ID"),
+      },
+    },
+    async ({ sessionId }) => {
+      await closeAccompany(sessionId);
+      return {
+        content: [{ type: "text", text: "closed" }],
+        structuredContent: { closed: true, sessionId },
+      };
+    },
+  );
+
+  server.registerTool(
+    "cairn_accompany_list",
+    {
+      title: "List accompany sessions",
+      description: "Active try-then-ask sessions.",
+      inputSchema: {},
+    },
+    async () => {
+      const accompanySessions = listAccompany().map((s) => ({
+        sessionId: s.id,
+        status: s.status,
+        lastActivity: new Date(s.lastActivity).toISOString(),
+        parkedStep: s.parked?.step.id,
+      }));
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              accompanySessions.length === 0
+                ? "no accompany sessions"
+                : accompanySessions
+                    .map((s) => `  ${s.sessionId} ${s.status}`)
+                    .join("\n"),
+          },
+        ],
+        structuredContent: { sessions: accompanySessions },
       };
     },
   );

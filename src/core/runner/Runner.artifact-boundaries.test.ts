@@ -66,6 +66,68 @@ describe("run artifact boundaries", () => {
     expect(context).not.toContain("All outcomes passed");
   });
 
+  it("renders a failed-step brief in agent_context", () => {
+    const spec: Spec = {
+      version: 1,
+      name: "click_miss",
+      intent: "click a button",
+      mode: "normal",
+      outcomes: [
+        {
+          id: "ok",
+          description: "ok",
+          verify: { console: { errorsMax: 0 } },
+        },
+      ],
+    };
+    const result: RunResult = {
+      $schema: "urn:cairntrace.dev:run:v1",
+      version: "1",
+      runId: "click_miss_run",
+      runDir: "/tmp/click_miss_run",
+      spec: { name: spec.name, path: "/tmp/click-miss.yml" },
+      environment: "local",
+      backend: "mock",
+      coldStart: false,
+      status: "failed",
+      summary: "step 'click_go' failed",
+      failure: {
+        step: "click_go",
+        message: "0 visible matches",
+        brief: {
+          step: {
+            id: "click_go",
+            action: "click",
+            goal: 'click role=button name="Go"',
+            approximations: ['role button named "Go"'],
+            doneWhen: "the authored effect is visible",
+          },
+          error: "0 visible matches",
+        },
+      },
+      startedAt: "2026-01-01T00:00:00.000Z",
+      endedAt: "2026-01-01T00:00:00.000Z",
+      durationMs: 0,
+      outcomes: [],
+      steps: [
+        {
+          id: "click_go",
+          status: "failed",
+          durationMs: 10,
+          error: "0 visible matches",
+        },
+      ],
+      artifacts: {
+        agentContext: "agent_context.md",
+        events: "events.ndjson",
+      },
+      exitCode: 1,
+    };
+    const context = renderAgentContext(spec, result);
+    expect(context).toContain("## Brief (failed step)");
+    expect(context).toContain('role button named "Go"');
+  });
+
   it("redacts dynamic credential headers before console/network NDJSON serialization", async () => {
     const dir = await makeRoot();
     const artifactRoot = join(dir, "runs");

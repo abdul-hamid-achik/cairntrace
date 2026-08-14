@@ -8,6 +8,16 @@ description: Hand off Cairntrace specs to Playwright JS/TS, or import Playwright
 Cairntrace stays the **agent source of truth**. Use Playwright export when CI or
 a human-only suite needs a plain `@playwright/test` file.
 
+## Journey brief (fragile environments)
+
+When the spec already passes locally but locators will not replay, export an
+agent-neutral brief instead of Playwright source. Full guide:
+[Journey briefs](/brief).
+
+```bash
+cairn export brief flows/login.yml --from-run latest --stdout --format md
+```
+
 ## Export
 
 ```bash

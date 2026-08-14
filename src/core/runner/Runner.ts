@@ -40,6 +40,7 @@ import type { ExitCode } from "../schema/shared";
 import {
   openPath,
   type EvalStep,
+  type Locator,
   type MonitorStep,
   type RequestStep,
   type Spec,
@@ -54,6 +55,12 @@ import type {
   RunResult,
   StepResult,
 } from "../schema/run.v1";
+import type { BriefStep } from "../schema/brief.v1";
+import {
+  isInteractiveLocatorStep,
+  isLocatorMissError,
+  replaceStepLocator,
+} from "../accompany/replaceStepLocator";
 import { buildReplayManifest } from "../schema/replay.v1";
 import type { Outcome } from "../schema/spec.v1";
 import { CAIRN_VERSION } from "../../cli/version";
@@ -67,6 +74,11 @@ import {
   resolveResponsePlaceholders,
   resolveRuntimeFilePath,
 } from "./runtimePlaceholders";
+import {
+  briefStepFromSpecStep,
+  isBriefableStep,
+  redactBriefStep,
+} from "../exporters/briefExporter";
 import { generateRunId } from "./runId";
 import {
   applyWaitScale,
@@ -154,6 +166,12 @@ export interface RunOptions {
   now?: () => Date;
   /** Receives progress events during the run. */
   listener?: ProgressListener;
+  /**
+   * Called when an interactive locator step fails. Return `retry` with a new
+   * locator (authored values are preserved) or `abort` to fail the step.
+   * Absent on normal CLI runs.
+   */
+  onLocatorMiss?: (ctx: LocatorMissContext) => Promise<LocatorMissDecision>;
   /** Path to a cairntrace.config.yml. Disables auto-discovery from the spec dir. */
   configPath?: string;
   /** Worker slot for `${worker.index}`. Defaults to 0. */
@@ -221,6 +239,18 @@ export interface RunOptions {
   }>;
   /** Internal command-level video settings (used by `cairn audit`). */
   videoOptions?: { slowMo?: number; speed?: number };
+}
+
+export type LocatorMissDecision =
+  | { action: "abort" }
+  | { action: "retry"; locator: Locator };
+
+export interface LocatorMissContext {
+  step: Step;
+  stepId: string;
+  index: number;
+  error: string;
+  brief: BriefStep;
 }
 
 export interface MonitorConfig {
@@ -832,11 +862,29 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           });
         }
       } else {
-        const r = await runResilientBrowserStep(
-          stepToRun,
-          opts.backend,
-          waitScale,
-        );
+        let current: Step = stepToRun;
+        let r = await runResilientBrowserStep(current, opts.backend, waitScale);
+        while (
+          !r.ok &&
+          opts.onLocatorMiss &&
+          isInteractiveLocatorStep(current) &&
+          isLocatorMissError(r.stderr.trim() || `exit ${r.exitCode}`)
+        ) {
+          const decision = await opts.onLocatorMiss({
+            step: current,
+            stepId,
+            index: i,
+            error: r.stderr.trim() || `exit ${r.exitCode}`,
+            brief: redactBriefStep(
+              briefStepFromSpecStep(current, i),
+              runEnv,
+              opts.secretValues ?? [],
+            ),
+          });
+          if (decision.action === "abort") break;
+          current = replaceStepLocator(current, decision.locator);
+          r = await runResilientBrowserStep(current, opts.backend, waitScale);
+        }
         stepResolved = r.resolvedElement;
         if (!r.ok) {
           stepStatus = "failed";
@@ -1259,7 +1307,33 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   } else if (failedStepResult) {
     const stepMsg =
       failedStepResult.error ?? `step '${failedStepResult.id}' failed`;
-    failure = { step: failedStepResult.id, message: stepMsg };
+    const failedIndex = stepResults.findIndex(
+      (s) => s.id === failedStepResult.id,
+    );
+    const specSteps = resolved.steps ?? [];
+    const specStep =
+      specSteps.find(
+        (s, i) => (s.id ?? `step_${i + 1}`) === failedStepResult.id,
+      ) ?? (failedIndex >= 0 ? specSteps[failedIndex] : undefined);
+    failure = {
+      step: failedStepResult.id,
+      message: stepMsg,
+      ...(specStep && isBriefableStep(specStep)
+        ? {
+            brief: {
+              step: redactBriefStep(
+                briefStepFromSpecStep(
+                  specStep,
+                  failedIndex >= 0 ? failedIndex : 0,
+                ),
+                runEnv,
+                opts.secretValues ?? [],
+              ),
+              error: stepMsg,
+            },
+          }
+        : {}),
+    };
     summary =
       status === "errored"
         ? `errored at step '${failedStepResult.id}': ${stepMsg}`

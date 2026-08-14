@@ -678,6 +678,68 @@ export function buildExplain(): ExplainResult {
         },
       },
       {
+        name: "export brief",
+        summary:
+          "Emit an agent-neutral journey brief (what to fill, what to look for) from a spec, optionally enriched from a passing run",
+        synopsis:
+          "cairn export brief <spec|dir> [--from-run <runDir|latest>] [--out <file>] [--out-dir <dir>] [--stdout] [--format json|yaml|md]",
+        flags: [
+          {
+            name: "--out",
+            type: "string",
+            description: "Where to write a single file",
+          },
+          {
+            name: "--out-dir",
+            type: "string",
+            description:
+              "Batch-write briefs into this directory (required for directory input)",
+          },
+          {
+            name: "--stdout",
+            type: "boolean",
+            default: false,
+            description: "Print the brief only (single-spec)",
+          },
+          {
+            name: "--from-run",
+            type: "string",
+            description:
+              "Enrich approximations from a run dir or 'latest' (uses StepResult.resolved)",
+          },
+          {
+            name: "--config",
+            type: "string",
+            description: "cairntrace.config.yml path",
+          },
+          {
+            name: "--env",
+            type: "string",
+            description: "Config environment name",
+          },
+          {
+            name: "--var",
+            type: "string",
+            description: "Override a ${vars.X} value (repeatable key=value)",
+          },
+          {
+            name: "--format",
+            type: "enum",
+            values: ["json", "yaml", "md"],
+            default: "md",
+            description: "Brief or report format",
+          },
+        ],
+        exitCodes: {
+          "0": "written",
+          "2": "usage or runtime error",
+          "4": "nothing exported",
+        },
+        outputSchema: "urn:cairntrace.dev:brief:v1",
+        notes:
+          "MCP: cairn_export_brief. Live try-then-ask: cairn_accompany_open / _choose / _status / _close / _list.",
+      },
+      {
         name: "import playwright",
         summary:
           "Convert a @playwright/test file into reviewable Cairntrace YAML",

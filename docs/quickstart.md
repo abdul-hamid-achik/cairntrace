@@ -134,5 +134,6 @@ Humans can open the HTML report. Agents start with `agent_context.md`. CI can co
 
 - [Authoring contracts](/authoring) — write outcomes that survive UI changes.
 - [Discovery sessions](/discover) — explore a live page and record interactions before exporting a spec.
+- [Journey briefs](/brief) — hand a passing spec to a harness when locators miss in another environment.
 - [Steps](/steps) and [verifiers](/verifiers) — learn the typed vocabulary.
 - [MCP server](/mcp) — give an MCP-aware coding agent the same author, run, and evidence loop.

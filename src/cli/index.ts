@@ -13,6 +13,7 @@ import { doctorCommand } from "./commands/doctor";
 import { docsCommand, DOC_TOPICS } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
+import { exportBriefCommand } from "./commands/exportBrief";
 import { importPlaywrightCommand } from "./commands/import";
 import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
@@ -409,6 +410,31 @@ addFormatFlags(
       "write actions/lib/tests/verifiers into an existing Playwright tree (no package.json or playwright.config)",
     ),
 ).action((p: string, opts) => exportPlaywrightCommand(p, opts));
+
+addFormatFlags(
+  exportCmd
+    .command("brief <spec>")
+    .description(
+      "Emit an agent-neutral journey brief (markdown/json/yaml) from a spec",
+    )
+    .option("--out <file>", "where to write a single file")
+    .option(
+      "--out-dir <dir>",
+      "batch-write briefs (required for directory input)",
+    )
+    .option("--stdout", "print the brief only (single-spec)", false)
+    .option("--from-run <ref>", "enrich from a run dir or 'latest'")
+    .option(
+      "--config <path>",
+      "cairntrace.config.yml supplying ${vars.*}/baseUrl",
+    )
+    .option("--env <name>", "config environment")
+    .option(
+      "--var <key=value>",
+      "override a ${vars.X} value (repeatable)",
+      (v: string, prev: string[] = []) => [...prev, v],
+    ),
+).action((p: string, opts) => exportBriefCommand(p, opts));
 
 const importCmd = program
   .command("import")

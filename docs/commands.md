@@ -14,6 +14,7 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 ## Page inspection
 
 - [Discover & snapshot](/discover) — `cairn discover` / `cairn snapshot` return the accessibility tree and locator inventory for a live page.
+- [Journey briefs](/brief) — `cairn export brief` compiles a spec into operator instructions for a fragile environment; MCP `cairn_accompany_*` is the live try-then-ask loop.
 
 ## Sessions
 

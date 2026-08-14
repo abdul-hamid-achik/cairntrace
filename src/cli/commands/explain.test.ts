@@ -36,5 +36,13 @@ describe("buildExplain", () => {
     // The stale 9-topic synopsis omitted these authoring-central topics.
     expect(docsCmd!.synopsis).toContain("discovery");
     expect(docsCmd!.synopsis).toContain("export");
+    expect(docsCmd!.synopsis).toContain("brief");
+  });
+
+  it("documents export brief", () => {
+    const brief = doc.commands.find((c) => c.name === "export brief");
+    expect(brief).toBeDefined();
+    expect(brief!.synopsis).toContain("cairn export brief");
+    expect(brief!.outputSchema).toBe("urn:cairntrace.dev:brief:v1");
   });
 });

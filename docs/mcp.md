@@ -15,14 +15,14 @@ There is no HTTP transport, no `serve` subcommand, and no `--port` flag. If you 
 
 ## Tool surface
 
-35 tools, grouped by concern. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`). Every tool's `--format json` output is identical between transports, so an agent does not special-case which one is in use.
+41 tools, grouped by concern. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`). Every tool's `--format json` output is identical between transports, so an agent does not special-case which one is in use.
 
 ### Bootstrap & docs
 
 | MCP tool | CLI | Purpose |
 |---|---|---|
 | `cairn_explain` | `cairn explain --format json` | the full surface: commands, flags, exit codes, step + verifier vocabulary, rules. Call once at session start. |
-| `cairn_docs` | `cairn docs [topic]` | focused authoring guidance by topic |
+| `cairn_docs` | `cairn docs [topic]` | focused authoring guidance by topic (`brief` covers journey briefs) |
 | `cairn_doctor` | `cairn doctor --format md` | environment health check |
 
 ### Spec authoring
@@ -70,9 +70,23 @@ Nine stateful tools that keep one browser session alive across calls (auto-expir
 
 `cairn_discover_open` → `cairn_discover_snapshot` / `cairn_discover_inventory` → `cairn_discover_interact` / `cairn_discover_navigate` → `cairn_discover_suggest` → `cairn_discover_export` → `cairn_discover_close`. Use `cairn_discover_list` to check for active sessions. The one-shot CLI equivalent is `cairn discover <url>`. See [Discover & snapshot](/discover).
 
+### Journey briefs (fragile environments)
+
+Compile a passing spec into operator instructions, or run it with try-then-ask when locators miss. See [Journey briefs](/brief).
+
+| MCP tool | CLI | Purpose |
+|---|---|---|
+| `cairn_export_brief` | `cairn export brief` | compile intent, outcomes, fill values, and locator approximations (`--from-run latest` attaches the last **passed** run of this spec) |
+| `cairn_accompany_open` | — (MCP-only session) | try authored locators; park on miss with brief + inventory |
+| `cairn_accompany_choose` | — | supply a locator or snapshot `@ref`; Cairntrace retries the authored value |
+| `cairn_accompany_status` / `_list` | — | parked cursor and active sessions |
+| `cairn_accompany_close` | — | abort or finalize; free the backend |
+
+Discovery *records* a spec. Accompany *plays* one. They do not share a session registry.
+
 ## Read-only vs mutating
 
-The bootstrap/docs trio (`cairn_explain`, `cairn_docs`, `cairn_doctor`) and `cairn_config_validate`, `cairn_checkpoint_show`, `cairn_stash_list`, `cairn_stash_info`, `cairn_secrets_status`, `cairn_services_status`, `cairn_discover_list`/`_snapshot`/`_inventory` are read-only. The rest are mutating — they write spec changes, run the runner, restore or stash artifacts, cut clips, or annotate codemap.
+The bootstrap/docs trio (`cairn_explain`, `cairn_docs`, `cairn_doctor`) and `cairn_config_validate`, `cairn_checkpoint_show`, `cairn_stash_list`, `cairn_stash_info`, `cairn_secrets_status`, `cairn_services_status`, `cairn_discover_list`/`_snapshot`/`_inventory`, `cairn_accompany_list`/`_status`, and `cairn_export_brief` (when used as a compile-only call) are read-only. The rest are mutating — they write spec changes, run the runner, restore or stash artifacts, cut clips, or annotate codemap. `cairn_accompany_open` / `_choose` / `_close` drive a live browser.
 
 Cairntrace ships **no built-in confirm gate**. If your harness wants a typed "I really meant to run that" gate, enforce it harness-side with a tool-permission allowlist: allow the read-only set freely, gate the mutating set behind an explicit approval. The server does not pause for interactive prompts.
 

@@ -1,6 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { loadConfig, type LoadedConfig } from "../core/config/loader";
 
 export interface ArtifactRootOptions {
@@ -47,10 +47,9 @@ export async function resolveRunRef(
   return join(runsRoot, ref);
 }
 
-export async function findRunBySlot(
+export async function listRunDirsNewestFirst(
   runsRoot: string,
-  slot: number,
-): Promise<string | undefined> {
+): Promise<string[]> {
   const entries = await readdir(runsRoot).catch(() => [] as string[]);
   const stats = await Promise.all(
     entries.map(async (name) => {
@@ -62,7 +61,17 @@ export async function findRunBySlot(
       }
     }),
   );
-  return stats.filter((s) => s.isDir).toSorted((a, b) => b.mtime - a.mtime)[
-    slot
-  ]?.name;
+  return stats
+    .filter((s) => s.isDir)
+    .toSorted((a, b) => b.mtime - a.mtime)
+    .map((s) => join(runsRoot, s.name));
+}
+
+export async function findRunBySlot(
+  runsRoot: string,
+  slot: number,
+): Promise<string | undefined> {
+  const dirs = await listRunDirsNewestFirst(runsRoot);
+  const picked = dirs[slot];
+  return picked ? basename(picked) : undefined;
 }

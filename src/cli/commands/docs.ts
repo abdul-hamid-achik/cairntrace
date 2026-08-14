@@ -517,6 +517,10 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         body: "Nine `cairn_discover_*` tools provide interactive page exploration: open a session, snapshot, interact (click/fill/hover/scroll/press), navigate, collect inventory, suggest recorded steps, export as spec YAML, and close. Sessions are stateful and auto-expire after 5 min. See `cairn docs discovery` for the full workflow.",
       },
       {
+        title: "Journey briefs",
+        body: "`cairn_export_brief` compiles a spec into operator instructions (what to fill, what to look for). `cairn_accompany_open` / `_choose` / `_status` / `_list` / `_close` run the spec with try-then-ask: authored locators first; on miss the harness picks WHERE and Cairntrace keeps WHAT. See `cairn docs brief`. Discovery records a spec; accompany plays one.",
+      },
+      {
         title: "No Per-Agent Paths",
         body: "The MCP tools are an adapter over the same runner, schemas, and artifact format as the CLI. Agent-specific behavior belongs in the client, not Cairntrace core.",
       },
@@ -537,7 +541,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
         ].join("\n"),
       },
     ],
-    relatedTopics: ["overview", "artifacts", "backends", "discovery"],
+    relatedTopics: ["overview", "artifacts", "backends", "discovery", "brief"],
   },
   backends: {
     title: "Browser Backends",
@@ -1249,7 +1253,7 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       },
       {
         title: "MCP",
-        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout, project, into, config, env, var. structuredContent is the same report schema as `--format json`.",
+        body: "`cairn_export_playwright` mirrors the CLI: path (spec or dir), out, outDir, lang js|ts, stdout, project, into, config, env, var. structuredContent is the same report schema as `--format json`. For an agent-readable journey (not Playwright source) see `cairn docs brief` / `cairn export brief`.",
       },
       {
         title: "Import (reverse direction)",
@@ -1293,6 +1297,48 @@ const DOCS: Record<DocsTopic, DocsTemplate> = {
       "verifiers",
       "backends",
       "mcp",
+      "brief",
     ],
+  },
+
+  brief: {
+    title: "Journey briefs",
+    summary:
+      "Compile a spec into an agent-neutral journey brief: what to fill, what to look for, and locator approximations. Use this when authored selectors do not replay in a delicate environment but a harness can still drive agent-browser. The contract stays intent + outcomes. The harness chooses WHERE; Cairntrace keeps WHAT.",
+    sections: [
+      {
+        title: "When to use",
+        body: "Use a brief when the local spec already passes and you know the values, but CSS/testid locators miss in another environment (different build, i18n, vendor widgets). Prefer semantic locators (`by: role|label|text`) and `cairn spec heal` first when the accessibility tree is stable. A brief is not a new verifier and does not rewrite the spec.",
+      },
+      {
+        title: "CLI",
+        body: "`cairn export brief <spec|dir> [--from-run <runDir|latest>] [--out <file>] [--out-dir <dir>] [--stdout] [--format json|yaml|md] [--config] [--env] [--var key=value]`. JSON is the stable `urn:cairntrace.dev:brief:v1` document. Markdown is a renderer of that document. `--from-run` copies `StepResult.resolved` (role/name the green run actually hit) onto each step. The brief header includes environment and how the spec satisfies cold-start (guest, checkpoint, imports, or preconditions).",
+      },
+      {
+        title: "Live try-then-ask",
+        body: "MCP `cairn_accompany_open` runs the spec and tries authored locators first. On a miss it parks with a miss packet (brief step + live inventory + snapshot). `cairn_accompany_choose` accepts a locator or a snapshot ref; Cairntrace dispatches the same authored value to that locator. Close with `cairn_accompany_close`. Sessions idle-expire after 5 minutes. There is no CLI choose loop in v1.",
+      },
+      {
+        title: "WHERE not WHAT",
+        body: "The harness may pick a different control. It may not change fill/type/select values, URLs, or outcomes. Secrets appear as `{ kind: secret, name }` — never inlined. `eval` / `request` / `transform` / `monitor` are machine-only: the live session still runs them; the static brief marks them as coverage skips.",
+      },
+      {
+        title: "Run miss packet",
+        body: "A failed interactive step on `cairn run` attaches `failure.brief` (that step's approximations + authored values) and suggests `cairn export brief`. `agent_context.md` renders the parked step.",
+      },
+    ],
+    examples: [
+      {
+        title: "Export a markdown brief",
+        language: "bash",
+        code: "cairn export brief flows/login.yml --from-run latest --stdout --format md",
+      },
+      {
+        title: "Export JSON for a harness",
+        language: "bash",
+        code: "cairn export brief flows/login.yml --format json --stdout",
+      },
+    ],
+    relatedTopics: ["export", "discovery", "authoring", "steps", "mcp"],
   },
 };

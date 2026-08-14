@@ -36,6 +36,10 @@ describe("buildRunNextActions", () => {
     expect(heal!.command).toBe(`cairn spec heal ${specPath} --verify --json`);
     expect(heal!.reason).toContain("drift");
     expect(heal!.safeToAutoRun).toBe(false);
+
+    const brief = acts.find((a) => a.command?.includes("cairn export brief"));
+    expect(brief?.command).toBe(`cairn export brief ${specPath} --format md`);
+    expect(brief?.safeToAutoRun).toBe(false);
   });
 
   it("outcome-only failure → no heal action (behavior regression, not drift)", () => {

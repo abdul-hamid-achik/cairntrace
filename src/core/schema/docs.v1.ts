@@ -24,6 +24,7 @@ export const DocsTopicSchema = z.enum([
   "services",
   "discovery",
   "export",
+  "brief",
 ]);
 export type DocsTopic = z.infer<typeof DocsTopicSchema>;
 

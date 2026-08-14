@@ -12,7 +12,8 @@ Cairn is built for AI coding agents as much as for people. Every CLI command tak
 | When | Tool | Answers |
 |---|---|---|
 | **First contact with the repo** | `cairn_explain` | the current CLI surface, step vocabulary, and verifier vocabulary |
-| **Focus on one task** | `cairn_docs` | focused guidance on authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends |
+| **Focus on one task** | `cairn_docs` | focused guidance on authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends, discovery, export, brief |
+| **Locators miss in another env** | `cairn_export_brief` / `cairn_accompany_*` | operator instructions + try-then-ask; see [Journey briefs](/brief) |
 | **Validate a spec before running** | `cairn_spec_verify` | schema, contract hash, dead-link check |
 | **Replays from a fresh browser** | `cairn_run` with `cold_start=true` | one golden run; rewrites artifact pack |
 | **Read what failed** | `cairn_context` (latest) | the agent-readable failure narrative |

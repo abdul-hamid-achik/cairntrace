@@ -3,6 +3,7 @@ import type { RunResult } from "../schema/run.v1";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createArtifactRedactor } from "./redaction";
+import { renderBriefStepMarkdown } from "../exporters/briefExporter";
 
 const CODE_MATCHES_START = "<!-- cairntrace:code-matches:start -->";
 const CODE_MATCHES_END = "<!-- cairntrace:code-matches:end -->";
@@ -235,6 +236,14 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
       "# or extract evidence with vidtrace:",
       `vidtrace extract ${result.runDir}/${result.artifacts.video} --json`,
       "```",
+    );
+  }
+
+  if (result.failure?.brief) {
+    lines.push(
+      "",
+      "## Brief (failed step)",
+      renderBriefStepMarkdown(result.failure.brief.step).trimEnd(),
     );
   }
 

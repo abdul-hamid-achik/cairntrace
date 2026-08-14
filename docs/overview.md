@@ -5,7 +5,7 @@ description: Learn how Cairntrace turns user intent and typed outcomes into dura
 
 # Overview
 
-Cairntrace is a local-first behavioral browser-spec layer for coding agents. Specs define `intent + outcomes` as the behavior contract and `steps` as repairable hints for reaching that state. The same spec can run from the CLI, through the MCP server, or be exported to Playwright.
+Cairntrace is a local-first behavioral browser-spec layer for coding agents. Specs define `intent + outcomes` as the behavior contract and `steps` as repairable hints for reaching that state. The same spec can run from the CLI, through the MCP server, be compiled into an [agent journey brief](/brief), or be exported to Playwright.
 
 It captures DOM snapshots, screenshots, console logs, network traffic, and outcome evidence into one agent-readable artifact pack. Heals common locator drift without changing the behavior contract. Agent-neutral: there are no Claude, Codex, Cursor, or OpenCode branches in core.
 
@@ -29,4 +29,5 @@ provisions and sinks the ephemeral compute behind an SSH tunnel.
 
 - [Quickstart](/quickstart) — install `cairn` and run your first browser spec.
 - [Authoring](/authoring), [Steps](/steps), and [Verifiers](/verifiers) — the typed vocabularies and what makes a contract survive.
-- [Commands](/commands) — the `cairn` CLI surface: doctor, discover, checkpoints, stash, investigate, annotate, clip, process monitoring, secrets, and services.
+- [Commands](/commands) — the `cairn` CLI surface: doctor, discover, briefs, checkpoints, stash, investigate, annotate, clip, process monitoring, secrets, and services.
+- [Journey briefs](/brief) — hand a passing spec to a harness when locators will not replay in another environment.

@@ -3,6 +3,10 @@ import type { RedactionConfig } from "../schema/spec.v1";
 
 const SENSITIVE_KEY_RE =
   /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion/i;
+
+export function isSensitiveEnvKey(key: string): boolean {
+  return SENSITIVE_KEY_RE.test(key);
+}
 const STRUCTURED_POST_DATA_KEY_RE = /^postData$/i;
 const BUILT_IN_SENSITIVE_HEADERS = ["Authorization", "Cookie", "Set-Cookie"];
 const BUILT_IN_QUERY_PARAM_RE =

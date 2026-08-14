@@ -76,6 +76,11 @@ describe("Cairntrace MCP server", () => {
     const list = await c.listTools();
     const names = list.tools.map((t) => t.name).toSorted();
     expect(names).toEqual([
+      "cairn_accompany_choose",
+      "cairn_accompany_close",
+      "cairn_accompany_list",
+      "cairn_accompany_open",
+      "cairn_accompany_status",
       "cairn_annotate",
       "cairn_audit",
       "cairn_checkpoint_capture",
@@ -97,6 +102,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_docs",
       "cairn_doctor",
       "cairn_explain",
+      "cairn_export_brief",
       "cairn_export_playwright",
       "cairn_investigate",
       "cairn_run",
@@ -1681,12 +1687,14 @@ steps:
       failure: { step: "nav", message: "element not found" },
     };
     const acts = buildRunNextActions(failed);
-    // A step-level failure suggests both a rerun and a heal (locator drift).
-    expect(acts).toHaveLength(2);
+    // A step-level failure suggests rerun, heal (locator drift), and a brief.
+    expect(acts).toHaveLength(3);
     expect(acts[0]!.safeToAutoRun).toBe(false);
     expect(acts[0]!.command).toContain("cairn run");
     expect(acts[0]!.reason).toContain("nav");
     expect(acts[1]!.command).toContain("cairn spec heal");
     expect(acts[1]!.safeToAutoRun).toBe(false);
+    expect(acts[2]!.command).toContain("cairn export brief");
+    expect(acts[2]!.safeToAutoRun).toBe(false);
   });
 });

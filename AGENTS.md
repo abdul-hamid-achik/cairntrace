@@ -186,9 +186,13 @@ per-agent code paths.
   vocabulary.
   For focused authoring guidance, use `cairn docs <topic> --json` or MCP
   `cairn_docs` (`authoring`, `steps`, `verifiers`, `downloads`, `scripts`,
-  `artifacts`, `mcp`, `backends`, `discovery`, `export`) — don't rely on
+  `artifacts`, `mcp`, `backends`, `discovery`, `export`, `brief`) — don't rely on
   training-data knowledge of the CLI. For Playwright handoff use
   `cairn export playwright` / MCP `cairn_export_playwright` (see `export`).
+  For a fragile environment where locators will not replay, use
+  `cairn export brief` / MCP `cairn_export_brief` and the live try-then-ask
+  session `cairn_accompany_*` (see `brief`). The harness chooses WHERE;
+  fill values and outcomes stay authored.
 
 ## Services Lifecycle
 

@@ -17,6 +17,12 @@ The runner verified the spec against a fresh browser session and the spec broke.
 
 Run `cairn run <spec> --cold-start --format json` to see exactly which step fails first.
 
+If the spec is green locally but locators miss in another environment, do not
+loosen the contract. Export a [journey brief](/brief)
+(`cairn export brief <spec> --from-run latest`) or open
+`cairn_accompany_open` so a harness can choose WHERE while values stay
+authored.
+
 ## "Outcome verifier rejected: text contains X"
 
 The `text` verifier expected a substring that wasn't there. Often the app changed copy:

@@ -790,6 +790,8 @@ steps:
     expect(result.steps).toHaveLength(1);
     expect(result.steps[0]!.status).toBe("failed");
     expect(result.steps[0]!.error).toContain("selector");
+    expect(result.failure?.brief?.step.action).toBe("click");
+    expect(result.failure?.brief?.error).toContain("selector");
     expect(result.artifacts.diagnostics?.[0]).toMatch(
       /^diagnostics\/001_bad\.json$/,
     );

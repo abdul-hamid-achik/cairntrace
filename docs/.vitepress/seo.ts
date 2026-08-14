@@ -32,6 +32,8 @@ const pageDescriptions: Record<string, string> = {
     'Explore live pages through Cairntrace discovery sessions, capture accessibility snapshots and locator inventories, and export recorded interactions as specs.',
   'export.md':
     'Export Cairntrace browser specs to Playwright JS or TypeScript with coverage reports, or import Playwright tests into reviewable YAML.',
+  'brief.md':
+    'Compile a passing Cairntrace spec into an agent-neutral journey brief so a harness can complete the same flow when authored locators do not replay.',
   'troubleshooting.md':
     'Diagnose Cairntrace cold-start gates, outcome failures, request errors, timeouts, contract mismatches, backend problems, and flaky browser behavior.',
   'annotate.md':

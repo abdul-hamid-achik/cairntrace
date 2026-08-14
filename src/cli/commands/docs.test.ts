@@ -7,10 +7,19 @@ import { parse as parseYaml } from "yaml";
 import { readFileSync } from "node:fs";
 
 describe("buildDocs", () => {
-  it("exposes all 17 docs topics including discovery and export", () => {
-    expect(DOC_TOPICS).toHaveLength(17);
+  it("mcp topic documents journey brief tools", () => {
+    const doc = buildDocs("mcp");
+    const text = JSON.stringify(doc);
+    expect(text).toContain("cairn_export_brief");
+    expect(text).toContain("cairn_accompany_open");
+    expect(doc.relatedTopics).toContain("brief");
+  });
+
+  it("exposes all 18 docs topics including discovery, export, and brief", () => {
+    expect(DOC_TOPICS).toHaveLength(18);
     expect(DOC_TOPICS).toContain("discovery");
     expect(DOC_TOPICS).toContain("export");
+    expect(DOC_TOPICS).toContain("brief");
   });
 
   it("steps topic documents the `type` step", () => {

@@ -162,3 +162,12 @@ The repair proposal is a suggestion, not an approval. Open the diff, check that 
 - `cairn docs snippets --format md` — to lift reusable `actions/*.yml` files.
 
 If `cairn run` passes once on `cold-start`, paste the harness command into your project README. The next agent that touches that flow will thank you.
+
+## When locators will not replay
+
+A green local run and a miss in another environment is not a reason to
+weaken `intent` or `outcomes`. Compile a [journey brief](/brief)
+(`cairn export brief <spec> --from-run latest`) so a harness can find the
+controls. The harness chooses WHERE; fill values stay authored. Prefer
+semantic locators and `cairn spec heal` first if the accessibility tree is
+the same and only CSS drifted.
