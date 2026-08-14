@@ -42,6 +42,13 @@ export interface AgentBrowserOptions {
   /** Extra global args to pass through. */
   extraGlobalArgs?: string[];
   /**
+   * agent-browser `--idle-timeout` in milliseconds. `0` disables the
+   * daemon's 1h idle exit (0.33.1+) so a long script verifier cannot
+   * strand the session. Omit to leave the CLI default. Production
+   * `createBackend` passes 0.
+   */
+  idleTimeoutMs?: number;
+  /**
    * Browser provider (`-p <name>`): selects the agent-browser transport —
    * `ios` (Mobile Safari via Appium; requires Xcode + Appium), or a cloud
    * provider (`browserbase`, `kernel`, …) connecting to a remote browser.

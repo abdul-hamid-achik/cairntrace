@@ -38,6 +38,11 @@ const locatorNear = {
    * "Yes" inside `[data-answer-key="…"]` without an eval.
    */
   hasText: z.string().min(1).optional(),
+  /**
+   * Semantic locators drop hidden matches (display:none / visibility:hidden)
+   * by default. Set false to act on a v-show=false a11y node.
+   */
+  visible: z.boolean().optional(),
 };
 
 const semanticLocatorExtras = {
@@ -339,28 +344,46 @@ export type ClickUntil = z.infer<typeof ClickUntilSchema>;
 
 /* ----- step variants (discriminated by which key is present) ----- */
 
-const stepCommon = {
-  id: z.string().min(1).optional(),
-  when: z.string().optional(), // simple condition string, e.g. "notAuthenticated"
-  /**
-   * A bounded response expected from this action. The runner arms the
-   * listener/baseline before dispatching the action and never retries the
-   * mutation when this guard is present.
-   */
-  postcondition: z
-    .object({
-      network: z
-        .object({
-          method: HttpMethodSchema.optional(),
-          urlContains: z.string().min(1),
-          status: StatusMatcherSchema.optional(),
-          timeoutMs: z.number().int().positive().optional(),
-        })
-        .strict(),
-    })
-    .strict()
-    .optional(),
-};
+export const WhenObjectSchema = z
+  .object({
+    urlContains: z.string().min(1).optional(),
+    urlNotContains: z.string().min(1).optional(),
+    urlMatches: z.string().min(1).optional(),
+    text: z.string().min(1).optional(),
+    notText: z.string().min(1).optional(),
+    selector: z.string().min(1).optional(),
+    notSelector: z.string().min(1).optional(),
+    hasText: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    const keys = (
+      [
+        "urlContains",
+        "urlNotContains",
+        "urlMatches",
+        "text",
+        "notText",
+        "selector",
+        "notSelector",
+      ] as const
+    ).filter((key) => value[key] !== undefined);
+    if (keys.length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "when: exactly one of urlContains|urlNotContains|urlMatches|text|notText|selector|notSelector",
+      });
+    }
+    if (value.hasText !== undefined && keys[0] !== "selector") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["hasText"],
+        message: "hasText is only valid with selector",
+      });
+    }
+  });
+export type WhenObject = z.infer<typeof WhenObjectSchema>;
 
 export const NetworkPostconditionSchema = z
   .object({
@@ -368,9 +391,31 @@ export const NetworkPostconditionSchema = z
     urlContains: z.string().min(1),
     status: StatusMatcherSchema.optional(),
     timeoutMs: z.number().int().positive().optional(),
+    /** Capture the matched request as `${requests.<assign>.…}`. */
+    assign: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][A-Za-z0-9_]*$/)
+      .optional(),
   })
   .strict();
 export type NetworkPostcondition = z.infer<typeof NetworkPostconditionSchema>;
+
+const stepCommon = {
+  id: z.string().min(1).optional(),
+  when: z.union([z.string(), WhenObjectSchema]).optional(),
+  /**
+   * A bounded response expected from this action. The runner arms the
+   * listener/baseline before dispatching the action and never retries the
+   * mutation when this guard is present.
+   */
+  postcondition: z
+    .object({
+      network: NetworkPostconditionSchema,
+    })
+    .strict()
+    .optional(),
+};
 
 export const PostconditionSchema = z
   .object({ network: NetworkPostconditionSchema })
@@ -670,10 +715,36 @@ export const SnapshotStepSchema = z
 export type SnapshotStep = z.infer<typeof SnapshotStepSchema>;
 
 /** Reusable action invocation, e.g. `use: login_admin`. */
+export const UseActionCallSchema = z
+  .object({
+    action: z
+      .string()
+      .min(1)
+      .regex(/^[a-z][a-z0-9_]*$/),
+    vars: z
+      .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+      .optional(),
+  })
+  .strict();
+export type UseActionCall = z.infer<typeof UseActionCallSchema>;
+
 export const UseStepSchema = z
-  .object({ ...stepCommon, use: z.string().min(1) })
+  .object({
+    ...stepCommon,
+    use: z.union([z.string().min(1), UseActionCallSchema]),
+  })
   .strict();
 export type UseStep = z.infer<typeof UseStepSchema>;
+
+export function useActionName(step: UseStep): string {
+  return typeof step.use === "string" ? step.use : step.use.action;
+}
+
+export function useActionVars(
+  step: UseStep,
+): Record<string, string | number | boolean> | undefined {
+  return typeof step.use === "string" ? undefined : step.use.vars;
+}
 
 /* ----- batch (composite single-invocation step) ----- */
 

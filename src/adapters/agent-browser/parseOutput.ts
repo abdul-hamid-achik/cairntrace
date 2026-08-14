@@ -151,6 +151,9 @@ export function buildGlobalArgs(opts: AgentBrowserOptions): string[] {
   if (opts.debug) a.push("--debug");
   if (opts.provider) a.push("-p", opts.provider);
   if (opts.device) a.push("--device", opts.device);
+  if (typeof opts.idleTimeoutMs === "number") {
+    a.push("--idle-timeout", String(opts.idleTimeoutMs));
+  }
   if (opts.extraGlobalArgs) a.push(...opts.extraGlobalArgs);
   return a;
 }

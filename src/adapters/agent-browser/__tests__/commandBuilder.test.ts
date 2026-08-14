@@ -421,6 +421,27 @@ describe("stepToArgv", () => {
     ).toEqual(["find", "label", "Email", "fill", "a@b.c"]);
   });
 
+  it("type with delayMs appends --delay", () => {
+    expect(
+      stepToArgv({
+        type: {
+          by: "selector",
+          selector: "#code",
+          value: "1234",
+          delayMs: 50,
+        },
+      }),
+    ).toEqual(["type", "#code", "1234", "--delay", "50"]);
+  });
+
+  it("type without delayMs omits --delay", () => {
+    expect(
+      stepToArgv({
+        type: { by: "selector", selector: "#code", value: "1234" },
+      }),
+    ).toEqual(["type", "#code", "1234"]);
+  });
+
   it("select with selector locator passes the value as trailing arg", () => {
     expect(
       stepToArgv({

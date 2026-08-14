@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assessAgentBrowserVersion,
   resolveCodemapIndexCheck,
   resolveIosChecks,
   resolvePlaywrightChecks,
@@ -44,6 +45,29 @@ const emptyRegistry: CodemapDeps = {
     return { exitCode: 1, stdout: "", stderr: "" };
   },
 };
+
+describe("assessAgentBrowserVersion", () => {
+  it("flags versions older than 0.34.0", () => {
+    const check = assessAgentBrowserVersion("agent-browser 0.31.1");
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("0.31.1");
+    expect(check.detail).toContain("0.34.0");
+  });
+
+  it("accepts 0.34.0 and newer", () => {
+    expect(assessAgentBrowserVersion("agent-browser 0.34.0").ok).toBe(true);
+    expect(assessAgentBrowserVersion("agent-browser 0.35.0").ok).toBe(true);
+    expect(assessAgentBrowserVersion("agent-browser 0.34.0").detail).toContain(
+      "0.34.0",
+    );
+  });
+
+  it("does not fail an unparseable version string", () => {
+    const check = assessAgentBrowserVersion("agent-browser dev");
+    expect(check.ok).toBe(true);
+    expect(check.detail).toBe("agent-browser dev");
+  });
+});
 
 describe("resolveCodemapIndexCheck (feature 7)", () => {
   it("reports 'codebase indexed: yes (N symbols)' from the registry", async () => {

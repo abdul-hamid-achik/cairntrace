@@ -86,3 +86,17 @@ export function bodyTextContainsExpression(
     (caseSensitive ? "" : ".toLowerCase()");
   return `${normalizedBody}.includes(${JSON.stringify(normalizedNeedle)})`;
 }
+
+/**
+ * Live DOM predicate: a visible `querySelectorAll(selector)` node contains
+ * `hasText` (whitespace-collapsed, case-insensitive). Shared by
+ * `wait.selector`+`hasText` and `when: { selector, hasText }`.
+ */
+export function visibleSelectorHasTextExpression(
+  selector: string,
+  hasText: string,
+): string {
+  const sel = JSON.stringify(selector);
+  const needle = JSON.stringify(hasText);
+  return `[].some.call(document.querySelectorAll(${sel}),function(el){var s=window.getComputedStyle(el);if(s.display==="none"||s.visibility==="hidden")return false;var t=String(el.textContent||"").replace(/\\s+/g," ").trim().toLowerCase();return t.indexOf(String(${needle}).replace(/\\s+/g," ").trim().toLowerCase())!==-1;})`;
+}

@@ -22,7 +22,7 @@ the check failed.
 | Check | What it gates |
 |---|---|
 | `node`, `bun` | the runtime |
-| `agent-browser` | `cairn run` without `--mock` |
+| `agent-browser` | `cairn run` without `--mock`. Present but older than 0.34.0 is a fail (`wait --state` collision, implicit role names, idle timeout). Upgrade with `brew upgrade agent-browser`. |
 | `playwright-package` | the `playwright` dependency loads from the current Bun install |
 | `playwright-chromium` | the matching Chromium executable exists and is executable for `--backend playwright` |
 | `fcheap` | `cairn stash` and `--stash-on-failure` |

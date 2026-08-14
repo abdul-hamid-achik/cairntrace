@@ -1,5 +1,9 @@
 import type { BrowserBackend } from "../../adapters/browserBackend";
-import { textContains } from "../textMatching";
+import type { WhenObject } from "../schema/spec.v1";
+import {
+  textContains,
+  visibleSelectorHasTextExpression,
+} from "../textMatching";
 
 /**
  * Tiny DSL for step-level `when:` predicates. Specs use these to skip steps
@@ -54,10 +58,21 @@ export function parseWhen(when: string): WhenCondition {
   return { kind, arg } as WhenCondition;
 }
 
+export function formatWhen(when: string | WhenObject): string {
+  if (typeof when === "string") return when;
+  return Object.entries(when)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}:${value}`)
+    .join(" ");
+}
+
 export async function evaluateWhen(
-  when: string,
+  when: string | WhenObject,
   backend: BrowserBackend,
 ): Promise<boolean> {
+  if (typeof when !== "string") {
+    return evaluateWhenObject(when, backend);
+  }
   const cond = parseWhen(when);
   switch (cond.kind) {
     case "urlContains": {
@@ -91,6 +106,40 @@ export async function evaluateWhen(
         `document.querySelector(${JSON.stringify(cond.arg)}) !== null`,
       ));
   }
+}
+
+async function evaluateWhenObject(
+  when: WhenObject,
+  backend: BrowserBackend,
+): Promise<boolean> {
+  if (when.urlContains !== undefined) {
+    return (await backend.getUrl()).includes(when.urlContains);
+  }
+  if (when.urlNotContains !== undefined) {
+    return !(await backend.getUrl()).includes(when.urlNotContains);
+  }
+  if (when.urlMatches !== undefined) {
+    return new RegExp(when.urlMatches).test(await backend.getUrl());
+  }
+  if (when.text !== undefined) {
+    return textContains(await backend.getText("page"), when.text);
+  }
+  if (when.notText !== undefined) {
+    return !textContains(await backend.getText("page"), when.notText);
+  }
+  if (when.selector !== undefined) {
+    const expression = when.hasText
+      ? visibleSelectorHasTextExpression(when.selector, when.hasText)
+      : `document.querySelector(${JSON.stringify(when.selector)}) !== null`;
+    return evalDocumentPredicate(backend, expression);
+  }
+  if (when.notSelector !== undefined) {
+    return !(await evalDocumentPredicate(
+      backend,
+      `document.querySelector(${JSON.stringify(when.notSelector)}) !== null`,
+    ));
+  }
+  return false;
 }
 
 async function evalDocumentPredicate(

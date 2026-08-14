@@ -5,6 +5,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
   BrowserBackend,
+  ConsoleEntry,
+  NetworkEntry,
   ResolvedElement,
 } from "../../adapters/browserBackend";
 import { createProcessTreeWatchdog } from "../../adapters/agent-browser/processTree";
@@ -839,21 +841,45 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         if (!r.ok) {
           stepStatus = "failed";
           stepError = r.stderr.trim() || `exit ${r.exitCode}`;
-        } else if (pendingDownload) {
-          downloads[pendingDownload.assign] = pendingDownload.relativePath;
-          namedArtifacts[pendingDownload.assign] = {
-            kind: "download",
-            path: pendingDownload.absolutePath,
-            relativePath: pendingDownload.relativePath,
-          };
-          stepArtifacts.push(pendingDownload.relativePath);
-          await writer.appendEvent({
-            ts: new Date().toISOString(),
-            type: "artifact.download",
-            stepId,
-            path: pendingDownload.relativePath,
-            assign: pendingDownload.assign,
-          });
+        } else {
+          if (pendingDownload) {
+            downloads[pendingDownload.assign] = pendingDownload.relativePath;
+            namedArtifacts[pendingDownload.assign] = {
+              kind: "download",
+              path: pendingDownload.absolutePath,
+              relativePath: pendingDownload.relativePath,
+            };
+            stepArtifacts.push(pendingDownload.relativePath);
+            await writer.appendEvent({
+              ts: new Date().toISOString(),
+              type: "artifact.download",
+              stepId,
+              path: pendingDownload.relativePath,
+              assign: pendingDownload.assign,
+            });
+          }
+          const assign = stepToRun.postcondition?.network?.assign;
+          if (assign && r.networkMatch) {
+            const response = networkMatchToResponse(r.networkMatch);
+            const relativePath = `requests/${assign}.json`;
+            await writer.writeJson(relativePath, response, "request");
+            responses[assign] = response;
+            requests[assign] = relativePath;
+            namedArtifacts[assign] = {
+              kind: "request",
+              path: writer.resolve(relativePath),
+              relativePath,
+            };
+            stepArtifacts.push(relativePath);
+            await writer.appendEvent({
+              ts: new Date().toISOString(),
+              type: "artifact.request",
+              stepId,
+              path: relativePath,
+              assign,
+              status: response.status,
+            });
+          }
         }
       }
     } catch (e) {
@@ -1068,13 +1094,28 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   // Persist console + network even on full pass, so agents have evidence to skim.
+  // Read errors once here. The console verifier reuses this snapshot so a
+  // long script outcome cannot hang a second `getErrors()` on a stale daemon.
   const consoleEntries = backendWedgedAfterSteps
     ? []
     : await safe(() => opts.backend.getConsole()).then((x) => x ?? []);
   const networkEntries = backendWedgedAfterSteps
     ? []
     : await safe(() => opts.backend.getNetworkRequests()).then((x) => x ?? []);
-  const consoleErrors = consoleEntries.filter((e) => e.type === "error");
+  let capturedConsoleErrors: ConsoleEntry[] | undefined;
+  let consoleUnavailable: string | undefined;
+  if (backendWedgedAfterSteps) {
+    consoleUnavailable =
+      "console was not captured because the backend was wedged";
+  } else {
+    try {
+      capturedConsoleErrors = await opts.backend.getErrors();
+    } catch (error) {
+      consoleUnavailable = (error as Error).message;
+    }
+  }
+  const consoleErrors =
+    capturedConsoleErrors ?? consoleEntries.filter((e) => e.type === "error");
   await writer.writeNdjson("console/console.ndjson", consoleEntries, "console");
   await writer.writeNdjson("console/errors.ndjson", consoleErrors, "console");
   const failedNetwork = networkEntries.filter(
@@ -1126,6 +1167,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     responses,
     evals: evalValues,
     networkEntries,
+    ...(capturedConsoleErrors !== undefined
+      ? { consoleErrors: capturedConsoleErrors }
+      : {}),
+    ...(consoleUnavailable !== undefined ? { consoleUnavailable } : {}),
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     vars: resolvedVars,
     childEnv: opts.childEnv ?? runEnv,
@@ -1849,6 +1894,28 @@ interface RequestResponse {
   ok: boolean;
   headers: Record<string, string>;
   body: unknown;
+  id?: string;
+}
+
+function networkMatchToResponse(entry: NetworkEntry): RequestResponse {
+  let body: unknown;
+  if (entry.postData) {
+    try {
+      body = JSON.parse(entry.postData);
+    } catch {
+      body = entry.postData;
+    }
+  }
+  const status = entry.status ?? 0;
+  return {
+    url: entry.url,
+    method: entry.method,
+    status,
+    ok: status >= 200 && status < 400,
+    headers: {},
+    body: body ?? null,
+    ...(entry.id ? { id: entry.id } : {}),
+  };
 }
 
 /**
@@ -2617,7 +2684,10 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
       action: step.monitor.action,
       type: step.monitor.type,
     };
-  return { kind: "use", action: step.use };
+  return {
+    kind: "use",
+    action: typeof step.use === "string" ? step.use : step.use.action,
+  };
 }
 
 function diagnosticNeedles(step: Step): string[] {

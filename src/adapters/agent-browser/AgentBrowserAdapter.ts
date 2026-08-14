@@ -139,13 +139,12 @@ interface LinkClickPreparation {
  * command for a given --session, so this class has no explicit `start()` —
  * just construct and start sending steps.
  *
- * Version note: the daemon-lifecycle, wait-slicing, and viewport-relative
- * `get box` behavior documented throughout this file were verified against
- * agent-browser 0.31.1, resolved from `$PATH` and not version-pinned by
- * cairntrace. If wait/snapshot behavior looks wrong after an agent-browser
- * update, compare `agent-browser --version` against this note first (origin:
- * the 2026-07-12 empty-<main> investigation, where a streamed-SSR dashboard
- * showed the Suspense fallback under heavy machine contention).
+ * Version note: the daemon-lifecycle, wait-slicing, `--delay` on `type`,
+ * and viewport-relative `get box` behavior documented throughout this file
+ * were verified against agent-browser 0.34.0, resolved from `$PATH` and not
+ * version-pinned by cairntrace. `cairn doctor` warns below 0.34.0. If
+ * wait/snapshot behavior looks wrong after an agent-browser update, compare
+ * `agent-browser --version` against this note first.
  */
 export class AgentBrowserAdapter implements BrowserBackend {
   readonly name = "agent-browser" as const;
@@ -190,8 +189,14 @@ export class AgentBrowserAdapter implements BrowserBackend {
       return this.runInteractiveStep(locator as Locator, "fill", value);
     }
     if ("type" in step) {
-      const { value, delayMs: _delayMs, ...locator } = step.type;
-      return this.runInteractiveStep(locator as Locator, "type", value);
+      const { value, delayMs, ...locator } = step.type;
+      return this.runInteractiveStep(
+        locator as Locator,
+        "type",
+        value,
+        undefined,
+        delayMs,
+      );
     }
     if ("select" in step) {
       // agent-browser's `select` matches the trailing argument against option
@@ -371,6 +376,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
       ),
       ...(locator.near ? { near: locator.near } : {}),
       ...(locator.hasText ? { hasText: locator.hasText } : {}),
+      ...("visible" in locator && locator.visible !== undefined
+        ? { visible: locator.visible }
+        : {}),
       ...("nth" in locator && locator.nth !== undefined
         ? { nth: locator.nth }
         : {}),
@@ -1056,6 +1064,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
     action: "click" | "hover" | "focus" | "fill" | "type" | "select" | "upload",
     value?: string,
     settleMsOverride?: number,
+    delayMs?: number,
   ): Promise<InvocationResult> {
     const start = Date.now();
     locator = this.materializeLocator(locator);
@@ -1139,6 +1148,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       }
       const argv = [action, locator.selector];
       if (value !== undefined) argv.push(value);
+      appendTypeDelay(argv, action, delayMs);
       const r = await this.invoke(argv);
       if (!r.ok) {
         return await this.appendSelectorMatchDiagnostics(r, locator.selector);
@@ -1184,6 +1194,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
     const argv = [action, `@${resolved.element.ref}`];
     if (value !== undefined) argv.push(value);
+    appendTypeDelay(argv, action, delayMs);
     const preparation =
       action === "click" && this.clickProbeEnabled(settleMsOverride)
         ? await this.prepareLinkClickProbe(
@@ -1864,10 +1875,27 @@ export class AgentBrowserAdapter implements BrowserBackend {
       lastSnapshot = snapshot;
       if (snapshot.ok) {
         const parsed = parseSnapshot(snapshot.stdout);
-        const matchIdx = collapseNestedMatches(
+        const rawIdx = collapseNestedMatches(
           matchingSnapshotIndices(locator, parsed),
           parsed,
         );
+        const visibility = await this.applyVisibilityFilter(
+          locator,
+          rawIdx,
+          parsed,
+        );
+        const matchIdx = visibility.idx;
+        if (visibility.dropped.length > 0) {
+          lastShortfall = `dropped ${visibility.dropped.length} hidden match(es): ${visibility.dropped
+            .slice(0, 3)
+            .map(
+              (el) =>
+                `${el.role} ${
+                  el.name ? JSON.stringify(el.name) : "<no name>"
+                } ref=${el.ref}`,
+            )
+            .join("; ")}`;
+        }
         const nth = "nth" in locator ? locator.nth : undefined;
         if (nth !== undefined) {
           if (nth < matchIdx.length) {
@@ -1926,6 +1954,51 @@ export class AgentBrowserAdapter implements BrowserBackend {
       ok: false,
       result: this.unresolvedFailure(action, start, stderrLines),
     };
+  }
+
+  /**
+   * Drop a11y-tree matches that are `display:none` / not visible. vue-multiselect
+   * keeps `role=option` nodes in the tree while v-show hides them. Skip the
+   * probe when `visible: false`.
+   */
+  private async applyVisibilityFilter(
+    locator: Locator,
+    matchIdx: number[],
+    parsed: SnapshotElement[],
+  ): Promise<{
+    idx: number[];
+    dropped: SnapshotElement[];
+  }> {
+    if ("visible" in locator && locator.visible === false) {
+      return { idx: matchIdx, dropped: [] };
+    }
+    const forceVisible = "visible" in locator && locator.visible === true;
+    const isOption = locator.by === "role" && locator.role === "option";
+    if (!forceVisible && !isOption) {
+      return { idx: matchIdx, dropped: [] };
+    }
+    const refs = matchIdx
+      .map((i) => ({ i, ref: parsed[i]?.ref }))
+      .filter((row): row is { i: number; ref: string } => Boolean(row.ref));
+    if (refs.length === 0) return { idx: matchIdx, dropped: [] };
+    const r = await this.batch(
+      refs.map((row) => ["is", "visible", `@${row.ref}`]),
+      { bail: false },
+    );
+    if (r.results.length !== refs.length) {
+      return { idx: matchIdx, dropped: [] };
+    }
+    const kept: number[] = [];
+    const dropped: SnapshotElement[] = [];
+    for (let n = 0; n < refs.length; n++) {
+      const row = refs[n]!;
+      if (isVisibleBatchResult(r.results[n])) {
+        kept.push(row.i);
+      } else {
+        dropped.push(parsed[row.i]!);
+      }
+    }
+    return { idx: kept, dropped };
   }
 
   /**
@@ -2877,6 +2950,35 @@ export function isTransientDaemonError(stderr: string): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function appendTypeDelay(
+  argv: string[],
+  action: string,
+  delayMs: number | undefined,
+): void {
+  if (action === "type" && delayMs !== undefined) {
+    argv.push("--delay", String(delayMs));
+  }
+}
+
+function isVisibleBatchResult(result: unknown): boolean {
+  if (result === true) return true;
+  if (typeof result === "string") {
+    const trimmed = result.trim().toLowerCase();
+    return trimmed === "true" || trimmed === "visible";
+  }
+  if (!result || typeof result !== "object") return false;
+  const record = result as Record<string, unknown>;
+  if (record.success === false) return false;
+  if (record.visible === true || record.result === true) return true;
+  const data = record.data;
+  if (data === true) return true;
+  if (data && typeof data === "object") {
+    const inner = data as Record<string, unknown>;
+    if (inner.visible === true || inner.result === true) return true;
+  }
+  return false;
 }
 
 export function matchingSnapshotIndices(

@@ -245,6 +245,7 @@ async function runNetworkPostconditionStep(
         ...actionResult,
         durationMs: Date.now() - startedAt,
         stdout: `network postcondition matched ${describeNetworkPostcondition(postcondition)}`,
+        networkMatch: match,
       };
     }
     const remaining = deadline - Date.now();

@@ -291,7 +291,9 @@ export class PlaywrightAdapter implements BrowserBackend {
         );
       } else if ("use" in step) {
         throw new Error(
-          `'use: ${step.use}' must be expanded by the runner before adapter dispatch`,
+          `'use: ${
+            typeof step.use === "string" ? step.use : step.use.action
+          }' must be expanded by the runner before adapter dispatch`,
         );
       } else {
         // Fail loudly on an unhandled step type rather than reporting a
@@ -992,13 +994,25 @@ export class PlaywrightAdapter implements BrowserBackend {
     root: Page | PlaywrightLocator,
     loc: Locator,
   ): PlaywrightLocator {
+    const includeHidden = "visible" in loc && loc.visible === false;
     switch (loc.by) {
       case "role": {
         const role = loc.role as Parameters<Page["getByRole"]>[0];
-        if (loc.name === undefined) return root.getByRole(role);
+        if (loc.name === undefined) {
+          return includeHidden
+            ? root.getByRole(role, { includeHidden: true })
+            : root.getByRole(role);
+        }
         if (loc.exact)
-          return root.getByRole(role, { name: loc.name, exact: true });
-        return root.getByRole(role, { name: wholeNameRegex(loc.name) });
+          return root.getByRole(role, {
+            name: loc.name,
+            exact: true,
+            ...(includeHidden ? { includeHidden: true } : {}),
+          });
+        return root.getByRole(role, {
+          name: wholeNameRegex(loc.name),
+          ...(includeHidden ? { includeHidden: true } : {}),
+        });
       }
       case "label":
         return loc.exact

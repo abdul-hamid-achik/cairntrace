@@ -27,8 +27,10 @@ import type {
   Outcome,
   Spec,
   Step,
+  WhenObject,
 } from "../schema/spec.v1";
 import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
+import { formatWhen } from "../runner/conditions";
 import { readFileSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { bodyTextContainsExpression } from "../textMatching";
@@ -765,18 +767,21 @@ export function renderStep(
 }
 
 function wrapWhen(
-  when: string,
+  when: string | WhenObject,
   body: Stmt[],
   exported: boolean,
   ctx: EmitCtx,
   stepId?: string,
 ): Rendered {
-  const colon = when.indexOf(":");
+  const serialized = formatWhen(when);
+  const colon = serialized.indexOf(":");
   const fallthrough = (): Rendered => {
-    skip(ctx, "when", `unrecognized when predicate: ${when}`, stepId);
+    skip(ctx, "when", `unrecognized when predicate: ${serialized}`, stepId);
     return {
       stmts: [
-        comment(`when: ${oneLine(when)} — not translated; step always runs`),
+        comment(
+          `when: ${oneLine(serialized)} — not translated; step always runs`,
+        ),
         ...body,
       ],
       exported,
@@ -784,8 +789,8 @@ function wrapWhen(
   };
   if (colon < 0) return fallthrough();
 
-  const kind = when.slice(0, colon);
-  const arg = when.slice(colon + 1);
+  const kind = serialized.slice(0, colon);
+  const arg = serialized.slice(colon + 1);
   const str = (s: string) => emitStr(s, ctx.usage);
   let condition: string | undefined;
   switch (kind) {
@@ -808,7 +813,7 @@ function wrapWhen(
       return fallthrough();
   }
   return {
-    stmts: [comment(`when: ${oneLine(when)}`), iff(condition, body)],
+    stmts: [comment(`when: ${oneLine(serialized)}`), iff(condition, body)],
     exported,
   };
 }
@@ -1097,8 +1102,10 @@ function renderStepBody(
     return skipStmt(
       ctx,
       "step",
-      `use: ${step.use} not expanded — pass parseSpec().resolved`,
-      `use: ${oneLine(step.use)} — expand imports via \`parseSpec\` before exporting`,
+      `use: ${
+        typeof step.use === "string" ? step.use : step.use.action
+      } not expanded — pass parseSpec().resolved`,
+      `use: ${oneLine(typeof step.use === "string" ? step.use : step.use.action)} — expand imports via \`parseSpec\` before exporting`,
       step.id,
     );
   }

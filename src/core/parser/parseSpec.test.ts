@@ -753,6 +753,61 @@ steps:
     ]);
   });
 
+  it("applies use-site vars over spec vars for each use: independently", async () => {
+    await writeFile(
+      join(dir, "edit_field.yml"),
+      `version: 1
+name: edit_field
+vars:
+  fieldValue: from-action
+steps:
+  - fill:
+      by: selector
+      selector: "#field"
+      value: "\${vars.fieldValue}"
+`,
+    );
+    const specPath = join(dir, "uses_action_call_vars.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: uses_action_call_vars
+intent: each use can override action vars
+imports:
+  - ./edit_field.yml
+vars:
+  fieldValue: from-spec
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - use:
+      action: edit_field
+      vars:
+        fieldValue: first
+  - use:
+      action: edit_field
+      vars:
+        fieldValue: second
+  - use: edit_field
+`,
+    );
+    const r = await parseSpec(specPath);
+    expect(r.resolved.steps).toEqual([
+      {
+        fill: { by: "selector", selector: "#field", value: "first" },
+      },
+      {
+        fill: { by: "selector", selector: "#field", value: "second" },
+      },
+      {
+        fill: { by: "selector", selector: "#field", value: "from-spec" },
+      },
+    ]);
+  });
+
   it("tracks origins back to imported action files", async () => {
     const actionPath = join(dir, "open_dashboard_action.yml");
     await writeFile(

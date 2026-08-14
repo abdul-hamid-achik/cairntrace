@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { stampSpecContractHash, verifyCommand } from "./verify";
+import {
+  replaceContractHashLine,
+  stampSpecContractHash,
+  verifyCommand,
+} from "./verify";
 
 class ExitIntercept extends Error {
   constructor(public readonly code: number) {
@@ -288,6 +292,41 @@ outcomes:
     expect(hash).toMatch(/^sha256:/);
     expect(text.startsWith("# keep this comment\n\n")).toBe(true);
     expect(text).toContain(`contractHash: ${hash}`);
+  });
+
+  it("does not rewrite quoted # selectors or ${vars} placeholders", async () => {
+    const specPath = join(dir, "quoted-selectors.yml");
+    const source = `version: 1
+name: quoted_selectors
+intent: stamp must keep YAML quoting
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - click:
+      by: selector
+      selector: "#element_abc"
+  - click:
+      by: selector
+      selector: "\${vars.tableSelector}"
+`;
+    await writeFile(specPath, source);
+    const hash = await stampSpecContractHash(specPath);
+    const text = await readFile(specPath, "utf8");
+    expect(text).toContain('selector: "#element_abc"');
+    expect(text).toContain('selector: "${vars.tableSelector}"');
+    expect(text).toContain(`contractHash: ${hash}`);
+    expect(text.replace(/\ncontractHash: sha256:[a-f0-9]+\n$/, "\n")).toBe(
+      source,
+    );
+  });
+
+  it("replaceContractHashLine appends when the file has no hash", () => {
+    expect(replaceContractHashLine("version: 1\n", "sha256:abc")).toBe(
+      "version: 1\ncontractHash: sha256:abc\n",
+    );
   });
 
   it("flags silent-empty env refs and undeclared secrets", async () => {

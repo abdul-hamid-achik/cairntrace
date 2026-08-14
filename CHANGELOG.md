@@ -5,6 +5,30 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- `type.delayMs` now maps to agent-browser `type --delay` (both backends).
+- `cairn run` starts agent-browser sessions with `--idle-timeout 0` so a
+  long script outcome cannot idle-kill the daemon.
+- `cairn doctor` fails `agent-browser` when the CLI is older than 0.34.0.
+- `use:` object form `{ action, vars }` so one reusable action can be
+  invoked twice with different values. String `use: login_admin` is
+  unchanged. Precedence: action defaults < config < spec < CLI < use-site.
+- `when:` object form, including `selector` + `hasText` (same visible-node
+  predicate as `wait.selector`).
+- Locator `visible: false` opt-out. `role: option` (and `visible: true`)
+  drop hidden a11y-tree matches via `is visible`.
+- `postcondition.network.assign` captures the matched request as
+  `${requests.<name>.…}` / `requests/<name>.json`.
+
+### Fixed
+
+- Console outcomes reuse the pre-outcome `getErrors()` snapshot. A second
+  daemon read after a long script verifier no longer hangs, and a wedged
+  backend no longer greens `console.errorsMax: 0`.
+- `cairn spec verify --stamp` rewrites only the `contractHash` line, so
+  quoted `#element_…` selectors and `"${vars.X}"` stay quoted.
+
 ## [2.9.0] - 2026-08-13
 
 ### Added

@@ -177,6 +177,32 @@ describe("evaluateOutcomes (dispatcher)", () => {
     expect(bad.evaluation.actual).toContain("1 error");
   });
 
+  it("console.errorsMax uses ctx.consoleErrors and does not re-hit the daemon", async () => {
+    const r = await eval1(
+      [outcome("c", { console: { errorsMax: 0 } })],
+      mockBackend({
+        getErrors: async () => {
+          throw new Error("second getErrors must not run");
+        },
+      }),
+      ctx({ consoleErrors: [] }),
+    );
+    expect(r.evaluation.passed).toBe(true);
+  });
+
+  it("console.errorsMax fails when ctx.consoleUnavailable is set", async () => {
+    const r = await eval1(
+      [outcome("c", { console: { errorsMax: 0 } })],
+      mockBackend(),
+      ctx({
+        consoleUnavailable:
+          "console was not captured because the backend was wedged",
+      }),
+    );
+    expect(r.evaluation.passed).toBe(false);
+    expect(r.evaluation.actual).toContain("backend was wedged");
+  });
+
   it("routes count → evaluateCount", async () => {
     const r = await eval1(
       [outcome("n", { count: { selector: "tr", equals: 3 } })],

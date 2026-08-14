@@ -7,9 +7,12 @@ import {
   openPath,
   ReusableActionSchema,
   SpecSchema,
+  useActionName,
+  useActionVars,
   type ReusableAction,
   type Spec,
   type Step,
+  type UseStep,
 } from "../schema/spec.v1";
 import {
   hasRuntimeUrlPlaceholder,
@@ -41,6 +44,10 @@ export interface LoadedAction {
   action: ReusableAction;
   /** Absolute path of the action YAML on disk. */
   path: string;
+  /** Unsubstituted action YAML, re-parsed per `use:` with merged vars. */
+  rawSource: string;
+  /** `vars:` defaults declared on the action file. */
+  actionDefaults: Record<string, string | number | boolean>;
 }
 
 export interface StepOrigin {
@@ -121,17 +128,26 @@ export async function parseSpec(
   const actionsByName = new Map<string, LoadedAction>();
   for (const importPath of spec.imports ?? []) {
     const resolvedImport = resolveImportPath(importPath, dirname(absPath));
-    const importRaw = await loadAndParseAction(
+    const actionSource = await readFile(resolvedImport, "utf8");
+    const actionDocument = parseYaml(actionSource);
+    const actionDefaults = extractPlainVars(actionDocument);
+    const importRaw = loadAndParseSource(
+      actionSource,
       resolvedImport,
       env,
-      vars,
+      { ...actionDefaults, ...vars },
       baseUrl,
       opts.runtime,
       opts.secretRef,
     );
     assertBatchSelectorLocators(importRaw, resolvedImport);
     const action = ReusableActionSchema.parse(importRaw);
-    actionsByName.set(action.name, { action, path: resolvedImport });
+    actionsByName.set(action.name, {
+      action,
+      path: resolvedImport,
+      rawSource: actionSource,
+      actionDefaults,
+    });
   }
 
   // Walk spec.steps in order; expand `use:` while tracking origins so heal
@@ -141,13 +157,28 @@ export async function parseSpec(
   for (let i = 0; i < specSteps.length; i++) {
     const step = specSteps[i]!;
     if ("use" in step) {
-      const loaded = actionsByName.get(step.use);
+      const useStep = step as UseStep;
+      const actionName = useActionName(useStep);
+      const loaded = actionsByName.get(actionName);
       if (!loaded) {
-        throw new UnresolvedActionError(step.use, spec.imports ?? []);
+        throw new UnresolvedActionError(actionName, spec.imports ?? []);
       }
-      for (let j = 0; j < loaded.action.steps.length; j++) {
+      const callVars = useActionVars(useStep) ?? {};
+      const expanded = ReusableActionSchema.parse(
+        loadAndParseSource(
+          loaded.rawSource,
+          loaded.path,
+          env,
+          { ...loaded.actionDefaults, ...vars, ...callVars },
+          baseUrl,
+          opts.runtime,
+          opts.secretRef,
+        ),
+      );
+      assertBatchSelectorLocators(expanded, loaded.path);
+      for (let j = 0; j < expanded.steps.length; j++) {
         origins.push({
-          step: loaded.action.steps[j]!,
+          step: expanded.steps[j]!,
           filePath: loaded.path,
           fileStepIdx: j,
         });
@@ -260,30 +291,6 @@ export class MissingTemplateVariableError extends Error {
     super(`missing vars.${variable} while parsing ${filePath}`);
     this.name = "MissingTemplateVariableError";
   }
-}
-
-async function loadAndParseAction(
-  absPath: string,
-  env: Record<string, string | undefined>,
-  vars: Record<string, string | number | boolean>,
-  baseUrl: string | undefined,
-  runtime: RuntimeTemplateContext | undefined,
-  secretRef?: (name: string) => string,
-): Promise<unknown> {
-  const text = await readFile(absPath, "utf8");
-  const rawDocument = parseYaml(text);
-  // Action-local defaults sit under spec/config/CLI vars so an action can
-  // ship `${vars.companyName}` without forcing every consumer to redeclare it.
-  const mergedVars = { ...extractPlainVars(rawDocument), ...vars };
-  return loadAndParseSource(
-    text,
-    absPath,
-    env,
-    mergedVars,
-    baseUrl,
-    runtime,
-    secretRef,
-  );
 }
 
 function extractPlainVars(

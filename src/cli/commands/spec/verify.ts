@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { parse as parseYaml, parseDocument } from "yaml";
+import { parse as parseYaml } from "yaml";
 import { coldStartLint } from "../../../core/coldStart";
 import { computeContractHash } from "../../../core/contractHash";
 import { resolveSpecRuntimeContext } from "../../../core/config/runtimeContext";
@@ -117,20 +117,26 @@ export async function verifyCommand(
 }
 
 export async function stampSpecContractHash(specPath: string): Promise<string> {
-  // Stamp mode: compute the contractHash from the validated spec, then update
-  // ONLY the contractHash node via the YAML Document API. A full re-serialize
-  // would re-emit every scalar in PLAIN style and strip hand-authored quoting
-  // (e.g. "${vars.X}" / "${secrets.X}"); the Document API preserves the rest of
-  // the file — quoting, comments, key order — untouched.
+  // Stamp only the contractHash line. Re-serializing via the YAML Document
+  // API still rewrites scalar quoting (`"#element_…"` / `"${vars.X}"`),
+  // which turns a `#` selector into a comment on the next read.
   const text = await readFile(specPath, "utf8");
   const raw = parseYaml(text);
   assertBatchSelectorLocators(raw, specPath);
   const spec = SpecSchema.parse(raw);
   const hash = computeContractHash(spec);
-  const doc = parseDocument(text);
-  doc.set("contractHash", hash);
-  await writeFile(specPath, doc.toString());
+  await writeFile(specPath, replaceContractHashLine(text, hash));
   return hash;
+}
+
+/** Replace or append the top-level `contractHash:` line without rewriting YAML. */
+export function replaceContractHashLine(text: string, hash: string): string {
+  const line = `contractHash: ${hash}`;
+  if (/^contractHash:[^\n]*$/m.test(text)) {
+    return text.replace(/^contractHash:[^\n]*$/m, line);
+  }
+  const prefix = text.length > 0 && !text.endsWith("\n") ? `${text}\n` : text;
+  return `${prefix}${line}\n`;
 }
 
 function toMarkdown(r: VerifyResult): string {

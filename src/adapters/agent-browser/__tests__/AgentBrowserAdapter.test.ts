@@ -823,6 +823,65 @@ describe("strict semantic interaction resolution", () => {
     expect(result.resolvedElement?.ref).toBe("e9");
   });
 
+  it("drops hidden role=option matches and clicks the visible one", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout:
+          '- listbox\n  - option "Utah" [ref=e3]\n  - option "Utah" [ref=e8]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: JSON.stringify([
+          { success: true, data: { visible: false } },
+          { success: true, data: { visible: true } },
+        ]),
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "option-visible" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "option", name: "Utah" },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement?.ref).toBe("e8");
+    const batchArgv = execaMock.mock.calls[1]![1] as string[];
+    expect(batchArgv).toContain("batch");
+    expect(batchArgv).toContain("is visible @e3");
+    expect(batchArgv).toContain("is visible @e8");
+  });
+
+  it("skips the visibility probe when visible: false", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '- listbox\n  - option "Utah" [ref=e3]\n',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[0]!)
+      .mockResolvedValueOnce(IN_VIEWPORT_BOX_AND_METRICS[1]!)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "option-hidden-ok" });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "option", name: "Utah", visible: false },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resolvedElement?.ref).toBe("e3");
+    const usedBatch = execaMock.mock.calls.some((call) =>
+      (call[1] as string[]).includes("batch"),
+    );
+    expect(usedBatch).toBe(false);
+  });
+
   it("fills via snapshot ref with the value as trailing arg", async () => {
     execaMock
       .mockResolvedValueOnce({
@@ -843,6 +902,27 @@ describe("strict semantic interaction resolution", () => {
       3,
       "agent-browser",
       ["--session", "fill-test", "fill", "@e2", "a@b.co"],
+      expect.objectContaining({ reject: false }),
+    );
+  });
+
+  it("passes type.delayMs as --delay on the selector path", async () => {
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "type-delay" });
+
+    const result = await adapter.runStep({
+      type: {
+        by: "selector",
+        selector: "#code",
+        value: "1234",
+        delayMs: 50,
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenCalledWith(
+      "agent-browser",
+      ["--session", "type-delay", "type", "#code", "1234", "--delay", "50"],
       expect.objectContaining({ reject: false }),
     );
   });

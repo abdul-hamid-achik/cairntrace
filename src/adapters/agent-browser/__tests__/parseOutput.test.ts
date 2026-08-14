@@ -147,6 +147,16 @@ describe("buildGlobalArgs", () => {
       }),
     ).toEqual(["-p", "ios", "--device", "iPhone 15 Pro"]);
   });
+
+  it("emits --idle-timeout when idleTimeoutMs is a number, including 0", () => {
+    expect(buildGlobalArgs({ session: "x", idleTimeoutMs: 0 })).toEqual([
+      "--idle-timeout",
+      "0",
+    ]);
+    expect(buildGlobalArgs({ session: "x", idleTimeoutMs: 3_600_000 })).toEqual(
+      ["--idle-timeout", "3600000"],
+    );
+  });
 });
 
 describe("parseBoxEnvelope", () => {

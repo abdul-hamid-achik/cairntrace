@@ -64,6 +64,9 @@ export function createBackend(opts: BackendOptions): BrowserBackend {
         ...(opts.testIdAttribute !== undefined
           ? { testIdAttribute: opts.testIdAttribute }
           : {}),
+        // Cairn owns session close; keep the daemon alive across long
+        // script-outcome polls (agent-browser 0.33.1 defaults to 1h idle).
+        idleTimeoutMs: 0,
       });
   }
 }

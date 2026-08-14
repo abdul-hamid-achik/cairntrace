@@ -6,6 +6,7 @@
 // batch lines.
 import { log as clackLog, S_ERROR, S_SUCCESS, S_WARN } from "@clack/prompts";
 import type { ProgressListener } from "../core/runner/Runner";
+import { formatWhen } from "../core/runner/conditions";
 
 /* ----- Color helpers ----- */
 
@@ -74,7 +75,10 @@ export function makePlainListener(
   let currentWhen: string | undefined;
   return {
     onStepStart(_idx, step) {
-      currentWhen = "when" in step ? step.when : undefined;
+      currentWhen =
+        "when" in step && step.when !== undefined
+          ? formatWhen(step.when)
+          : undefined;
     },
     onRunStart(spec, _runId, runDir, backendName, environment) {
       line(

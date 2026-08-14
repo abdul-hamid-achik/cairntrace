@@ -1,12 +1,27 @@
-import type { BrowserBackend } from "../../../adapters/browserBackend";
+import type {
+  BrowserBackend,
+  ConsoleEntry,
+} from "../../../adapters/browserBackend";
 import type { ConsoleVerifier } from "../../schema/verifier.v1";
 import type { VerifierEvaluation } from "./types";
 
 export async function evaluateConsole(
   verifier: ConsoleVerifier,
   backend: BrowserBackend,
+  captured?: { errors?: ConsoleEntry[]; unavailable?: string },
 ): Promise<VerifierEvaluation> {
-  const errors = await backend.getErrors();
+  if (captured?.unavailable) {
+    const max = verifier.console.errorsMax;
+    return {
+      passed: false,
+      expected: `at most ${max} console error${max === 1 ? "" : "s"}`,
+      actual: captured.unavailable,
+    };
+  }
+  const errors =
+    captured?.errors !== undefined
+      ? captured.errors
+      : await backend.getErrors();
   const max = verifier.console.errorsMax;
   const passed = errors.length <= max;
 

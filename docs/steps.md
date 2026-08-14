@@ -158,7 +158,7 @@ An empty `value: ""` is legal and picks a value-less placeholder option. Playwri
 
 ### `type`
 
-Type text character-by-character into a field, sending each character as a real keyboard event. This is what reactive frameworks (Vue, React) need to fire their form validation. `delayMs` adds a per-keystroke delay for slow, debounced validators (default 0).
+Type text character-by-character into a field, sending each character as a real keyboard event. This is what reactive frameworks (Vue, React) need to fire their form validation. `delayMs` adds a per-keystroke delay for slow, debounced validators (default 0) on both agent-browser (`--delay`) and Playwright.
 
 ```yaml
 - type: { by: label, name: Token, value: "${requests.qr.body.token}", delayMs: 50 }
@@ -216,10 +216,13 @@ postcondition. Cairntrace observes the response before dispatching
       timeoutMs: 45000
 ```
 
-`urlContains` is required; `method`, `status`, and `timeoutMs` are optional.
-`status` accepts `equals`, `below`, `atLeast`, or `in`. The same guard can
-cover `click`, `fill`, `type`, and `select`; it intentionally disables
-mutation retries for that action.
+`urlContains` is required; `method`, `status`, `timeoutMs`, and `assign` are
+optional. `status` accepts `equals`, `below`, `atLeast`, or `in`. `assign`
+writes `requests/<name>.json` and exposes `${requests.<name>.status}`,
+`${requests.<name>.url}`, `${requests.<name>.id}`, and `${requests.<name>.body}`
+when a JSON request body was captured. The same guard can cover `click`,
+`fill`, `type`, and `select`; it intentionally disables mutation retries for
+that action.
 
 ### `download`
 
@@ -283,9 +286,25 @@ Invoke an imported reusable action by name. See [Snippets](/snippets) for the `i
 
 ```yaml
 - use: login_admin
+- use:
+    action: edit_and_save_text_field
+    vars:
+      textFieldValue: https://example.com
 ```
 
-An action file may declare `vars:` defaults for `${vars.X}` placeholders in its steps. Those defaults sit under the spec's vars: action defaults < config env vars < spec `vars:` < CLI `--var`. The action can ship a company name or answer key; the spec overrides only what it must.
+An action file may declare `vars:` defaults for `${vars.X}` placeholders in its steps. Precedence: action defaults < config env vars < spec `vars:` < CLI `--var` < **use-site `vars:`** (highest, only for that expansion). The same action can be invoked twice with different values.
+
+`when:` can be the string DSL (`text:Password`, `selector:.invite`) or an object. Use the object when the gate needs `hasText` on a selector — the same visible-node predicate as `wait.selector` + `hasText`, so a card-concat `Connect as Supplier` does not skip or fire the wrong step.
+
+```yaml
+- when:
+    selector: .invite-entity-blade
+    hasText: Connect as Supplier
+  click:
+    by: role
+    role: button
+    name: Connect as Supplier
+```
 
 ```yaml
 # actions/open_home_connection.yml

@@ -915,6 +915,128 @@ steps:
     expect(diagnostics).toContain('"wedged": true');
   });
 
+  it("assigns a network postcondition match to requests/<name>.json", async () => {
+    const specPath = await writeSpec(
+      "postcondition_assign",
+      `version: 1
+name: postcondition_assign
+intent: capture the Save PATCH as a named request
+outcomes:
+  - id: no_errors
+    description: dummy
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: save
+    click:
+      by: selector
+      selector: button.save-button
+    postcondition:
+      network:
+        method: PATCH
+        urlContains: /api/answers
+        status:
+          in: [200, 201, 204]
+        assign: save
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const original = backend.runStep.bind(backend);
+    backend.runStep = async (step) => {
+      const result = await original(step);
+      backend.pushNetworkEntry({
+        id: "req-1",
+        url: "http://localhost/api/answers/xyz",
+        method: "PATCH",
+        status: 204,
+        timestamp: Date.now(),
+        postData: '{"Locations_List":"HQ"}',
+      });
+      return result;
+    };
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    const saved = JSON.parse(
+      await readFile(join(result.runDir, "requests", "save.json"), "utf8"),
+    ) as { status: number; url: string; id?: string; body?: unknown };
+    expect(saved.status).toBe(204);
+    expect(saved.url).toContain("/api/answers");
+    expect(saved.id).toBe("req-1");
+    expect(saved.body).toEqual({ Locations_List: "HQ" });
+  });
+
+  it("does not re-read console errors after the pre-outcome snapshot", async () => {
+    const specPath = await writeSpec(
+      "console_snapshot_once",
+      `version: 1
+name: console_snapshot_once
+intent: the console verifier reuses the pre-outcome error snapshot
+outcomes:
+  - id: no_errors
+    description: page has no console errors
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: go
+    open: /ready
+`,
+    );
+    const backend = new MockBrowserBackend();
+    const errorsSpy = vi.spyOn(backend, "getErrors");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("passed");
+    expect(result.outcomes[0]?.status).toBe("passed");
+    expect(errorsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails a console outcome when the backend is wedged instead of certifying zero errors", async () => {
+    const specPath = await writeSpec(
+      "wedged_console_outcome",
+      `version: 1
+name: wedged_console_outcome
+intent: a wedged capture must not green a console errorsMax 0 outcome
+artifacts:
+  capture:
+    screenshots: always
+    snapshots: never
+outcomes:
+  - id: no_errors
+    description: page has no console errors
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: render
+    open: /ready
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.setPageText("Ready");
+    let wedged = false;
+    vi.spyOn(backend, "screenshot").mockImplementation(async ({ path }) => {
+      wedged = true;
+      return {
+        ok: false,
+        path,
+        durationMs: 15_000,
+        error: "screenshot capture timed out after 15000ms",
+      };
+    });
+    (
+      backend as unknown as BrowserBackend & { isWedged: () => boolean }
+    ).isWedged = () => wedged;
+    const errorsSpy = vi.spyOn(backend, "getErrors");
+    const result = await runSpec({ specPath, backend, artifactRoot });
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]?.status).toBe("passed");
+    expect(result.outcomes[0]?.status).toBe("failed");
+    expect(errorsSpy).not.toHaveBeenCalled();
+    const evidence = await readFile(
+      join(result.runDir, "outcomes", "no_errors.md"),
+      "utf8",
+    );
+    expect(evidence).toContain("backend was wedged");
+  });
+
   it("degrades a screenshot hard-timeout to best-effort without voiding outcomes", async () => {
     const specPath = await writeSpec(
       "screenshot_timeout",

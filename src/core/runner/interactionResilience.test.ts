@@ -336,6 +336,11 @@ describe("runResilientBrowserStep", () => {
     expect(result.ok).toBe(true);
     expect(backend.stepLog).toHaveLength(1);
     expect(backend.mutations).toBe(1);
+    expect(result.networkMatch).toMatchObject({
+      method: "POST",
+      status: 200,
+      url: "http://localhost/api/files/extract-content-by-package",
+    });
   });
 
   it("does not retry a mutation when the postcondition times out", async () => {

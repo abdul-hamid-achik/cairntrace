@@ -20,7 +20,10 @@ import {
   type WaitStep,
 } from "../../core/schema/spec.v1";
 import { testIdSelector } from "../../core/locators";
-import { bodyTextContainsExpression } from "../../core/textMatching";
+import {
+  bodyTextContainsExpression,
+  visibleSelectorHasTextExpression,
+} from "../../core/textMatching";
 
 /**
  * Pure functions mapping a behavioral Step → agent-browser argv.
@@ -114,13 +117,13 @@ export function fillStepToArgv(step: FillStep): string[] {
  * Real keyboard events trigger SPA framework reactivity (Vue/React) that a
  * bulk `fill` may miss, leaving submit buttons disabled.
  *
- * NOTE: agent-browser's `type` does not support `--delay`; the schema's
- * `delayMs` is reserved for future backends (e.g. Playwright) and is
- * stripped by the adapter before dispatch.
+ * `delayMs` maps to agent-browser `--delay` (supported since 0.27.2).
  */
 export function typeStepToArgv(step: TypeStep): string[] {
-  const { value, delayMs: _delayMs, ...locator } = step.type;
-  return locatorToArgv(locator as Locator, "type", value);
+  const { value, delayMs, ...locator } = step.type;
+  const argv = locatorToArgv(locator as Locator, "type", value);
+  if (delayMs !== undefined) argv.push("--delay", String(delayMs));
+  return argv;
 }
 
 /**
@@ -201,10 +204,9 @@ export function waitConditionToArgv(w: WaitCondition): string[] {
       // Poll for a visible node whose text contains the needle. Bare
       // `wait.text` reads body.innerText and false-positives on card
       // concat / invite headers before the <button> exists.
-      const needle = JSON.stringify(w.hasText);
       argv.push(
         "--fn",
-        `[].some.call(document.querySelectorAll(${sel}),function(el){var s=window.getComputedStyle(el);if(s.display==="none"||s.visibility==="hidden")return false;var t=String(el.textContent||"").replace(/\\s+/g," ").trim().toLowerCase();return t.indexOf(String(${needle}).replace(/\\s+/g," ").trim().toLowerCase())!==-1;})`,
+        visibleSelectorHasTextExpression(w.selector, w.hasText),
       );
     } else if (w.state === "attached") {
       argv.push("--fn", `document.querySelector(${sel}) !== null`);
@@ -339,7 +341,9 @@ export function stepToArgv(step: Step): string[] {
   }
   if ("use" in step) {
     throw new Error(
-      `'use: ${step.use}' must be expanded to inline steps by the runner before adapter dispatch`,
+      `'use: ${
+        typeof step.use === "string" ? step.use : step.use.action
+      }' must be expanded to inline steps by the runner before adapter dispatch`,
     );
   }
   if ("eval" in step) {

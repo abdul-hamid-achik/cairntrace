@@ -28,6 +28,7 @@ import {
 } from "node:path";
 import type { ParseResult } from "../parser/parseSpec";
 import type { Spec, Step } from "../schema/spec.v1";
+import { useActionName, useActionVars } from "../schema/spec.v1";
 import {
   blank,
   block,
@@ -231,17 +232,39 @@ export function exportPlaywrightProject(
     body.push(...renderOutcomeEvidenceSetup(spec, lang));
     if (steps.length > 0) {
       body.push(comment(`--- steps ---`));
+      const resolvedSteps = parsed.resolved.steps ?? [];
+      let resolvedIdx = 0;
       for (const step of steps) {
         if ("use" in step) {
-          const mod = actionModules.get(step.use);
+          const actionName = useActionName(step);
+          const loaded = parsed.actionsByName.get(actionName);
+          const expandedCount = loaded?.action.steps.length ?? 0;
+          const callVars = useActionVars(step);
+          if (callVars && loaded) {
+            body.push(
+              comment(
+                `step: ${oneLine(step.id ?? actionName)} (action, call-site vars — inlined)`,
+              ),
+            );
+            for (let k = 0; k < expandedCount; k++) {
+              const expanded = resolvedSteps[resolvedIdx + k];
+              if (!expanded) continue;
+              const rendered = renderStep(expanded, spec.settleMs, ctx);
+              if (rendered.exported) ctx.coverage.stepsExported += 1;
+              body.push(...rendered.stmts);
+            }
+            resolvedIdx += expandedCount;
+            continue;
+          }
+          const mod = actionModules.get(actionName);
           if (mod) {
-            usedActions.add(step.use);
+            usedActions.add(actionName);
             for (const envName of mod.envNames) {
               ctx.usage.envNames.add(envName);
             }
             if (mod.usesRunToken) ctx.usage.runToken = true;
             body.push(
-              comment(`step: ${oneLine(step.id ?? step.use)} (action)`),
+              comment(`step: ${oneLine(step.id ?? actionName)} (action)`),
               raw(
                 `await ${mod.fnName}(page${
                   mod.usesRunToken ? ", RUN_TOKEN" : ""
@@ -249,8 +272,12 @@ export function exportPlaywrightProject(
               ),
             );
             ctx.coverage.stepsExported += 1;
+            resolvedIdx += expandedCount;
             continue;
           }
+          resolvedIdx += expandedCount;
+        } else {
+          resolvedIdx += 1;
         }
         const rendered = renderStep(step as Step, spec.settleMs, ctx);
         if (rendered.exported) ctx.coverage.stepsExported += 1;

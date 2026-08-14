@@ -31,6 +31,8 @@ export interface InvocationResult {
   argv: string[];
   /** Present when the backend resolved a semantic locator before acting. */
   resolvedElement?: ResolvedElement;
+  /** Network entry that satisfied `postcondition.network`, when armed. */
+  networkMatch?: NetworkEntry;
 }
 
 export interface SnapshotResult {

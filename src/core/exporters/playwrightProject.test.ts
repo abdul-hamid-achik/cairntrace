@@ -183,6 +183,8 @@ describe("exportPlaywrightProject timeout emission", () => {
           "slow_login",
           {
             path: "/tmp/actions/slow_login.yml",
+            rawSource: "",
+            actionDefaults: {},
             action: {
               version: 1,
               name: "slow_login",
@@ -406,6 +408,8 @@ describe("exportPlaywrightProject timeout emission", () => {
           "mutate",
           {
             path: "/tmp/project/actions/mutate.yml",
+            rawSource: "",
+            actionDefaults: {},
             action: {
               version: 1,
               name: "mutate",

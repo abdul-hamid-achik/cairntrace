@@ -98,4 +98,24 @@ describe("evaluateWhen", () => {
       true,
     );
   });
+
+  it("object when selector+hasText uses the shared visible-text predicate", async () => {
+    const b = new MockBrowserBackend();
+    b.enqueueEvalResult(true);
+    expect(
+      await evaluateWhen(
+        { selector: ".invite-entity-blade", hasText: "Connect as Supplier" },
+        b,
+      ),
+    ).toBe(true);
+    expect(b.lastEvaluatedScript).toContain("querySelectorAll");
+    expect(b.lastEvaluatedScript).toContain("Connect as Supplier");
+    b.enqueueEvalResult(false);
+    expect(
+      await evaluateWhen(
+        { selector: ".invite-entity-blade", hasText: "Connect as Supplier" },
+        b,
+      ),
+    ).toBe(false);
+  });
 });

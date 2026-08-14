@@ -32,6 +32,44 @@ export interface DoctorOptions {
   ios?: boolean;
 }
 
+/** Minimum agent-browser cairn is verified against (wait --state, idle timeout). */
+export const RECOMMENDED_AGENT_BROWSER = "0.34.0";
+
+export function assessAgentBrowserVersion(versionOutput: string): DoctorCheck {
+  const trimmed = versionOutput.trim();
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(trimmed);
+  if (!match) {
+    return {
+      name: "agent-browser",
+      ok: true,
+      detail: trimmed || "agent-browser (unparsed version)",
+    };
+  }
+  const current = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const recommended = RECOMMENDED_AGENT_BROWSER.split(".").map(Number);
+  const older =
+    current[0]! < recommended[0]! ||
+    (current[0] === recommended[0] && current[1]! < recommended[1]!) ||
+    (current[0] === recommended[0] &&
+      current[1] === recommended[1] &&
+      current[2]! < recommended[2]!);
+  if (older) {
+    return {
+      name: "agent-browser",
+      ok: false,
+      detail:
+        `agent-browser ${match[0]} is older than recommended ${RECOMMENDED_AGENT_BROWSER} ` +
+        `(wait --state collision, find role implicit names, idle timeout). ` +
+        `Upgrade: brew upgrade agent-browser`,
+    };
+  }
+  return {
+    name: "agent-browser",
+    ok: true,
+    detail: trimmed,
+  };
+}
+
 export async function doctorCommand(
   opts: DoctorOptions,
   deps: DoctorDeps = { codemap: defaultCodemapDeps },
@@ -53,13 +91,16 @@ export async function doctorCommand(
   });
 
   const ab = await tryExec("agent-browser", ["--version"]);
-  checks.push({
-    name: "agent-browser",
-    ok: ab.ok,
-    detail: ab.ok
-      ? ab.stdout.trim()
-      : "agent-browser not on $PATH (cairn run will fail without --mock)",
-  });
+  checks.push(
+    ab.ok
+      ? assessAgentBrowserVersion(ab.stdout)
+      : {
+          name: "agent-browser",
+          ok: false,
+          detail:
+            "agent-browser not on $PATH (cairn run will fail without --mock)",
+        },
+  );
 
   checks.push(...(await resolvePlaywrightChecks()));
 

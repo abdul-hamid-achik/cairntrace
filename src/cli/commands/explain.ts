@@ -1364,7 +1364,8 @@ export function buildExplain(): ExplainResult {
         id: "use",
         kind: "interaction",
         summary: "Invoke an imported reusable action",
-        yamlExample: "steps:\n  - use: login_admin",
+        yamlExample:
+          "steps:\n  - use: login_admin\n  - use:\n      action: edit_and_save_text_field\n      vars:\n        textFieldValue: https://example.com",
       },
       {
         id: "batch",

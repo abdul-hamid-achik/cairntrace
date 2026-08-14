@@ -1,6 +1,7 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
 import type {
   ArtifactRef,
+  ConsoleEntry,
   NetworkEntry,
 } from "../../../adapters/browserBackend";
 import type { ProcessMetricsSummary } from "../../monitor/processSampler";
@@ -46,6 +47,19 @@ export interface VerifierContext {
    * change from pending to complete between artifact capture and evaluation.
    */
   networkEntries?: NetworkEntry[];
+  /**
+   * Page errors + console.error entries captured once before outcomes.
+   * When set (including `[]`), the console verifier must not re-hit the
+   * daemon. Absent means unit tests / callers that still go through
+   * `backend.getErrors()`.
+   */
+  consoleErrors?: ConsoleEntry[];
+  /**
+   * Why the pre-outcome console snapshot was not taken (wedged backend or
+   * a failed `getErrors()`). The console verifier fails closed on this
+   * instead of treating a missing log as "0 errors".
+   */
+  consoleUnavailable?: string;
   /** Config-resolved baseUrl for relative browser-side HTTP checks. */
   baseUrl?: string;
   /**

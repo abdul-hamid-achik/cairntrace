@@ -339,6 +339,27 @@ describe("console", () => {
     const r = await evaluateConsole({ console: { errorsMax: 0 } }, b);
     expect(r.passed).toBe(false);
   });
+
+  it("uses a captured empty snapshot without calling getErrors", async () => {
+    const b = new MockBrowserBackend();
+    b.getErrors = async () => {
+      throw new Error("daemon unreachable");
+    };
+    const r = await evaluateConsole({ console: { errorsMax: 0 } }, b, {
+      errors: [],
+    });
+    expect(r.passed).toBe(true);
+    expect(r.actual).toBe("0 errors logged");
+  });
+
+  it("fails closed when the pre-outcome snapshot is unavailable", async () => {
+    const b = new MockBrowserBackend();
+    const r = await evaluateConsole({ console: { errorsMax: 0 } }, b, {
+      unavailable: "console was not captured because the backend was wedged",
+    });
+    expect(r.passed).toBe(false);
+    expect(r.actual).toContain("backend was wedged");
+  });
 });
 
 describe("httpJson", () => {

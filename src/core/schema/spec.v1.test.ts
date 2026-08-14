@@ -3,6 +3,9 @@ import {
   LocatorSchema,
   ReusableActionSchema,
   StepSchema,
+  useActionName,
+  useActionVars,
+  type UseStep,
   WaitConditionSchema,
   withoutPostcondition,
 } from "./spec.v1";
@@ -114,6 +117,49 @@ describe("authoring locators and waits", () => {
       }).vars,
     ).toEqual({ companyName: "Turnvu DBA" });
   });
+
+  it("accepts string and object use: forms", () => {
+    const asString = StepSchema.parse({ use: "login_admin" }) as UseStep;
+    expect(useActionName(asString)).toBe("login_admin");
+    expect(useActionVars(asString)).toBeUndefined();
+
+    const asObject = StepSchema.parse({
+      use: {
+        action: "edit_and_save_text_field",
+        vars: { textFieldValue: "https://example.com" },
+      },
+    }) as UseStep;
+    expect(useActionName(asObject)).toBe("edit_and_save_text_field");
+    expect(useActionVars(asObject)).toEqual({
+      textFieldValue: "https://example.com",
+    });
+    expect(StepSchema.safeParse({ use: { vars: { x: "y" } } }).success).toBe(
+      false,
+    );
+  });
+
+  it("accepts when object with selector+hasText and rejects hasText without selector", () => {
+    expect(
+      StepSchema.parse({
+        when: {
+          selector: ".invite-entity-blade",
+          hasText: "Connect as Supplier",
+        },
+        click: { by: "role", role: "button", name: "Connect as Supplier" },
+      }),
+    ).toMatchObject({
+      when: {
+        selector: ".invite-entity-blade",
+        hasText: "Connect as Supplier",
+      },
+    });
+    expect(
+      StepSchema.safeParse({
+        when: { text: "Password", hasText: "x" },
+        click: { by: "role", role: "button", name: "Go" },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("network postconditions", () => {
@@ -136,6 +182,31 @@ describe("network postconditions", () => {
       id: "upload",
       upload: { by: "selector", selector: "input[type=file]", path: "w9.pdf" },
     });
+  });
+
+  it("accepts postcondition.network.assign and rejects an invalid name", () => {
+    expect(
+      StepSchema.parse({
+        click: { by: "role", role: "button", name: "Save" },
+        postcondition: {
+          network: {
+            urlContains: "/api/answers",
+            status: { in: [200, 201, 204] },
+            assign: "save",
+          },
+        },
+      }),
+    ).toMatchObject({
+      postcondition: { network: { assign: "save" } },
+    });
+    expect(
+      StepSchema.safeParse({
+        click: { by: "role", role: "button", name: "Save" },
+        postcondition: {
+          network: { urlContains: "/api/answers", assign: "Save" },
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("requires a URL matcher for a network postcondition", () => {

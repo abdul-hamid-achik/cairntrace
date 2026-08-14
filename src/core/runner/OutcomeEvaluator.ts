@@ -94,7 +94,11 @@ async function dispatch(
       return await evaluateNetwork(v, backend, ctx.networkEntries);
     if (isNoFailedRequestsVerifier(v))
       return await evaluateNoFailedRequests(v, backend, ctx.networkEntries);
-    if (isConsoleVerifier(v)) return await evaluateConsole(v, backend);
+    if (isConsoleVerifier(v))
+      return await evaluateConsole(v, backend, {
+        errors: ctx.consoleErrors,
+        unavailable: ctx.consoleUnavailable,
+      });
     if (isCountVerifier(v)) return await evaluateCount(v, backend);
     if (isXlsxVerifier(v)) return await evaluateXlsx(v, ctx);
     if (isFileVerifier(v)) return await evaluateFile(v, ctx);
