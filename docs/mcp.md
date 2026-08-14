@@ -111,7 +111,7 @@ For Claude Code, Codex, Cursor, OpenCode, or any other MCP-aware harness, regist
 }
 ```
 
-Pin the binary version in your setup script (e.g. `git checkout v1.25.0 && bun install && ln -sf "$(pwd)/bin/cairn" /usr/local/bin/cairn`). The first `cairn_explain` call you make surfaces the current tool surface so the agent can bootstrap without guessing.
+Pin the binary version in your setup script (`brew install abdul-hamid-achik/tap/cairntrace`, `npm install -g @thelacanians/cairntrace@2.10.0`, or `git checkout v2.10.0 && bun install`). The first `cairn_explain` call you make surfaces the current tool surface so the agent can bootstrap without guessing.
 
 ## See also
 

@@ -5,6 +5,13 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Tag pushes bump `Formula/cairntrace.rb` in `abdul-hamid-achik/homebrew-tap`
+  (`.github/workflows/homebrew-tap.yml`). Install with
+  `brew install abdul-hamid-achik/tap/cairntrace` or
+  `npm install -g @thelacanians/cairntrace`.
+
 ## [2.10.0] - 2026-08-14
 
 ### Added

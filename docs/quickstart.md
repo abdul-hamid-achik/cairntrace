@@ -17,7 +17,14 @@ You can use Playwright instead, but the commands below follow the default agent-
 
 ## 1. Install Cairntrace
 
-Fastest (any package manager):
+Homebrew:
+
+```bash
+brew install abdul-hamid-achik/tap/cairntrace
+cairn --version
+```
+
+npm (or bun / pnpm / yarn):
 
 ```bash
 npm install -g @thelacanians/cairntrace

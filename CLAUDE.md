@@ -46,7 +46,8 @@ all coding agents. Read that file first — everything below assumes you have.
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:
   choose the SemVer increment, bump only `package.json`, create an annotated
-  `vX.Y.Z` tag, push, then run `gh release create`. Use patch releases for
+  `vX.Y.Z` tag, push, then run `gh release create`. Tag push publishes npm
+  and updates `abdul-hamid-achik/tap/cairntrace`. Use patch releases for
   fixes/docs/polish, and never create a floating `latest` tag or rewrite old
   releases unless the user explicitly asks to rewrite release history.
 

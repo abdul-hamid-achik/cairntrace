@@ -1,6 +1,6 @@
 # GitHub
 
-Cairntrace development happens on `main`, with a single GitHub Actions workflow enforcing the same checks locally and in CI. Releases are git tags mirrored as GitHub release pages; cairntrace is **not** published to npm or any other registry — it installs by clone + `bun install` (see [Distribution](/distribution)).
+Cairntrace development happens on `main`. GitHub Actions run the same verify gate locally and in CI. Releases are SemVer tags mirrored as GitHub release pages, published to npm as `@thelacanians/cairntrace`, and bumped on Homebrew as `abdul-hamid-achik/tap/cairntrace` (see [Distribution](/distribution)).
 
 ## Repository layout
 
@@ -31,7 +31,7 @@ The dependency direction is one-way: `cli → core → {adapters, mcp}`. The CLI
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every PR (concurrency cancels superseded runs on the same ref). The job:
+`.github/workflows/ci.yml` runs on every push to `main` and every PR (concurrency cancels superseded runs on the same ref). Tag pushes also run `npm-publish.yml` and `homebrew-tap.yml`. The CI job:
 
 1. Sets up Bun (latest) + installs deps (`bun install`).
 2. Installs Playwright Chromium (`bunx playwright install --with-deps chromium`).
@@ -51,7 +51,7 @@ git push origin vX.Y.Z
 gh release create vX.Y.Z --title vX.Y.Z --generate-notes
 ```
 
-Versioning (see AGENTS.md): patch for fixes/docs/polish, minor for new agent-callable commands/steps/verifiers/stable schema fields, major for breaking CLI/spec/artifact/MCP contracts. `vX.Y.Z` tags are the only tag kind — do not create or move a floating `latest` tag; GitHub marks the newest release "Latest" automatically. Do not rewrite old tags/releases unless explicitly asked.
+Versioning (see AGENTS.md): patch for fixes/docs/polish, minor for new agent-callable commands/steps/verifiers/stable schema fields, major for breaking CLI/spec/artifact/MCP contracts. `vX.Y.Z` tags are the only tag kind — do not create or move a floating `latest` tag; GitHub marks the newest release "Latest" automatically. Do not rewrite old tags/releases unless explicitly asked. Tag push publishes `@thelacanians/cairntrace` and updates `abdul-hamid-achik/tap/cairntrace` (`HOMEBREW_TAP_TOKEN`).
 
 ## Branching and PRs
 
@@ -74,13 +74,13 @@ The `AGENTS.md` and `CLAUDE.md` files pin the working rules for AI coding agents
 
 ## Companion tools (not cairntrace)
 
-`cairn doctor` checks a set of optional companion tools on `$PATH`. Each has its own install path; cairntrace itself is **not** on Homebrew — it installs by clone. The companions:
+`cairn doctor` checks a set of optional companion tools on `$PATH`. Install cairntrace itself with `brew install abdul-hamid-achik/tap/cairntrace` or `npm install -g @thelacanians/cairntrace`. The companions:
 
-- `fcheap`, `vecgrep`, `vidtrace`, `codemap`, `tvault` — install via the maintainer's Homebrew tap (e.g. `brew install abdul-hamid-achik/tap/fcheap`) or per their own docs. `cairn doctor --format md` tells you which are missing.
+- `fcheap`, `vecgrep`, `vidtrace`, `codemap`, `tvault` — install via the same Homebrew tap (e.g. `brew install abdul-hamid-achik/tap/fcheap`) or per their own docs. `cairn doctor --format md` tells you which are missing.
 
 ## See also
 
-- [Distribution](/distribution) — clone-to-install, version pinning
+- [Distribution](/distribution) — npm, Homebrew, and source install
 - [Configuration](/configuration) — config schema and env resolution
 - [Doctor & clean](/doctor) — the companion-tool availability check
 - [Overview](/overview) — what cairntrace is

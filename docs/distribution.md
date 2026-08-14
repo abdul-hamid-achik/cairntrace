@@ -1,19 +1,25 @@
 # Distribution
 
-Cairntrace is published to npm as **`@thelacanians/cairntrace`** and installed
-with any package manager. Installing from source (clone + `bun install`) is also
-supported and equivalent — there is no build or compile step either way. Pin to
-the latest release tag or use `main` for the latest.
+Cairntrace is published to npm as **`@thelacanians/cairntrace`** and to
+Homebrew as **`abdul-hamid-achik/tap/cairntrace`**. Installing from source
+(clone + `bun install`) is also supported and equivalent — there is no build
+or compile step either way. Pin to the latest release tag or use `main`.
 
 ## Install the CLI
 
-One-liner (detects your package manager — bun > pnpm > yarn > npm):
+One-liner (Homebrew if `brew` is on `$PATH`, otherwise bun > pnpm > yarn > npm):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdul-hamid-achik/cairntrace/main/install.sh | bash
 ```
 
-Or manually:
+Homebrew:
+
+```bash
+brew install abdul-hamid-achik/tap/cairntrace
+```
+
+npm (or bun / pnpm / yarn):
 
 ```bash
 npm install -g @thelacanians/cairntrace
@@ -22,9 +28,10 @@ pnpm add -g @thelacanians/cairntrace
 yarn global add @thelacanians/cairntrace
 ```
 
-Requires [Bun](https://bun.com) `>=1.3.0` at runtime (the CLI is a Bun shebang).
-Tag pushes to `main` publish new versions automatically via
-`.github/workflows/npm-publish.yml` (npm Trusted Publisher + provenance).
+Requires [Bun](https://bun.com) `>=1.3.0` at runtime (the CLI is a Bun shebang;
+Homebrew installs it as a dependency). Tag pushes publish to npm via
+`.github/workflows/npm-publish.yml` (Trusted Publisher + provenance) and bump
+the Homebrew formula via `.github/workflows/homebrew-tap.yml`.
 
 ## What gets distributed
 
@@ -43,7 +50,7 @@ What does NOT get distributed:
 ```bash
 git clone https://github.com/abdul-hamid-achik/cairntrace
 cd cairntrace
-git checkout v1.25.0
+git checkout v2.10.0
 bun install
 ./bin/cairn --version
 ```
@@ -86,7 +93,7 @@ SemVer tags are the release record. The pre-1.0 series used `0.x.y`; post-1.0 us
 
 An agent harness (Claude Code, Codex, OpenCode, …) should:
 
-- Pin to a specific tag (`v1.25.0`) in any setup script.
+- Pin to a specific tag (`v2.10.0`), npm version, or Homebrew formula in any setup script.
 - Verify the version with `./bin/cairn version` after install.
 - Run `cairn_explain` (or `cairn explain --format json`) once on first contact to get the current CLI surface.
 - Re-pin only on a deliberate upgrade.

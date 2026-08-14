@@ -1,0 +1,131 @@
+name: homebrew-tap
+
+# Bump Formula/cairntrace.rb in abdul-hamid-achik/homebrew-tap when a SemVer
+# tag is pushed (or via workflow_dispatch). Brew users then pick up the new
+# version with `brew update && brew upgrade cairntrace`.
+#
+# Auth: repository secret HOMEBREW_TAP_TOKEN — a PAT with write access to
+# the tap only. Do not reuse GITHUB_TOKEN; it cannot push to another repo.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v2.10.0). Defaults to the triggering tag or the latest GitHub release."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          elif [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="$(gh api repos/abdul-hamid-achik/cairntrace/releases/latest --jq .tag_name)"
+          fi
+          tag="${tag#v}"
+          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: expected vX.Y.Z, got '$tag'" >&2
+            exit 1
+          fi
+          echo "tag=v${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch source tarball and sha256
+        id: tarball
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          url="https://github.com/abdul-hamid-achik/cairntrace/archive/refs/tags/${tag}.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$url" -o /tmp/cairntrace.tar.gz; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "error: tarball not available at $url" >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+          done
+          sha="$(sha256sum /tmp/cairntrace.tar.gz | awk '{print $1}')"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: abdul-hamid-achik/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        env:
+          URL: ${{ steps.tarball.outputs.url }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          formula = Path("homebrew-tap/Formula/cairntrace.rb")
+          text = formula.read_text()
+          url = os.environ["URL"]
+          sha256 = os.environ["SHA256"]
+          updated = text
+          updated = re.sub(
+              r'url "https://github.com/abdul-hamid-achik/cairntrace/archive/refs/tags/v[^"]+"',
+              f'url "{url}"',
+              updated,
+              count=1,
+          )
+          updated = re.sub(
+              r'^  version "[^"]+"\n',
+              "",
+              updated,
+              count=1,
+              flags=re.M,
+          )
+          updated = re.sub(
+              r'^  sha256 "[0-9a-f]{64}"',
+              f'  sha256 "{sha256}"',
+              updated,
+              count=1,
+              flags=re.M,
+          )
+          if updated == text:
+              print("formula already at this version")
+          formula.write_text(updated)
+          PY
+
+      - name: Commit and push
+        working-directory: homebrew-tap
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/cairntrace.rb
+          if git diff --cached --quiet; then
+            echo "no formula changes"
+            exit 0
+          fi
+          git commit -m "Brew formula update for cairntrace version ${TAG}"
+          git push origin HEAD

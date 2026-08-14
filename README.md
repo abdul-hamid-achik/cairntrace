@@ -23,22 +23,29 @@ format.
 
 ## Installation Guide
 
-Cairntrace is published to npm as **`@thelacanians/cairntrace`** (requires
-[Bun](https://bun.com) `>=1.3.0` at runtime — the CLI ships as a bun shebang
-with no build step). Installing from source is also supported and equivalent:
-clone + `bun install`, no compile step. Pin the
+Cairntrace is published to npm as **`@thelacanians/cairntrace`** and to
+Homebrew as **`abdul-hamid-achik/tap/cairntrace`**. The CLI ships as a Bun
+shebang with no build step, so [Bun](https://bun.com) `>=1.3.0` is required
+at runtime (Homebrew installs it as a dependency). Installing from source is
+also supported and equivalent: clone + `bun install`. Pin the
 [latest release](https://github.com/abdul-hamid-achik/cairntrace/releases/latest)
 or use `main`.
 
-### 0. Install the CLI (any package manager)
+### 0. Install the CLI
 
-One-liner (detects your package manager — bun > pnpm > yarn > npm):
+One-liner (Homebrew if `brew` is on `$PATH`, otherwise bun > pnpm > yarn > npm):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/abdul-hamid-achik/cairntrace/main/install.sh | bash
 ```
 
-Or manually with your preferred manager:
+Homebrew (macOS/Linux):
+
+```bash
+brew install abdul-hamid-achik/tap/cairntrace
+```
+
+npm (or bun / pnpm / yarn):
 
 ```bash
 npm install -g @thelacanians/cairntrace
@@ -47,9 +54,8 @@ pnpm add -g @thelacanians/cairntrace
 yarn global add @thelacanians/cairntrace
 ```
 
-Verify with `cairn --version`. The CLI requires [Bun](https://bun.com) `>=1.3.0` at
-runtime (it ships as a Bun shebang with no build step). If you prefer to run from
-source, follow the clone path below.
+Verify with `cairn --version`. If you prefer to run from source, follow the
+clone path below.
 
 ### 1. Install prerequisites
 
@@ -964,10 +970,10 @@ canonical instruction set for coding agents working in this repo.
 
 ## Release Policy
 
-Cairntrace is distributed through git tags and GitHub release pages only; it is
-not published to npm or GitHub Packages. The install guide intentionally
-doesn't hardcode a version because users can pin the newest tag with
-`git tag --sort=-v:refname`.
+Cairntrace is distributed through SemVer git tags, GitHub releases, npm
+(`@thelacanians/cairntrace`), and Homebrew (`abdul-hamid-achik/tap/cairntrace`).
+The install guide does not hardcode a version — `brew upgrade cairntrace`
+and `npm update -g @thelacanians/cairntrace` follow the newest tag.
 
 The project follows SemVer tags (`vX.Y.Z`). All `v1.x.y` releases are
 Cairntrace v1, so normal maintenance should add the next patch or minor tag
@@ -977,7 +983,8 @@ major releases for breaking contracts.
 
 For a release, bump `package.json`'s `version`, run `bun run verify`, create an
 annotated `vX.Y.Z` tag, push `main` and the tag, then create the GitHub release
-with `gh release create`. Do not create a floating `latest` tag — GitHub keeps
+with `gh release create`. The tag push publishes npm and updates the Homebrew
+formula. Do not create a floating `latest` tag — GitHub keeps
 `/releases/latest` pointed at the newest release automatically.
 
 ## Related
