@@ -5,6 +5,8 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-08-14
+
 ### Added
 
 - Tag pushes bump `Formula/cairntrace.rb` in `abdul-hamid-achik/homebrew-tap`
