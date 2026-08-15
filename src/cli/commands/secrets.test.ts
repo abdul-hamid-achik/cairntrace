@@ -7,6 +7,7 @@ import {
   getTvaultKeys,
   getTvaultSelectedEnv,
   resolveScopedSecrets,
+  tvaultProcessEnv,
 } from "./secrets";
 
 const { execaMock } = vi.hoisted(() => ({
@@ -240,5 +241,19 @@ steps:
       expect.arrayContaining(["--only", "IMPORTED_SECRET"]),
       expect.objectContaining({ reject: false, timeout: 10_000 }),
     );
+  });
+});
+
+describe("tvaultProcessEnv", () => {
+  it("keeps an explicit passphrase file", () => {
+    const env = tvaultProcessEnv({
+      TVAULT_PASSPHRASE_FILE: "/custom/env",
+    });
+    expect(env.TVAULT_PASSPHRASE_FILE).toBe("/custom/env");
+  });
+
+  it("does not override an exported passphrase", () => {
+    const env = tvaultProcessEnv({ TVAULT_PASSPHRASE: "from-shell" });
+    expect(env.TVAULT_PASSPHRASE).toBe("from-shell");
   });
 });

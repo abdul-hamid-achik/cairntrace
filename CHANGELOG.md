@@ -5,6 +5,16 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-08-14
+
+### Fixed
+
+- MCP / GUI-launched `cairn mcp` now points TinyVault at
+  `~/.config/secrets/env` (`TVAULT_PASSPHRASE_FILE`) when the process
+  inherited no unlock credentials. Accompany and `cairn_run` against
+  `secrets.provider: tvault` no longer fail locked after the local agent
+  idle-exits.
+
 ## [2.11.0] - 2026-08-14
 
 ### Added

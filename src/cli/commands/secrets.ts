@@ -1,7 +1,8 @@
 import { execa } from "execa";
+import { statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { resolveSpecRuntimeContext } from "../../core/config/runtimeContext";
 import {
@@ -25,9 +26,37 @@ import type {
  * 2. `cairn secrets status` — check which keys are available
  * ------------------------------------------------------------------------- */
 
+/** TinyVault's documented daemon unlock path (launchd / MCP / GUI hosts). */
+export function conventionalTvaultPassphraseFile(): string {
+  return join(homedir(), ".config", "secrets", "env");
+}
+
+/**
+ * Env for spawning `tvault`. GUI-launched MCP hosts do not inherit a login
+ * shell, so TVAULT_PASSPHRASE is usually missing. Point tvault at the
+ * conventional 0600 passphrase file when the caller did not set one.
+ */
+export function tvaultProcessEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (base.TVAULT_PASSPHRASE || base.TVAULT_PASSPHRASE_FILE) return { ...base };
+  const path = conventionalTvaultPassphraseFile();
+  try {
+    if (statSync(path).isFile()) {
+      return { ...base, TVAULT_PASSPHRASE_FILE: path };
+    }
+  } catch {
+    // no conventional file
+  }
+  return { ...base };
+}
+
 export async function isTvaultAvailable(): Promise<boolean> {
   try {
-    const r = await execa("tvault", ["--version"], { reject: false });
+    const r = await execa("tvault", ["--version"], {
+      reject: false,
+      env: tvaultProcessEnv(),
+    });
     return r.exitCode === 0;
   } catch {
     return false;
@@ -88,6 +117,7 @@ export async function getTvaultKeys(
         {
           reject: false,
           timeout: 10_000,
+          env: tvaultProcessEnv(),
         },
       );
       if (r.exitCode !== 0) {
@@ -107,7 +137,7 @@ export async function getTvaultKeys(
     const r = await execa(
       "tvault",
       ["env", "inherited", "--group", cfg.group!, "--env", cfg.env!, "--json"],
-      { reject: false, timeout: 10_000 },
+      { reject: false, timeout: 10_000, env: tvaultProcessEnv() },
     );
     if (r.exitCode !== 0) {
       return {
@@ -183,7 +213,7 @@ export async function getTvaultSelectedEnv(
         emitSelected,
         JSON.stringify(uniqueKeys),
       ],
-      { reject: false, timeout: 10_000 },
+      { reject: false, timeout: 10_000, env: tvaultProcessEnv() },
     );
     if (r.exitCode !== 0) {
       return {

@@ -66,6 +66,29 @@ and review binary captures before sharing or stashing them.
 `secrets.provider: tvault` and the vault cannot be resolved, the run fails
 before browser execution instead of continuing with missing secrets.
 
+### MCP / GUI hosts
+
+`cairn mcp` (including accompany) execs `tvault` as a child. GUI-launched
+hosts (Grok via mcphub, Cursor, …) do not inherit a login shell, so
+`TVAULT_PASSPHRASE` is usually missing and a 15-minute TinyVault agent
+idle-exit leaves the vault locked. Cairntrace then sets
+`TVAULT_PASSPHRASE_FILE` to `~/.config/secrets/env` when that `0600` file
+exists. Prefer the same path in `~/.tvault/config.yaml`
+(`agent.passphrase_file`) and, for mcphub, on the cairntrace server:
+
+```text
+# mcphub.yaml (not cairntrace.config.yml)
+servers:
+  cairntrace:
+    command: cairn
+    args: [mcp]
+    env:
+      TVAULT_PASSPHRASE_FILE: ~/.config/secrets/env
+```
+
+Do not put `TVAULT_PASSPHRASE` itself in `mcphub.yaml`. mcphub strips that
+variable from ordinary stdio children.
+
 ## See also
 
 - [Services](/services) — where `secrets.provider: tvault` is consumed (the seed step)
