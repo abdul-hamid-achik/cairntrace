@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -695,6 +695,35 @@ describe("file", () => {
     );
     expect(r.passed).toBe(true);
     expect(r.actual).toContain("welcome");
+  });
+
+  it("resolves ${artifacts.<name>.path} placeholders against the run dir", async () => {
+    const runDir = await mkdtemp(join(tmpdir(), "cairntrace-file-artifact-"));
+    await mkdir(join(runDir, "downloads"), { recursive: true });
+    await writeFile(join(runDir, "downloads", "report.csv"), "sku,name\n");
+    const { evaluateFile } = await import("./file");
+
+    const r = await evaluateFile(
+      {
+        file: {
+          glob: "${artifacts.report.path}",
+          contains: "sku,name",
+          timeoutMs: 500,
+        },
+      },
+      {
+        artifacts: {
+          report: {
+            kind: "download",
+            path: join(runDir, "downloads", "report.csv"),
+            relativePath: "downloads/report.csv",
+          },
+        },
+        runDir,
+      },
+    );
+    expect(r.passed).toBe(true);
+    expect(r.actual).toContain("report.csv");
   });
 
   it("matches on contained text and reports near-misses", async () => {

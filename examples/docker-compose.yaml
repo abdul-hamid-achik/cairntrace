@@ -1,0 +1,23 @@
+# Demo platform database for the Cairntrace examples.
+# Port 5433 on purpose: 5432 is the usual host Postgres; the demo must not
+# collide with whatever else is running locally.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: cairn-demo-db
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: cairn
+      POSTGRES_DB: cairn
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - cairn_demo_pg:/var/lib/postgresql/data
+
+volumes:
+  cairn_demo_pg:

@@ -1,0 +1,71 @@
+# Platform API — authenticate through the JSON API and read the session.
+#
+# Demonstrates: the typed `request` step with `assign` (cookie persistence
+# into the browser session), `${requests.X.body.Y}` splicing, the `httpJson`
+# verifier on both public and authenticated endpoints, and status assertions
+# including the 401 unauthenticated probe.
+version: 1
+name: api_session
+intent: the JSON API issues a session and reports the signed-in operator and catalog stats
+environment: local
+vars:
+  demoEmail: casey@cairntrace.dev
+  demoPassword: cairn-demo-2026
+coldStart: guest
+outcomes:
+  - id: session_reports_operator
+    description: /api/session with the issued cookie returns the seeded operator
+    verify:
+      httpJson:
+        url: /api/session
+        jsonPath: user.email
+        equals: casey@cairntrace.dev
+  - id: stats_report_catalog
+    description: /api/stats reports the four seeded electronics products
+    verify:
+      httpJson:
+        url: /api/stats
+        jsonPath: electronics
+        equals: 4
+  - id: login_call_succeeded
+    description: the POST /api/login call returned 200
+    verify:
+      network:
+        method: POST
+        urlContains: /api/login
+        status:
+          equals: 200
+  - id: unauth_probe_is_401
+    description: /api/session without the cookie answers 401
+    verify:
+      network:
+        method: GET
+        urlContains: /api/session
+        status:
+          equals: 401
+steps:
+  - id: open_home
+    open: /
+  - id: probe_unauthenticated
+    request:
+      method: GET
+      url: /api/session
+      expectStatus: 401
+      assign: unauth
+  - id: login_via_api
+    request:
+      method: POST
+      url: /api/login
+      headers:
+        content-type: application/json
+      body: |
+        { "email": "${vars.demoEmail}", "password": "${vars.demoPassword}" }
+      expectStatus: 200
+      assign: login
+  - id: read_session
+    request:
+      method: GET
+      url: /api/session
+      expectStatus: 200
+      assign: session
+contractHash: sha256:d05daa17d93264443d04f711d972c97efa4f7991f433e48f01070c0356d93fee

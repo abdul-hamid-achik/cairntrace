@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { FileVerifier } from "../../schema/verifier.v1";
+import { resolveRuntimeFilePath } from "../runtimePlaceholders";
 import type { VerifierContext, VerifierEvaluation } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -13,7 +14,8 @@ const POLL_INTERVAL_MS = 200;
  *
  * Glob semantics are deliberately small: the directory part is literal, and
  * `*` / `?` wildcards apply to the filename only. Relative globs resolve
- * against the spec's directory.
+ * against the spec's directory; `${artifacts.<name>.path}` placeholders
+ * resolve like the xlsx verifier's path (run-artifact downloads included).
  */
 export async function evaluateFile(
   verifier: FileVerifier,
@@ -21,9 +23,14 @@ export async function evaluateFile(
 ): Promise<VerifierEvaluation> {
   const { glob, contains } = verifier.file;
   const timeoutMs = verifier.file.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const absGlob = isAbsolute(glob)
-    ? glob
-    : resolve(ctx.specDir ?? process.cwd(), glob);
+  const resolvedGlob = resolveRuntimeFilePath(glob, {
+    artifacts: ctx.artifacts,
+    runDir: ctx.runDir,
+    specDir: ctx.specDir,
+  });
+  const absGlob = isAbsolute(resolvedGlob)
+    ? resolvedGlob
+    : resolve(ctx.specDir ?? process.cwd(), resolvedGlob);
   const dir = dirname(absGlob);
   const namePattern = globToRegExp(basename(absGlob));
 

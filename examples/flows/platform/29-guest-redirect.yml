@@ -1,0 +1,34 @@
+# Platform auth wall — unauthenticated visits bounce to the sign-in page.
+#
+# Demonstrates: URL outcomes on a redirect and `wait.url` polling instead of
+# an inline location eval.
+version: 1
+name: guest_redirect
+intent: a guest opening the documents desk is redirected to the sign-in page
+environment: local
+coldStart: guest
+outcomes:
+  - id: redirected_to_login
+    description: the guest lands on /login.html (with the next param)
+    verify:
+      url:
+        startsWith: "${baseUrl}/login.html"
+  - id: login_form_visible
+    description: the sign-in form is on the page
+    verify:
+      text:
+        contains: Demo operator
+  - id: no_console_errors
+    description: the redirect produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - id: open_documents_as_guest
+    open: /documents.html
+  - id: wait_for_login_url
+    wait:
+      url:
+        includes: /login.html
+      timeoutMs: 5000
+contractHash: sha256:b64716bdbbfe626c954e96d96ad75ecc5f16dc5c200c631ee104d5a2a59c120f

@@ -1,0 +1,66 @@
+# Platform form controls — focus-reveal combobox and Enter-committed search.
+#
+# Demonstrates: `focus` on a control that opens on focus (no click), clicking
+# an option revealed by focus, `fill` + `press` with a target locator, and
+# text outcomes on live client-side state. No network calls on this page.
+version: 1
+name: form_controls
+intent: the category picker opens on focus and Enter commits the SKU search filter
+environment: local
+coldStart: guest
+outcomes:
+  - id: picked_category_echoed
+    description: picking Electronics echoes the choice on the page
+    verify:
+      text:
+        contains: "Picked category: Electronics"
+  - id: search_commits_on_enter
+    description: pressing Enter filters to exactly one SKU row
+    verify:
+      text:
+        contains: "1 matching SKU"
+  - id: no_console_errors
+    description: the page stayed console-clean
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - id: open_form_controls
+    open: /form-controls.html
+  - id: focus_picker
+    focus:
+      by: testid
+      testid: category-picker
+  - id: wait_options_revealed
+    wait:
+      text: Office supplies
+      timeoutMs: 5000
+  - id: pick_electronics
+    # Chrome's a11y tree exposes the listbox children as buttons (the explicit
+    # role="option" on <button> is not honored), so the semantic locator uses
+    # role: button here.
+    click:
+      by: role
+      role: button
+      name: Electronics
+  - id: wait_picked_echo
+    wait:
+      text: "Picked category: Electronics"
+      timeoutMs: 5000
+  - id: type_search
+    # by: label, not by: testid — the fill re-read races agent-browser's
+    # snapshot, which does not expose data-testid attributes.
+    fill:
+      by: label
+      name: Search SKU list
+      value: LG
+  - id: commit_search
+    press: Enter
+    target:
+      by: label
+      name: Search SKU list
+  - id: wait_search_status
+    wait:
+      text: "1 matching SKU"
+      timeoutMs: 5000
+contractHash: sha256:fc211c76fc76bd4cfae44899db87c5e0006467914bac835208847210065e62b3

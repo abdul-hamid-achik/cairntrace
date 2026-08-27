@@ -1,0 +1,47 @@
+# Reusable action: create a product through the real form.
+# Assumes the session is already authenticated (chain after login_demo_app).
+version: 1
+name: create_product
+vars:
+  name: Cairn Test Widget
+  sku: CTW-000
+  category: office
+  price: "9.99"
+  stock: "5"
+steps:
+  - id: open_new_product
+    open: /products/new.html
+  - id: wait_for_form
+    wait:
+      selector: "[data-testid=\"product-form\"]"
+      timeoutMs: 10000
+  - id: fill_name
+    fill:
+      by: label
+      name: Product name
+      value: "${vars.name}"
+  - id: fill_sku
+    fill:
+      by: label
+      name: SKU
+      value: "${vars.sku}"
+  - id: select_category
+    select:
+      by: label
+      name: Category
+      value: "${vars.category}"
+  - id: fill_price
+    fill:
+      by: label
+      name: Price (USD)
+      value: "${vars.price}"
+  - id: fill_stock
+    fill:
+      by: label
+      name: Stock
+      value: "${vars.stock}"
+  - id: submit
+    click:
+      by: role
+      role: button
+      name: Create product

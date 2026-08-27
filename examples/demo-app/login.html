@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Sign in</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 480px; margin: 4rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      label { display: block; margin-top: 1rem; font-weight: 600; }
+      input { display: block; margin-top: 0.25rem; padding: 0.4rem; font: inherit; width: 24ch; }
+      button { margin-top: 1.25rem; padding: 0.55rem 1.1rem; background: #1e7e34; color: #fff; border: 0; border-radius: 4px; font: inherit; cursor: pointer; }
+      button:hover { background: #155724; }
+      .error { display: none; padding: 0.6rem 0.9rem; background: #fdecea; border: 1px solid #b3261e; border-radius: 4px; margin-top: 1rem; }
+      .hint { margin-top: 1.5rem; color: #555; font-size: 0.9em; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Sign in</h1>
+      <p>Northwind Depot operator access.</p>
+    </header>
+    <main>
+      <p id="login-error" class="error" role="alert">Invalid email or password</p>
+      <form method="post" action="/login" data-testid="login-form">
+        <input type="hidden" name="next" id="login-next" value="/products.html" />
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" data-testid="login-email" autocomplete="username" required />
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" data-testid="login-password" autocomplete="current-password" required />
+        <button type="submit" data-testid="login-submit">Sign in</button>
+      </form>
+      <p class="hint">Demo operator: casey@cairntrace.dev / cairn-demo-2026 (seeded by the demo platform).</p>
+    </main>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("error") === "1") {
+        document.getElementById("login-error").style.display = "block";
+      }
+      const next = params.get("next");
+      if (next && next.startsWith("/")) {
+        document.getElementById("login-next").value = next;
+      }
+    </script>
+  </body>
+</html>

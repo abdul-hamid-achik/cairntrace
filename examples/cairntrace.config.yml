@@ -10,11 +10,38 @@ version: 1
 project: cairntrace-demo
 defaultEnvironment: local
 
+# Cairn owns the whole demo platform lifecycle: it starts the demo app
+# (webServer), brings up Postgres via docker compose (services.docker), and
+# keeps the demo data fresh (services.seed — data-level freshness check, so a
+# wiped volume re-seeds even inside the TTL window). Commands run with cwd =
+# this file's directory (examples/).
+webServer:
+  command: bun demo-app/server.ts
+  url: http://localhost:8787
+  reuseExisting: true
+  readyTimeoutMs: 120000
+
+services:
+  docker:
+    command: docker compose up -d
+    reuseExisting: true
+    readyTimeoutMs: 300000 # first postgres image pull can be slow
+    readinessCheck: docker compose exec -T db pg_isready -U cairn -d cairn
+  seed:
+    command: bun demo-app/db/seed.ts
+    ttlSeconds: 0 # always run the data-level check below
+    freshnessCheck: >-
+      docker compose exec -T db psql -U cairn -d cairn -tAc
+      "select count(*) from products" | grep -qv '^0$'
+    timeoutMs: 120000
+
 environments:
   local:
     baseUrl: http://localhost:8787
     vars:
       expectedRows: 3
+      demoEmail: casey@cairntrace.dev
+      demoPassword: cairn-demo-2026
 
   staging:
     # Pretend staging is something completely different; useful for demo
@@ -22,3 +49,5 @@ environments:
     baseUrl: http://localhost:8787
     vars:
       expectedRows: 3
+      demoEmail: casey@cairntrace.dev
+      demoPassword: cairn-demo-2026

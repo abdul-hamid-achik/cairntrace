@@ -5,12 +5,12 @@
 # locator-not-found error.
 #
 # Then run:
-#   ./bin/cairn spec heal examples/flows/06-drifted-link.yml
+#   ./bin/cairn spec heal examples/flows/demos/_06-drifted-link.yml
 # to see Cairntrace inspect the snapshot and propose:
 #   replace /steps/1/click/name  from "Dashboard link"  to "Open dashboard"
 #
 # Add --apply to write the fix back to the file (comments preserved), then re-run
-# with `cairn run examples/flows/06-drifted-link.yml` to confirm it passes.
+# with `cairn run examples/flows/demos/_06-drifted-link.yml` to confirm it passes.
 #
 version: 1
 name: drifted_dashboard_nav

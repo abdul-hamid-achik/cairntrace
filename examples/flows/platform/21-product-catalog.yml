@@ -1,0 +1,52 @@
+# Platform catalog — read-only DB-backed listing with category filters.
+#
+# The electronics count is stable at 4 because creation flows post into
+# "office" on purpose (see 22-product-create).
+version: 1
+name: product_catalog
+intent: the seeded catalog lists every product and the electronics filter narrows it to four
+environment: local
+coldStart: guest
+outcomes:
+  - id: catalog_reports_twelve
+    description: the stats API reports the full seeded catalog of 12 products
+    verify:
+      httpJson:
+        url: /api/stats
+        jsonPath: products
+        equals: 12
+  - id: electronics_filter_four
+    description: after filtering by electronics the table has exactly 4 rows
+    verify:
+      count:
+        selector: "[data-testid=\"product-row\"]"
+        equals: 4
+  - id: seeded_product_visible
+    description: the electronics filter shows the seeded Anker hub
+    verify:
+      text:
+        contains: Anker 341 USB-C Hub
+  - id: no_failed_requests
+    description: nothing on this page 4xx/5xx
+    verify:
+      noFailedRequests:
+        urlContains: localhost:8787
+steps:
+  - id: open_products
+    open:
+      path: /products.html
+      waitUntil: networkidle
+  - id: wait_for_table
+    wait:
+      text: SKU
+      timeoutMs: 10000
+  - id: filter_electronics
+    click:
+      by: role
+      role: link
+      name: electronics
+  - id: wait_for_filter
+    wait:
+      text: Anker 341 USB-C Hub
+      timeoutMs: 5000
+contractHash: sha256:a0f05e347ff27d6868956d53b824da8b091d0630f1b7d62a7a25b8d46090237a

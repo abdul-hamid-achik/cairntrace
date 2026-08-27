@@ -1,0 +1,62 @@
+# Platform exports — download CSV and XLSX generated from the live database.
+#
+# Demonstrates: download step on export buttons, `file` verifier polling a
+# downloaded artifact's contents, and the `xlsx` verifier on a workbook whose
+# rows come from Postgres (seeded SKUs), not a static fixture.
+version: 1
+name: product_exports
+intent: the catalog exports CSV and XLSX downloads that contain the seeded data
+environment: local
+coldStart: guest
+outcomes:
+  - id: csv_has_header
+    description: the CSV download carries the expected header row
+    verify:
+      file:
+        glob: "${artifacts.csv.path}"
+        contains: "sku,name,category,price,stock"
+  - id: csv_has_seeded_sku
+    description: the CSV contains a seeded SKU
+    verify:
+      file:
+        glob: "${artifacts.csv.path}"
+        contains: "AN-HUB-7P"
+  - id: xlsx_has_seeded_sku
+    description: the workbook contains the seeded Anker SKU
+    verify:
+      xlsx:
+        path: "${artifacts.workbook.path}"
+        sheets:
+          - name: Products
+            contains:
+              - SKU
+              - AN-HUB-7P
+  - id: no_failed_requests
+    description: the export downloads did not fail
+    verify:
+      noFailedRequests:
+        urlContains: localhost:8787
+steps:
+  - id: open_products
+    open:
+      path: /products.html
+      waitUntil: networkidle
+  - id: wait_for_table
+    wait:
+      text: SKU
+      timeoutMs: 10000
+  - id: download_csv
+    download:
+      by: role
+      role: button
+      name: Export CSV
+      saveAs: products.csv
+      assign: csv
+  - id: download_xlsx
+    download:
+      by: role
+      role: button
+      name: Export XLSX
+      saveAs: products.xlsx
+      assign: workbook
+contractHash: sha256:f03453008abe5f33bdf1aa28175bcabc8a5d35b3ec751c2c9ec060173f3daaeb

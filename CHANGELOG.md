@@ -5,6 +5,37 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ## [Unreleased]
 
+### Fixed
+
+- `upload` steps now resolve bare relative `path:` values against the spec's
+  directory (matching `transform.file` / `eval.file` / script-verifier
+  `file:`), so uploading a repo fixture no longer depends on the process cwd.
+  Absolute paths and `${artifacts.*}` placeholders are unchanged.
+- The `file` verifier resolves `${artifacts.<name>.path}` placeholders the
+  same way the `xlsx` verifier does, so a downloaded artifact can be polled
+  by reference instead of a spec-relative glob.
+
+### Changed
+
+- The examples suite is now a real demo platform backed by Postgres:
+  `examples/docker-compose.yaml` (db on :5433), Drizzle schema + journal
+  migrations + deterministic seed (`examples/demo-app/db/`), login/documents/
+  products/exports pages and JSON APIs on the same :8787 server, and sample
+  fixtures (PDFs, generated product photos) under `examples/fixtures/`.
+  `examples/cairntrace.config.yml` now drives the whole lifecycle through
+  `webServer` + `services.docker` + `services.seed` (data-level freshness
+  check), so a plain `cairn run examples/flows` brings up and seeds the
+  platform itself.
+- New platform spec suite `examples/flows/platform/` (login journey, catalog
+  + filters, form create, duplicate-SKU rejection, PDF upload/download with
+  a Node magic-byte verifier, image upload with preview, CSV/XLSX export
+  downloads, API login + session via `request`/`httpJson`, focus combobox +
+  Enter-committed search, guest redirect), with reusable
+  `login_demo_app` / `create_product` actions.
+- The intentional-failure demos moved to `examples/flows/demos/` with `_`
+  prefixes so a directory run of `examples/flows` is green; run them by
+  explicit path for the failure/heal walkthroughs.
+
 ## [2.11.1] - 2026-08-14
 
 ### Fixed

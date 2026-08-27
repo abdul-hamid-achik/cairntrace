@@ -1,0 +1,57 @@
+# Platform files — upload a JPEG and see the inline preview.
+#
+# The image fixture is a generated product photo (examples/fixtures), uploaded
+# as docType "photo" so the documents desk renders an <img> preview.
+version: 1
+name: documents_image
+intent: an operator uploads a product photo and the desk renders an image preview
+environment: local
+imports:
+  - ../../actions/login_demo_app.yml
+outcomes:
+  - id: upload_flash_visible
+    description: the documents page confirms the upload
+    verify:
+      text:
+        contains: Document uploaded
+  - id: image_preview_rendered
+    description: at least one thumbnail preview renders in the table
+    verify:
+      count:
+        selector: "img.thumb"
+        atLeast: 1
+  - id: preview_loaded_cleanly
+    description: the preview request did not fail
+    verify:
+      noFailedRequests:
+        urlContains: /documents/
+steps:
+  - use: login_demo_app
+  - id: open_documents
+    open:
+      path: /documents.html
+      waitUntil: networkidle
+  - id: wait_for_table
+    wait:
+      selector: "[data-testid=\"document-row\"]"
+      timeoutMs: 10000
+  - id: pick_type
+    select:
+      by: label
+      name: Document type
+      value: photo
+  - id: upload_photo
+    upload:
+      by: label
+      name: Choose file
+      path: ../../fixtures/product-notebook.jpg
+  - id: submit_upload
+    click:
+      by: role
+      role: button
+      name: Upload document
+  - id: wait_for_flash
+    wait:
+      text: Document uploaded
+      timeoutMs: 10000
+contractHash: sha256:c19ca92d90f5f3b37109c7554c0c1bb134d46b0ac0cd638de654d12d126418ed

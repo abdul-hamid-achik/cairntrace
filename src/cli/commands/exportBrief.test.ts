@@ -166,7 +166,7 @@ steps:
 
   it("expands imported use: actions instead of skipping them", async () => {
     const { document } = await exportOneBrief(
-      "examples/flows/09-imported-drift.yml",
+      "examples/flows/demos/_09-imported-drift.yml",
       {},
     );
     expect(document.steps.some((s) => s.action === "machine")).toBe(false);

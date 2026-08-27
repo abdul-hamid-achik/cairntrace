@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Form controls</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      label { display: block; margin-top: 1rem; font-weight: 600; }
+      input { display: block; margin-top: 0.25rem; padding: 0.4rem; font: inherit; width: 28ch; }
+      ul.options { display: none; border: 1px solid #ccc; border-radius: 4px; list-style: none; margin: 0.25rem 0 0; padding: 0.25rem; width: 28ch; }
+      ul.options.open { display: block; }
+      ul.options button { display: block; width: 100%; text-align: left; padding: 0.35rem 0.5rem; background: none; border: 0; font: inherit; cursor: pointer; }
+      ul.options button:hover { background: #eef4ee; }
+      table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+      th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; }
+      th { background: #f8f8f8; }
+      .note { margin-top: 1.5rem; color: #555; font-size: 0.9em; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Form controls</h1>
+      <p>Focus-reveal combobox and Enter-driven search. No network calls.</p>
+    </header>
+    <main>
+      <label for="category-picker">Category picker</label>
+      <input id="category-picker" data-testid="category-picker" placeholder="Pick a category" readonly
+             aria-haspopup="listbox" autocomplete="off" />
+      <ul id="category-options" class="options" role="listbox" aria-label="Category options">
+        <li><button type="button" role="option" data-value="office">Office supplies</button></li>
+        <li><button type="button" role="option" data-value="electronics">Electronics</button></li>
+        <li><button type="button" role="option" data-value="kitchen">Kitchen</button></li>
+      </ul>
+      <p id="picked-category" data-testid="picked-category" aria-live="polite"></p>
+
+      <label for="search">Search SKU list</label>
+      <input id="search" data-testid="sku-search" placeholder="Type then press Enter" autocomplete="off" />
+      <table aria-label="SKU list">
+        <thead>
+          <tr><th>SKU</th><th>Name</th></tr>
+        </thead>
+        <tbody id="sku-rows">
+          <tr data-sku="FN-NB-48"><td>FN-NB-48</td><td>Field Notes Memo Book 3-pack</td></tr>
+          <tr data-sku="AN-HUB-7P"><td>AN-HUB-7P</td><td>Anker 341 USB-C Hub</td></tr>
+          <tr data-sku="BK-KTL-GO"><td>BK-KTL-GO</td><td>Bodum Bistro Gooseneck Kettle</td></tr>
+          <tr data-sku="LG-MTR-27"><td>LG-MTR-27</td><td>LG UltraFine Monitor</td></tr>
+        </tbody>
+      </table>
+      <p id="search-status" data-testid="search-status"></p>
+      <p class="note">The picker opens on focus (no click needed) and the search filter commits on Enter.</p>
+    </main>
+    <script>
+      const picker = document.getElementById("category-picker");
+      const options = document.getElementById("category-options");
+      const picked = document.getElementById("picked-category");
+
+      // Reveal on real focus state, not just the DOM focus event — CDP-style
+      // focus (what automation drivers use) sets document.activeElement
+      // without always dispatching the event listener path. Once open the
+      // listbox stays open until a pick or an outside click, so the options
+      // survive across separate automation invocations.
+      const syncOpen = () => {
+        if (document.activeElement === picker || picker.matches(":focus")) {
+          options.classList.add("open");
+        }
+      };
+      picker.addEventListener("focus", syncOpen);
+      document.addEventListener("focusin", syncOpen);
+      setInterval(syncOpen, 200);
+      document.addEventListener("mousedown", (event) => {
+        if (!options.contains(event.target) && event.target !== picker) {
+          options.classList.remove("open");
+        }
+      });
+      options.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          picker.value = button.dataset.value;
+          picked.textContent = "Picked category: " + button.textContent;
+          picker.blur();
+          options.classList.remove("open");
+        });
+      });
+
+      const search = document.getElementById("search");
+      const status = document.getElementById("search-status");
+      search.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        const needle = search.value.trim().toLowerCase();
+        let shown = 0;
+        document.querySelectorAll("#sku-rows tr").forEach((row) => {
+          const sku = row.dataset.sku.toLowerCase();
+          const match = !needle || sku.includes(needle);
+          row.style.display = match ? "" : "none";
+          if (match) shown++;
+        });
+        status.textContent = shown === 1 ? "1 matching SKU" : shown + " matching SKUs";
+      });
+    </script>
+  </body>
+</html>

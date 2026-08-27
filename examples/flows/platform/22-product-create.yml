@@ -1,0 +1,44 @@
+# Platform form flow — create a product through the real form.
+#
+# Demonstrates: chained reusable actions (login + parameterized create),
+# per-run unique SKU via ${run.token}, redirect flash + outcome evidence.
+version: 1
+name: product_create
+intent: an operator creates a product through the form and sees it confirmed
+environment: local
+vars:
+  productSku: "CTW-${run.token}"
+imports:
+  - ../../actions/login_demo_app.yml
+  - ../../actions/create_product.yml
+outcomes:
+  - id: redirect_confirms_creation
+    description: the URL carries the created SKU in the flash query
+    verify:
+      url:
+        matches: created=CTW-
+  - id: flash_shows_sku
+    description: the page shows the Product created flash with the SKU
+    verify:
+      text:
+        contains: "Product created: ${vars.productSku}"
+  - id: no_console_errors
+    description: the form flow produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - use: login_demo_app
+  - use:
+      action: create_product
+      vars:
+        name: Cairn Test Widget
+        sku: "${vars.productSku}"
+        category: office
+        price: "9.99"
+        stock: "5"
+  - id: wait_for_flash
+    wait:
+      text: "Product created: ${vars.productSku}"
+      timeoutMs: 10000
+contractHash: sha256:e1143485c4f58826f54f19fc3b6c46a7e8c6d79ef7ebcd978419498990490488

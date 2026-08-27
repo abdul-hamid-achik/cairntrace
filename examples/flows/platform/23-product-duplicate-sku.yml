@@ -1,0 +1,39 @@
+# Platform form validation — duplicate SKU is rejected with a clear error.
+version: 1
+name: product_duplicate_sku
+intent: submitting a form with an existing SKU shows a row-level error and keeps the form
+environment: local
+imports:
+  - ../../actions/login_demo_app.yml
+  - ../../actions/create_product.yml
+outcomes:
+  - id: duplicate_sku_error
+    description: the form shows the SKU already exists error
+    verify:
+      text:
+        contains: "SKU already exists: AN-HUB-7P"
+  - id: stays_on_form
+    description: the operator stays on the form submission URL
+    verify:
+      url:
+        equals: "${baseUrl}/products"
+  - id: no_console_errors
+    description: the rejected submission produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - use: login_demo_app
+  - use:
+      action: create_product
+      vars:
+        name: Duplicate Widget
+        sku: AN-HUB-7P
+        category: office
+        price: "1.00"
+        stock: "1"
+  - id: wait_for_error
+    wait:
+      text: "SKU already exists: AN-HUB-7P"
+      timeoutMs: 5000
+contractHash: sha256:b0e65e1b0bfa2013177e6486f2182ca53ac5a4a5be34c1207de488dc390ad6a8

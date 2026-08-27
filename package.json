@@ -59,10 +59,12 @@
     "@types/node": "^22.20.1",
     "@types/react": "^19.2.18",
     "@vitest/coverage-v8": "2.1.9",
+    "drizzle-orm": "^0.45.2",
     "knip": "^6.29.0",
     "lefthook": "^2.1.10",
     "oxfmt": "^0.4.0",
     "oxlint": "^1.75.0",
+    "postgres": "^3.4.9",
     "typescript": "^5.9.3",
     "vitepress": "^1.6.4",
     "vitest": "^2.1.9"

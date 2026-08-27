@@ -2,7 +2,7 @@
 #
 # The action at examples/actions/open_dashboard.yml has a stale locator name.
 # Running this spec fails (the link can't be clicked). Running
-# `cairn spec heal --apply examples/flows/09-imported-drift.yml` should
+# `cairn spec heal --apply examples/flows/demos/_09-imported-drift.yml` should
 # patch the ACTION FILE (open_dashboard.yml), not this spec — because heal
 # follows the origin of the failed step.
 #
@@ -16,7 +16,7 @@ preconditions:
   commands:
     - run: "echo demo-app must be running on :8787"
 imports:
-  - ../actions/open_dashboard.yml
+  - ../../actions/open_dashboard.yml
 outcomes:
   - id: url_is_dashboard
     description: after the use:action, URL ends with /dashboard.html

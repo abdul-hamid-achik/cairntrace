@@ -1,0 +1,74 @@
+# Platform files — upload a real PDF and download it back.
+#
+# Demonstrates: multipart upload through the UI, spec-relative fixture path
+# (../../fixtures — resolved against this spec's directory), download of a
+# stored document, and a Node script verifier checking the %PDF magic bytes.
+version: 1
+name: documents_pdf
+intent: an operator uploads a PDF invoice and downloads the stored bytes back
+environment: local
+imports:
+  - ../../actions/login_demo_app.yml
+outcomes:
+  - id: upload_flash_visible
+    description: the documents page confirms the upload
+    verify:
+      text:
+        contains: Document uploaded
+  - id: document_rows_grow
+    description: the documents table shows at least three rows
+    verify:
+      count:
+        selector: "[data-testid=\"document-row\"]"
+        atLeast: 3
+  - id: downloaded_bytes_are_pdf
+    description: the downloaded artifact is a real PDF
+    verify:
+      script:
+        runtime: node
+        file: ../../verifiers/check-pdf-magic.ts
+        fixtures:
+          pdfPath: "${artifacts.invoice.path}"
+          pdfRelativePath: "${artifacts.invoice.relativePath}"
+  - id: no_console_errors
+    description: the upload flow produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - use: login_demo_app
+  - id: open_documents
+    open:
+      path: /documents.html
+      waitUntil: networkidle
+  - id: wait_for_table
+    wait:
+      selector: "[data-testid=\"document-row\"]"
+      timeoutMs: 10000
+  - id: pick_type
+    select:
+      by: label
+      name: Document type
+      value: report
+  - id: upload_invoice
+    upload:
+      by: label
+      name: Choose file
+      path: ../../fixtures/sample-invoice.pdf
+  - id: submit_upload
+    click:
+      by: role
+      role: button
+      name: Upload document
+  - id: wait_for_flash
+    wait:
+      text: Document uploaded
+      timeoutMs: 10000
+  - id: download_report
+    download:
+      by: role
+      role: link
+      name: Download sample-invoice.pdf as report
+      saveAs: sample-invoice.pdf
+      assign: invoice
+contractHash: sha256:156ebe99d2662805421a69d340b52b4e891d536815b885910f88a507db2f2698

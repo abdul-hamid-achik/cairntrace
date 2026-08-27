@@ -1,0 +1,30 @@
+# Platform journey — sign in as the seeded operator and land on the catalog.
+#
+# Demonstrates: reusable action import (login_demo_app), cold-start contract
+# satisfied by the imported login, URL + text + count outcomes.
+version: 1
+name: login_journey
+intent: an operator signs in with seeded credentials and lands on the products catalog
+environment: local
+imports:
+  - ../../actions/login_demo_app.yml
+outcomes:
+  - id: lands_on_products
+    description: after sign-in the URL is the products page
+    verify:
+      url:
+        endsWith: /products.html
+  - id: catalog_rows_visible
+    description: the seeded catalog renders at least 12 product rows
+    verify:
+      count:
+        selector: "[data-testid=\"product-row\"]"
+        atLeast: 12
+  - id: no_console_errors
+    description: sign-in produced no console errors
+    verify:
+      console:
+        errorsMax: 0
+steps:
+  - use: login_demo_app
+contractHash: sha256:e7a36e6ade143a02e505ac6a39dcebe01851e81edacd3427c709a72b447af50d

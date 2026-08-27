@@ -1,0 +1,36 @@
+# Reusable action: sign in to the demo platform as the seeded operator.
+#
+# Call sites can override the default vars:
+#   - use: login_demo_app
+#   - use: { action: login_demo_app, vars: { email: other@cairntrace.dev } }
+version: 1
+name: login_demo_app
+vars:
+  email: casey@cairntrace.dev
+  password: cairn-demo-2026
+steps:
+  - id: open_login
+    open: /login.html
+  - id: wait_for_form
+    wait:
+      selector: "[data-testid=\"login-form\"]"
+      timeoutMs: 10000
+  - id: fill_email
+    fill:
+      by: label
+      name: Email
+      value: "${vars.email}"
+  - id: fill_password
+    fill:
+      by: label
+      name: Password
+      value: "${vars.password}"
+  - id: submit
+    click:
+      by: role
+      role: button
+      name: Sign in
+  - id: wait_for_products
+    wait:
+      text: Products
+      timeoutMs: 10000

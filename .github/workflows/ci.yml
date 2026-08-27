@@ -34,16 +34,16 @@ jobs:
       - name: Verify (production audit + typecheck + lint + format + knip + test)
         run: bun run verify
 
-      - name: Smoke — run a spec end-to-end against real Chromium
+      - name: Smoke — run specs end-to-end against real Chromium
+        # examples/cairntrace.config.yml owns the whole lifecycle: docker
+        # compose (Postgres on :5433), the conditional seed, and the demo
+        # server via webServer. CI=true makes every phase start fresh.
         run: |
           set -euo pipefail
-          bun examples/demo-app/server.ts &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          # Wait for the demo app to accept connections (max 30s).
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:8787/ >/dev/null; then break; fi
-            sleep 1
-          done
-          curl -sf http://localhost:8787/ >/dev/null || { echo "demo app did not start"; exit 1; }
-          ./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright
+          ./bin/cairn run \
+            examples/flows/01-dashboard-nav.yml \
+            examples/flows/platform/20-login-journey.yml \
+            examples/flows/platform/24-documents-pdf.yml \
+            examples/flows/platform/26-exports.yml \
+            examples/flows/platform/27-api-session.yml \
+            --backend playwright

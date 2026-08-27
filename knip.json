@@ -18,7 +18,7 @@
     "vidtrace",
     "tvault"
   ],
-  "ignoreDependencies": [],
+  "ignoreDependencies": ["drizzle-orm", "postgres"],
   "ignoreIssues": {
     "src/core/schema/**": ["exports", "types"],
     "src/cli/commands/secrets.ts": ["exports", "types"],

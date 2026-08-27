@@ -710,6 +710,39 @@ steps:
     expect(transformed).toContain("invalid row");
   });
 
+  it("resolves a bare relative upload path against the spec's directory, not the cwd", async () => {
+    await makeDir(join(workDir, "fixtures"), { recursive: true });
+    await writeFile(join(workDir, "fixtures", "w9.pdf"), "%PDF-1.4 fixture");
+    const specPath = await writeSpec(
+      "upload_spec_relative",
+      `version: 1
+name: upload_spec_relative
+intent: upload a fixture that lives next to the spec
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - id: upload_fixture
+    upload:
+      by: label
+      name: Upload data
+      path: ./fixtures/w9.pdf
+`,
+    );
+
+    const backend = new MockBrowserBackend();
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("passed");
+    expect(backend.stepLog[0]).toMatchObject({
+      upload: {
+        path: join(workDir, "fixtures", "w9.pdf"),
+      },
+    });
+  });
+
   it("redacts secrets from failed node verifier artifacts", async () => {
     await writeFile(
       join(workDir, "secret-fail.ts"),

@@ -730,6 +730,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           ...stepToRun.upload,
           path: resolveUploadPath(
             stepToRun.upload.path,
+            dirname(specPath),
             runDir,
             namedArtifacts,
           ),
@@ -1899,6 +1900,7 @@ function artifactNameFromPath(path: string): string {
 
 function resolveUploadPath(
   path: string,
+  specDir: string,
   runDir: string,
   artifacts: Record<string, ArtifactRef>,
 ): string {
@@ -1907,6 +1909,12 @@ function resolveUploadPath(
     /\$\{artifacts\.[a-z][A-Za-z0-9_]*\.relativePath\}/.test(path);
   if (usedRelativeArtifact && !isAbsolute(resolved)) {
     return resolve(runDir, resolved);
+  }
+  // Bare relative paths resolve against the spec's directory, matching how
+  // `transform.file` / `eval.file` / script-verifier `file:` resolve — so an
+  // upload of a repo fixture is independent of the process cwd.
+  if (!isAbsolute(resolved)) {
+    return resolve(specDir, resolved);
   }
   return resolved;
 }
