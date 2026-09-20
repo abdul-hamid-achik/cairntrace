@@ -19,6 +19,10 @@ all coding agents. Read that file first — everything below assumes you have.
   checklists. Markdown belongs in the repo only when it is maintained project
   documentation such as README, agent instructions, docs pages, changelogs, or
   release notes.
+
+The public site auto-builds from **`main` only** (`vercel.json`). Do not
+`vercel promote` docs; npm/Homebrew ship from tags. See **Docs site (Vercel)**
+in AGENTS.md.
 - Run directories include `report.html` and `report.json`. Keep reporting
   changes self-contained, redacted, print-friendly, and compatible with
   `report.theme` / `report.colors` in `cairntrace.config.yml`; do not add a

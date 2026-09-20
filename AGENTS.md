@@ -27,6 +27,14 @@ Agents author + run + heal those specs via the `cairn` CLI or the MCP server.
   Cairntrace v1; do not rewrite old tags/releases just to make the visible
   numbering look cleaner.
 
+## Docs site (Vercel)
+
+The public site is VitePress at the repo root (`vercel.json`). Git auto-builds
+**`main` only**. Feature branches do not create Preview deployments.
+`ignoreCommand` skips the build unless `docs/`, lockfiles, or `vercel.json`
+changed. Do not `vercel promote`; `main` is the docs release. npm and Homebrew
+ship from SemVer tags — that is a separate pipeline from the site.
+
 ## Architecture in 60 seconds
 
 ```
