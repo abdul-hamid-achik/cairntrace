@@ -129,9 +129,12 @@ environments:
       provider: tvault
       tvault:
         project: myapp-staging
+  remote:
+    services:                # keep docker/seed phases, drop inherited local tmux windows
+      tmux: false
 ```
 
-A partial `services:` block deep-merges over the top-level one. An env-level `secrets:` block replaces the top-level one entirely.
+A partial `services:` block deep-merges over the top-level one. An env-level `secrets:` block replaces the top-level one entirely. Inside a partial `services:` block, `tmux: false` removes only the inherited local tmux windows while keeping the docker and seed phases — for apps running remotely over a tunnel that still own provisioning and seeding.
 
 ## TinyVault seeding
 

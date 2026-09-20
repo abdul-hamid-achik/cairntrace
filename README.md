@@ -512,7 +512,9 @@ environments:
 When `services: false`, `cairn run --env dev` skips the entire lifecycle — no
 need for `--no-services`. A partial `services:` block deep-merges over the
 top-level one (e.g. override just the seed command, keep docker and tmux). An
-env-level `secrets:` block replaces the top-level one entirely.
+env-level `secrets:` block replaces the top-level one entirely. Inside a
+partial `services:` block, `tmux: false` drops only the inherited local tmux
+windows while keeping the docker and seed phases.
 
 Use the same config for validation and runs:
 

@@ -298,9 +298,11 @@ Key rules:
 - **Per-environment overrides:** `environments.<name>` can carry `services:`
   and `secrets:` blocks. `services: false` disables all services for that env
   (e.g. `dev`/`test` where the app is already deployed remotely). A partial
-  `services:` block deep-merges over the top-level one. An env-level `secrets:`
-  block replaces the top-level one entirely. This replaces the need for
-  `--no-services` or `--services-dry-run` when running against remote envs.
+  `services:` block deep-merges over the top-level one. Inside a partial block,
+  `tmux: false` drops only the inherited local tmux windows while keeping the
+  docker and seed phases. An env-level `secrets:` block replaces the top-level
+  one entirely. This replaces the need for `--no-services` or
+  `--services-dry-run` when running against remote envs.
 
 ## Logging & output
 

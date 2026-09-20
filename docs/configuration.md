@@ -124,7 +124,7 @@ when that is the product's stable hook.
 | `baseUrl` | prepended to `open:` steps that begin with `/`; also `${baseUrl}` |
 | `vars` | substituted as `${vars.X}` in specs (config env vars) |
 | `viewport` | browser viewport applied at run start (spec-level `viewport:` wins) |
-| `services` | `false` disables all services for this env; a partial `services:` block deep-merges over the top-level one |
+| `services` | `false` disables all services for this env; a partial `services:` block deep-merges over the top-level one (`tmux: false` inside it drops only inherited local tmux windows, keeping docker/seed) |
 | `secrets` | replaces the top-level `secrets:` block for this env entirely |
 
 The active environment is `--env <name>`, else `defaultEnvironment`, else `local`.

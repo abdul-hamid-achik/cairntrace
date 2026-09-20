@@ -5,6 +5,7 @@ import { loadConfig, type LoadedConfig } from "./loader";
 import type {
   Config,
   ConfigVarValue,
+  EnvironmentServicesConfig,
   SecretsConfig,
   ServicesConfig,
   ViewportConfig,
@@ -99,13 +100,15 @@ export async function resolveSpecRuntimeContext(
  * Deep-merge two ServicesConfig objects. The env-level override takes
  * precedence: any defined field in `override` replaces the corresponding
  * field from `base`. Nested objects (docker, seed, tmux, stash) are merged
- * field-by-field; teardown arrays are replaced (not concatenated).
+ * field-by-field; teardown arrays are replaced (not concatenated). An
+ * environment may set `tmux: false` to remove inherited local windows while
+ * keeping its docker and seed phases.
  */
 function mergeServicesConfig(
   base: ServicesConfig,
-  override: Partial<ServicesConfig>,
+  override: EnvironmentServicesConfig,
 ): ServicesConfig {
-  return {
+  const merged: ServicesConfig = {
     ...base,
     ...(override.docker !== undefined
       ? { docker: { ...base.docker, ...override.docker } }
@@ -113,7 +116,7 @@ function mergeServicesConfig(
     ...(override.seed !== undefined
       ? { seed: { ...base.seed, ...override.seed } }
       : {}),
-    ...(override.tmux !== undefined
+    ...(override.tmux !== undefined && override.tmux !== false
       ? { tmux: { ...base.tmux, ...override.tmux } }
       : {}),
     ...(override.teardown !== undefined ? { teardown: override.teardown } : {}),
@@ -121,6 +124,8 @@ function mergeServicesConfig(
       ? { stash: { ...base.stash, ...override.stash } }
       : {}),
   };
+  if (override.tmux === false) delete merged.tmux;
+  return merged;
 }
 
 /**
@@ -132,12 +137,15 @@ function mergeServicesConfig(
  */
 function resolveEffectiveServices(
   topLevel: ServicesConfig | undefined,
-  envServices: false | Partial<ServicesConfig> | undefined,
+  envServices: false | EnvironmentServicesConfig | undefined,
 ): ServicesConfig | undefined {
   if (!topLevel) return undefined;
   if (envServices === false) return undefined;
   if (envServices === undefined) return topLevel;
-  return mergeServicesConfig(topLevel, envServices as Partial<ServicesConfig>);
+  return mergeServicesConfig(
+    topLevel,
+    envServices as EnvironmentServicesConfig,
+  );
 }
 
 async function peekSpecSettings(specPath: string): Promise<{

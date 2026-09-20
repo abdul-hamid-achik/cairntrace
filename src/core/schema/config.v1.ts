@@ -33,8 +33,9 @@ export interface EnvironmentConfig {
   /** Multiplier for browser waits, settles, and network-idle quiet windows. */
   waitScale?: number;
   /** Per-env services override: false disables all; partial ServicesConfig
-   * is deep-merged over the top-level services block. */
-  services?: false | ServicesConfig;
+   * is deep-merged over the top-level services block. `tmux: false` removes
+   * only inherited local tmux windows while retaining docker/seed phases. */
+  services?: false | EnvironmentServicesConfig;
   /** Per-env secrets override (replaces the top-level secrets block). */
   secrets?: SecretsConfig;
 }
@@ -633,6 +634,37 @@ export const ServicesConfigSchema = z
   );
 export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
 
+/**
+ * Environment service overlays accept the normal optional phases plus a
+ * targeted `tmux: false` escape hatch. This is needed when applications run
+ * remotely but the same environment still owns docker/seed through a tunnel.
+ */
+export const EnvironmentServicesConfigSchema = z
+  .object({
+    docker: DockerConfigSchema.optional(),
+    seed: SeedConfigSchema.optional(),
+    tmux: z.union([TmuxConfigSchema, z.literal(false)]).optional(),
+    teardown: z.array(z.string().min(1)).optional(),
+    artifacts: ServicesArtifactsConfigSchema.optional(),
+    stash: ServicesStashConfigSchema.optional(),
+  })
+  .strict()
+  .refine(
+    (cfg) => {
+      if (!cfg.tmux) return true;
+      return cfg.tmux.windows.every(
+        (win) => !win.readyOn || win.readyOn.url || win.readyOn.text,
+      );
+    },
+    {
+      message:
+        "tmux window readyOn must specify at least one of `url` or `text`",
+    },
+  );
+export type EnvironmentServicesConfig = z.infer<
+  typeof EnvironmentServicesConfigSchema
+>;
+
 export const EnvironmentConfigSchema = z
   .object({
     /** Base URL prepended to `open:` steps that begin with `/`. */
@@ -645,7 +677,9 @@ export const EnvironmentConfigSchema = z
     waitScale: z.number().positive().finite().optional(),
     /** Per-env services override: false disables all; partial ServicesConfig
      * is deep-merged over the top-level services block. */
-    services: z.union([z.literal(false), ServicesConfigSchema]).optional(),
+    services: z
+      .union([z.literal(false), EnvironmentServicesConfigSchema])
+      .optional(),
     /** Per-env secrets override (replaces the top-level secrets block). */
     secrets: SecretsConfigSchema.optional(),
   })

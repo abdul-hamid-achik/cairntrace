@@ -282,6 +282,56 @@ steps: []
     expect(ctx.services?.docker?.command).toBe("docker compose up -d");
   });
 
+  it("removes inherited tmux when an environment sets tmux: false", async () => {
+    const projectRoot = join(dir, "remote-services-without-local-tmux");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+services:
+  docker:
+    command: docker compose up -d
+  seed:
+    command: yarn seed
+    ttlSeconds: 3600
+  tmux:
+    session: sample-app
+    windows:
+      - name: web
+        cwd: web-app
+        command: yarn serve
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  remote:
+    baseUrl: http://localhost:8081
+    services:
+      tmux: false
+      docker:
+        command: bun provision-remote
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: remote_services_without_local_tmux
+intent: remote apps keep provisioning and seed but disable inherited tmux
+outcomes: []
+steps: []
+`,
+    );
+
+    const ctx = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "remote",
+    });
+    expect(ctx.services?.docker?.command).toBe("bun provision-remote");
+    expect(ctx.services?.seed?.command).toBe("yarn seed");
+    expect(ctx.services?.tmux).toBeUndefined();
+  });
+
   it("merges env services override over top-level", async () => {
     const projectRoot = join(dir, "merge-services");
     const flowsDir = join(projectRoot, "flows");
