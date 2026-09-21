@@ -5,6 +5,8 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     environment: "node",
     reporters: ["default"],
+    // Hermetic HOME per worker so tests never touch the real ~/.cairntrace.
+    setupFiles: ["./vitest.setup.ts"],
     // GitHub's shared runner cannot reliably execute the browser-heavy suites
     // alongside the runner and CLI suites. One worker keeps per-test timeouts
     // meaningful instead of making the release gate dependent on host load.
