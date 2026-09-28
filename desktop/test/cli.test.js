@@ -312,6 +312,20 @@ describe("resolveCairn", () => {
       assert.ok(dirs.includes(extra), `missing ${extra}`);
     assert.equal(env.NO_COLOR, "1");
   });
+
+  it("finds Go tools like codemap under a GUI-minimal PATH", () => {
+    const home = tempDir("cairn-home-");
+    const bin = write(home, "go/bin/codemap", "#!/bin/sh\necho v0.68.0\n");
+    fs.chmodSync(bin, 0o755);
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const env = cli.augmentedEnv({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin" });
+      assert.equal(cli.which("codemap", env), bin);
+    } finally {
+      process.env.HOME = previousHome;
+    }
+  });
 });
 
 describe("execCairn", () => {

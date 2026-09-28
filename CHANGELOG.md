@@ -3,6 +3,16 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.1] - 2026-09-28
+
+### Fixed
+
+- Studio launched from the Dock/Finder (minimal GUI `$PATH`) could not see Go
+  tools: `~/go/bin` and `/usr/local/go/bin` are now part of the augmented PATH
+  every spawned command inherits, so `cairn doctor` inside Studio reports
+  `codemap` (and friends) instead of failing the check. The extra dirs are
+  computed per call and covered by a regression test with a fake `$HOME`.
+
 ## [2.12.0] - 2026-09-28
 
 ### Added

@@ -12,35 +12,45 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+/**
+ * Directories a Finder-launched app never inherits but a dev shell always has.
+ * Computed per call so a changed `$HOME` (tests, portable setups) is honoured.
+ * @param {string} [home]
+ * @returns {string[]}
+ */
+function extraPathDirs(home = os.homedir()) {
+  return [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    path.join(home, ".bun", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".deno", "bin"),
+    path.join(home, ".cargo", "bin"),
+    path.join(home, ".volta", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    path.join(home, "go", "bin"),
+    path.join(home, "bin"),
+    "/usr/local/go/bin",
+  ];
+}
+
 /** Directories a Finder-launched app never inherits but a dev shell always has. */
-const EXTRA_PATH_DIRS = [
-  "/opt/homebrew/bin",
-  "/opt/homebrew/sbin",
-  "/usr/local/bin",
-  "/usr/local/sbin",
-  path.join(os.homedir(), ".bun", "bin"),
-  path.join(os.homedir(), ".local", "bin"),
-  path.join(os.homedir(), ".deno", "bin"),
-  path.join(os.homedir(), ".cargo", "bin"),
-  path.join(os.homedir(), ".volta", "bin"),
-  path.join(os.homedir(), ".npm-global", "bin"),
-  path.join(os.homedir(), "bin"),
-];
+const EXTRA_PATH_DIRS = extraPathDirs();
 
 /**
  * Build an env whose PATH also covers the usual per-user/toolchain bin dirs.
  * GUI processes on macOS start with a near-empty PATH, which would hide
- * `cairn`, `bun`, `docker`, and `agent-browser` from every spawned command.
+ * `cairn`, `bun`, `docker`, `agent-browser`, and Go tools like `codemap`
+ * from every spawned command.
  *
  * @param {NodeJS.ProcessEnv} [base]
  * @returns {NodeJS.ProcessEnv}
  */
 function augmentedEnv(base = process.env) {
   const sep = process.platform === "win32" ? ";" : ":";
-  const home = os.homedir();
-  const extra = EXTRA_PATH_DIRS.map((dir) =>
-    dir.startsWith("~") ? path.join(home, dir.slice(1)) : dir,
-  );
+  const extra = extraPathDirs();
   const current = String(base.PATH ?? base.Path ?? "")
     .split(sep)
     .filter(Boolean);
@@ -572,6 +582,7 @@ function execCairn(options) {
 
 module.exports = {
   EXTRA_PATH_DIRS,
+  extraPathDirs,
   augmentedEnv,
   which,
   resolveCairn,
