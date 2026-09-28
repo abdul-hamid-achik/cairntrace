@@ -13,7 +13,9 @@ const { registerIpc } = require("./ipc");
 const { closeReportWindows } = require("./windows");
 
 const isMac = process.platform === "darwin";
-const argv = process.argv.slice(2);
+// Packaged apps get argv = [exe, ...flags]; dev gets [electron, ., ...flags].
+// Slice from the first argument so both shapes see the same flags.
+const argv = process.argv.slice(1);
 const smokeMode = argv.includes("--smoke");
 /** A spec file dropped on the dock icon / passed on the command line. */
 const pendingFiles = argv.filter(

@@ -34,6 +34,9 @@ All notable changes to cairntrace are documented here. This project adheres to
   on `script-src 'none'` pages no longer die mid-poll. Generated Playwright
   suites inherit the fix via `expect.poll(...)`, and a hard deadline now closes
   the browser even when no process-based watchdog was available.
+- Studio's `--smoke` boot harness reads flags from `argv[1..]`, so packaged
+  builds (whose argv lacks the dev-mode `electron .` prefix) boot-test instead
+  of opening a window and idling.
 - `upload` steps now resolve bare relative `path:` values against the spec's
   directory (matching `transform.file` / `eval.file` / script-verifier
   `file:`), so uploading a repo fixture no longer depends on the process cwd.
