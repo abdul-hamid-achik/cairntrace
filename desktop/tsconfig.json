@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  // Main-process surface only: the trust boundary (ipc.js), the spawn/kill
+  // logic (lib/cli.js), and the artifact readers (lib/runs.js) are where a
+  // type mistake costs a wedged child or a wrong path. The renderer is
+  // classic-script DOM glue, covered by oxlint, the node:test suite, and the
+  // `--smoke` boot harness instead.
+  "include": ["main.js", "preload.js", "ipc.js", "windows.js", "lib/**/*.js", "test/**/*.js"],
+  "exclude": ["node_modules", "dist", "renderer", "test/dom.test.js"]
+}

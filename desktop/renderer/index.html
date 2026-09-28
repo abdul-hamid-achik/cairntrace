@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'"
+    />
+    <title>Cairntrace Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <header id="topbar" class="topbar">
+        <div class="topbar-drag"></div>
+        <div class="topbar-content">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">▲</span>
+            <span class="brand-name">Cairntrace</span>
+            <span class="brand-sub">Studio</span>
+          </div>
+          <button id="project-picker" class="chip chip-project" type="button">
+            <span class="chip-label">project</span>
+            <span class="chip-value" id="project-name">—</span>
+          </button>
+          <div class="topbar-meta">
+            <span id="runs-root" class="meta-item" title="artifact runs root">—</span>
+            <span id="cairn-status" class="meta-item" title="resolved cairn binary">—</span>
+          </div>
+          <div class="topbar-actions">
+            <span id="active-run-pill" class="pill pill-live hidden">
+              <span class="dot dot-running"></span>
+              <span id="active-run-label">running</span>
+            </span>
+            <button id="refresh-button" class="btn btn-ghost" type="button" title="Refresh (⌘⇧R)">
+              Refresh
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div class="body">
+        <nav id="sidebar" class="sidebar" aria-label="views"></nav>
+        <main id="view" class="view" tabindex="-1"></main>
+      </div>
+
+      <footer id="statusbar" class="statusbar">
+        <span id="status-text">ready</span>
+        <span id="status-right" class="status-right"></span>
+      </footer>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <dialog id="modal" class="modal"></dialog>
+
+    <script src="../lib/format.js"></script>
+    <script src="dom.js"></script>
+    <script src="markdown.js"></script>
+    <script src="state.js"></script>
+    <script src="components.js"></script>
+    <script src="views/runs.js"></script>
+    <script src="views/run-detail.js"></script>
+    <script src="views/specs.js"></script>
+    <script src="views/live.js"></script>
+    <script src="views/stats.js"></script>
+    <script src="views/docs.js"></script>
+    <script src="views/environment.js"></script>
+    <script src="views/settings.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
