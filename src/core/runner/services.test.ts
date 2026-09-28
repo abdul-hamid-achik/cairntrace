@@ -225,6 +225,66 @@ describe("startServices — docker phase", () => {
     ).toBe(true);
   });
 
+  it("polls the docker readinessCheck until the infra reports ready", async () => {
+    const readiness = "probe-pg-isready";
+    let readinessCalls = 0;
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async (command) => {
+      if (command === readiness) {
+        readinessCalls += 1;
+        // First two attempts race initdb, the third sees a ready database.
+        return readinessCalls < 3
+          ? { exitCode: 1, stdout: "", stderr: "no response" }
+          : { exitCode: 0, stdout: "accepting connections", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+
+    const handle = track(
+      await startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            readinessCheck: readiness,
+            cwd: dir,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+
+    expect(handle.startedByUs).toBe(true);
+    expect(readinessCalls).toBe(3);
+  });
+
+  it("fails the docker phase when the readinessCheck never passes", async () => {
+    execaImpl = async (cmd) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async (command) =>
+      command === "probe-always-down"
+        ? { exitCode: 1, stdout: "", stderr: "no response" }
+        : { exitCode: 0, stdout: "", stderr: "" };
+
+    await expect(
+      startServices(
+        {
+          docker: {
+            command: "docker compose up -d",
+            readinessCheck: "probe-always-down",
+            readyTimeoutMs: 2_200,
+            cwd: dir,
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    ).rejects.toThrow(/readiness check failed after \d+ attempt/);
+  });
+
   it("skips docker when containers are already running (reuse)", async () => {
     // docker compose ps shows running containers
     execaImpl = async (cmd) => {

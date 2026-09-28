@@ -208,6 +208,8 @@ export function createNoopServicesHandle(): ServicesHandle {
 }
 
 const DEFAULT_DOCKER_TIMEOUT_MS = 120_000;
+/** Readiness-check retry cadence for the docker phase. */
+const READINESS_POLL_MS = 1_000;
 const DEFAULT_SEED_TIMEOUT_MS = 300_000;
 const DEFAULT_TMUX_READY_MS = 90_000;
 const POLL_MS = 500;
@@ -631,14 +633,33 @@ async function startDocker(
   }
 
   // Optional readiness check: a command whose exit 0 means infra is ready.
+  // Polled until the phase deadline (`readyTimeoutMs`; 0 waits indefinitely)
+  // because a container routinely needs seconds after `Started` before it
+  // accepts connections — a single attempt races initdb on a fresh machine.
   if (cfg.readinessCheck) {
     ctx.logDetail?.(`docker — readiness check (${cfg.readinessCheck})`);
     emit("docker", "readiness-check", cfg.readinessCheck);
-    const rc = await runShellWithTimeout(
+    const deadline =
+      timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
+    let attempts = 1;
+    let rc = await runShellWithTimeout(
       cfg.readinessCheck,
       { cwd, env },
       timeout,
     );
+    while (rc.exitCode !== 0 && Date.now() + READINESS_POLL_MS <= deadline) {
+      attempts += 1;
+      ctx.logDetail?.(
+        `docker — readiness check attempt ${attempts} failed (exit ${rc.exitCode}); retrying in ${READINESS_POLL_MS}ms`,
+      );
+      await sleep(READINESS_POLL_MS);
+      const remaining = deadline - Date.now();
+      rc = await runShellWithTimeout(
+        cfg.readinessCheck,
+        { cwd, env },
+        timeout > 0 ? Math.max(1_000, remaining) : timeout,
+      );
+    }
     storeServiceCommandArtifactRecord(phases, "docker", {
       kind: "readiness",
       index: 0,
@@ -652,8 +673,18 @@ async function startDocker(
         exitCode: rc.exitCode,
       });
       throw new ServicesError(
-        `docker readiness check failed (exit ${rc.exitCode}): ${cfg.readinessCheck}\n` +
+        `docker readiness check failed after ${attempts} attempt(s) (exit ${rc.exitCode}): ${cfg.readinessCheck}\n` +
           tailText(`${rc.stdout}\n${rc.stderr}`, SHELL_TAIL_LINES),
+      );
+    }
+    if (attempts > 1) {
+      ctx.logDetail?.(
+        `docker — readiness check passed after ${attempts} attempts`,
+      );
+      emit(
+        "docker",
+        "ready",
+        `readiness check passed after ${attempts} attempts`,
       );
     }
   }

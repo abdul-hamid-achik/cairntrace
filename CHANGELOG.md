@@ -3,6 +3,16 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.12.2] - 2026-09-28
+
+### Fixed
+
+- The docker phase's `readinessCheck` is now polled (1s cadence) until the
+  phase deadline (`readyTimeoutMs`, 0 = indefinite) instead of running once.
+  A single attempt raced container startup: `pg_isready` executed 140ms after
+  `Container … Started` and killed the run on every fresh machine, CI
+  included. The failure message now reports how many attempts were made.
+
 ## [2.12.1] - 2026-09-28
 
 ### Fixed
