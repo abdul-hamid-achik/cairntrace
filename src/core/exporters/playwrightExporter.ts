@@ -33,7 +33,10 @@ import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
 import { formatWhen } from "../runner/conditions";
 import { readFileSync } from "node:fs";
 import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
-import { bodyTextContainsExpression } from "../textMatching";
+import {
+  bodyTextContainsExpression,
+  normalizeTextForMatching,
+} from "../textMatching";
 import {
   blank,
   block,
@@ -1063,23 +1066,18 @@ function renderStepBody(
       );
     }
     const timeout = "timeoutMs" in w ? (w.timeoutMs ?? 30_000) : 30_000;
-    if ("text" in w) {
-      return one(
-        raw(
-          `await page.waitForFunction(${JSON.stringify(
-            bodyTextContainsExpression(w.text, w.caseSensitive ?? false),
-          )}, undefined, { timeout: ${timeout} });`,
-        ),
-      );
-    }
-    if ("notText" in w) {
-      const expression = bodyTextContainsExpression(
-        w.notText,
+    if ("text" in w || "notText" in w) {
+      const expected = "text" in w;
+      const needle = normalizeTextForMatching(
+        expected ? w.text : w.notText,
         w.caseSensitive ?? false,
       );
+      const text =
+        '(await page.locator("body").innerText()).replace(/\\s+/g, " ").trim()' +
+        (w.caseSensitive ? "" : ".toLowerCase()");
       return one(
         raw(
-          `await page.waitForFunction(${JSON.stringify(`!(${expression})`)}, undefined, { timeout: ${timeout} });`,
+          `await expect.poll(async () => ${text}.includes(${str(needle)}), { timeout: ${timeout} }).toBe(${expected});`,
         ),
       );
     }

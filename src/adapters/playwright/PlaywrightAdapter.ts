@@ -30,10 +30,7 @@ import {
   describeNetworkPostcondition,
   matchesStatus,
 } from "../../core/networkPostcondition";
-import {
-  bodyTextContainsExpression,
-  wholeNameRegex,
-} from "../../core/textMatching";
+import { textContains, wholeNameRegex } from "../../core/textMatching";
 import type {
   BackendRequest,
   BackendResponse,
@@ -1183,19 +1180,28 @@ export class PlaywrightAdapter implements BrowserBackend {
     cond: WaitCondition,
     timeout: number,
   ): Promise<void> {
-    if ("text" in cond) {
-      // String form sidesteps needing the DOM lib for tsc.
-      await page.waitForFunction(
-        bodyTextContainsExpression(cond.text, cond.caseSensitive ?? false),
-        undefined,
-        { timeout },
-      );
-    } else if ("notText" in cond) {
-      const expression = bodyTextContainsExpression(
-        cond.notText,
-        cond.caseSensitive ?? false,
-      );
-      await page.waitForFunction(`!(${expression})`, undefined, { timeout });
+    if ("text" in cond || "notText" in cond) {
+      const expected = "text" in cond;
+      const needle = expected ? cond.text : cond.notText;
+      const deadline = Date.now() + timeout;
+      // Poll rendered text from the host; waitForFunction's in-page eval can
+      // violate CSP on subsequent animation frames, even with a callback.
+      while (Date.now() < deadline) {
+        const text = await page.locator("body").innerText({
+          timeout: Math.max(1, deadline - Date.now()),
+        });
+        if (
+          textContains(text, needle, cond.caseSensitive ?? false) === expected
+        )
+          return;
+        await new Promise((resolve) =>
+          setTimeout(
+            resolve,
+            Math.min(100, Math.max(0, deadline - Date.now())),
+          ),
+        );
+      }
+      throw new Error(`wait timed out after ${timeout}ms`);
     } else if ("selector" in cond) {
       await page.waitForSelector(cond.selector, {
         state: cond.state ?? "visible",
@@ -1272,6 +1278,9 @@ export class PlaywrightAdapter implements BrowserBackend {
         // Browser is (or may be) wedged — abandon the refs so the next operation
         // spins up a fresh page instead of reusing a dead/hung one.
         this.pageOperationWedged = true;
+        // A deadline can race a responsive browser; close it before dropping
+        // the handle, even when no process-based watchdog was available.
+        void this.browser?.close().catch(() => {});
         this.resetBrowserRefs();
         throw new TimeoutError(message);
       }

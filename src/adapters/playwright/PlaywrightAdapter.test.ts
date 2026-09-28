@@ -549,6 +549,55 @@ describe("PlaywrightAdapter screenshot", () => {
 });
 
 describe("PlaywrightAdapter wait", () => {
+  it("closes the real browser on a hard deadline without a process watchdog", async () => {
+    const adapter = new PlaywrightAdapter();
+    await adapter.runStep({ open: "data:text/html,<body>Ready</body>" });
+    const browser = (await ensureBrowser(adapter)) as {
+      isConnected(): boolean;
+      close(): Promise<void>;
+    };
+    try {
+      const result = await adapter.evaluate("new Promise(() => {})", {
+        timeoutMs: 50,
+      });
+      expect(result.ok).toBe(false);
+      await vi.waitFor(() => expect(browser.isConnected()).toBe(false), {
+        timeout: 2000,
+      });
+    } finally {
+      await browser.close();
+      await adapter.close();
+    }
+  });
+
+  it("polls rendered text and notText under CSP after the initial check", async () => {
+    const adapter = new PlaywrightAdapter();
+    try {
+      await adapter.runStep({
+        open:
+          "data:text/html," +
+          encodeURIComponent(
+            '<meta http-equiv="Content-Security-Policy" content="script-src \'none\'"><body>Loading</body>',
+          ),
+      });
+      const waits = [
+        adapter.runStep({ wait: { text: "READY now", timeoutMs: 2000 } }),
+        adapter.runStep({ wait: { notText: "Loading", timeoutMs: 2000 } }),
+      ];
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await adapter.evaluate('document.body.textContent = "Ready   now"');
+      for (const result of await Promise.all(waits))
+        expect(result).toMatchObject({ ok: true });
+      expect(
+        await adapter.runStep({
+          wait: { text: "READY", caseSensitive: true, timeoutMs: 100 },
+        }),
+      ).toMatchObject({ ok: false });
+    } finally {
+      await adapter.close();
+    }
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -556,8 +605,8 @@ describe("PlaywrightAdapter wait", () => {
   it("hard-bounds text waits with the step timeout", async () => {
     vi.useFakeTimers();
     const adapter = new PlaywrightAdapter();
-    const waitForFunction = vi.fn(() => new Promise(() => {}));
-    installPage(adapter, { waitForFunction });
+    const innerText = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { locator: () => ({ innerText }) });
 
     const pending = adapter.runStep({
       wait: { text: "AWAITING ORDERS", timeoutMs: 25 },
@@ -565,11 +614,7 @@ describe("PlaywrightAdapter wait", () => {
     await vi.advanceTimersByTimeAsync(25);
     const result = await pending;
 
-    expect(waitForFunction).toHaveBeenCalledWith(
-      `String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().toLowerCase().includes("awaiting orders")`,
-      undefined,
-      { timeout: 25 },
-    );
+    expect(innerText).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       ok: false,
       stderr: "wait timed out after 25ms",
@@ -580,8 +625,8 @@ describe("PlaywrightAdapter wait", () => {
   it("uses a 30s default hard bound for wait steps", async () => {
     vi.useFakeTimers();
     const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 10 });
-    const waitForFunction = vi.fn(() => new Promise(() => {}));
-    installPage(adapter, { waitForFunction });
+    const innerText = vi.fn(() => new Promise(() => {}));
+    installPage(adapter, { locator: () => ({ innerText }) });
 
     const pending = adapter.runStep({
       wait: { notText: "Loading" },
@@ -589,11 +634,7 @@ describe("PlaywrightAdapter wait", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const result = await pending;
 
-    expect(waitForFunction).toHaveBeenCalledWith(
-      `!(String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().toLowerCase().includes("loading"))`,
-      undefined,
-      { timeout: 30_000 },
-    );
+    expect(innerText).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       ok: false,
       stderr: "wait timed out after 30000ms",
@@ -602,19 +643,15 @@ describe("PlaywrightAdapter wait", () => {
 
   it("preserves case for text waits that opt into case sensitivity", async () => {
     const adapter = new PlaywrightAdapter();
-    const waitForFunction = vi.fn().mockResolvedValue(undefined);
-    installPage(adapter, { waitForFunction });
+    const innerText = vi.fn().mockResolvedValue("Saved");
+    installPage(adapter, { locator: () => ({ innerText }) });
 
     const result = await adapter.runStep({
       wait: { text: "Saved", caseSensitive: true, timeoutMs: 25 },
     });
 
     expect(result.ok).toBe(true);
-    expect(waitForFunction).toHaveBeenCalledWith(
-      `String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().includes("Saved")`,
-      undefined,
-      { timeout: 25 },
-    );
+    expect(innerText).toHaveBeenCalledOnce();
   });
 
   it("hard-bounds load-state waits with the step timeout", async () => {
@@ -716,7 +753,9 @@ describe("PlaywrightAdapter wait", () => {
     const browserProcess = startHungProcess();
     installBrowserProcess(adapter, browserProcess);
     installPage(adapter, {
-      waitForFunction: vi.fn(() => rejectWhenProcessExits(browserProcess)),
+      locator: () => ({
+        innerText: vi.fn(() => rejectWhenProcessExits(browserProcess)),
+      }),
     });
 
     try {
@@ -1120,9 +1159,12 @@ function installBrowserProcess(
 ): void {
   (
     adapter as unknown as {
-      browser: { process: () => ChildProcess };
+      browser: { process: () => ChildProcess; close: () => Promise<void> };
     }
-  ).browser = { process: () => browserProcess };
+  ).browser = {
+    process: () => browserProcess,
+    close: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 function adapterInternals(adapter: PlaywrightAdapter): {

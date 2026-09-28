@@ -597,8 +597,10 @@ describe("exportPlaywright", () => {
         ],
       }),
     );
-    expect(src).toContain(`trim().toLowerCase().includes(\\"order saved\\")`);
-    expect(src).toContain(`trim().includes(\\"Loading\\")`);
+    expect(src).toContain(`trim().toLowerCase().includes("order saved")`);
+    expect(src).toContain(`trim().includes("Loading")`);
+    expect(src).toContain("await expect.poll(");
+    expect(src).not.toContain("waitForFunction");
   });
 
   it("exports step and spec click settle overrides", () => {

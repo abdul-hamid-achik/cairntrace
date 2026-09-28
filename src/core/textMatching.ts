@@ -40,7 +40,7 @@ export function textEquals(
  * JavaScript expression for a browser-side whole-page `contains` check.
  *
  * The returned string is an expression, not a function. Playwright can pass it
- * directly to `waitForFunction`; agent-browser wraps it in `() => ...` for its
+ * directly to `evaluate`; agent-browser wraps it in `() => ...` for its
  * `wait --fn` command.
  */
 /**
