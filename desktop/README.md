@@ -98,3 +98,14 @@ bun run desktop:dist:dmg  # zip target (unsigned; identity: null)
 
 The packaged app resolves `cairn` from PATH or the Settings override; in a
 source checkout it also falls back to `<repo>/bin/cairn`.
+
+## Brand assets
+
+`build/icon.svg` is the app-icon rendition of the product mark — the same
+cairn geometry as `docs/public/favicon.svg`, scaled ×16 onto the deep-green
+tile. `build/icon.icns` / `build/icon.png` are generated from it (Electron
+`capturePage` at 1024px → `sips` resize into an iconset → `iconutil -c icns`);
+electron-builder picks them up from `buildResources`. The renderer topbar
+inlines the mark as SVG and keeps the wordmark as text so it stays crisp at
+any zoom. The UI accent is the brand emerald (`#34D399`), so selection, focus,
+and primary actions read as the same product as the docs site.

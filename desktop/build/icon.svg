@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0A6B4F"/>
+      <stop offset="55%" stop-color="#064E3B"/>
+      <stop offset="100%" stop-color="#04382B"/>
+    </linearGradient>
+    <linearGradient id="stone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#10B981"/>
+      <stop offset="100%" stop-color="#6EE7B7"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.18" r="0.9">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.28"/>
+      <stop offset="60%" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <title>Cairntrace Studio</title>
+  <!-- full-bleed rounded tile: the cairn mark from docs/public/favicon.svg,
+       scaled x16 so the app icon and the site mark are the same drawing -->
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="url(#glow)"/>
+  <!-- ground shadow -->
+  <ellipse cx="256" cy="452" rx="152" ry="14" fill="#022C22" opacity="0.5"/>
+  <!-- cairn: weathered stacked stones, slight asymmetry -->
+  <path d="M 96 352 L 144 448 L 368 448 L 416 352 Z" fill="url(#stone)"/>
+  <path d="M 144 256 L 192 352 L 320 352 L 368 256 Z" fill="url(#stone)"/>
+  <path d="M 192 160 L 224 256 L 288 256 L 320 160 Z" fill="url(#stone)"/>
+  <path d="M 224 64 L 256 160 L 288 160 L 304 64 Z" fill="url(#stone)"/>
+  <!-- highlight strokes, as in the wordmark logo -->
+  <line x1="124" y1="400" x2="390" y2="400" stroke="#ECFDF5" stroke-width="6" opacity="0.35"/>
+  <line x1="170" y1="304" x2="344" y2="304" stroke="#ECFDF5" stroke-width="5" opacity="0.35"/>
+  <line x1="208" y1="208" x2="304" y2="208" stroke="#ECFDF5" stroke-width="4" opacity="0.3"/>
+</svg>
