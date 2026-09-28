@@ -7,6 +7,11 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ### Fixed
 
+- `cairn run` now starts the `services` environment (docker/seed/tmux)
+  **before** the `webServer`. The demo platform (and any app server that
+  connects to its database at boot) crashed on fresh machines — CI runners
+  included — because the web server spawned while Postgres was still
+  nonexistent; teardown now stops the web server before services.
 - Studio launched from the Dock/Finder (minimal GUI `$PATH`) could not see Go
   tools: `~/go/bin` and `/usr/local/go/bin` are now part of the augmented PATH
   every spawned command inherits, so `cairn doctor` inside Studio reports

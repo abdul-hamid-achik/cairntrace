@@ -480,6 +480,28 @@ export async function runCommand(
     }
   }
 
+  // Bring up the configured services environment (docker/seed/tmux) FIRST:
+  // the webServer is usually an app process that depends on that infra (the
+  // demo platform connects to its Postgres at boot), so starting it before
+  // the database exists crashes it on a fresh machine. Same scope as before —
+  // starts once before the pool, stops once after.
+  let svcHandle: ServicesHandle | undefined;
+  let untrackSvc: (() => void) | undefined;
+  try {
+    svcHandle = await maybeStartServices(
+      expandedSpecs[0]!,
+      opts,
+      scopedSecrets,
+      (terminateSync) => {
+        untrackSvc = trackServices({ terminateSync });
+      },
+    );
+  } catch (e) {
+    untrackSvc?.();
+    failRun((e as Error).message, 2);
+    return;
+  }
+
   // Bring up the configured webServer (if any) once for the whole invocation,
   // before any spec runs. A boot/setup failure here is fatal (exit 2).
   let server: WebServerHandle | undefined;
@@ -496,28 +518,11 @@ export async function runCommand(
     );
   } catch (e) {
     untrackServer?.();
-    failRun((e as Error).message, 2);
-    return;
-  }
-
-  // Bring up the configured services environment (docker/seed/tmux), if any.
-  // Same scope as webServer — starts once before the pool, stops once after.
-  let svcHandle: ServicesHandle | undefined;
-  let untrackSvc: (() => void) | undefined;
-  try {
-    svcHandle = await maybeStartServices(
-      expandedSpecs[0]!,
-      opts,
-      scopedSecrets,
-      (terminateSync) => {
-        untrackSvc = trackServices({ terminateSync });
-      },
-    );
-  } catch (e) {
-    untrackSvc?.();
-    // Tear down the web server too before exiting.
-    if (server) await server.stop().catch(() => undefined);
-    untrackServer?.();
+    // Tear down the services environment too before exiting.
+    if (svcHandle) {
+      await svcHandle.stop().catch(() => undefined);
+      untrackSvc?.();
+    }
     failRun((e as Error).message, 2);
     return;
   }
@@ -536,13 +541,13 @@ export async function runCommand(
       timeoutMs: hookTimeoutMs,
     });
   } catch (e) {
-    if (svcHandle) {
-      await svcHandle.stop().catch(() => undefined);
-      untrackSvc?.();
-    }
     if (server) {
       await server.stop().catch(() => undefined);
       untrackServer?.();
+    }
+    if (svcHandle) {
+      await svcHandle.stop().catch(() => undefined);
+      untrackSvc?.();
     }
     failRun((e as Error).message, 2);
     return;
@@ -582,10 +587,8 @@ export async function runCommand(
     } catch (e) {
       noteWarn(`after hook: ${(e as Error).message}`);
     }
-    if (svcHandle) {
-      await svcHandle.stop().catch(() => undefined);
-      untrackSvc?.();
-    }
+    // Reverse of startup: the app process releases its infra connections
+    // before the services environment goes away.
     if (server) {
       if (server.startedByUs && exitCode !== 0) {
         const logTail = server.tailLog(80).trim();
@@ -599,6 +602,10 @@ export async function runCommand(
       }
       await server.stop().catch(() => undefined);
       untrackServer?.();
+    }
+    if (svcHandle) {
+      await svcHandle.stop().catch(() => undefined);
+      untrackSvc?.();
     }
   }
 

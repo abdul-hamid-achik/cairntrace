@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -963,6 +964,72 @@ steps: []
     expect(result.stderr).toContain("web server log (last 80 lines");
     expect(result.stderr).toContain(marker);
     expect(result.exitCode).toBe(1);
+  });
+
+  it("starts services before the webServer so app processes see seeded infra", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-order-"));
+    const artifactRoot = join(dir, "runs");
+    const servicesMarker = join(dir, "services-ran");
+    const configPath = join(dir, "cairntrace.config.yml");
+    const specPath = join(dir, "lifecycle_order.yml");
+    const node = JSON.stringify(process.execPath);
+    // The "docker" phase is a plain command: it drops the marker. The
+    // webServer boots only if that marker already exists — under the old
+    // webServer-first order it exits 1 and the run dies with exit 2.
+    const dockerCommand = `${node} -e ${JSON.stringify(
+      `require("fs").writeFileSync(${JSON.stringify(servicesMarker)}, "1")`,
+    )}`;
+    const readinessCheck = `${node} -e ${JSON.stringify(
+      `process.exit(require("fs").existsSync(${JSON.stringify(servicesMarker)}) ? 0 : 1)`,
+    )}`;
+    const serverScript =
+      `const fs = require("fs");` +
+      `if (!fs.existsSync(${JSON.stringify(servicesMarker)})) { console.error("NO_SERVICES_AT_BOOT"); process.exit(1); }` +
+      `console.error("WEB_READY_ORDER_MARKER"); setInterval(() => {}, 1000);`;
+    const serverCommand = `${node} -e ${JSON.stringify(serverScript)}`;
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: test
+environments:
+  test: {}
+artifactRoot: ${JSON.stringify(artifactRoot)}
+services:
+  docker:
+    command: ${JSON.stringify(dockerCommand)}
+    readinessCheck: ${JSON.stringify(readinessCheck)}
+    reuseExisting: false
+    readyTimeoutMs: 5000
+webServer:
+  command: ${JSON.stringify(serverCommand)}
+  waitForText: WEB_READY_ORDER_MARKER
+  reuseExisting: false
+  readyTimeoutMs: 5000
+`,
+    );
+    await writeFile(
+      specPath,
+      `version: 1
+name: lifecycle_order
+intent: prove the services environment is ready before the webServer boots.
+outcomes:
+  - id: no_console_errors
+    description: the mock run produces no console errors.
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+
+    const result = await execa(
+      join(process.cwd(), "bin", "cairn"),
+      ["run", specPath, "--config", configPath, "--mock", "--json"],
+      { cwd: dir, reject: false, timeout: 30_000 },
+    );
+
+    expect(result.stderr).not.toContain("web server exited");
+    expect(result.stderr).not.toContain("NO_SERVICES_AT_BOOT");
+    expect(existsSync(servicesMarker)).toBe(true);
+    expect(result.exitCode).toBe(0);
   });
 
   it("flushes a large batch JSON document before exiting", async () => {
