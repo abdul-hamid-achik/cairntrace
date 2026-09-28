@@ -57,6 +57,23 @@ yarn global add @thelacanians/cairntrace
 Verify with `cairn --version`. If you prefer to run from source, follow the
 clone path below.
 
+### 0b. The desktop app (optional)
+
+**Cairntrace Studio** (`desktop/`) is an Electron console over the same CLI:
+run history with one-click evidence (steps, outcome markdown, screenshots,
+console/network, `report.html`, run diffs), a spec editor that saves and shows
+`cairn spec verify` findings, live step progress streamed from the run's own
+`events.ndjson`, cohort stats, and the step/verifier reference read from the
+installed binary. It needs the CLI on `$PATH` (or pointed at in Settings) and
+nothing else.
+
+```bash
+bun run desktop:install   # once
+bun run desktop:start     # launch Studio
+```
+
+See [desktop/README.md](./desktop/README.md) for the architecture and gates.
+
 ### 1. Install prerequisites
 
 - [Bun](https://bun.com) `>=1.3.0`
@@ -967,6 +984,14 @@ bun run lint
 bun run test
 bun run format
 bun run verify
+```
+
+The desktop app has its own gates, all wired to root scripts:
+
+```bash
+bun run desktop:test       # node:test over desktop/lib (argv, spawn/kill, artifacts)
+bun run desktop:typecheck  # tsc --checkJs over the main-process surface
+bun run desktop:smoke      # boots a hidden window and asserts every view mounts
 ```
 
 Run `bun run verify` before pushing. If you touched the runner, heal flow, or

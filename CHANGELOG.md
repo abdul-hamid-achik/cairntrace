@@ -3,10 +3,37 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.12.0] - 2026-09-28
+
+### Added
+
+- **Cairntrace Studio** (`desktop/`), an Electron desktop console over the CLI
+  and its artifacts: run history with status/spec/text filters; per-run
+  evidence (step timeline with resolved locators and artifacts, outcome
+  markdown, screenshots, console/network captures, `agent_context.md`,
+  `report.html`, and `cairn diff` against any other run); a spec editor whose
+  save runs `cairn spec verify` and surfaces its findings (including
+  contract-hash refusals and the cold-start contract status); live step
+  progress tailed from the run's own `events.ndjson` with cancel and re-run;
+  `cairn stats --group-by` cohorts with baseline deltas; and the step/verifier
+  reference read live from `cairn docs` / `cairn explain`. Studio spawns the
+  same `cairn` binary an agent would use, keeps the renderer sandboxed behind a
+  channel-allowlist preload, and kills spawned children as a process group so
+  cancels and deadlines cannot orphan browsers or docker. Ships with a
+  node:test suite, `tsc --checkJs` over the main-process surface, and a
+  `--smoke` boot harness (`bun run desktop:smoke`); CI runs the tests and
+  typecheck. See `desktop/README.md`.
+- Root scripts `desktop:install|start|smoke|test|typecheck|dist`, and a CI job
+  that tests and typechecks the desktop core without downloading Electron.
 
 ### Fixed
 
+- Playwright `wait: { text }` / `wait: { notText }` now poll rendered body text
+  from the host instead of `page.waitForFunction`, whose in-page re-evaluation
+  a strict Content-Security-Policy can refuse on later animation frames; waits
+  on `script-src 'none'` pages no longer die mid-poll. Generated Playwright
+  suites inherit the fix via `expect.poll(...)`, and a hard deadline now closes
+  the browser even when no process-based watchdog was available.
 - `upload` steps now resolve bare relative `path:` values against the spec's
   directory (matching `transform.file` / `eval.file` / script-verifier
   `file:`), so uploading a repo fixture no longer depends on the process cwd.

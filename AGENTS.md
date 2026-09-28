@@ -473,6 +473,12 @@ src/
     agent-browser/             real backend (commandBuilder + AgentBrowserAdapter)
     mock/                      MockBrowserBackend for tests + --mock
   mcp/             buildMcpServer() — tools mirror the CLI surface
+desktop/           Cairntrace Studio (Electron): a thin console over the CLI +
+                   artifacts. main/preload/ipc + lib/ (testable core) +
+                   renderer/ (classic scripts, no bundler, no innerHTML).
+                   Spawns `cairn`; never reimplements runner behaviour.
+                   Gates: desktop:test, desktop:typecheck, desktop:smoke
+                   (see desktop/README.md).
 examples/          demo-app + spec YAMLs (see examples/README.md)
 bin/cairn          bun shebang launcher
 ```
