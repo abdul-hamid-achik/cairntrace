@@ -17,7 +17,7 @@ changes, Studio follows automatically.
 | **Runs**      | The artifact-root history: every run, newest first, filterable by status/spec/text, one click into full evidence.   |
 | **Run detail**| One run's whole directory: failure summary, per-step timeline with resolved locators and artifacts, outcome evidence rendered as Markdown, screenshots, console/network captures, `agent_context.md`, `report.html`, and `cairn diff` against any other run. |
 | **Specs**     | List/read/edit specs; save runs `cairn spec verify` and shows its findings (including contract-hash refusals, exit 6); stamp hashes behind a confirm; run, run headed, cold-start run, and `cairn spec heal` (dry run or `--apply`); scaffold new specs. |
-| **Live**      | Runs started from the app, streaming step progress from the run's own `events.ndjson` plus cairn's NDJSON logs, with cancel and re-run. |
+| **Live**      | Runs started from the app, streaming step progress from the run's own `events.ndjson` plus cairn's NDJSON logs, with cancel and re-run — plus runs started *outside* the app (a terminal `cairn run`, an agent), which the artifact-root watcher detects in flight and streams the same way, until `run.json` lands. |
 | **Cohorts**   | `cairn stats --group-by`: pass rate, duration p50/p95, harvested domain metric, and baseline deltas for A/B labels. |
 | **Docs**      | The authoring reference read live from the binary: `cairn docs <topic>` plus the full `cairn explain` surface (commands, step kinds, verifiers, rules). |
 | **Environment**| `cairn doctor` checks, the config cairn discovered for the open project, services and checkpoint state, and retention/clean controls. |
@@ -63,6 +63,8 @@ desktop/
     runs.js      artifact-root indexing, run detail, bounded artifact reads
     specs.js     config discovery, spec discovery, YAML summaries
     live.js      run-directory discovery + events.ndjson tailing
+    watcher.js   polls the artifact root for runs started outside the app and
+                 tails their events.ndjson until run.json lands
     settings.js  the settings store (userData/settings.json)
     format.js    shared formatters (also loaded by the renderer as a script)
   renderer/      classic <script> files, no bundler, no innerHTML anywhere

@@ -16,6 +16,7 @@ const live = require("./lib/live");
 const runs = require("./lib/runs");
 const settingsStore = require("./lib/settings");
 const specs = require("./lib/specs");
+const { createRunWatcher } = require("./lib/watcher");
 
 /**
  * @typedef {object} IpcContext
@@ -37,7 +38,7 @@ function nextToken() {
  * @param {IpcContext} ctx
  */
 function registerIpc(ctx) {
-  /** @type {Map<string, { controller: AbortController, tail: { stop: () => void } | null, specs: string[], startedAt: number, argv: string[], command: string }>} */
+  /** @type {Map<string, { controller: AbortController, tail: { stop: () => void, runDir?: () => string | null } | null, specs: string[], startedAt: number, argv: string[], command: string }>} */
   const activeRuns = new Map();
   /** @type {Map<string, { at: number, value: unknown }>} */
   const cache = new Map();
@@ -643,6 +644,34 @@ function registerIpc(ctx) {
     };
   });
 
+  handle("runs:detected", () => detectedRunsSnapshot());
+
+  /**
+   * Run directories still in flight that the app's own live tails do not
+   * already track — i.e. runs started outside Studio.
+   * @returns {Array<Record<string, any>>}
+   */
+  function detectedRunsSnapshot() {
+    const excluded = appTrackedRunIds();
+    return runs
+      .listDetectedRuns(runsRootFor(null).runsRoot)
+      .filter((run) => !excluded.has(run.runId));
+  }
+
+  /**
+   * Run ids the app's own live tails track, so the external-run watcher does
+   * not double-report runs Studio itself started.
+   * @returns {Set<string>}
+   */
+  function appTrackedRunIds() {
+    const ids = new Set();
+    for (const entry of activeRuns.values()) {
+      const dir = entry.tail?.runDir?.();
+      if (dir) ids.add(path.basename(dir));
+    }
+    return ids;
+  }
+
   handle("run:detail", (_event, runRef, projectDir) => {
     const runDir = runDirFor(String(runRef), projectDir);
     return runs.readRunDetail(runDir);
@@ -934,8 +963,36 @@ function registerIpc(ctx) {
     return true;
   });
 
+  // ── external-run watcher ─────────────────────────────────────────────────
+  // Polls the artifact root for runs started outside the app (terminal,
+  // agents) and streams their events.ndjson into the renderer. main.js starts
+  // it once the window has finished loading: the renderer registers its push
+  // subscriptions during script evaluation, so that ordering guarantees no
+  // event is consumed before anyone can receive it.
+  const runWatcher = createRunWatcher({
+    runsRoot: () => {
+      try {
+        return cached(
+          "watch:runsRoot",
+          10_000,
+          () => runsRootFor(null).runsRoot,
+        );
+      } catch {
+        return null;
+      }
+    },
+    pollMs: 2000,
+    excludes: appTrackedRunIds,
+    onSnapshot: (list) => ctx.send("runs:detected", { runs: list }),
+    onEvents: (runId, events) =>
+      ctx.send("run:external-events", { runId, events }),
+    onFinished: (runId, info) =>
+      ctx.send("run:external-finished", { runId, ...info }),
+  });
+
   /** Cancel every spawned cairn process before the app disappears. */
   const shutdown = () => {
+    runWatcher.stop();
     for (const entry of activeRuns.values()) {
       entry.tail?.stop();
       try {
@@ -947,7 +1004,7 @@ function registerIpc(ctx) {
     activeRuns.clear();
   };
   app.on("before-quit", shutdown);
-  return { shutdown, activeRuns };
+  return { shutdown, activeRuns, runWatcher };
 }
 
 module.exports = { registerIpc, nextToken };

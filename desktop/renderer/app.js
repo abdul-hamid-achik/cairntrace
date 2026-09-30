@@ -32,6 +32,8 @@
   function liveCount() {
     let count = 0;
     for (const record of state.live.values()) if (!record.done) count += 1;
+    for (const record of state.detected.values())
+      if (!record.done && !record.stale) count += 1;
     return count;
   }
 
@@ -164,45 +166,8 @@
 
   // ── live run bookkeeping ──────────────────────────────────────────────────
 
-  /**
-   * Roll streamed events into per-step rows (mirrors lib/live.stepProgress;
-   * the renderer cannot require main-process modules).
-   * @param {any} record
-   */
-  function rollupSteps(record) {
-    const steps = new Map();
-    for (const event of record.events) {
-      const stepId = typeof event?.stepId === "string" ? event.stepId : null;
-      if (!stepId) continue;
-      const row = steps.get(stepId) ?? {
-        stepId,
-        status: "running",
-        durationMs: null,
-        startedAt: null,
-      };
-      switch (String(event?.type ?? "")) {
-        case "step.started":
-          row.status = "running";
-          row.startedAt = event.ts ?? row.startedAt;
-          break;
-        case "step.finished":
-          row.status = event?.status === "failed" ? "failed" : "passed";
-          row.durationMs =
-            typeof event?.durationMs === "number"
-              ? event.durationMs
-              : row.durationMs;
-          break;
-        case "step.skipped":
-          row.status = "skipped";
-          break;
-        default:
-          break;
-      }
-      steps.set(stepId, row);
-    }
-    record.steps = [...steps.values()];
-    return record.steps;
-  }
+  /** Kept for the views' benefit; the rollup itself lives in state.js. */
+  const rollupSteps = (record) => Studio.rollupSteps(record);
 
   function subscribeLive() {
     unsubscribes.push(
@@ -246,7 +211,13 @@
         if (!record) return;
         record.runDir = runDir;
         record.runId = runId;
+        // The app's own tail claimed this run — suppress it from the
+        // detected set for the whole session, so neither the remaining
+        // watcher pushes nor its finish notification re-render it.
+        Studio.suppressDetectedRun(runId);
         setStatus(`tailing ${runId}`);
+        paintNav();
+        paintTopbar();
         Studio.live?.refreshIfVisible();
       }),
     );
@@ -294,6 +265,53 @@
         );
         setStatus(ok ? "run passed" : `run ${payload.meaning ?? "failed"}`);
         setStatusRight("");
+        paintNav();
+        paintTopbar();
+        Studio.live?.refreshIfVisible();
+        if (state.view === "runs")
+          void actions.loadRuns().then(() => mount("runs", {}));
+      }),
+    );
+  }
+
+  /** Watcher pushes for runs started outside the app. */
+  function subscribeDetected() {
+    unsubscribes.push(
+      api.on("runs:detected", (payload) => {
+        // Last-activity refreshes alone do not change what is running.
+        if (!Studio.syncDetected(payload?.runs)) return;
+        paintNav();
+        paintTopbar();
+        Studio.live?.refreshIfVisible();
+      }),
+    );
+
+    unsubscribes.push(
+      api.on("run:external-events", ({ runId, events }) => {
+        const record = Studio.applyExternalEvents(runId, events);
+        if (!record) return;
+        setStatus(
+          fmt.oneLine(
+            `${record.spec} ▸ ${String(events.at(-1)?.message ?? events.at(-1)?.type ?? "")}`,
+          ),
+        );
+        Studio.live?.refreshIfVisible();
+      }),
+    );
+
+    unsubscribes.push(
+      api.on("run:external-finished", (payload) => {
+        const record = Studio.markExternalFinished(payload);
+        if (!record) return;
+        const ok = Boolean(record.done.ok);
+        toast(
+          ok
+            ? `Passed · ${record.spec}`
+            : `${record.done.status} · ${record.spec}`,
+          fmt.truncate(record.done.summary ?? "", 220),
+          ok ? "ok" : "bad",
+          ok ? 4200 : 9000,
+        );
         paintNav();
         paintTopbar();
         Studio.live?.refreshIfVisible();
@@ -422,6 +440,10 @@
       checks.bridge = Boolean(/** @type {any} */ (globalThis.cairn?.call));
       if (!checks.bridge) throw new Error("preload bridge missing");
 
+      // The watcher starts as soon as the page finishes loading; register its
+      // subscriptions before anything awaits so no early push is dropped.
+      subscribeDetected();
+
       const info = await actions.loadInfo();
       checks.appVersion = info?.appVersion ?? null;
       checks.cairnCommand = info?.cairn?.command ?? null;
@@ -435,6 +457,9 @@
 
       await actions.loadRuns();
       checks.runCount = state.runs.length;
+
+      await actions.loadDetected();
+      checks.detectedCount = state.detected.size;
 
       subscribeLive();
       subscribeMenus();

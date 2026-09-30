@@ -78,6 +78,12 @@ function createMainWindow() {
     const allowed = `file://${path.join(__dirname, "renderer", "index.html")}`;
     if (url !== allowed) event.preventDefault();
   });
+  // The renderer registers its watcher push subscriptions while scripts
+  // evaluate (before this event), so starting here drops nothing. start() is
+  // idempotent, so a reload re-fires this harmlessly.
+  win.webContents.on("did-finish-load", () => {
+    ipcHandle?.runWatcher?.start();
+  });
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
   });

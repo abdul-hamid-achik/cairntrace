@@ -8,10 +8,14 @@
  */
 const fs = require("node:fs");
 const path = require("node:path");
-const { parseRunId } = require("./format");
+const { parseRunId, runIdTimestampMs } = require("./format");
 
 const DEFAULT_MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+/** A run-less directory quiet longer than this is no longer "detected". */
+const DEFAULT_STALE_MS = 30 * 60_000;
+/** A run-less directory written within this window renders as "running". */
+const DEFAULT_RUNNING_WINDOW_MS = 5 * 60_000;
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const TEXT_EXTENSIONS = new Set([
@@ -102,6 +106,7 @@ function listRunIds(runsRoot) {
  * @property {string} spec
  * @property {string | null} specPath
  * @property {string} status
+ * @property {boolean} running
  * @property {string | null} summary
  * @property {Record<string, any> | null} failure
  * @property {string | null} startedAt
@@ -114,16 +119,37 @@ function listRunIds(runsRoot) {
  * @property {number | null} exitCode
  * @property {boolean} interrupted
  * @property {number} mtimeMs
+ * @property {number | null} lastActivityMs
  * @property {{ total: number, passed: number, failed: number }} outcomes
  * @property {Record<string, any> | null} artifacts
  */
 
 /**
+ * When a run directory was last written: the `events.ndjson` heartbeat when
+ * present (the runner appends to it all run long), else the directory itself.
+ * A finished run's last write is `run.json`, but callers only ask here when
+ * `run.json` is missing.
+ * @param {string} runDir
+ * @returns {number | null} epoch millis, or null when nothing is readable
+ */
+function lastActivityMs(runDir) {
+  for (const candidate of ["events.ndjson", "."]) {
+    try {
+      return fs.statSync(path.join(runDir, candidate)).mtimeMs;
+    } catch {
+      // try the next signal
+    }
+  }
+  return null;
+}
+
+/**
  * @param {string} runsRoot
  * @param {string} runId
+ * @param {{ now?: number, runningWindowMs?: number }} [options]
  * @returns {RunSummary}
  */
-function summarizeRun(runsRoot, runId) {
+function summarizeRun(runsRoot, runId, options = {}) {
   const dir = path.join(runsRoot, runId);
   const run = readJsonFile(path.join(dir, "run.json"));
   let mtimeMs = 0;
@@ -135,12 +161,19 @@ function summarizeRun(runsRoot, runId) {
   const parsed = parseRunId(runId);
   const record = run && typeof run === "object" ? run : null;
   const outcomes = Array.isArray(record?.outcomes) ? record.outcomes : [];
+  const activity = record ? null : lastActivityMs(dir);
+  const running =
+    !record &&
+    activity !== null &&
+    (options.now ?? Date.now()) - activity <=
+      (options.runningWindowMs ?? DEFAULT_RUNNING_WINDOW_MS);
   return {
     runId,
     dir,
     spec: record?.spec?.name ?? parsed.spec ?? runId,
     specPath: record?.spec?.path ?? null,
-    status: record?.status ?? "interrupted",
+    status: record?.status ?? (running ? "running" : "interrupted"),
+    running,
     summary: record?.summary ?? null,
     failure: record?.failure ?? null,
     startedAt: record?.startedAt ?? null,
@@ -154,6 +187,7 @@ function summarizeRun(runsRoot, runId) {
     exitCode: record?.exitCode ?? null,
     interrupted: !record || !record.status,
     mtimeMs,
+    lastActivityMs: activity,
     outcomes: {
       total: outcomes.length,
       passed: outcomes.filter((o) => o?.status === "passed").length,
@@ -167,7 +201,7 @@ function summarizeRun(runsRoot, runId) {
 
 /**
  * @param {string} runsRoot
- * @param {{ limit?: number, status?: string | null, spec?: string | null, search?: string | null }} [options]
+ * @param {{ limit?: number, status?: string | null, spec?: string | null, search?: string | null, now?: number, runningWindowMs?: number }} [options]
  * @returns {Array<ReturnType<typeof summarizeRun>>}
  */
 function listRuns(runsRoot, options = {}) {
@@ -178,7 +212,7 @@ function listRuns(runsRoot, options = {}) {
   const out = [];
   for (const runId of listRunIds(runsRoot)) {
     if (out.length >= limit) break;
-    const summary = summarizeRun(runsRoot, runId);
+    const summary = summarizeRun(runsRoot, runId, options);
     if (status && String(summary.status).toLowerCase() !== status) continue;
     if (spec && String(summary.spec).toLowerCase() !== spec) continue;
     if (search) {
@@ -187,6 +221,40 @@ function listRuns(runsRoot, options = {}) {
       if (!haystack.includes(search)) continue;
     }
     out.push(summary);
+  }
+  return out;
+}
+
+/**
+ * Run directories still in flight (or crashed without a record): no
+ * `run.json` yet, and written recently enough to be worth watching. This is
+ * how the desktop app finds runs started outside itself — `run.json` is
+ * written last, so its absence means the run has not finished.
+ * @param {string} runsRoot
+ * @param {{ staleMs?: number, limit?: number, now?: number }} [options]
+ * @returns {Array<{ runId: string, runDir: string, spec: string, startedAt: string | null, startedAtMs: number | null, lastActivityMs: number, ageMs: number }>}
+ */
+function listDetectedRuns(runsRoot, options = {}) {
+  const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
+  const limit = Math.max(1, options.limit ?? 20);
+  const now = options.now ?? Date.now();
+  const out = [];
+  for (const runId of listRunIds(runsRoot)) {
+    if (out.length >= limit) break;
+    const runDir = path.join(runsRoot, runId);
+    if (fs.existsSync(path.join(runDir, "run.json"))) continue;
+    const activity = lastActivityMs(runDir);
+    if (activity === null || now - activity > staleMs) continue;
+    const parsed = parseRunId(runId);
+    out.push({
+      runId,
+      runDir,
+      spec: parsed.spec ?? runId,
+      startedAt: parsed.startedAt,
+      startedAtMs: runIdTimestampMs(parsed.startedAt),
+      lastActivityMs: activity,
+      ageMs: Math.max(0, now - activity),
+    });
   }
   return out;
 }
@@ -583,13 +651,17 @@ function listRunFiles(runDir, maxEntries = 500) {
 module.exports = {
   DEFAULT_MAX_TEXT_BYTES,
   DEFAULT_MAX_IMAGE_BYTES,
+  DEFAULT_STALE_MS,
+  DEFAULT_RUNNING_WINDOW_MS,
   safeJoin,
   readJsonFile,
   readTextFileOrNull,
   listRunIds,
+  lastActivityMs,
   summarizeRun,
   listRuns,
   listRunSpecs,
+  listDetectedRuns,
   resolveRunRef,
   groupArtifacts,
   evidenceText,

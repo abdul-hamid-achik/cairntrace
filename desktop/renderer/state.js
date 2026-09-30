@@ -84,6 +84,8 @@
     /** token → live run record */
     live: new Map(),
     liveOrder: [],
+    /** runId → externally started run record (watcher-detected) */
+    detected: new Map(),
     view: "runs",
     viewParams: {},
   };
@@ -237,6 +239,16 @@
       return state.runs;
     },
 
+    /** Initial snapshot of runs detected in the artifact root. */
+    async loadDetected() {
+      try {
+        syncDetected(await api.call("runs:detected"));
+      } catch {
+        // the watcher snapshot is best-effort
+      }
+      return state.detected;
+    },
+
     async openRun(runDirOrId) {
       state.selectedRun = runDirOrId;
       state.runDetail = null;
@@ -317,6 +329,176 @@
     return `${outcomes.passed}/${outcomes.total}`;
   }
 
+  // ── externally started runs (watcher-detected) ────────────────────────────
+
+  /**
+   * Run ids that must never surface as detected runs, for the whole session:
+   * run ids an app-owned live tail claimed (the watcher keeps tracking them
+   * after the claim and pushes their finish — which would otherwise render a
+   * duplicate card and a second toast), and run ids the user explicitly hid.
+   * @type {Set<string>}
+   */
+  const suppressedDetected = new Set();
+
+  /** @param {string} runId */
+  function suppressDetectedRun(runId) {
+    if (!runId) return;
+    suppressedDetected.add(runId);
+    state.detected.delete(runId);
+  }
+
+  /**
+   * Roll streamed events into per-step rows. Shared by app-started and
+   * detected-run records (mirrors lib/live.stepProgress; the renderer cannot
+   * require main-process modules).
+   * @param {any} record
+   */
+  function rollupSteps(record) {
+    const steps = new Map();
+    for (const event of record.events) {
+      const stepId = typeof event?.stepId === "string" ? event.stepId : null;
+      if (!stepId) continue;
+      const row = steps.get(stepId) ?? {
+        stepId,
+        status: "running",
+        durationMs: null,
+        startedAt: null,
+      };
+      switch (String(event?.type ?? "")) {
+        case "step.started":
+          row.status = "running";
+          row.startedAt = event.ts ?? row.startedAt;
+          break;
+        case "step.finished":
+          row.status = event?.status === "failed" ? "failed" : "passed";
+          row.durationMs =
+            typeof event?.durationMs === "number"
+              ? event.durationMs
+              : row.durationMs;
+          break;
+        case "step.skipped":
+          row.status = "skipped";
+          break;
+        default:
+          break;
+      }
+      steps.set(stepId, row);
+    }
+    record.steps = [...steps.values()];
+    return record.steps;
+  }
+
+  /**
+   * Sync the detected-runs map with a watcher snapshot. Records the renderer
+   * already holds are kept (streamed events included); a record missing from
+   * the snapshot is marked stale rather than dropped, so a card the user is
+   * watching does not vanish — the watcher only omits runs that finished,
+   * went quiet past the stale window, or were deleted.
+   * @param {Array<Record<string, any>>} runs
+   * @returns {boolean} true when the visible set changed (badge/pill repaint)
+   */
+  function syncDetected(runs) {
+    let changed = false;
+    /** @type {Set<string>} */
+    const seen = new Set();
+    for (const run of runs ?? []) {
+      seen.add(run.runId);
+      if (suppressedDetected.has(run.runId)) continue;
+      let record = state.detected.get(run.runId);
+      if (!record) {
+        changed = true;
+        record = {
+          runId: run.runId,
+          spec: run.spec ?? run.runId,
+          runDir: run.runDir ?? null,
+          startedAtMs: run.startedAtMs ?? null,
+          lastActivityMs: run.lastActivityMs ?? null,
+          events: [],
+          steps: [],
+          done: null,
+          stale: false,
+        };
+        state.detected.set(run.runId, record);
+        continue;
+      }
+      if (record.done) continue;
+      record.runDir = run.runDir ?? record.runDir;
+      record.spec = run.spec ?? record.spec;
+      record.startedAtMs = run.startedAtMs ?? record.startedAtMs;
+      record.lastActivityMs = run.lastActivityMs ?? record.lastActivityMs;
+      if (record.stale) {
+        record.stale = false;
+        changed = true;
+      }
+    }
+    for (const record of state.detected.values()) {
+      if (record.done || record.stale || seen.has(record.runId)) continue;
+      record.stale = true;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * Append tail events to a detected run's record, creating a stub when the
+   * events race ahead of the first snapshot.
+   * @param {string} runId
+   * @param {Array<Record<string, any>>} events
+   * @returns {Record<string, any> | null} the record, or null when empty
+   */
+  function applyExternalEvents(runId, events) {
+    if (!Array.isArray(events) || !events.length) return null;
+    if (suppressedDetected.has(runId)) return null;
+    let record = state.detected.get(runId);
+    if (!record) {
+      record = {
+        runId,
+        spec: runId,
+        runDir: null,
+        startedAtMs: null,
+        lastActivityMs: Date.now(),
+        events: [],
+        steps: [],
+        done: null,
+        stale: false,
+      };
+      state.detected.set(runId, record);
+    }
+    record.events.push(...events);
+    if (record.events.length > 6000)
+      record.events.splice(0, record.events.length - 6000);
+    record.lastActivityMs = Date.now();
+    rollupSteps(record);
+    return record;
+  }
+
+  /**
+   * @param {{ runId: string, runDir?: string | null, status?: string | null, summary?: string | null }} payload
+   * @returns {Record<string, any> | null}
+   */
+  function markExternalFinished(payload) {
+    const record = state.detected.get(payload.runId);
+    if (!record || record.done) return null;
+    if (payload.runDir) record.runDir = payload.runDir;
+    record.done = {
+      ok: payload.status === "passed",
+      status: payload.status ?? "unknown",
+      summary: payload.summary ?? null,
+      at: Date.now(),
+    };
+    return record;
+  }
+
+  /**
+   * Hide a detected run for this session. The suppression outlives the
+   * record: the next watcher snapshot or event push must not resurrect the
+   * card while the run is still going.
+   * @param {string} runId
+   */
+  function hideDetected(runId) {
+    suppressDetectedRun(runId);
+  }
+
   Object.assign(Studio, {
     api,
     state,
@@ -330,6 +512,12 @@
     actions,
     runLabel,
     outcomeLabel,
+    rollupSteps,
+    syncDetected,
+    applyExternalEvents,
+    markExternalFinished,
+    suppressDetectedRun,
+    hideDetected,
     fmt,
   });
 })();

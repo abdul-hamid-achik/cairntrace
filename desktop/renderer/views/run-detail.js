@@ -64,8 +64,18 @@
         detail?.runId ?? runRef,
         run
           ? `${run.spec?.name ?? "?"} · ${run.environment ?? "?"} · ${run.backend ?? "?"} · ${fmt.formatDuration(run.durationMs)} · ${fmt.formatTimestamp(run.startedAt)}`
-          : "run.json missing — this run was interrupted before it could write its record",
+          : !run && detail?.hasEvents
+            ? "run.json missing — this run is still executing (or was interrupted); its event stream is in the Live view"
+            : "run.json missing — this run was interrupted before it could write its record",
         [
+          !run && detail?.hasEvents
+            ? h("button", {
+                class: "btn",
+                type: "button",
+                text: "Watch in Live",
+                onClick: () => Studio.navigate("live"),
+              })
+            : null,
           h("button", {
             class: "btn",
             type: "button",

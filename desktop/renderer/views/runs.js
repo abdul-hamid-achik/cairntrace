@@ -10,6 +10,7 @@
 
   const STATUSES = [
     ["", "all statuses"],
+    ["running", "running"],
     ["passed", "passed"],
     ["failed", "failed"],
     ["errored", "errored"],
@@ -164,7 +165,12 @@
         h(
           "td",
           { class: "status-cell" },
-          h("span", { class: `dot dot-${fmt.statusTone(run.status)}` }),
+          h("span", {
+            class:
+              run.status === "running"
+                ? "dot dot-running"
+                : `dot dot-${fmt.statusTone(run.status)}`,
+          }),
           run.status,
         ),
         h("td", { class: "cell-spec", text: run.spec }),
@@ -187,9 +193,11 @@
           title: run.summary ?? "",
           text: fmt.truncate(
             run.summary ??
-              (run.interrupted
-                ? "interrupted before run.json was written"
-                : ""),
+              (run.running
+                ? "in progress — streaming in the Live view"
+                : run.interrupted
+                  ? "interrupted before run.json was written"
+                  : ""),
             120,
           ),
         }),

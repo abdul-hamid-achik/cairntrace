@@ -63,19 +63,44 @@ describe("summarizeRun", () => {
     assert.deepEqual(summary.outcomes, { total: 1, passed: 1, failed: 0 });
   });
 
-  it("flags a run whose run.json never landed as interrupted", () => {
+  it("flags a quiet run-less directory as interrupted", () => {
     const root = tempDir("cairn-runs-");
     fs.mkdirSync(path.join(root, RUN_B), { recursive: true });
+    // A run-less directory only means "in progress" while it is still being
+    // written; age it past the running window to model a killed run.
+    const stale = new Date(Date.now() - 60 * 60_000);
+    fs.utimesSync(path.join(root, RUN_B), stale, stale);
     const summary = runs.summarizeRun(root, RUN_B);
     assert.equal(summary.status, "interrupted");
     assert.equal(summary.interrupted, true);
+    assert.equal(summary.running, false);
     assert.equal(summary.spec, "demo_spec"); // recovered from the run id
+  });
+
+  it("renders a freshly written run-less directory as running", () => {
+    const root = tempDir("cairn-runs-");
+    const dir = path.join(root, RUN_B);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "run.started" })}\n`,
+      "utf8",
+    );
+    const summary = runs.summarizeRun(root, RUN_B);
+    assert.equal(summary.status, "running");
+    assert.equal(summary.running, true);
+    assert.equal(summary.interrupted, true); // still no final record
+    assert.ok(summary.lastActivityMs !== null);
   });
 
   it("tolerates a corrupt run.json", () => {
     const root = tempDir("cairn-runs-");
     makeRun(root, RUN_A);
     fs.writeFileSync(path.join(root, RUN_A, "run.json"), "{not json", "utf8");
+    // A corrupt record counts as "no record": the directory still parses out
+    // of the run id, and once it goes quiet it renders as interrupted.
+    const stale = new Date(Date.now() - 60 * 60_000);
+    fs.utimesSync(path.join(root, RUN_A, "events.ndjson"), stale, stale);
     const summary = runs.summarizeRun(root, RUN_A);
     assert.equal(summary.interrupted, true);
     assert.equal(summary.status, "interrupted");
@@ -135,6 +160,57 @@ describe("listRunSpecs", () => {
     makeRun(root, RUN_B);
     makeRun(root, RUN_C);
     assert.deepEqual(runs.listRunSpecs(root), ["demo_spec", "other_spec"]);
+  });
+});
+
+describe("listDetectedRuns", () => {
+  const LIVE_RUN = "2026-09-05T12-00-00-000Z_live_spec_dddddd";
+
+  /** A run directory mid-flight: no run.json, events still landing. */
+  function makeRunningRun(root, runId) {
+    const dir = path.join(root, runId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "run.started" })}\n`,
+      "utf8",
+    );
+    return dir;
+  }
+
+  it("finds run-less directories written recently, newest first", () => {
+    const root = tempDir("cairn-runs-");
+    makeRun(root, RUN_A); // finished — never detected
+    makeRunningRun(root, LIVE_RUN);
+    const detected = runs.listDetectedRuns(root);
+    assert.deepEqual(
+      detected.map((run) => run.runId),
+      [LIVE_RUN],
+    );
+    assert.equal(detected[0].spec, "live_spec");
+    assert.equal(
+      detected[0].startedAtMs,
+      Date.parse("2026-09-05T12:00:00.000Z"),
+    );
+    assert.ok(detected[0].lastActivityMs !== null);
+    assert.equal(detected[0].ageMs < 60_000, true);
+  });
+
+  it("ignores directories quiet past the stale window", () => {
+    const root = tempDir("cairn-runs-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    const old = new Date(Date.now() - 2 * runs.DEFAULT_STALE_MS);
+    fs.utimesSync(path.join(dir, "events.ndjson"), old, old);
+    fs.utimesSync(dir, old, old);
+    assert.deepEqual(runs.listDetectedRuns(root), []);
+  });
+
+  it("honours the limit and accepts explicit now", () => {
+    const root = tempDir("cairn-runs-");
+    makeRunningRun(root, LIVE_RUN);
+    makeRunningRun(root, RUN_C);
+    assert.equal(runs.listDetectedRuns(root, { limit: 1 }).length, 1);
+    assert.equal(runs.listDetectedRuns(root).length, 2);
   });
 });
 

@@ -132,6 +132,22 @@ function parseRunId(runId) {
 }
 
 /**
+ * `<iso-ish>` prefix of a run id as UTC epoch millis.
+ * @param {string | null} value e.g. `2026-08-06T19-27-11-803Z`
+ * @returns {number | null}
+ */
+function runIdTimestampMs(value) {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/.exec(
+      String(value ?? ""),
+    );
+  if (!match) return null;
+  const iso = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}.${match[7]}Z`;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
  * @param {string} value
  * @param {number} [max]
  * @returns {string}
@@ -182,6 +198,7 @@ const CairnFormat = {
   relativeTime,
   statusTone,
   parseRunId,
+  runIdTimestampMs,
   truncate,
   oneLine,
   titleCase,
