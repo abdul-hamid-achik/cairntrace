@@ -24,7 +24,11 @@ import {
   investigateRunRef,
 } from "../cli/commands/investigate";
 import { validateConfigFile } from "../cli/commands/config/validate";
-import { isFcheapAvailable, stashDirectory } from "../cli/commands/stash";
+import {
+  isFcheapAvailable,
+  stashDirectory,
+  stashTagsForRun,
+} from "../cli/commands/stash";
 import {
   parseFcheapInfoOutput,
   parseFcheapListOutput,
@@ -1013,9 +1017,22 @@ export function buildMcpServer(): McpServer {
           .optional()
           .describe("Override run artifact root directory"),
         tag: z.array(z.string()).optional().describe("Tags for this stash"),
+        labelsAsTags: z
+          .boolean()
+          .optional()
+          .describe(
+            "Also tag the stash with every run.json label as key=value (cairn run --label)",
+          ),
+        ttl: z
+          .string()
+          .regex(/^[0-9A-Za-z-]+$/)
+          .optional()
+          .describe(
+            "file.cheap time-to-live, e.g. 30d; omitted = never expires",
+          ),
       },
     },
-    async ({ runId, artifactRoot, tag }) => {
+    async ({ runId, artifactRoot, tag, labelsAsTags, ttl }) => {
       const available = await isFcheapAvailable();
       if (!available) {
         return {
@@ -1035,7 +1052,8 @@ export function buildMcpServer(): McpServer {
       const resolvedRunId = basename(runDir);
       const saved = await stashDirectory(runDir, {
         tool: "cairntrace",
-        tags: tag ?? [],
+        tags: await stashTagsForRun(runDir, tag, labelsAsTags),
+        ...(ttl ? { ttl } : {}),
       });
       if (!saved.ok || !saved.stashId) {
         return {

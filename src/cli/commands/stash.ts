@@ -1,4 +1,5 @@
-import { basename } from "node:path";
+import { readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { log } from "../logger";
@@ -50,10 +51,69 @@ export type StashSearchResult = FcheapSearchResult;
  * Stash commands
  * ------------------------------------------------------------------------- */
 
+/**
+ * Labels stamped by `cairn run --label key=value`, as sorted `key=value`
+ * tags. Entries that would make an ambiguous tag (an `=` in the key, a comma,
+ * which file.cheap splits tag flags on, or whitespace) are skipped.
+ */
+export function tagsFromLabels(
+  labels: Record<string, string> | undefined,
+): string[] {
+  if (!labels) return [];
+  return Object.entries(labels)
+    .filter(
+      ([key, value]) =>
+        key.length > 0 &&
+        !/[=,\s]/.test(key) &&
+        typeof value === "string" &&
+        !/[,\s]/.test(value),
+    )
+    .map(([key, value]) => `${key}=${value}`)
+    .toSorted();
+}
+
+/** Read `labels` from a run directory's run.json; missing or invalid yields {}. */
+export async function readRunLabels(
+  runDir: string,
+): Promise<Record<string, string>> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(join(runDir, "run.json"), "utf8"));
+  } catch {
+    return {};
+  }
+  const labels = (raw as { labels?: unknown } | null)?.labels;
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) return {};
+  return Object.fromEntries(
+    Object.entries(labels).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
+}
+
+/** Explicit tags first, then (optionally) run.json labels, without duplicates. */
+export async function stashTagsForRun(
+  runDir: string,
+  explicit: string[] | undefined,
+  labelsAsTags: boolean | undefined,
+): Promise<string[]> {
+  const tags = [...(explicit ?? [])];
+  if (labelsAsTags) {
+    for (const tag of tagsFromLabels(await readRunLabels(runDir))) {
+      if (!tags.includes(tag)) tags.push(tag);
+    }
+  }
+  return tags;
+}
+
 export interface StashSaveOptions {
   artifactRoot?: string;
   config?: string;
   tag?: string[];
+  /** Add every run.json `labels` entry as a `key=value` tag. */
+  labelsAsTags?: boolean;
+  /** file.cheap TTL such as `30d`; omitted keeps the stash until dropped. */
+  ttl?: string;
   tool?: string;
   source?: string;
   format?: string;
@@ -81,13 +141,13 @@ export async function stashSaveCommand(
   const runDir = await resolveRunRef(runRef, root);
   const runId = basename(runDir);
 
-  // Derive spec name from run.json if available for a default tag.
-  const tags = opts.tag ?? [];
+  const tags = await stashTagsForRun(runDir, opts.tag, opts.labelsAsTags);
   const tool = opts.tool ?? "cairntrace";
 
   const saved = await stashDirectory(runDir, {
     tool,
     tags,
+    ...(opts.ttl ? { ttl: opts.ttl } : {}),
     ...(opts.source ? { source: opts.source } : {}),
   });
   if (!saved.ok || !saved.stashId) {
@@ -137,7 +197,8 @@ function stashSaveMarkdown(r: StashSaveResult, runId: string): string {
 /* ----- list ----- */
 
 export interface StashListOptions {
-  tag?: string;
+  /** Repeatable; file.cheap requires every listed tag (AND). */
+  tag?: string | string[];
   tool?: string;
   format?: string;
   json?: boolean;
@@ -151,7 +212,8 @@ export interface StashListOptions {
 export async function stashListCommand(opts: StashListOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
   const args = ["list"];
-  if (opts.tag) args.push("--tag", opts.tag);
+  const listTags = typeof opts.tag === "string" ? [opts.tag] : (opts.tag ?? []);
+  for (const tag of listTags) args.push("--tag", tag);
   if (opts.tool) args.push("--tool", opts.tool);
 
   const r = await runFcheap(args, { json: true });
@@ -477,6 +539,7 @@ export async function stashDirectory(
     tool?: string;
     tags?: string[];
     source?: string;
+    ttl?: string;
   } = {},
 ): Promise<StashDirectoryResult> {
   const tool = opts.tool ?? "cairntrace";
@@ -488,6 +551,7 @@ export async function stashDirectory(
     ...(opts.name ? ["--name", opts.name] : []),
     ...(opts.tags ?? []).flatMap((t) => ["--tag", t]),
     ...(opts.source ? ["--source", opts.source] : []),
+    ...(opts.ttl ? ["--ttl", opts.ttl] : []),
   ];
   const r = await runFcheap(args, { json: true });
   try {

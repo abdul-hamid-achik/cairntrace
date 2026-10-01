@@ -3,6 +3,17 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.15.0] - 2026-10-01
+
+### Added
+
+- `cairn stash save --labels-as-tags` tags the stash with every
+  `cairn run --label key=value` from run.json (e.g. `round=…`, `sha=…`,
+  `target=…`), so benchmark cohorts can be listed back from file.cheap.
+  `--ttl <duration>` passes a file.cheap time-to-live. The MCP
+  `cairn_stash_save` tool accepts `labelsAsTags` and `ttl`.
+- `cairn stash list --tag` is repeatable; file.cheap requires every tag (AND).
+
 ## [2.14.0] - 2026-10-01
 
 ### Added

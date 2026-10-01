@@ -27,6 +27,8 @@ transferring the local vault.
 | Flag | Effect |
 |---|---|
 | `--tag <tag>` | tag for this stash (repeatable) |
+| `--labels-as-tags` | also add every run.json label (`cairn run --label key=value`) as a `key=value` tag |
+| `--ttl <duration>` | file.cheap time-to-live, e.g. `30d` (default: never expires) |
 | `--tool <name>` | tool name (default `cairntrace`) |
 | `--source <path>` | source artifact path |
 | `--artifact-root <path>` | override artifact root |
@@ -34,7 +36,15 @@ transferring the local vault.
 
 ### `list`
 
-`--tag <tag>` and `--tool <name>` filter. Without filters, lists every stash in the vault.
+`--tag <tag>` (repeatable; a stash must carry every tag) and `--tool <name>` filter. Without filters, lists every stash in the vault.
+
+A benchmark that labels its runs can keep them as a queryable cohort:
+
+```bash
+cairn run flows/checkout.yml --label round=r7 --label sha=abc1234567 --label target=intel
+cairn stash save latest --labels-as-tags --tag project=shop --ttl 30d
+cairn stash list --tag round=r7 --tag target=intel --json
+```
 
 ### `info <stash-id>`
 

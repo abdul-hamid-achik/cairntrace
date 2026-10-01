@@ -634,6 +634,14 @@ addFormatFlags(
       collectRepeatable,
       [] as string[],
     )
+    .option(
+      "--labels-as-tags",
+      "also tag the stash with every run.json label as key=value (from cairn run --label)",
+    )
+    .option(
+      "--ttl <duration>",
+      "file.cheap time-to-live, e.g. 30d (default: never expires)",
+    )
     .option("--tool <name>", "tool name (default: cairntrace)")
     .option("--source <path>", "source artifact path")
     .option("--artifact-root <path>", "override artifact root directory")
@@ -647,7 +655,12 @@ addFormatFlags(
   stash
     .command("list")
     .description("List stashes in the fcheap vault")
-    .option("--tag <tag>", "filter by tag")
+    .option(
+      "--tag <tag>",
+      "filter by tag; repeatable (a stash must have every tag)",
+      collectRepeatable,
+      [] as string[],
+    )
     .option("--tool <name>", "filter by tool name"),
 ).action((opts) => stashListCommand(opts));
 
