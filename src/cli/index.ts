@@ -169,15 +169,28 @@ addFormatFlags(
     )
     .option(
       "--before <shell>",
-      "run a shell command after services/secrets and before the first spec (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
+      "run a shell command after services/secrets and before the first spec of each run (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
       collectRepeatable,
       [] as string[],
     )
     .option(
       "--after <shell>",
-      "run a shell command after all specs and before services teardown (repeatable). Failures are logged, non-fatal.",
+      "run a shell command after EACH spec finishes (pass or fail), while services are still up (repeatable). $CAIRN_RUN_DIR points at the run directory; collectors may write $CAIRN_RUN_DIR/diagnostics/ (numeric top-level fields of diagnostics/report.json become `cairn stats --metric` values). Failures are logged, non-fatal.",
       collectRepeatable,
       [] as string[],
+    )
+    .option(
+      "--repeat <n>",
+      "run the spec set n times sequentially (distinct run dirs), stamping label repeat=<i>; --before hooks run per run",
+    )
+    .option(
+      "--matrix <spec>",
+      "run the cartesian product of key=a,b[;key2=x,y]: each combination exports CAIRN_MATRIX_<KEY> env vars and key=value labels (so `cairn stats --group-by key` works)",
+    )
+    .option(
+      "--stop-on-fail",
+      "with --repeat/--matrix: stop at the first run that does not pass",
+      false,
     )
     .option(
       "--hook-timeout-ms <ms>",

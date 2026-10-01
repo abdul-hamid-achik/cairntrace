@@ -230,6 +230,13 @@ export interface RunOptions {
    * Used by `cairn stats --group-by` for A/B cohorts. Optional.
    */
   labels?: Record<string, string>;
+  /**
+   * Raise the auto-prune keep-count to at least this many runs per spec for
+   * this invocation (`cairn run --repeat/--matrix` sets it to the iteration
+   * count so earlier repeats are not pruned mid-benchmark). Never lowers a
+   * configured `retention.keepRuns`; ignored when retention is disabled.
+   */
+  minKeepRuns?: number;
   /** Internal command-level capture override (used by `cairn audit`). */
   captureOverride?: Partial<{
     screenshots: "always" | "on-failure" | "never";
@@ -1684,7 +1691,10 @@ async function applyRunRetention(input: {
   const keepRuns =
     retention?.enabled === false
       ? undefined
-      : (retention?.keepRuns ?? DEFAULT_KEEP_RUNS);
+      : Math.max(
+          retention?.keepRuns ?? DEFAULT_KEEP_RUNS,
+          opts.minKeepRuns ?? 0,
+        );
   if (keepRuns === undefined) return;
 
   const requiresArchive = retention?.archiveToStash === true;

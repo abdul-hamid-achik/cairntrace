@@ -112,7 +112,7 @@ export function renderStatsMarkdown(s: StatsResult): string {
   lines.push("|---|---:|---:|---:|---:|---:|---:|");
   for (const g of s.groups) {
     lines.push(
-      `| ${g.key} | ${g.runs} | ${(g.passRate * 100).toFixed(1)}% | ${fmtMs(g.duration.p50)} | ${fmtMs(g.duration.p95)} | ${fmtMs(g.metric?.p50)} | ${fmtMs(g.metric?.p95)} |`,
+      `| ${g.key} | ${g.runs} | ${(g.passRate * 100).toFixed(1)}% | ${fmtMs(g.duration.p50)} | ${fmtMs(g.duration.p95)} | ${fmtMetric(g.metricName, g.metric?.p50)} | ${fmtMetric(g.metricName, g.metric?.p95)} |`,
     );
   }
 
@@ -199,7 +199,9 @@ export function renderStatsCharts(
         continue;
       }
       lines.push(
-        formatBarLine(g.key, v, maxMetric, labelWidth, barWidth, fmtMs),
+        formatBarLine(g.key, v, maxMetric, labelWidth, barWidth, (n) =>
+          fmtMetric(metricLabel, n),
+        ),
       );
     }
     lines.push("```");
@@ -221,6 +223,20 @@ export function formatBarLine(
   const filled = Math.round(ratio * barWidth);
   const bar = "█".repeat(filled) + "░".repeat(Math.max(0, barWidth - filled));
   return `${label.padEnd(labelWidth)}  ${bar}  ${formatValue(value)}`;
+}
+
+/**
+ * Format a metric value: names ending in `ms` (case-insensitive) render as
+ * durations; other names (e.g. gcSeconds from report.json) render as plain
+ * numbers so they are not mislabeled as milliseconds.
+ */
+export function fmtMetric(
+  name: string | undefined,
+  v: number | undefined,
+): string {
+  if (v === undefined) return "—";
+  if (!name || /ms$/i.test(name)) return fmtMs(v);
+  return String(Number(v.toFixed(3)));
 }
 
 export function fmtMs(ms: number | undefined): string {

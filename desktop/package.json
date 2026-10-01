@@ -1,6 +1,6 @@
 {
   "name": "cairntrace-desktop",
-  "version": "2.13.1",
+  "version": "2.14.0",
   "private": true,
   "description": "Cairntrace Studio — desktop console for authoring, running, and inspecting behavioral browser specs",
   "license": "MIT",

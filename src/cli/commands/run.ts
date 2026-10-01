@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { homedir } from "node:os";
@@ -73,6 +74,15 @@ import type { CodemapDeps } from "./annotate";
 import { codemapReview, codemapSemantic } from "./codemap";
 import { stampSpecContractHash } from "./spec/verify";
 import { parseLabelFlags } from "../../core/stats/runStats";
+import {
+  describeIteration,
+  iterationEnv,
+  iterationLabels,
+  parseMatrix,
+  parseRepeat,
+  planIterations,
+  type RunIteration,
+} from "./runMatrix";
 
 export { parseLabelFlags };
 
@@ -150,12 +160,26 @@ export interface RunCommandOptions {
    */
   before?: string[];
   /**
-   * Repeatable `--after <shell>`: run once after all specs, before services
-   * teardown. Failures are logged but do not change the run exit code.
+   * Repeatable `--after <shell>`: run after EACH spec finishes (pass or fail),
+   * while services are still up, with `CAIRN_RUN_DIR` pointing at that spec's
+   * run directory so external collectors can drop files into
+   * `$CAIRN_RUN_DIR/diagnostics/`. Failures are logged but do not change the
+   * run exit code.
    */
   after?: string[];
   /** Per-command timeout shared by `--before` and `--after` hooks. */
   hookTimeoutMs?: string;
+  /** `--repeat N`: run the whole spec set N times, labeling `repeat=<i>`. */
+  repeat?: string;
+  /**
+   * `--matrix key=a,b[;key2=x,y]`: run the cartesian product, exporting each
+   * combination as CAIRN_MATRIX_<KEY> env vars and `key=value` labels.
+   */
+  matrix?: string;
+  /** With --repeat/--matrix: stop at the first iteration that fails. */
+  stopOnFail?: boolean;
+  /** Internal: auto-prune floor passed to runSpec (set by --repeat/--matrix). */
+  minKeepRuns?: number;
 }
 
 /**
@@ -389,13 +413,19 @@ export async function runCommand(
 
   const requiredTags = normalizeTagFilters(opts.tag);
 
+  let iterations: RunIteration[];
   try {
     parseVarFlags(opts.var);
     parseLabelFlags(opts.label);
+    iterations = planIterations(
+      parseRepeat(opts.repeat),
+      parseMatrix(opts.matrix),
+    );
   } catch (e) {
     failRun((e as Error).message, 2);
     return;
   }
+  const multiRun = opts.repeat !== undefined || opts.matrix !== undefined;
 
   // `--select-only`: resolve which specs WOULD run and exit 0 WITHOUT launching
   // a browser, services, or webServer. Emits SelectionResult v1. Applies
@@ -532,60 +562,84 @@ export async function runCommand(
   // webServer/services. Best-effort: no config → undefined → adapter defaults.
   const browser = await resolveBrowserConfig(expandedSpecs[0]!, opts);
 
-  // Domain hooks (e.g. tools/flip-path.sh next) run AFTER
-  // services+secrets so they can restart tmux panes, and BEFORE the first spec.
-  try {
-    await runHookCommands("before", opts.before, {
-      env: scopedSecrets.childEnv,
-      selectedTvaultKeys: scopedSecrets.selectedKeys,
-      timeoutMs: hookTimeoutMs,
-    });
-  } catch (e) {
-    if (server) {
-      await server.stop().catch(() => undefined);
-      untrackServer?.();
-    }
-    if (svcHandle) {
-      await svcHandle.stop().catch(() => undefined);
-      untrackSvc?.();
-    }
-    failRun((e as Error).message, 2);
-    return;
-  }
-
   // Resolve one final exit status only after lifecycle teardown; forcing an
   // exit inside runSingle/runBatch would skip finally and orphan resources.
   let exitCode: ExitCode = 2;
+  const summaryRows: IterationSummary[] = [];
+  let beforeHookError: string | undefined;
   try {
-    exitCode =
-      expandedSpecs.length === 1 && parallel === 1
-        ? await runSingle(
-            expandedSpecs[0]!,
-            opts,
-            svcHandle,
-            browser,
-            scopedSecrets,
-          )
-        : await runBatch(
-            expandedSpecs,
-            parallel,
-            opts,
-            svcHandle,
-            browser,
-            scopedSecrets,
-          );
+    // Services/webServer are shared; each iteration (one pass with a single
+    // run when no --repeat/--matrix) re-runs the --before hooks, then the specs.
+    for (const it of iterations) {
+      const iterOpts: RunCommandOptions = multiRun
+        ? {
+            ...opts,
+            label: [...(opts.label ?? []), ...iterationLabels(it)],
+            minKeepRuns: iterations.length,
+          }
+        : opts;
+      const iterSecrets = withIterationEnv(scopedSecrets, it);
+      if (multiRun) {
+        noteInfo(
+          `run ${it.index}/${iterations.length}: ${describeIteration(it)}`,
+        );
+      }
+
+      // Domain hooks (e.g. tools/flip-path.sh next) run AFTER services+secrets
+      // so they can restart tmux panes, and BEFORE each run's first spec.
+      try {
+        await runHookCommands("before", opts.before, {
+          env: iterSecrets.childEnv,
+          selectedTvaultKeys: iterSecrets.selectedKeys,
+          timeoutMs: hookTimeoutMs,
+        });
+      } catch (e) {
+        beforeHookError = (e as Error).message;
+        summaryRows.push({ it, exitCode: 2, results: [], note: "before hook" });
+        exitCode = 2;
+        break;
+      }
+
+      const results: RunResult[] = [];
+      let iterExit: ExitCode;
+      try {
+        iterExit =
+          expandedSpecs.length === 1 && parallel === 1
+            ? await runSingle(
+                expandedSpecs[0]!,
+                iterOpts,
+                svcHandle,
+                browser,
+                iterSecrets,
+                results,
+              )
+            : await runBatch(
+                expandedSpecs,
+                parallel,
+                iterOpts,
+                svcHandle,
+                browser,
+                iterSecrets,
+                results,
+              );
+      } catch (e) {
+        noteWarn(`run ${it.index} crashed: ${(e as Error).message}`);
+        iterExit = 2;
+      }
+      summaryRows.push({ it, exitCode: iterExit, results });
+      exitCode = mergeExitCodes(exitCode, iterExit, it.index === 1);
+      if (iterExit !== 0 && opts.stopOnFail && it.index < iterations.length) {
+        noteWarn(
+          `--stop-on-fail: stopping after run ${it.index}/${iterations.length} (exit ${iterExit})`,
+        );
+        break;
+      }
+    }
   } finally {
-    // after hooks run while services are still up (can query mongo/tmux).
-    // Best-effort: log failures, keep the suite exit code.
-    try {
-      await runHookCommands("after", opts.after, {
-        fatal: false,
-        env: scopedSecrets.childEnv,
-        selectedTvaultKeys: scopedSecrets.selectedKeys,
-        timeoutMs: hookTimeoutMs,
-      });
-    } catch (e) {
-      noteWarn(`after hook: ${(e as Error).message}`);
+    if (multiRun && summaryRows.length > 0) {
+      process.stderr.write(
+        `${renderIterationSummary(summaryRows, iterations.length)}\n`,
+      );
     }
     // Reverse of startup: the app process releases its infra connections
     // before the services environment goes away.
@@ -609,10 +663,117 @@ export async function runCommand(
     }
   }
 
+  if (beforeHookError !== undefined) {
+    failRun(beforeHookError, 2);
+    return;
+  }
+
   // runSingle/runBatch return the stable wire exit code so lifecycle teardown
   // above always completes first. Do not force process.exit here: stdout may
   // still be draining a large batch JSON/YAML document into a pipe.
   process.exitCode = exitCode;
+}
+
+/* ----- --repeat / --matrix iteration helpers ----- */
+
+export interface IterationSummary {
+  it: RunIteration;
+  exitCode: ExitCode;
+  results: RunResult[];
+  note?: string;
+}
+
+/** Overlay one iteration's CAIRN_MATRIX_<KEY> and CAIRN_REPEAT vars onto the secrets env. */
+export function withIterationEnv(
+  secrets: ScopedSecrets,
+  it: RunIteration,
+): ScopedSecrets {
+  const extra = iterationEnv(it);
+  if (Object.keys(extra).length === 0) return secrets;
+  return {
+    ...secrets,
+    env: { ...secrets.env, ...extra },
+    childEnv: { ...secrets.childEnv, ...extra },
+  };
+}
+
+const EXIT_SEVERITY: Record<number, number> = { 0: 0, 2: 1, 1: 2, 6: 3 };
+
+/** Most severe exit wins: 6 (contract changed) > 1 (failed) > 2 (errored) > 0. */
+export function mergeExitCodes(
+  current: ExitCode,
+  next: ExitCode,
+  first: boolean,
+): ExitCode {
+  if (first) return next;
+  return (EXIT_SEVERITY[next] ?? 1) > (EXIT_SEVERITY[current] ?? 1)
+    ? next
+    : current;
+}
+
+/** Plain-text end-of-run summary for --repeat/--matrix (printed to stderr). */
+export function renderIterationSummary(
+  rows: IterationSummary[],
+  planned: number,
+): string {
+  const lines = [`Summary: ${rows.length}/${planned} run(s) executed`];
+  let ok = 0;
+  for (const r of rows) {
+    if (r.exitCode === 0) ok += 1;
+    const specs = r.results.length;
+    const passed = r.results.filter((x) => x.status === "passed").length;
+    const dirs = r.results.map((x) => x.runDir).join(", ");
+    lines.push(
+      `  ${
+        r.exitCode === 0 ? "PASS" : "FAIL"
+      } #${r.it.index} ${describeIteration(r.it)}` +
+        ` exit=${r.exitCode}` +
+        (specs > 0 ? ` specs=${passed}/${specs}` : "") +
+        (r.note ? ` (${r.note})` : "") +
+        (dirs ? ` ${dirs}` : ""),
+    );
+  }
+  lines.push(`  ${ok} passed, ${rows.length - ok} failed`);
+  return lines.join("\n");
+}
+
+/**
+ * Run `--after` hooks for ONE finished spec. Pass or fail, with
+ * `CAIRN_RUN_DIR` (and `CAIRN_RUN_ID`, `CAIRN_RUN_STATUS`, `CAIRN_SPEC_PATH`)
+ * set so external collectors can write into `$CAIRN_RUN_DIR/diagnostics/`.
+ * Best-effort: never throws and never changes the run exit code. Skipped for
+ * synthesized errored results (their run dir is never created).
+ */
+export async function runAfterHooksForResult(
+  result: RunResult,
+  opts: Pick<RunCommandOptions, "after" | "hookTimeoutMs">,
+  scopedSecrets?: ScopedSecrets,
+): Promise<void> {
+  if (!opts.after || opts.after.every((c) => !c.trim())) return;
+  try {
+    const diagnostics = join(result.runDir, "diagnostics");
+    if (!existsSync(result.runDir)) {
+      noteWarn(
+        `after hooks skipped: run directory does not exist (${result.runDir})`,
+      );
+      return;
+    }
+    await mkdir(diagnostics, { recursive: true });
+    await runHookCommands("after", opts.after, {
+      fatal: false,
+      env: {
+        ...(scopedSecrets?.childEnv ?? process.env),
+        CAIRN_RUN_DIR: result.runDir,
+        CAIRN_RUN_ID: result.runId,
+        CAIRN_RUN_STATUS: result.status,
+        CAIRN_SPEC_PATH: result.spec.path,
+      },
+      selectedTvaultKeys: scopedSecrets?.selectedKeys ?? [],
+      timeoutMs: parseHookTimeoutMs(opts.hookTimeoutMs),
+    });
+  } catch (e) {
+    noteWarn(`after hook: ${(e as Error).message}`);
+  }
 }
 
 /**
@@ -830,6 +991,7 @@ async function runSingle(
   services?: ServicesHandle,
   browser?: BrowserConfig,
   scopedSecrets?: ScopedSecrets,
+  sink?: RunResult[],
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const backend = createBackend(backendOpts(opts, browser));
@@ -875,6 +1037,7 @@ async function runSingle(
       ...(opts.config !== undefined ? { configPath: opts.config } : {}),
       ...(Object.keys(vars).length > 0 ? { vars } : {}),
       ...(Object.keys(labels).length > 0 ? { labels } : {}),
+      ...(opts.minKeepRuns ? { minKeepRuns: opts.minKeepRuns } : {}),
       ...(scopedSecrets
         ? {
             env: scopedSecrets.env,
@@ -898,6 +1061,8 @@ async function runSingle(
     // that finalized evidence pack.
     activeRunDir = undefined;
     exitCode = result.exitCode;
+    sink?.push(result);
+    await runAfterHooksForResult(result, opts, scopedSecrets);
     if (!(await stampIfGreen(opts, [result]))) {
       return 2;
     }
@@ -922,6 +1087,7 @@ async function runSingle(
     const result = synthesizeErroredResult(specPath, e as Error, {
       labels: parseLabelFlags(opts.label),
     });
+    sink?.push(result);
     exitCode = result.exitCode;
     if (isTuiMounted()) {
       getTuiStore()?.push({
@@ -953,6 +1119,7 @@ async function runBatch(
   services?: ServicesHandle,
   browser?: BrowserConfig,
   scopedSecrets?: ScopedSecrets,
+  sink?: RunResult[],
 ): Promise<ExitCode> {
   const format = resolveFormat(opts, "md");
   const progressMode: ProgressMode | undefined = resolveRunProgressMode(opts);
@@ -1086,6 +1253,7 @@ async function runBatch(
             ...(opts.config !== undefined ? { configPath: opts.config } : {}),
             ...(Object.keys(vars).length > 0 ? { vars } : {}),
             ...(Object.keys(labels).length > 0 ? { labels } : {}),
+            ...(opts.minKeepRuns ? { minKeepRuns: opts.minKeepRuns } : {}),
             ...(scopedSecrets
               ? {
                   env: scopedSecrets.env,
@@ -1112,6 +1280,8 @@ async function runBatch(
           // Record immediately, before best-effort annotation/stash work, so a
           // signal can index every completed per-spec artifact directory.
           completedByIndex[idx] = r;
+          sink?.push(r);
+          await runAfterHooksForResult(r, opts, scopedSecrets);
           if (progressMode === "tty") {
             getTuiStore()?.push({
               type: "spec-finish",
@@ -1169,6 +1339,7 @@ async function runBatch(
             labels: parseLabelFlags(opts.label),
           });
           completedByIndex[idx] = errored;
+          sink?.push(errored);
           return errored;
         } finally {
           if (activeRunDir) activeRunDirs.delete(activeRunDir);

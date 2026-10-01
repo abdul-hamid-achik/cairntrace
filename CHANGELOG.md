@@ -3,6 +3,26 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [2.14.0] - 2026-10-01
+
+### Added
+
+- `cairn run --repeat N` and `--matrix key=a,b[;key2=x,y]` run the spec set
+  repeatedly / over a cartesian grid in one invocation. Each run gets its own
+  run dir and labels (`repeat=<i>`, `key=value`), matrix values are exported
+  as `CAIRN_MATRIX_<KEY>` env vars, `--before` hooks run per run,
+  `--stop-on-fail` halts at the first failing run, and a summary prints to
+  stderr. Auto-prune keeps at least one run per iteration.
+- `cairn stats --metric <name>` also reads numeric top-level fields of
+  `<runDir>/diagnostics/report.json` (wins over outcome sidecars).
+
+### Changed
+
+- **`--after` hooks now run after each spec** (pass or fail) with
+  `CAIRN_RUN_DIR`/`CAIRN_RUN_ID`/`CAIRN_RUN_STATUS`/`CAIRN_SPEC_PATH` set,
+  instead of once after all specs. Single-spec invocations behave as before
+  apart from the new env vars. `--hook-timeout-ms` still applies.
+
 ## [2.12.2] - 2026-09-28
 
 ### Fixed

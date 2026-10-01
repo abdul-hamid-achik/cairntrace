@@ -25,7 +25,7 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 - [Stash](/stash) — `cairn stash` persists run packs in the local file.cheap vault for retention-safe search.
 - [Clip](/clip) — `cairn clip` cuts named clips from a run video via vidtrace.
 - [Process monitoring](/monitor) — `--monitor` samples the browser process tree; the `monitor` step and `process` verifier assert on it.
-- **Stats** — `cairn stats --group-by <label-key>` aggregates labeled runs (`cairn run --label key=value`) into A/B cohorts with pass rate, duration percentiles, optional domain metrics from `outcomes/*.raw.json`, and ASCII charts in markdown. Pair with `--before` hooks for domain path flips before a suite.
+- **Stats** — `cairn stats --group-by <label-key>` aggregates labeled runs (`cairn run --label key=value`) into A/B cohorts with pass rate, duration percentiles, optional domain metrics from `outcomes/*.raw.json`, and ASCII charts in markdown. Pair with `--before` hooks for domain path flips before a suite. `--repeat`/`--matrix` run many labeled iterations in one command, and `--after` hooks can drop `diagnostics/report.json` whose numeric fields feed `cairn stats --metric`.
 
 ## Failure → code
 

@@ -274,6 +274,10 @@ async function harvestMetricFromRun(
   run: RunResult,
   metricNames: string[],
 ): Promise<number | undefined> {
+  // External collectors (`cairn run --after`) win: an explicit report.json
+  // field named like the requested metric beats outcome-sidecar harvesting.
+  const fromReport = await harvestReportMetric(runDir, metricNames);
+  if (fromReport !== undefined) return fromReport;
   const samples: number[] = [];
   for (const o of run.outcomes ?? []) {
     if (!o.evidenceRaw) continue;
@@ -289,6 +293,53 @@ async function harvestMetricFromRun(
   if (samples.length === 0) return undefined;
   // Prefer the first metric sample (usually the primary duration outcome).
   return samples[0];
+}
+
+/** Run-relative path of the external collector report (see `cairn run --after`). */
+export const DIAGNOSTICS_REPORT_PATH = join("diagnostics", "report.json");
+
+/**
+ * Numeric top-level fields of `<runDir>/diagnostics/report.json`, written by
+ * external collectors. Only finite, non-negative numbers (or numeric strings)
+ * count; nested objects, booleans, and everything else are ignored. Missing or
+ * malformed files yield an empty record.
+ */
+export async function readReportMetrics(
+  runDir: string,
+): Promise<Record<string, number>> {
+  try {
+    const json: unknown = JSON.parse(
+      await readFile(join(runDir, DIAGNOSTICS_REPORT_PATH), "utf8"),
+    );
+    if (json === null || typeof json !== "object" || Array.isArray(json)) {
+      return {};
+    }
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(json as Record<string, unknown>)) {
+      const n =
+        typeof v === "number"
+          ? v
+          : typeof v === "string" && v.trim() !== ""
+            ? Number(v)
+            : NaN;
+      if (Number.isFinite(n) && n >= 0) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** First requested metric name present in the run's report.json. */
+export async function harvestReportMetric(
+  runDir: string,
+  metricNames: string[],
+): Promise<number | undefined> {
+  const metrics = await readReportMetrics(runDir);
+  for (const name of metricNames) {
+    if (Object.hasOwn(metrics, name)) return metrics[name];
+  }
+  return undefined;
 }
 
 function findNumericField(

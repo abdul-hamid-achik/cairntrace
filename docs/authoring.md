@@ -91,8 +91,8 @@ cairn run flows/ --tag checkout \
 ```
 
 - `--label key=value` (repeatable) is written into each `run.json` as `labels`.
-- `--before <shell>` (repeatable) runs **after** services/secrets and **before** the first spec — use it for domain setup (path flips, warmers). Failures abort the run.
-- `--after <shell>` (repeatable) runs after all specs and before services teardown; failures are logged, non-fatal.
+- `--before <shell>` (repeatable) runs **after** services/secrets and **before** the first spec of each run (once per `--repeat`/`--matrix` iteration) — use it for domain setup (path flips, warmers). Failures abort the run.
+- `--after <shell>` (repeatable) runs after **each spec** finishes (pass or fail), while services are still up, with `CAIRN_RUN_DIR` set to that spec's run directory (see [After hooks and external metrics](#after-hooks-and-external-metrics)). Failures and timeouts are logged, non-fatal.
 - `--hook-timeout-ms <ms>` bounds each hook independently (10 minutes by default, 2 hours maximum). Raise it explicitly when a fenced drain/restart has a larger documented wall-clock budget; prefix the hook with `exec` when its cancellation must reach the target process directly.
 - `services.seed.postCommands` always run after seed (even when seed is skipped as fresh) — use for fixture ensure scripts.
 
@@ -103,6 +103,42 @@ cairn stats --group-by path --label suite=checkout-ab --baseline legacy --format
 ```
 
 Markdown output includes a table, ASCII bar charts (pass rate / duration p50 / optional domain metric), and pairwise deltas. JSON/YAML use schema `urn:cairntrace.dev:stats:v1`. Domain latency is harvested from `outcomes/*.raw.json` when fields like `processingDurationMS` are present.
+
+## Repeat and matrix runs
+
+Benchmark a flow N times, or across a parameter grid, in one command:
+
+```bash
+cairn run flows/import.yml --env chalupa --no-services \
+  --label round=r7 --repeat 5 \
+  --matrix 'workers=1,4;flag=on,off' \
+  --before 'tools/apply-config.sh "$CAIRN_MATRIX_WORKERS" "$CAIRN_MATRIX_FLAG"' \
+  --stop-on-fail
+
+cairn stats --group-by workers --baseline 1 --metric rootMs
+```
+
+- `--repeat N` runs the whole spec set N times sequentially. Every run gets its own run directory and the label `repeat=<i>` (1-based). N is capped at 1000.
+- `--matrix key=a,b[;key2=x,y]` runs the cartesian product (first key varies slowest). Each combination is stamped as `key=value` labels, so `cairn stats --group-by key` works, and exported as `CAIRN_MATRIX_<KEY>` environment variables (key upper-cased, non-alphanumerics become `_`) to `--before`/`--after` hooks and to the spec's `${env.…}` substitutions. A key may not be `repeat`. `--repeat` additionally exports `CAIRN_REPEAT`. The whole plan is capped at 5000 runs.
+- With both flags, repeats are the outer loop and matrix combinations the inner one (a, b, a, b, …), so slow machine drift does not bias a single cohort.
+- Services and the web server start once per invocation; `--before` hooks run again before every run.
+- `--stop-on-fail` stops at the first run that does not pass. Without it every run executes.
+- A plain-text summary (one line per run: status, labels, exit code, run dirs) is printed to **stderr** at the end, so `--json`/`--yaml` stdout stays one document per run. The process exit code is the most severe code across runs (6, then 1, then 2, then 0).
+- Auto-prune (`retention.keepRuns`, default 3 per spec) is raised to at least the number of runs in the invocation, so earlier repeats are not deleted mid-benchmark. Runs from a _previous_ invocation still count against the normal limit.
+
+## After hooks and external metrics
+
+External collectors (CPU profilers, a benchmark harness) can attach artifacts to each run:
+
+```bash
+cairn run flows/import.yml --label sha=$(git rev-parse --short HEAD) \
+  --after 'collect-profile.sh "$CAIRN_RUN_DIR/diagnostics"' \
+  --hook-timeout-ms 120000
+```
+
+- Each `--after` command runs after every spec, pass or fail (skipped for specs that errored before a run directory existed), with `CAIRN_RUN_DIR` (absolute run directory; `diagnostics/` is pre-created), `CAIRN_RUN_ID`, `CAIRN_RUN_STATUS` (`passed`/`failed`/`errored`) and `CAIRN_SPEC_PATH`. Commands run sequentially in the order given. Timeouts (`--hook-timeout-ms`, shared with `--before`) kill the whole process tree; failures only warn.
+- If `$CAIRN_RUN_DIR/diagnostics/report.json` exists, its **numeric top-level fields** (finite, non-negative; numeric strings accepted; nested objects, booleans and arrays ignored) become run metrics: `cairn stats --group-by <label> --metric rootMs` aggregates that field (p50/p95 per cohort). Metrics are read when `cairn stats` runs, so a collector may also write the file later.
+- **Precedence:** the built-in duration columns (run wall-clock) always come from `run.json` and are never overridden. For the single `--metric <name>` column, a `report.json` field named `<name>` wins; if absent, the first matching field in `outcomes/*.raw.json` is used (the original behavior). Metric names ending in `ms` render as durations; other names (for example `gcSeconds`) render as plain numbers.
 
 Keep product-specific scripts (path flip, mongosh fixtures) in the automation project; cairn only orchestrates via hooks + postCommands.
 
