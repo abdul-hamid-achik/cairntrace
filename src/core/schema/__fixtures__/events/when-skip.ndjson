@@ -1,0 +1,15 @@
+{"ts":"<ts>","type":"run.started","runId":"<runId>","spec":"demo_when_skip"}
+{"ts":"<ts>","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"steps"}
+{"ts":"<ts>","type":"step.started","stepId":"step_1","index":1,"total":3,"kind":"open","label":"open https://demo.example.test/home"}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"step_1","path":"snapshots/001_step_1.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"step_1","durationMs":0,"url":"https://demo.example.test/home"}
+{"ts":"<ts>","type":"step.started","stepId":"dismiss_banner","index":2,"total":3,"kind":"click","label":"click role=button \"Accept\""}
+{"ts":"<ts>","type":"step.finished","stepId":"dismiss_banner","durationMs":0,"skipped":true,"when":"text:Accept cookies"}
+{"ts":"<ts>","type":"step.started","stepId":"settle","index":3,"total":3,"kind":"wait","label":"wait 10ms"}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"settle","path":"snapshots/003_settle.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"settle","durationMs":0}
+{"ts":"<ts>","type":"phase.changed","phase":"outcomes"}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"home","kind":"url"}
+{"ts":"<ts>","type":"outcome.passed","outcomeId":"home","durationMs":0}
+{"ts":"<ts>","type":"run.passed","runId":"<runId>","durationMs":0}

@@ -22,18 +22,38 @@ export function importPlaywright(
   const outcomes: Outcome[] = [];
   const todos: string[] = [];
 
+  // `await test.step("title", async () => {` wrappers (e.g. a `--project`
+  // export) carry the step/outcome id; apply it to the next mapped line.
+  let pendingStepTitle: string | undefined;
   for (const rawLine of lines) {
     const line = rawLine.trim();
+    const stepOpen =
+      /^await\s+test\.step\((['"`])((?:\\.|(?!\1).)*)\1\s*,/.exec(line);
+    if (stepOpen) {
+      pendingStepTitle = stepOpen[2];
+      continue;
+    }
     if (shouldIgnore(line)) continue;
 
     const mappedStep = mapStep(line, todos);
     if (mappedStep) {
+      if (pendingStepTitle && !mappedStep.id) mappedStep.id = pendingStepTitle;
+      pendingStepTitle = undefined;
       steps.push(mappedStep);
       continue;
     }
 
     const mappedOutcome = mapOutcome(line, outcomes.length, todos);
     if (mappedOutcome) {
+      const outcomeId = pendingStepTitle ? slug(pendingStepTitle) : undefined;
+      if (
+        outcomeId &&
+        /^[a-z][a-z0-9_]*$/.test(outcomeId) &&
+        !outcomes.some((existing) => existing.id === outcomeId)
+      ) {
+        mappedOutcome.id = outcomeId;
+      }
+      pendingStepTitle = undefined;
       outcomes.push(mappedOutcome);
       continue;
     }
@@ -93,31 +113,54 @@ export function importPlaywright(
   };
 }
 
+/**
+ * `test.<member>(` calls that are NOT test declarations: steps, hooks,
+ * fixtures/config, and runtime helpers. `test.skip/fixme/only/fail(title, fn)`
+ * still declare tests.
+ */
+const NON_TEST_MEMBERS = new Set([
+  "describe",
+  "step",
+  "beforeAll",
+  "afterAll",
+  "beforeEach",
+  "afterEach",
+  "use",
+  "extend",
+  "info",
+  "setTimeout",
+  "slow",
+  "expect",
+]);
+
+const TEST_CALL_RE = /(?<![\w$.])test(?:\.(\w+))?\s*\(/gm;
+
 function findFirstTest(
   source: string,
 ): { title: string; body: string } | undefined {
-  const re = /\btest(?:\.(\w+))?\s*\(/gm;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(source))) {
-    if (m[1] === "describe") continue;
-    const parsed = parseTestAt(source, m.index + m[0].length);
-    if (parsed) return parsed;
-  }
-  return undefined;
+  return findTests(source)[0];
 }
 
 function findAllTestTitles(source: string): string[] {
-  const re = /\btest(?:\.(\w+))?\s*\(/gm;
-  const titles: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(source))) {
-    if (m[1] === "describe") continue;
-    const parsed = parseTestAt(source, m.index + m[0].length);
-    if (parsed) titles.push(parsed.title);
-  }
-  return titles;
+  return findTests(source).map((test) => test.title);
 }
 
+function findTests(source: string): Array<{ title: string; body: string }> {
+  const re = new RegExp(TEST_CALL_RE.source, TEST_CALL_RE.flags);
+  const tests: Array<{ title: string; body: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source))) {
+    if (m[1] !== undefined && NON_TEST_MEMBERS.has(m[1])) continue;
+    const parsed = parseTestAt(source, m.index + m[0].length);
+    if (parsed) tests.push(parsed);
+  }
+  return tests;
+}
+
+/**
+ * Parse `test(title, fn)` or `test(title, options, fn)` starting at the title.
+ * `fn` may be an async/sync arrow or a function expression.
+ */
 function parseTestAt(
   source: string,
   titleStart: number,
@@ -130,12 +173,21 @@ function parseTestAt(
   const title = source.slice(i + 1, titleEnd);
   i = skipWhitespace(source, titleEnd + 1);
   if (source[i] !== ",") return undefined;
+  i = skipWhitespace(source, i + 1);
+  if (source[i] === "{") {
+    // test(title, { tag, annotation }, fn) — skip the details object.
+    const optionsEnd = matchingBrace(source, i);
+    if (optionsEnd < 0) return undefined;
+    i = skipWhitespace(source, optionsEnd + 1);
+    if (source[i] !== ",") return undefined;
+    i = skipWhitespace(source, i + 1);
+  }
   const rest = source.slice(i);
-  const arrow = /^,\s*async\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.exec(
-    rest,
-  );
-  if (!arrow) return undefined;
-  const bodyStart = i + arrow[0].length;
+  const fn =
+    /^(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.exec(rest) ??
+    /^(?:async\s+)?function\s*[A-Za-z_$]?[\w$]*\s*\([^)]*\)\s*\{/.exec(rest);
+  if (!fn) return undefined;
+  const bodyStart = i + fn[0].length;
   let depth = 1;
   for (let j = bodyStart; j < source.length; j++) {
     const ch = source[j];
@@ -146,6 +198,28 @@ function parseTestAt(
     }
   }
   return { title, body: source.slice(bodyStart) };
+}
+
+function matchingBrace(source: string, openIndex: number): number {
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = openIndex; i < source.length; i++) {
+    const ch = source[i]!;
+    if (quote) {
+      if (ch === quote && source[i - 1] !== "\\") quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "{") depth++;
+    if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 function skipWhitespace(source: string, index: number): number {
@@ -167,9 +241,22 @@ function shouldIgnore(line: string): boolean {
     line.length === 0 ||
     line === "});" ||
     line === "}" ||
-    line === "});" ||
+    line === "{" ||
     line.startsWith("import ") ||
-    line.startsWith("//")
+    line.startsWith("//") ||
+    line.startsWith("test.setTimeout(") ||
+    isExporterScaffolding(line)
+  );
+}
+
+/**
+ * Listener plumbing `cairn export playwright` emits around the behavior
+ * (network/console evidence buffers). It carries no step or assertion.
+ */
+function isExporterScaffolding(line: string): boolean {
+  return (
+    /^const (?:requests|consoleErrors)\b.*= \[\];$/.test(line) ||
+    /^page\.on\("(?:response|console|pageerror)",/.test(line)
   );
 }
 
@@ -263,6 +350,31 @@ function mapStep(line: string, todos?: string[]): Step | undefined {
     }
   }
 
+  // Helpers a `--project` export emits (lib/hydration, lib/clickUntil).
+  const helper =
+    /^await\s+(verifiedFill|verifiedType|clickUntil)\(page,\s*(.+)\);?$/.exec(
+      line,
+    );
+  if (helper) {
+    const args = splitTopLevelArgs(helper[2]!);
+    const loc = locator(args[0] ?? "", todos);
+    if (loc) {
+      if (helper[1] === "clickUntil") return { click: loc };
+      const value = literal(args[1] ?? "");
+      if (value !== undefined) {
+        if (helper[1] === "verifiedFill") return { fill: { ...loc, value } };
+        const delayMs = objectNumberProperty(args[2], "delay");
+        return {
+          type: {
+            ...loc,
+            value,
+            ...(delayMs !== undefined ? { delayMs } : {}),
+          },
+        };
+      }
+    }
+  }
+
   const action =
     /^await\s+(page\..+?)\.(click|hover|focus)\(\s*\);?$/.exec(line) ??
     /^await\s+(page\..+?)\.(fill|pressSequentially)\((.+?)\);?$/.exec(line);
@@ -298,6 +410,22 @@ function mapOutcome(
   idx: number,
   todos?: string[],
 ): Outcome | undefined {
+  // The exporter's console budget assertion.
+  const consoleMax =
+    /^expect\(consoleErrors\.length\)\.toBeLessThanOrEqual\((\d+)\);?$/.exec(
+      line,
+    );
+  if (consoleMax) {
+    return outcome(
+      idx,
+      "console_errors_max",
+      "console errors stay within budget",
+      {
+        console: { errorsMax: Number(consoleMax[1]) },
+      },
+    );
+  }
+
   const assertion = parseExpectAssertion(line);
   if (!assertion) return undefined;
 
@@ -347,7 +475,9 @@ function mapOutcome(
       return outcome(idx, "text_contains", "expected text is present", {
         text: {
           contains: text,
-          ...(loc?.by === "selector" ? { region: loc.selector } : {}),
+          ...(loc?.by === "selector" && loc.selector !== "body"
+            ? { region: loc.selector }
+            : {}),
         },
       });
     }
@@ -373,8 +503,11 @@ function locator(input: string, todos?: string[]): Locator | undefined {
   // A trailing `.nth(N)` selects the Nth match — strip it, parse the base
   // locator, then re-attach. Without this it was silently dropped, targeting a
   // different element than the source.
-  const nthMatch = /^(.+)\.nth\((\d+)\)$/.exec(input.trim());
-  const base = nthMatch ? nthMatch[1]! : input;
+  // The exporter appends `.first()` to mirror first-match semantics; that is
+  // the default for a Cairntrace semantic locator, so it is dropped.
+  const trimmed = input.trim().replace(/\.first\(\)$/, "");
+  const nthMatch = /^(.+)\.nth\((\d+)\)$/.exec(trimmed);
+  const base = nthMatch ? nthMatch[1]! : trimmed;
   const parsed = parseBaseLocator(base);
   if (!parsed || !nthMatch) return parsed;
   const nth = Number(nthMatch[2]);

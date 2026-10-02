@@ -5,6 +5,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  readFile,
   readdir,
   rm,
   stat,
@@ -20,11 +21,18 @@ import {
 import { Transform, type Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReportConfig } from "../schema/config.v1";
-import type {
-  ArtifactManifest,
-  ArtifactManifestEntry,
-  RunResult,
+import {
+  ArtifactManifestSchema,
+  type ArtifactManifest,
+  type ArtifactManifestEntry,
+  type ArtifactSensitivity,
+  type RunResult,
 } from "../schema/run.v1";
+import {
+  inferArtifactSensitivity,
+  inferUnredactedSensitivity,
+} from "./evidenceSelection";
+import { isServicesEventType, type RunEvent } from "../schema/events.v1";
 import type { ReplayManifest } from "../schema/replay.v1";
 import type { Spec } from "../schema/spec.v1";
 import { renderAgentContext } from "./agentContext";
@@ -40,55 +48,6 @@ import { renderYaml } from "./renderers/yaml";
 
 const ARTIFACT_DIRECTORY_MODE = 0o700;
 const ARTIFACT_FILE_MODE = 0o600;
-
-/**
- * Event emitted to events.ndjson during a run. Append-only.
- */
-export interface RunEvent {
-  ts: string;
-  type:
-    | "run.started"
-    | "run.failed"
-    | "run.passed"
-    | "run.errored"
-    | "step.started"
-    | "step.finished"
-    | "step.failed"
-    | "outcome.passed"
-    | "outcome.failed"
-    | "outcome.skipped"
-    | "artifact.screenshot"
-    | "artifact.snapshot"
-    | "artifact.download"
-    | "artifact.transform"
-    | "artifact.diagnostics"
-    | "artifact.clip"
-    | "artifact.request"
-    | "artifact.eval"
-    | "artifact.monitor"
-    | "artifact.video"
-    | "artifact.services"
-    | "artifact.stash"
-    | "artifact.retention"
-    | "viewport.set"
-    | "precondition.started"
-    | "precondition.run"
-    | "services.docker.start"
-    | "services.docker.reuse"
-    | "services.docker.ready"
-    | "services.docker.fail"
-    | "services.docker.healthcheck"
-    | "services.seed.start"
-    | "services.seed.skip"
-    | "services.seed.complete"
-    | "services.seed.fail"
-    | "services.tmux.session-created"
-    | "services.tmux.reuse"
-    | "services.tmux.ready"
-    | "services.teardown.complete"
-    | "services.stash.complete";
-  [extra: string]: unknown;
-}
 
 export interface ArtifactRedactor {
   value<T>(input: T): T;
@@ -112,6 +71,8 @@ const IDENTITY_REDACTOR: ArtifactRedactor = {
  *   ├── run.json | run.yaml | run.md
  *   ├── report.html | report.json
  *   ├── events.ndjson
+ *   ├── run.log                        (plain narration, always written)
+ *   ├── logs/                          (live precondition / verifier logs)
  *   ├── agent_context.md
  *   ├── screenshots/                   (created on first capture)
  *   ├── snapshots/
@@ -125,6 +86,8 @@ export class ArtifactWriter {
   public readonly runDir: string;
 
   private readonly artifactKinds = new Map<string, string>();
+  /** Explicit manifest sensitivities (redacted writes, sanitized traces). */
+  private readonly artifactSensitivity = new Map<string, ArtifactSensitivity>();
   private readonly pendingWrites = new Set<Promise<unknown>>();
   private eventTail: Promise<void> = Promise.resolve();
   private eventLogPermissionsSealed = false;
@@ -211,16 +174,28 @@ export class ArtifactWriter {
     const absolute = this.resolve(relative);
     await ensurePrivateDirectory(dirname(absolute));
     this.artifactKinds.set(toPortablePath(relative), kind);
+    this.markUnredacted(relative);
     return absolute;
   }
 
-  /** Register a producer-owned file so its semantic kind appears in the manifest. */
+  /**
+   * Register a producer-owned file so its semantic kind appears in the
+   * manifest. The writer never saw its bytes, so it is not `redacted`
+   * unless the caller says so; LiveLog-backed logs (`run-log` / `log`) are
+   * redacted line by line before they reach disk.
+   */
   registerExisting(
     relative: string,
     kind = inferArtifactKind(relative),
+    sensitivity?: ArtifactSensitivity,
   ): string {
     const absolute = this.resolve(relative);
     this.artifactKinds.set(toPortablePath(relative), kind);
+    const resolved =
+      sensitivity ??
+      (LINE_REDACTED_LOG_KINDS.has(kind) ? "redacted" : undefined);
+    if (resolved) this.markSensitivity(relative, resolved);
+    else this.markUnredacted(relative);
     return absolute;
   }
 
@@ -228,6 +203,25 @@ export class ArtifactWriter {
     const absolute = this.resolve(relative);
     await rm(absolute, { force: true });
     this.artifactKinds.delete(toPortablePath(relative));
+    this.artifactSensitivity.delete(toPortablePath(relative));
+  }
+
+  /**
+   * Record how a producer-owned file was treated (a sanitized trace is
+   * `sanitized`, one that could not be sanitized `secret-bearing`). Files the
+   * writer never saw get `secret-bearing` (text) or `safe` (media) in the
+   * manifest; only bytes written through the redactor are `redacted`.
+   */
+  markSensitivity(relative: string, sensitivity: ArtifactSensitivity): void {
+    this.artifactSensitivity.set(toPortablePath(relative), sensitivity);
+  }
+
+  /** Raw bytes written without the redactor can never be `redacted`. */
+  private markUnredacted(relative: string): void {
+    this.markSensitivity(
+      relative,
+      inferUnredactedSensitivity(toPortablePath(relative)),
+    );
   }
 
   async writeText(
@@ -243,6 +237,7 @@ export class ArtifactWriter {
       });
       await tightenMode(absolute, ARTIFACT_FILE_MODE);
       this.artifactKinds.set(toPortablePath(relative), kind);
+      this.artifactSensitivity.set(toPortablePath(relative), "redacted");
     })();
     return this.track(operation);
   }
@@ -301,6 +296,7 @@ export class ArtifactWriter {
       await writeFile(absolute, contents, { mode: ARTIFACT_FILE_MODE });
       await tightenMode(absolute, ARTIFACT_FILE_MODE);
       this.artifactKinds.set(toPortablePath(relative), kind);
+      this.markUnredacted(relative);
     })();
     return this.track(operation);
   }
@@ -318,6 +314,7 @@ export class ArtifactWriter {
     assertMaxBytes(options.maxBytes);
     const kind = options.kind ?? inferArtifactKind(relative);
     const absolute = await this.preparePath(relative, kind);
+    this.markUnredacted(relative);
     let bytes = 0;
     const limiter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
@@ -449,6 +446,10 @@ export class ArtifactWriter {
     await this.writeText("replay.json", renderJson(manifest), "replay");
   }
 
+  /**
+   * Append one event to events.ndjson. Events are typed against the
+   * events.v1 contract (`schema/events.v1.ts`) and redacted before writing.
+   */
   async appendEvent(event: RunEvent): Promise<void> {
     const line = `${JSON.stringify(this.redactor.value(event))}\n`;
     const absolute = this.resolve("events.ndjson");
@@ -466,6 +467,7 @@ export class ArtifactWriter {
         this.eventLogPermissionsSealed = true;
       }
       this.artifactKinds.set("events.ndjson", "event-log");
+      this.artifactSensitivity.set("events.ndjson", "redacted");
     });
     this.eventTail = operation.catch(() => undefined);
     return this.track(operation);
@@ -474,9 +476,12 @@ export class ArtifactWriter {
   /**
    * Write services lifecycle events (from startServices) to events.ndjson.
    * Each ServicesEvent is mapped to a `services.<phase>.<event>` RunEvent.
+   * A pairing outside the events.v1 vocabulary is dropped instead of being
+   * written as an unvalidated line; every emit site in services.ts is pinned
+   * to that vocabulary by a unit test.
    */
   async appendServicesEvents(
-    events: Array<{
+    events: ReadonlyArray<{
       phase: string;
       event: string;
       message: string;
@@ -485,9 +490,11 @@ export class ArtifactWriter {
     }>,
   ): Promise<void> {
     for (const event of events) {
+      const type = `services.${event.phase}.${event.event}`;
+      if (!isServicesEventType(type)) continue;
       await this.appendEvent({
         ts: event.timestamp,
-        type: `services.${event.phase}.${event.event}` as RunEvent["type"],
+        type,
         message: event.message,
         ...(event.data ? { data: event.data } : {}),
       });
@@ -516,10 +523,14 @@ export class ArtifactWriter {
     await this.flushPendingWrites();
     await this.normalizeArtifactPermissions(this.runDir);
     const excluded = toPortablePath(relative);
+    // A writer that reopens a finalized run (stash receipt, pin, publish)
+    // keeps the kinds and sensitivities the original run recorded.
+    const previous = await readPreviousManifest(absolute);
     const artifacts = await this.collectManifestEntries(
       this.runDir,
       "",
       excluded,
+      previous,
     );
     artifacts.sort((a, b) => a.path.localeCompare(b.path));
     const manifest: ArtifactManifest = { version: "1", artifacts };
@@ -552,6 +563,7 @@ export class ArtifactWriter {
     directory: string,
     prefix: string,
     excluded: string,
+    previous: ReadonlyMap<string, ArtifactManifestEntry>,
   ): Promise<ArtifactManifestEntry[]> {
     const entries: ArtifactManifestEntry[] = [];
     const children = await readdir(directory, { withFileTypes: true });
@@ -564,17 +576,36 @@ export class ArtifactWriter {
       }
       if (child.isDirectory()) {
         entries.push(
-          ...(await this.collectManifestEntries(absolute, portable, excluded)),
+          ...(await this.collectManifestEntries(
+            absolute,
+            portable,
+            excluded,
+            previous,
+          )),
         );
         continue;
       }
       if (!child.isFile() || portable === excluded) continue;
       const { bytes, sha256 } = await hashFile(absolute);
+      const before = previous.get(portable);
       entries.push({
         path: portable,
-        kind: this.artifactKinds.get(portable) ?? inferArtifactKind(portable),
+        kind:
+          this.artifactKinds.get(portable) ??
+          before?.kind ??
+          inferArtifactKind(portable),
         bytes,
         sha256,
+        // A file this writer never recorded and no earlier manifest listed
+        // (an `--after` collector output, a tool's raw capture) was not
+        // written through the redactor. A legacy entry without sensitivity
+        // keeps the path inference of the version that wrote it.
+        sensitivity:
+          this.artifactSensitivity.get(portable) ??
+          before?.sensitivity ??
+          (before
+            ? inferArtifactSensitivity(portable)
+            : inferUnredactedSensitivity(portable)),
       });
     }
     return entries;
@@ -602,6 +633,22 @@ export class ArtifactWriter {
   }
 }
 
+/** Entries of an existing manifest by path (empty when absent or invalid). */
+async function readPreviousManifest(
+  absolute: string,
+): Promise<Map<string, ArtifactManifestEntry>> {
+  try {
+    const parsed = ArtifactManifestSchema.safeParse(
+      JSON.parse(await readFile(absolute, "utf8")),
+    );
+    return parsed.success
+      ? new Map(parsed.data.artifacts.map((entry) => [entry.path, entry]))
+      : new Map();
+  } catch {
+    return new Map();
+  }
+}
+
 async function ensurePrivateDirectory(absolute: string): Promise<void> {
   await mkdir(absolute, {
     recursive: true,
@@ -622,6 +669,12 @@ async function tightenMode(absolute: string, mode: number): Promise<void> {
   await chmod(absolute, mode);
 }
 
+/** LiveLog files: every line goes through the run redactor before disk. */
+const LINE_REDACTED_LOG_KINDS: ReadonlySet<string> = new Set([
+  "run-log",
+  "log",
+]);
+
 function toPortablePath(relative: string): string {
   return relative.replaceAll("\\", "/");
 }
@@ -634,6 +687,7 @@ function inferArtifactKind(relative: string): string {
     "artifact-manifest.json": "manifest",
     "events.ndjson": "event-log",
     "replay.json": "replay",
+    "run.log": "run-log",
     "spec.resolved.yml": "resolved-spec",
     "stash-receipt.json": "stash-receipt",
   };
@@ -647,6 +701,7 @@ function inferArtifactKind(relative: string): string {
     diagnostics: "diagnostic",
     downloads: "download",
     evals: "eval",
+    logs: "log",
     network: "network",
     requests: "request",
     screenshots: "screenshot",

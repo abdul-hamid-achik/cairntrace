@@ -13,8 +13,15 @@ import { gunzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CAIRN_VERSION } from "../version";
 
-const { runFcheapMock } = vi.hoisted(() => ({ runFcheapMock: vi.fn() }));
-vi.mock("./fcheapClient", () => ({ runFcheap: runFcheapMock }));
+const { runFcheapMock, runIndexSupportMock } = vi.hoisted(() => ({
+  runFcheapMock: vi.fn(),
+  runIndexSupportMock: vi.fn(async () => false),
+}));
+vi.mock("./fcheapClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./fcheapClient")>()),
+  runFcheap: runFcheapMock,
+  fcheapSupportsPublishRunIndex: runIndexSupportMock,
+}));
 
 import {
   createRunArchive,
@@ -68,6 +75,9 @@ describe("remote artifact publication", () => {
     ).resolves.toMatchObject({
       sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
       sizeBytes: expect.any(Number),
+      runIndex: false,
+      // This fcheap has no `publish --run-index`: say why none was sent.
+      runIndexSkipped: "unsupported",
     });
 
     expect(archivedPaths).toEqual([

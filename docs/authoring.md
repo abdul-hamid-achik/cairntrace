@@ -53,6 +53,40 @@ steps:
   - click: { by: { role: button, name: "Yes, rotate" } }
 ```
 
+## Paths and environments
+
+Never hardcode an absolute path to a fixture, script, or upload — the spec stops working on the next machine. Relative paths in steps (`upload.path`, `eval.file`, `transform.file`/`input`, eval `args.filePath`/`fixtureFiles`) resolve against the file that declares the step: the spec's folder for its own steps, the **action's** folder for the steps of an imported action. A path inside an action that only exists next to the importing spec (how earlier releases resolved it) still works, with a deprecation warning naming the action and step — move the file next to the action. Two placeholders cover the rest:
+
+- `${file.dir}` (alias `${project.root}`) is the directory of the **file being parsed**. In a spec that is the spec's folder; inside an imported action it is the **action's** folder. That makes `${file.dir}/fixture.csv` in `actions/upload.yml` mean `actions/fixture.csv`, wherever the importing spec lives.
+- `${config.dir}` is the directory of the resolved `cairntrace.config.yml`: the file passed with `--config` (MCP `config`), else the one found by walking up from the spec's folder (the current directory when there is no config). `cairn run`, `spec verify`, `spec heal`, and both exporters resolve it the same way. Use it for fixtures shared by specs and actions in different folders.
+
+```yaml
+steps:
+  - upload: { by: label, name: "Import file", path: "${config.dir}/fixtures/import.xlsx" }
+```
+
+`cairn spec verify` resolves every one of those files exactly like a run (actions included) and exits 4 when one is missing; an absolute path outside the project is a warning.
+
+Pick the environment explicitly with `--env`. When a config exists, an `--env` it does not define fails fast with the list of known environments — `cairn spec verify` exits 4 — instead of running without the environment's `baseUrl` and vars. A spec's own `environment:` is a default: if the config does not define it, the spec still runs (without that `baseUrl` and vars) and `cairn spec verify` warns. See [Configuration](/configuration#placeholder-resolution).
+
+## Where a spec may run
+
+A spec that changes shared data must not run everywhere. Declare it in the spec and let `cairn run` enforce it — not a shell guard in a precondition:
+
+```yaml
+requires:
+  env:
+    - local
+    - dev: { optIn: CAIRN_ALLOW_DEV_MUTATIONS }   # dev only when that variable is 1/true
+  mutates: true                                  # refused where policy.mutations is deny
+```
+
+Environments carry the other half in the config (`environments.<name>.policy`, see [Configuration](/configuration#environment-policy)): `trait: protected` environments run only specs that list them in `requires.env`, and `mutations: deny` refuses `requires.mutates: true`.
+
+`cairn run` checks each spec before secrets, services, the webServer, hooks, preconditions or a browser start. A refused spec gets status `refused` with a `refusal` block (`reason`, `env`, `requires`, `code`: `env-not-listed`, `opt-in-missing`, `mutations-denied`, `protected-env`), its outcomes reported `skipped`, no run directory (the result carries `synthetic: true`: its `runId` / `runDir` are placeholders that are never written, so do not open them), a `run.refused` event in the invocation journal (the journal `summary` counts it as `refused`), and is never stashed, investigated or counted by retention. When every spec of the run was refused — one spec or many, whatever `--parallel` — nothing ran and `cairn run` exits **7**. In a batch where other specs ran, a refused spec is listed (`summary.refused`, and its own section in the markdown summary) and skipped; that batch fails with exit 7 only under `--strict-requires` (failed and errored specs still win with 1 and 2). `cairn spec heal` on a refused spec exits 7 too. `cairn run --select-only` lists refused specs under `skipped` with the reason, and `cairn spec verify --env <name>` fails with an `env-not-allowed` finding (exit 4); without `--env`, verify lists every environment and whether the spec may run there.
+
+Exported Playwright tests keep the guard at run time: `requires` becomes `test.skip(...)` on `process.env.CAIRN_ENV` (and the opt-in variable) — set `CAIRN_ENV` when you run the exported suite. An export that bakes an environment's `baseUrl` (absolute URLs in a single file, `baseURL` in a `--project` config) ties the guard to that environment: the test runs only when `CAIRN_ENV` names it, because the URLs it drives belong to it. If the policy refuses the spec in the exported environment (not listed, protected, mutations denied), the test always skips and the export reports an `envPolicy` risk; re-export with an `--env` the spec may run in.
+
 ## Tags for suite selection
 
 Put stable labels on a spec under `metadata.tags`. Agents and humans then run a **subset** of a directory without inventing new folders:
@@ -123,7 +157,7 @@ cairn stats --group-by workers --baseline 1 --metric rootMs
 - With both flags, repeats are the outer loop and matrix combinations the inner one (a, b, a, b, …), so slow machine drift does not bias a single cohort.
 - Services and the web server start once per invocation; `--before` hooks run again before every run.
 - `--stop-on-fail` stops at the first run that does not pass. Without it every run executes.
-- A plain-text summary (one line per run: status, labels, exit code, run dirs) is printed to **stderr** at the end, so `--json`/`--yaml` stdout stays one document per run. The process exit code is the most severe code across runs (6, then 1, then 2, then 0).
+- A plain-text summary (one line per run: status, labels, exit code, run dirs) is printed to **stderr** at the end, so `--json`/`--yaml` stdout stays one document per run. The process exit code is the most severe code across runs (6, then 1, then 2, then 7, then 0).
 - Auto-prune (`retention.keepRuns`, default 3 per spec) is raised to at least the number of runs in the invocation, so earlier repeats are not deleted mid-benchmark. Runs from a _previous_ invocation still count against the normal limit.
 
 ## After hooks and external metrics
@@ -189,15 +223,106 @@ step rewrites that preserve the contract hash.
 
 The repair proposal is a suggestion, not an approval. Open the diff, check that the contract is unchanged, and apply only what keeps the behavior intact. If the diff touches `intent` or `outcomes`, that is *not* a repair; that is a contract change, and the hash must be re-stamped.
 
+## Lint before you run
+
+`cairn spec lint` reads a spec the way an experienced reviewer would and
+says what to change, with the line:
+
+```bash
+cairn spec lint flows/profile.yml --env local,staging --json
+cairn spec lint flows/ --fix          # quote # selectors, add step ids
+```
+
+It catches the mistakes agents make most:
+
+- `selector: #save` — YAML reads an unquoted `#` as a comment, so the value
+  is empty. `--fix` quotes it. A comment after a key that holds a nested map
+  (`click:  # primary` above an indented `by: role`) is a real comment and is
+  left alone.
+- Schema problems explained for the step that has them (`fill step: unknown
+  key "label"`), not a dump of every union branch.
+- Files that do not exist where a run will look (a `preconditions.commands`
+  `cwd` included), and paths that only exist on one machine (`/Users/…`,
+  `/home/…`).
+- A cold start satisfied only by `echo` preconditions.
+- Script verifier fixture keys the verifier's contract does not list, and
+  required ones that are missing.
+- Literal secrets: a known secret value or a credential var is an error. A
+  literal typed into a field whose name sounds like a credential (Password,
+  API key, PIN) is a warning, since the input type is not in the spec: write
+  a credential as `${secrets.NAME}` or `${env.NAME}`, and keep test data or
+  move it to `${vars.X}`. Fields about a credential ("Token name", "Password
+  hint") are not flagged.
+- `eval` bodies a typed step does better: `location.assign` → `open`, a
+  login `fetch` → `request` or the login action, `.click()` → `click`, a
+  value setter → `fill`, a polling loop → `wait` or `click.until`.
+- Placeholders that would reach a shell literally (`${requests.x}` in a
+  precondition), missing step ids, and `${vars.X}` that do not resolve in
+  each `--env`.
+
+`--fix` only applies edits that cannot change what the spec does: it writes
+only when the edited file parses to the same document plus the quoted values
+or new ids, and it leaves step ids alone in a file that uses YAML anchors or
+aliases. Comments and quoting elsewhere stay byte-identical, and each
+finding's `fix.applied` says whether it was written. Exit 4 when any finding
+is an error.
+
+## Finish, then promote
+
+`cairn spec finish` is the done-check:
+
+```bash
+cairn spec finish flows/_drafts/profile_website_saved.yml --env local --json
+```
+
+It lints (errors stop here), runs the spec from a cold browser through the
+same engine as `cairn run` (config, vars, scoped secrets, services — a
+`cairn services up` stack is reused), stamps the contract hash when the run is
+green, and returns the run directory, the report and a summary of
+`agent_context.md` with what to do next. It takes the run flags that matter
+for a cold start: `--no-web-server` when you already run the dev server (a
+cold start otherwise boots the config `webServer` fresh and refuses a busy
+port), `--no-services`, `--artifact-root`, `--provider` and `--device`.
+
+`--mock` (or `--backend mock`) checks that the spec parses and its steps
+replay, but no browser touches the app: the result says so, and promotion
+does not accept a mock finish without `--force`.
+
+Drafts live in the drafts directory (config `authoring.draftsDir`, default
+`flows/_drafts`; the folder name must start with `_`). `cairn run <dir>` skips
+every folder and file whose name starts with `_`, so a draft never joins a
+suite by accident; `--select-only` lists them under `skipped`, and a run notes
+how many it left out. When the human has reviewed it:
+
+```bash
+cairn spec promote flows/_drafts/profile_website_saved.yml --json
+```
+
+moves it out (to `flows/` by default, or `--to`), rewrites its relative
+imports and file paths (eval and transform files, eval host files next to the
+draft, upload paths, script verifiers, precondition `cwd`s), stamps the
+contract and returns `{from, to, intent, outcomes, contractHash}`. A
+precondition command without a `cwd` runs in the spec's folder, so promote
+warns that the folder changed. If the promoted copy would point at a file
+that does not exist, promote removes it again and keeps the draft. Promotion
+requires a green finish of the exact content being promoted, on a real
+backend (`--force` overrides, and says so); it never replaces an existing
+spec.
+
+[Author a spec from a request](/author-flow) walks through the whole path,
+from a few sentences to a promoted spec.
+
 ## A checklist before you call a spec done
 
 - `cairn explain --format json` — surface-level sanity check.
 - `cairn docs <topic> --format json` for focused authoring reminders.
-- `cairn spec verify my-spec.yml --format json` — schema, contract hash, dead links.
-- `cairn run my-spec.yml --cold-start --format json` — single golden run from a fresh browser.
+- `cairn catalog --query "<words>" --format json` — reuse the project's actions and vars instead of re-recording literals.
+- `cairn spec lint my-spec.yml --format json` — fix-its before anything runs.
+- `cairn spec verify my-spec.yml --format json` — schema, contract hash, dead links, missing files, and the environments the spec may run in (`--env <name>` to check one).
+- `cairn spec finish my-spec.yml --format json` — lint, one golden run from a fresh browser, stamp when green. (`cairn run my-spec.yml --cold-start --format json` is the run on its own.)
 - `cairn docs snippets --format md` — to lift reusable `actions/*.yml` files.
 
-If `cairn run` passes once on `cold-start`, paste the harness command into your project README. The next agent that touches that flow will thank you.
+If `cairn spec finish` is green, paste the command into your project README. The next agent that touches that flow will thank you.
 
 ## When locators will not replay
 

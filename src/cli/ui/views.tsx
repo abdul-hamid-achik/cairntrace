@@ -46,10 +46,16 @@ function Duration({ ms }: { ms?: number }) {
   return ms === undefined ? null : <Text dimColor> {formatDuration(ms)}</Text>;
 }
 
-function RowLine({ id, status, startedAt, durationMs, error }: Row) {
+function RowLine({ id, status, startedAt, durationMs, error, detail }: Row) {
   const elapsed = useElapsed(startedAt);
   if (status === "running") {
-    return <Spinner label={`${id} ${formatDuration(elapsed)}`} />;
+    return (
+      <Spinner
+        label={`${id} ${formatDuration(elapsed)}${
+          detail ? ` · ${truncate(detail, 100)}` : ""
+        }`}
+      />
+    );
   }
   return (
     <StatusLine status={status}>
@@ -189,7 +195,13 @@ function RunView({ state }: { state: TuiState }) {
 function OutcomeLine({ outcome }: { outcome: OutcomeRow }) {
   const elapsed = useElapsed(outcome.startedAt);
   if (outcome.status === "running") {
-    return <Spinner label={`${outcome.id} ${formatDuration(elapsed)}`} />;
+    return (
+      <Spinner
+        label={`${outcome.id} ${formatDuration(elapsed)}${
+          outcome.detail ? ` · ${truncate(outcome.detail, 100)}` : ""
+        }`}
+      />
+    );
   }
   return (
     <StatusLine status={outcome.status}>
@@ -242,12 +254,23 @@ function BatchSummaryView({ state }: { state: TuiState }) {
     (r) => r.status === "failed" || r.status === "errored",
   );
   const hasFailures = summary.failed + summary.errored > 0;
-  const banner = `${summary.passed}/${summary.total} passed  ${summary.failed} failed  ${summary.errored} errored  in ${formatDuration(summary.durationMs)}`;
+  // Every spec refused (exit 7): nothing ran, which is not a green run.
+  const allRefused =
+    (summary.refused ?? 0) > 0 && summary.refused === summary.total;
+  const banner = `${summary.passed}/${summary.total} passed  ${summary.failed} failed  ${summary.errored} errored${
+    summary.refused ? `  ${summary.refused} refused` : ""
+  }  in ${formatDuration(summary.durationMs)}`;
   return (
     <Box flexDirection="column" marginTop={1}>
       <Text
         bold
-        color={hasFailures ? STATUS_COLOR.failed : STATUS_COLOR.passed}
+        color={
+          hasFailures
+            ? STATUS_COLOR.failed
+            : allRefused
+              ? STATUS_COLOR.warn
+              : STATUS_COLOR.passed
+        }
       >
         {banner}
       </Text>

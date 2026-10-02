@@ -1,22 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { execa } from "execa";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  resolve as resolvePath,
-} from "node:path";
-import { parse as parseYaml, stringify as yamlStringify } from "yaml";
+import { basename, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { stringify as yamlStringify } from "yaml";
 import { z } from "zod";
-import { AgentBrowserAdapter } from "../adapters/agent-browser/AgentBrowserAdapter";
-import { MockBrowserBackend } from "../adapters/mock/MockBrowserBackend";
-import { type ClipOptions } from "../cli/commands/clip";
-import { resolveDiscoverUrl } from "../cli/commands/discover";
-import { resolveSnapshotUrl } from "../cli/commands/snapshot";
+import { type ClipOptions, stashClipRun } from "../cli/commands/clip";
+import { resolveSnapshotTarget } from "../cli/commands/snapshot";
+import { redactBrowseUrl } from "../core/discovery/browseTarget";
 import { buildDocs, docsToMarkdown } from "../cli/commands/docs";
-import { resolvePlaywrightChecks } from "../cli/commands/doctor";
+import {
+  resolveFcheapChecks,
+  resolvePlaywrightChecks,
+} from "../cli/commands/doctor";
 import { buildExplain } from "../cli/commands/explain";
 import {
   auditResultExitCode,
@@ -26,62 +21,69 @@ import {
 import { validateConfigFile } from "../cli/commands/config/validate";
 import {
   isFcheapAvailable,
-  stashDirectory,
+  loadStashConfig,
+  parseIncludeFlag,
+  stashRunDirectory,
   stashTagsForRun,
 } from "../cli/commands/stash";
+import { pinRunRef, unpinRunRef } from "../cli/commands/pin";
+import { runWait } from "../cli/commands/wait";
+import {
+  fixturesMarkdown,
+  runFixtures,
+  type FixturesAction,
+  type FixturesRequest,
+} from "../cli/commands/fixtures";
+import { publishRunRef } from "../cli/commands/publishCommand";
+import { EvidenceCategorySchema } from "../core/schema/config.v1";
 import {
   parseFcheapInfoOutput,
   parseFcheapListOutput,
   parseFcheapRestoreOutput,
   parseFcheapSearchOutput,
 } from "../cli/commands/fcheapContract";
-import { resolveFcheapBinary, runFcheap } from "../cli/commands/fcheapClient";
-import { getTvaultKeys, resolveScopedSecrets } from "../cli/commands/secrets";
-import { parseVarFlags, selectSpecsByBlastRadius } from "../cli/commands/run";
+import { runFcheap } from "../cli/commands/fcheapClient";
+import { getTvaultKeys } from "../cli/commands/secrets";
+import { backendOpts, parseVarFlags } from "../cli/commands/run";
+import { RunInvocationRegistry } from "../cli/invocation/registry";
+import { environmentLockKey } from "../cli/invocation/lifecycle";
+import { resolveServicesConfigPath } from "../cli/commands/services/target";
+import { registerRunTools } from "./runTools";
+import { registerCatalogTools } from "./catalogTools";
+import { registerAuthoringTools } from "./authoringTools";
 import { randomUUID } from "node:crypto";
 import {
   resolveArtifactRoot,
   resolveRunRef,
   type ArtifactRootOptions,
 } from "../cli/runRefs";
+import { checkpointRow } from "../cli/commands/checkpoint/list";
+import { checkpointMetaFor } from "../cli/commands/checkpoint/scope";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
-import { coldStartLint } from "../core/coldStart";
-import { resolveSpecRuntimeContext } from "../core/config/runtimeContext";
+import { parseTtlMs } from "../core/checkpoint/meta";
 import {
   captureCheckpoint,
   closeAllSessions,
-  closeSession,
-  captureSnapshot,
-  getExportableSteps,
-  getInventory,
-  interact,
-  navigate,
-  openSession,
+  endAllJournalsSync,
   sweepSessions,
   type SessionRegistry,
 } from "../core/discovery/DiscoverySession";
-import { buildSpecYaml, deriveSpecName } from "../core/discovery/specExporter";
-import { toHealResult } from "../cli/commands/spec/heal";
-import { stampSpecContractHash } from "../cli/commands/spec/verify";
+import { registerDiscoveryTools } from "./discoveryTools";
+import {
+  healErrorExitCode,
+  resolveHealRuntime,
+  toHealResult,
+} from "../cli/commands/spec/heal";
+import { stampSpecContractHash, verifySpec } from "../cli/commands/spec/verify";
 import { createBackend } from "../cli/backendFactory";
 import {
-  chooseAccompany,
   closeAllAccompany,
-  closeAccompany,
-  listAccompany,
-  locatorFromSnapshotRef,
-  openAccompany,
-  statusAccompany,
   sweepExpiredAccompany,
   terminateAllAccompanySync,
 } from "../core/accompany/AccompanySession";
-import { renderBriefStepMarkdown } from "../core/exporters/briefExporter";
 import { exportOneBrief } from "../cli/commands/exportBrief";
-import type { Locator } from "../core/schema/spec.v1";
 import { healSpec, healVerify } from "../core/healer/Healer";
 import { collectLocatorInventory } from "../core/snapshot/locatorInventory";
-import { parseSpec } from "../core/parser/parseSpec";
-import { runSpec } from "../core/runner/Runner";
 import { createArtifactRedactor } from "../core/artifacts/redaction";
 import { DocsResultSchema, DocsTopicSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
@@ -90,26 +92,16 @@ import { AuditResultSchema } from "../core/schema/audit.v1";
 import { InvestigateResultSchema } from "../core/schema/investigate.v1";
 import {
   ConfigValidateResultSchema,
-  DiscoveryActionResultSchema,
-  DiscoveryExportResultSchema,
-  DiscoveryInventoryResultSchema,
-  DiscoveryListResultSchema,
-  DiscoveryOpenResultSchema,
-  DiscoverySnapshotResultSchema,
-  DiscoverySuggestResultSchema,
   ServicesStatusResultSchema,
   StashInfoResultSchema,
   StashRestoreResultSchema,
   StashToolErrorSchema,
 } from "../core/schema/mcp.v1";
-import {
-  buildRunNextActions,
-  RunResultSchema,
-  type RunResult,
-} from "../core/schema/run.v1";
-import { LocatorSchema, SpecSchema } from "../core/schema/spec.v1";
-import { VerifierSchema } from "../core/schema/verifier.v1";
 import { SafeStashIdSchema } from "../core/schema/stash.v1";
+import {
+  ServicesDownResultSchema,
+  ServicesUpResultSchema,
+} from "../core/schema/services.v1";
 import { CAIRN_VERSION as VERSION } from "../cli/version";
 
 function stashMcpError(input: z.input<typeof StashToolErrorSchema>): {
@@ -131,24 +123,6 @@ function stashMcpError(input: z.input<typeof StashToolErrorSchema>): {
   };
 }
 
-function locatorFromAccompanyRef(
-  sessionId: string,
-  ref: string | undefined,
-): Locator {
-  if (!ref) {
-    throw new Error("accompany choose needs locator or ref");
-  }
-  const handle = statusAccompany(sessionId);
-  if (!handle?.lastSnapshot) {
-    throw new Error(`snapshot ref ${ref} not found in session ${sessionId}`);
-  }
-  try {
-    return locatorFromSnapshotRef(handle.lastSnapshot, ref, handle.backend);
-  } catch {
-    throw new Error(`snapshot ref ${ref} not found in session ${sessionId}`);
-  }
-}
-
 /**
  * Build a Cairntrace MCP server. The CLI's `cairn mcp` subcommand connects this
  * to an stdio transport so MCP-aware agents (Claude Code, Cursor, Windsurf) can
@@ -157,8 +131,71 @@ function locatorFromAccompanyRef(
  * Tools mirror the CLI surface but return JSON-typed `structuredContent`
  * alongside short text summaries for the agent's chat-side rendering.
  */
-export function buildMcpServer(): McpServer {
+export interface McpServerOptions {
+  /**
+   * Accept `cairn_run` before/after hooks (arbitrary shell). Off unless
+   * `cairn mcp --allow-hooks` or `CAIRN_MCP_ALLOW_HOOKS=1`.
+   */
+  allowHooks?: boolean;
+  /**
+   * Let MCP tools start config services (docker/seed/tmux) and run their
+   * teardown: cairn_run, cairn_spec_finish and cairn_audit without
+   * noServices / reuseServices, cairn_services_up and cairn_services_down.
+   * Off unless `cairn mcp --allow-services` or `CAIRN_MCP_ALLOW_SERVICES=1`.
+   */
+  allowServices?: boolean;
+}
+
+/** A services tool this server may not run, and how to get past it. */
+function servicesToolRefusal(
+  tool: string,
+  action: string,
+): { content: Array<{ type: "text"; text: string }>; isError: true } {
+  return {
+    content: [
+      {
+        type: "text",
+        text:
+          `${tool} refused: this MCP server does not ${action} config services ` +
+          "(they can be remote or billable, and their teardown runs shell). " +
+          "Run `cairn services up|down` from a shell, or restart the server as " +
+          "`cairn mcp --allow-services` (or with CAIRN_MCP_ALLOW_SERVICES=1).",
+      },
+    ],
+    isError: true,
+  };
+}
+
+/** MCP result of a `cairn fixtures` action (F3b). */
+function fixturesToolResult(result: Awaited<ReturnType<typeof runFixtures>>) {
+  return {
+    content: [{ type: "text" as const, text: fixturesMarkdown(result) }],
+    structuredContent: { ...result },
+    ...(result.ok ? {} : { isError: true }),
+  };
+}
+
+const FIXTURES_SCHEMA_NOTE =
+  "Returns urn:cairntrace.dev:fixtures:v1 {action, ok, exitCode (0 ok incl. dry-run, 1 a verb failed, 2 error, 4 invalid input), project, env, writes (allowed | dry-run), writesReason?, …, warnings, error?}.";
+
+function runFixturesTool(
+  action: FixturesAction,
+  input: Omit<FixturesRequest, "action">,
+  signal: AbortSignal,
+): ReturnType<typeof runFixtures> {
+  return runFixtures({ ...input, action, signal });
+}
+
+export function buildMcpServer(options: McpServerOptions = {}): McpServer {
   const server = new McpServer({ name: "cairntrace", version: VERSION });
+  const allowHooks =
+    options.allowHooks === true || process.env.CAIRN_MCP_ALLOW_HOOKS === "1";
+  const allowServices =
+    options.allowServices === true ||
+    process.env.CAIRN_MCP_ALLOW_SERVICES === "1";
+  // cairn_run invocations (sync and background) outlive single tool calls;
+  // shutdown aborts them gracefully, process exit kills them synchronously.
+  const runInvocations = new RunInvocationRegistry();
 
   server.registerTool(
     "cairn_explain",
@@ -248,118 +285,18 @@ export function buildMcpServer(): McpServer {
     },
   );
 
-  server.registerTool(
-    "cairn_run",
-    {
-      title: "Run a behavioral spec",
-      description:
-        "Execute a Cairntrace spec end-to-end. Returns the structured RunResult " +
-        "(v1 schema). When mock=true, uses the in-memory backend (fast smoke).",
-      inputSchema: {
-        path: z.string().describe("Path to the spec YAML"),
-        env: z.string().optional().describe("Environment name override"),
-        mock: z.boolean().optional().describe("Use mock backend"),
-        backend: z
-          .enum(["agent-browser", "playwright", "mock"])
-          .optional()
-          .describe(
-            "Browser backend (default agent-browser; playwright enables native traces/video/HAR)",
-          ),
-        coldStart: z
-          .boolean()
-          .optional()
-          .describe("Wipe browser state before steps"),
-        artifactRoot: z
-          .string()
-          .optional()
-          .describe("Override run artifact root directory"),
-        labels: z
-          .record(z.string(), z.string())
-          .optional()
-          .describe(
-            "Free-form cohort labels stamped into run.json (e.g. { path: 'next', suite: 'ab' })",
-          ),
-        since: z
-          .string()
-          .optional()
-          .describe(
-            "git ref for `codemap review --since <ref>` impact-driven " +
-              "selection: skip the run unless the spec's coversSymbol " +
-              "intersects the blast radius (degrades to running when " +
-              "codemap is absent)",
-          ),
-      },
-    },
-    async ({
-      path,
-      env,
-      mock,
-      backend: backendChoice,
-      coldStart,
-      artifactRoot,
-      labels,
-      since,
-    }) => {
-      // `since` (FEATURES item 1): impact-driven selection. Skip the run unless
-      // the spec's coversSymbol intersects `codemap review --since <ref>`
-      // blast radius. Degrades to running when codemap is absent.
-      if (since) {
-        const selected = await selectSpecsByBlastRadius([path], since);
-        if (!selected.includes(path)) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `skipped: ${path} not in blast radius of ${since} (--since-codemap)`,
-              },
-            ],
-            structuredContent: {
-              status: "skipped",
-              reason: "not_in_blast_radius",
-              since,
-              path,
-            },
-            isError: false,
-          };
-        }
-      }
-      const backend = createBackend({
-        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
-        mock,
-        session: `cairntrace-mcp-${process.pid}`,
-      });
-      try {
-        const scopedSecrets = await resolveScopedSecrets(
-          path,
-          env !== undefined ? { environmentOverride: env } : undefined,
-        );
-        const result = await runSpec({
-          specPath: path,
-          backend,
-          ...(env !== undefined ? { environmentOverride: env } : {}),
-          ...(coldStart !== undefined ? { coldStart } : {}),
-          ...(artifactRoot !== undefined ? { artifactRoot } : {}),
-          ...(labels !== undefined && Object.keys(labels).length > 0
-            ? { labels }
-            : {}),
-          env: scopedSecrets.env,
-          childEnv: scopedSecrets.childEnv,
-          secretValues: scopedSecrets.secretValues,
-          selectedTvaultKeys: scopedSecrets.selectedKeys,
-        });
-        return {
-          content: [{ type: "text", text: summarizeRun(result) }],
-          structuredContent: RunResultSchema.parse({
-            ...result,
-            nextActions: buildRunNextActions(result),
-          }) as unknown as Record<string, unknown>,
-          isError: result.status !== "passed",
-        };
-      } finally {
-        await backend.close().catch(() => undefined);
-      }
-    },
-  );
+  registerRunTools(server, {
+    allowHooks,
+    allowServices,
+    registry: runInvocations,
+  });
+  // cairn_catalog + the cairn://catalog resource (A4).
+  registerCatalogTools(server);
+  // cairn_spec_lint / _finish / _promote + the author-flow prompt (A7/A8).
+  registerAuthoringTools(server, {
+    allowServices,
+    registry: runInvocations,
+  });
 
   server.registerTool(
     "cairn_context",
@@ -420,15 +357,19 @@ export function buildMcpServer(): McpServer {
     {
       title: "One-shot locator inventory for a page",
       description:
-        "Open a URL statelessly (no session) and return the role + data-testid locator " +
-        "inventory for agent-friendly step authoring. Use waitUntil for SPAs so the tree " +
-        "isn't captured pre-hydration. The stateless counterpart to the cairn_discover_* " +
-        "session tools — use this for a single-page inventory, discovery for multi-step exploration.",
+        "Open a URL statelessly (no session) and return the role + test-id locator " +
+        "inventory for agent-friendly step authoring. Test ids are scanned on the " +
+        "config's browser.testIdAttribute (default data-testid). Use waitUntil for SPAs " +
+        "so the tree isn't captured pre-hydration. The stateless counterpart to the " +
+        "cairn_discover_* session tools — use this for a single-page inventory, " +
+        "discovery for multi-step exploration.",
       inputSchema: {
         url: z
           .string()
           .min(1)
-          .describe("Page URL (absolute, or relative to config baseUrl)"),
+          .describe(
+            "Page URL (absolute, or relative to config baseUrl; ${vars.X} placeholders resolve)",
+          ),
         roles: z
           .boolean()
           .optional()
@@ -438,7 +379,9 @@ export function buildMcpServer(): McpServer {
         testids: z
           .boolean()
           .optional()
-          .describe("Include data-testid locators"),
+          .describe(
+            "Include test-id locators (browser.testIdAttribute, default data-testid)",
+          ),
         waitUntil: z
           .enum(["networkidle", "load", "domcontentloaded"])
           .optional()
@@ -456,6 +399,10 @@ export function buildMcpServer(): McpServer {
           .string()
           .optional()
           .describe("Explicit cairntrace.config.yml"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X} in the URL"),
       },
     },
     async ({
@@ -467,17 +414,35 @@ export function buildMcpServer(): McpServer {
       mock,
       backend: backendChoice,
       config,
+      var: varFlags,
     }) => {
+      let target: Awaited<ReturnType<typeof resolveSnapshotTarget>>;
+      try {
+        target = await resolveSnapshotTarget(url, {
+          ...(env !== undefined ? { env } : {}),
+          ...(config !== undefined ? { config } : {}),
+          ...(varFlags !== undefined ? { var: varFlags } : {}),
+        });
+      } catch (e) {
+        return {
+          content: [
+            { type: "text", text: `snapshot failed: ${(e as Error).message}` },
+          ],
+          isError: true,
+        };
+      }
       const be = createBackend({
-        ...(mock !== undefined ? { mock } : {}),
-        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+        ...backendOpts(
+          {
+            ...(mock !== undefined ? { mock } : {}),
+            ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+          },
+          target.browser,
+        ),
         session: `cairntrace-snapshot-${process.pid}`,
       });
       try {
-        const resolvedUrl = await resolveSnapshotUrl(url, {
-          ...(env !== undefined ? { env } : {}),
-          ...(config !== undefined ? { config } : {}),
-        });
+        const resolvedUrl = target.url;
         const openStep =
           waitUntil !== undefined
             ? { open: { path: resolvedUrl, waitUntil } }
@@ -488,7 +453,7 @@ export function buildMcpServer(): McpServer {
             content: [
               {
                 type: "text",
-                text: `snapshot open failed: ${opened.stderr || opened.stdout || "unknown error"}`,
+                text: `snapshot open failed: ${redactBrowseUrl(target, opened.stderr || opened.stdout || "unknown error")}`,
               },
             ],
             isError: true,
@@ -499,8 +464,15 @@ export function buildMcpServer(): McpServer {
         const inventory = await collectLocatorInventory(be, {
           roles: includeRoles,
           testids: includeTestIds,
+          ...(target.testIdAttribute
+            ? { testIdAttribute: target.testIdAttribute }
+            : {}),
         });
-        const finalUrl = await be.getUrl().catch(() => resolvedUrl);
+        // The page URL can still carry a secret the opened URL had.
+        const finalUrl = redactBrowseUrl(
+          target,
+          await be.getUrl().catch(() => resolvedUrl),
+        );
         return {
           content: [
             {
@@ -515,6 +487,9 @@ export function buildMcpServer(): McpServer {
             url: finalUrl,
             backend: be.name,
             ...inventory,
+            ...(target.warnings.length > 0
+              ? { warnings: target.warnings }
+              : {}),
           },
         };
       } catch (e) {
@@ -559,17 +534,26 @@ export function buildMcpServer(): McpServer {
     {
       title: "Verify a spec",
       description:
-        "Lint the spec. With stamp=true, write a fresh contractHash into the file.",
+        "Lint the spec exactly like `cairn spec verify`: resolve config/env/vars, " +
+        "parse + validate (imports included), report stamp and cold-start " +
+        "warnings, and run the static placeholder reference audit (an " +
+        "`${env.X}` without a default or a `${secrets.X}` outside " +
+        "secrets.required makes the spec invalid, exit 4). " +
+        "With stamp=true, write a fresh contractHash into the file.",
       inputSchema: {
         path: z.string(),
         stamp: z.boolean().optional(),
         env: z.string().optional().describe("Environment name override"),
         config: z.string().optional().describe("Explicit config path"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X}"),
       },
     },
-    async ({ path, stamp, env, config }) => {
-      try {
-        if (stamp) {
+    async ({ path, stamp, env, config, var: varFlags }) => {
+      if (stamp) {
+        try {
           // Route through the same Document-API stamp the CLI uses so inline
           // comments/quoting are preserved (a full re-serialize strips them).
           const hash = await stampSpecContractHash(path);
@@ -577,52 +561,81 @@ export function buildMcpServer(): McpServer {
             content: [{ type: "text", text: `Stamped contractHash: ${hash}` }],
             structuredContent: { status: "stamped", contractHash: hash, path },
           };
+        } catch (e) {
+          return {
+            content: [
+              { type: "text", text: `invalid: ${(e as Error).message}` },
+            ],
+            isError: true,
+          };
         }
-        const runtime = await resolveSpecRuntimeContext(path, {
-          ...(env !== undefined ? { envOverride: env } : {}),
-          ...(config !== undefined ? { configPath: config } : {}),
-        });
-        const r = await parseSpec(path, {
-          vars: runtime.vars,
-          ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
-        });
-        // Surface the same cold-start + stamp signals `cairn spec verify`
-        // reports, so an agent doesn't mistake a parseable spec for one that
-        // replays from a fresh browser.
-        const warnings: string[] = [];
-        const coldStartWarning = coldStartLint(r.spec);
-        if (coldStartWarning) warnings.push(coldStartWarning);
-        if (!r.spec.contractHash) {
-          warnings.push(
-            "spec has no contractHash; call with stamp=true to lock it",
-          );
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `valid: ${path}\n` +
-                `contractHash: ${r.spec.contractHash ?? "(not stamped)"}` +
-                (warnings.length > 0
-                  ? `\nwarnings: ${warnings.join("; ")}`
-                  : ""),
-            },
-          ],
-          structuredContent: {
-            status: "valid",
-            path,
-            contractHash: r.spec.contractHash,
-            coldStartSatisfied: coldStartWarning === undefined,
-            ...(warnings.length > 0 ? { warnings } : {}),
-          },
-        };
+      }
+      let vars: Record<string, string>;
+      try {
+        vars = parseVarFlags(varFlags);
       } catch (e) {
         return {
           content: [{ type: "text", text: `invalid: ${(e as Error).message}` }],
           isError: true,
         };
       }
+      // The one verify code path shared with `cairn spec verify`, so MCP and
+      // CLI agree on validity (reference audit included).
+      const { result, exitCode } = await verifySpec(path, {
+        ...(env !== undefined ? { env } : {}),
+        ...(config !== undefined ? { config } : {}),
+        vars,
+        stampHint: "call with stamp=true",
+      });
+      const structuredContent = {
+        status: result.status,
+        path,
+        contractHash: result.contractHash,
+        ...(result.coldStartSatisfied !== undefined
+          ? { coldStartSatisfied: result.coldStartSatisfied }
+          : {}),
+        ...(result.referenceFindings !== undefined
+          ? { referenceFindings: result.referenceFindings }
+          : {}),
+        // Same structured fields as `cairn spec verify --json`: env-policy,
+        // file-reference and checkpoint findings, and where the spec may run.
+        ...(result.findings !== undefined ? { findings: result.findings } : {}),
+        ...(result.environment !== undefined
+          ? { environment: result.environment }
+          : {}),
+        ...(result.environments !== undefined
+          ? { environments: result.environments }
+          : {}),
+        ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+        ...(result.errors.length > 0 ? { errors: result.errors } : {}),
+        exitCode,
+      };
+      if (exitCode !== 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `invalid: ${result.errors.join("; ")}`,
+            },
+          ],
+          structuredContent,
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `valid: ${path}\n` +
+              `contractHash: ${result.contractHash ?? "(not stamped)"}` +
+              (result.warnings.length > 0
+                ? `\nwarnings: ${result.warnings.join("; ")}`
+                : ""),
+          },
+        ],
+        structuredContent,
+      };
     },
   );
 
@@ -646,17 +659,56 @@ export function buildMcpServer(): McpServer {
           .enum(["agent-browser", "playwright", "mock"])
           .optional()
           .describe("Browser backend (default agent-browser)"),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment name override (same as `cairn run --env`)"),
+        config: z.string().optional().describe("Explicit config path"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("Repeatable key=value overrides for ${vars.X}"),
       },
     },
-    async ({ path, apply, verify, mock, backend: backendChoice }) => {
+    async ({
+      path,
+      apply,
+      verify,
+      mock,
+      backend: backendChoice,
+      env,
+      config,
+      var: varFlags,
+    }) => {
+      // Same config/env/var resolution as `cairn spec heal` / `cairn run`;
+      // an unknown explicit env fails here, before a browser starts.
+      let resolved: Awaited<ReturnType<typeof resolveHealRuntime>>;
+      try {
+        resolved = await resolveHealRuntime(path, {
+          ...(env !== undefined ? { env } : {}),
+          ...(config !== undefined ? { config } : {}),
+          ...(varFlags !== undefined ? { var: varFlags } : {}),
+        });
+      } catch (e) {
+        return healFailure(e as Error);
+      }
       const backend = createBackend({
-        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
-        mock,
+        ...backendOpts(
+          {
+            ...(mock !== undefined ? { mock } : {}),
+            ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
+          },
+          resolved.browser,
+        ),
         session: `cairntrace-mcp-heal-${process.pid}`,
       });
       try {
         if (verify) {
-          const vr = await healVerify({ specPath: path, backend });
+          const vr = await healVerify({
+            specPath: path,
+            backend,
+            ...resolved.runtime,
+          });
           return {
             content: [
               {
@@ -684,6 +736,7 @@ export function buildMcpServer(): McpServer {
           specPath: path,
           backend,
           ...(apply !== undefined ? { apply } : {}),
+          ...resolved.runtime,
         });
         return {
           content: [
@@ -707,6 +760,10 @@ export function buildMcpServer(): McpServer {
           ) as unknown as Record<string, unknown>,
           isError: out.status === "no-heal-possible",
         };
+      } catch (e) {
+        // Same exit codes as `cairn spec heal`: a spec the environment
+        // policy refuses is exit 7 (heal never ran it), a changed contract 6.
+        return healFailure(e as Error);
       } finally {
         await backend.close().catch(() => undefined);
       }
@@ -718,7 +775,7 @@ export function buildMcpServer(): McpServer {
     {
       title: "List saved checkpoints",
       description:
-        "Returns named checkpoints at ~/.cairntrace/checkpoints/ (sorted by mtime desc).",
+        "Returns named checkpoints at ~/.cairntrace/checkpoints/ (sorted by mtime desc), like `cairn checkpoint list --json`: each with health (ok | expired | unscoped), staleMeta when the scope sidecar no longer matches the state file, and env/baseUrl/createdAt/ttl/expiresAt when the capture recorded them. A run refuses a missing, expired or other-origin checkpoint (failure.phase session).",
       inputSchema: {},
     },
     async () => {
@@ -732,21 +789,29 @@ export function buildMcpServer(): McpServer {
               list.length === 0
                 ? "(no checkpoints)"
                 : list
-                    .map(
-                      (c) =>
-                        `- ${c.name} — ${(c.sizeBytes / 1024).toFixed(1)} KB — ${c.modifiedAt.toISOString()}`,
-                    )
+                    .map((c) => {
+                      const scope = [
+                        c.meta?.env ? `env ${c.meta.env}` : undefined,
+                        c.meta?.baseUrl,
+                        c.meta?.expiresAt
+                          ? `expires ${c.meta.expiresAt}`
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(", ");
+                      return `- ${c.name} — ${c.health}${
+                        c.staleMeta ? " (stale scope ignored)" : ""
+                      } — ${(c.sizeBytes / 1024).toFixed(1)} KB — ${c.modifiedAt.toISOString()}${
+                        scope ? ` — ${scope}` : ""
+                      }`;
+                    })
                     .join("\n"),
           },
         ],
+        // The same rows as `cairn checkpoint list --json`.
         structuredContent: {
           root: store.root,
-          checkpoints: list.map((c) => ({
-            name: c.name,
-            path: c.path,
-            sizeBytes: c.sizeBytes,
-            modifiedAt: c.modifiedAt.toISOString(),
-          })),
+          checkpoints: list.map(checkpointRow),
         },
       };
     },
@@ -757,7 +822,7 @@ export function buildMcpServer(): McpServer {
     {
       title: "Inspect a saved checkpoint",
       description:
-        "Return the metadata + first 400 bytes of a named checkpoint file.",
+        "Return the metadata (health, staleMeta, scope meta) + first 400 bytes of a named checkpoint file, like `cairn checkpoint show --json`.",
       inputSchema: {
         name: z
           .string()
@@ -779,15 +844,33 @@ export function buildMcpServer(): McpServer {
           {
             type: "text",
             text:
-              `${summary.name} — ${(summary.sizeBytes / 1024).toFixed(1)} KB — ${summary.modifiedAt.toISOString()}\n` +
-              `${summary.path}\n\n${summary.preview}`,
+              `${summary.name} — ${summary.health}${
+                summary.staleMeta
+                  ? " (stale scope ignored: the state was rewritten after it)"
+                  : ""
+              } — ${(summary.sizeBytes / 1024).toFixed(1)} KB — ${summary.modifiedAt.toISOString()}\n` +
+              `${summary.path}\n` +
+              (summary.meta
+                ? `scope: ${summary.meta.baseUrl ?? "(no baseUrl)"}${
+                    summary.meta.env ? ` env ${summary.meta.env}` : ""
+                  }${
+                    summary.meta.expiresAt
+                      ? `, expires ${summary.meta.expiresAt}`
+                      : ""
+                  }\n`
+                : "") +
+              `\n${summary.preview}`,
           },
         ],
+        // The same document as `cairn checkpoint show --json`.
         structuredContent: {
           name: summary.name,
           path: summary.path,
           sizeBytes: summary.sizeBytes,
           modifiedAt: summary.modifiedAt.toISOString(),
+          health: summary.health,
+          ...(summary.staleMeta ? { staleMeta: true } : {}),
+          ...(summary.meta ? { meta: summary.meta } : {}),
           preview: summary.preview,
         },
       };
@@ -832,6 +915,7 @@ export function buildMcpServer(): McpServer {
         "as a named checkpoint at ~/.cairntrace/checkpoints/<name>.json. Log in during " +
         "discovery first, then call this, then reference the checkpoint in the exported " +
         "spec via `session: { resume: <name> }` to satisfy the cold-start contract. " +
+        "Writes scope metadata (<name>.meta.json, like `cairn checkpoint capture-from-session`): the session's environment baseUrl, else the origin of the page it is on, the env when cairn_discover_open named one, and an optional ttl. A run refuses the checkpoint for another origin or once expired. " +
         "Requires a real (non-mock) session.",
       inputSchema: {
         sessionId: z.string().min(1).describe("Discovery session ID"),
@@ -839,9 +923,25 @@ export function buildMcpServer(): McpServer {
           .string()
           .regex(/^[a-z][a-z0-9-_]*$/i)
           .describe("checkpoint name (letters, digits, hyphen, underscore)"),
+        ttl: z
+          .string()
+          .optional()
+          .describe(
+            "Lifetime such as 30m, 12h or 7d; a run refuses the checkpoint afterwards",
+          ),
       },
     },
-    async ({ sessionId, name }) => {
+    async ({ sessionId, name, ttl }) => {
+      if (ttl !== undefined) {
+        try {
+          parseTtlMs(ttl);
+        } catch (e) {
+          return {
+            content: [{ type: "text", text: (e as Error).message }],
+            isError: true,
+          };
+        }
+      }
       const handle = sessions.get(sessionId);
       if (!handle) {
         return {
@@ -876,12 +976,50 @@ export function buildMcpServer(): McpServer {
             isError: true,
           };
         }
+        // Scope it like `cairn checkpoint capture-from-session`: the session's
+        // environment baseUrl, else the origin of the page it is on. Without
+        // this a fresh state would sit next to an older sidecar (stale, so
+        // `unscoped`) or none at all.
+        let meta: ReturnType<typeof checkpointMetaFor> | undefined;
+        let scopeWarning: string | undefined;
+        try {
+          const pageUrl = handle.baseUrl
+            ? undefined
+            : await handle.backend
+                .getUrl()
+                .catch(() => handle.session.currentUrl);
+          const env = handle.runtimeInputs?.env;
+          meta = checkpointMetaFor(
+            name,
+            {
+              ...(env ? { env } : {}),
+              ...(handle.baseUrl ? { envBaseUrl: handle.baseUrl } : {}),
+              ...(ttl !== undefined ? { ttl } : {}),
+            },
+            {
+              ...(pageUrl ? { pageUrl } : {}),
+              capturedBy: "discovery",
+            },
+          );
+          await store.writeMeta(outPath, meta);
+        } catch (e) {
+          meta = undefined;
+          scopeWarning = `checkpoint saved without scope metadata (unscoped): ${
+            (e as Error).message
+          }`;
+        }
         return {
           content: [
             {
               type: "text",
               text:
                 `Checkpoint saved: ${outPath}\n` +
+                (meta
+                  ? `Scope: ${meta.baseUrl ?? "(no baseUrl)"}${
+                      meta.env ? ` env ${meta.env}` : ""
+                    }${meta.expiresAt ? `, expires ${meta.expiresAt}` : ""}\n`
+                  : "") +
+                (scopeWarning ? `Warning: ${scopeWarning}\n` : "") +
                 `Reference it with: session: { resume: ${name} }`,
             },
           ],
@@ -890,6 +1028,18 @@ export function buildMcpServer(): McpServer {
             path: outPath,
             ok: true,
             resumeHint: `session: { resume: ${name} }`,
+            ...(meta
+              ? {
+                  scope: {
+                    ...(meta.baseUrl ? { baseUrl: meta.baseUrl } : {}),
+                    ...(meta.env ? { env: meta.env } : {}),
+                    createdAt: meta.createdAt,
+                    ...(meta.ttl ? { ttl: meta.ttl } : {}),
+                    ...(meta.expiresAt ? { expiresAt: meta.expiresAt } : {}),
+                  },
+                }
+              : {}),
+            ...(scopeWarning ? { warning: scopeWarning } : {}),
           },
         };
       } catch (e) {
@@ -958,7 +1108,8 @@ export function buildMcpServer(): McpServer {
       title: "Check services environment status",
       description:
         "Check the status of the services environment configured in cairntrace.config.yml: " +
-        "docker containers, tmux session windows, and seed freshness. " +
+        "docker containers, tmux session windows, seed freshness, and the `cairn services up` " +
+        "owner lock of the config (owner, env, age, stale for a lock held for this env). " +
         "Returns a ServicesStatusResult with phase statuses and readiness.",
       inputSchema: {
         config: z
@@ -967,32 +1118,206 @@ export function buildMcpServer(): McpServer {
           .describe(
             "Path to cairntrace.config.yml (auto-discovers if omitted)",
           ),
+        env: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Environment (default: config defaultEnvironment, else local)",
+          ),
       },
     },
-    async ({ config }) => {
+    async ({ config, env }) => {
       try {
-        const { getServicesStatus } = await import(
+        const { describeLockReport, getServicesStatus } = await import(
           "../cli/commands/services/status"
         );
-        const result = await getServicesStatus({ config });
+        const result = await getServicesStatus({
+          ...(config !== undefined ? { config } : {}),
+          ...(env !== undefined ? { env } : {}),
+        });
+        const phases = result.docker
+          ? result.tmux?.session
+            ? `docker: ${
+                result.docker.running ? "running" : "stopped"
+              }\ntmux: session=${result.tmux.session} windows=${result.tmux.windows.length} healthy=${result.tmux.windows.every((w: { healthy?: boolean }) => w.healthy !== false)}`
+            : `docker: ${result.docker.running ? "running" : "stopped"}`
+          : result.tmux?.session
+            ? `tmux: session=${result.tmux.session} windows=${result.tmux.windows.length}`
+            : "no services configured";
         return {
           content: [
             {
               type: "text",
-              text: result.docker
-                ? result.tmux?.session
-                  ? `docker: ${
-                      result.docker.running ? "running" : "stopped"
-                    }\ntmux: session=${result.tmux.session} windows=${result.tmux.windows.length} healthy=${result.tmux.windows.every((w: { healthy?: boolean }) => w.healthy !== false)}`
-                  : `docker: ${result.docker.running ? "running" : "stopped"}`
-                : result.tmux?.session
-                  ? `tmux: session=${result.tmux.session} windows=${result.tmux.windows.length}`
-                  : "no services configured",
+              text: result.lock
+                ? `${phases}\nlock: ${describeLockReport(result.lock, result.env)}`
+                : phases,
             },
           ],
           structuredContent: ServicesStatusResultSchema.parse(
             result,
           ) as unknown as Record<string, unknown>,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // `services up` / `down` run under the same per-config environment lock
+  // as cairn_run, so they never fight a run of this server over one stack.
+  const withServicesEnvironment = async <T>(
+    config: string | undefined,
+    signal: AbortSignal | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    const configPath = await resolveServicesConfigPath(
+      config !== undefined ? { config } : {},
+    );
+    if (!configPath) return work();
+    const release = await runInvocations.environmentLock.acquire(
+      environmentLockKey(configPath, process.cwd()),
+      `services-${randomUUID()}`,
+      signal ? { signal } : {},
+    );
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  };
+
+  server.registerTool(
+    "cairn_services_up",
+    {
+      title: "Start the services environment and keep it running",
+      description:
+        "Start the config services (docker → seed → tmux) through the same code path as cairn_run, " +
+        "leave them running, and write the config's owner lock (one per config file, by: mcp). While it exists, " +
+        "cairn_run for that env refuses (exit 4) unless it passes reuseServices: true (readiness check, no " +
+        "start, no teardown, cold browser), and cairn_run of another env of the config refuses. Stop them " +
+        "with cairn_services_down. Waits for a cairn_run of this server that holds the same config. " +
+        "Needs a server started as `cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); without it the tool refuses and starts nothing. " +
+        "Returns the services-up v1 result (phases, lock, redacted events); exit 4 when no config is found, " +
+        "for an unknown env, no services block, or a lock held for another env; 2 for a boot failure or a " +
+        "config path that does not exist.",
+      inputSchema: {
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+        env: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Environment (default: config defaultEnvironment, else local)",
+          ),
+      },
+    },
+    async ({ config, env }, extra) => {
+      if (!allowServices) {
+        return servicesToolRefusal("cairn_services_up", "start");
+      }
+      try {
+        const { servicesUp } = await import("../cli/commands/services/up");
+        const result = await withServicesEnvironment(config, extra.signal, () =>
+          servicesUp({
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+            by: "mcp",
+            signal: extra.signal,
+          }),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `services up: project=${result.project} env=${result.env} ` +
+                  `${Object.entries(result.phases)
+                    .map(([phase, what]) => `${phase}=${what}`)
+                    .join(" ")}\nlock: ${result.lockPath}`
+                : `services up failed (exit ${result.exitCode}): ${result.error ?? "unknown error"}`,
+            },
+          ],
+          structuredContent: ServicesUpResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_services_down",
+    {
+      title: "Tear the services environment down",
+      description:
+        "Full teardown of the config services: the configured teardown commands in order (docker compose " +
+        "down and tmux kill-session when the config lists them; a docker phase no command stops is warned " +
+        "about), then the tmux session if it is still running, and removal of the config's `cairn services " +
+        "up` owner lock. Works without a lock (a stack a run left alive for reuse); exit 4 with nothing torn " +
+        "down while the lock is held for another env. Returns the services-down v1 result; exit 2 when a " +
+        "teardown command failed (the lock is still removed). Needs a server started as " +
+        "`cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); without it the tool refuses and runs no teardown.",
+      inputSchema: {
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+        env: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Environment (default: config defaultEnvironment, else local)",
+          ),
+      },
+    },
+    async ({ config, env }, extra) => {
+      if (!allowServices) {
+        return servicesToolRefusal("cairn_services_down", "tear down");
+      }
+      try {
+        const { servicesDown } = await import("../cli/commands/services/down");
+        const result = await withServicesEnvironment(config, extra.signal, () =>
+          servicesDown({
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+          }),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `services down: project=${result.project} env=${result.env} ` +
+                  `teardown=${result.teardown.length} tmuxKilled=${result.tmuxKilled} lock=${
+                    result.removedLock
+                      ? "removed"
+                      : (result.lockState ?? "none")
+                  }`
+                : `services down incomplete (exit ${result.exitCode}): ${result.error ?? "unknown error"}`,
+            },
+          ],
+          structuredContent: ServicesDownResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
+          isError: !result.ok,
         };
       } catch (e) {
         return {
@@ -1009,13 +1334,22 @@ export function buildMcpServer(): McpServer {
       title: "Stash a run to fcheap",
       description:
         "Save a run directory to the local file.cheap vault for persistence " +
-        "beyond Cairntrace retention and cross-run search. Requires fcheap on $PATH.",
+        "beyond Cairntrace retention and cross-run search. Requires fcheap on $PATH. " +
+        "Same evidence gate as `cairn stash save`: traces, videos and downloads " +
+        "stay local unless `include` (or config stash.include) lists them; the run " +
+        "gains stash-receipt.json and an artifact.stash event (action manual).",
       inputSchema: {
         runId: z.string().min(1).describe("Run id, 'latest', or 'previous'"),
         artifactRoot: z
           .string()
           .optional()
           .describe("Override run artifact root directory"),
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Explicit cairntrace.config.yml (stash.include / meta defaults)",
+          ),
         tag: z.array(z.string()).optional().describe("Tags for this stash"),
         labelsAsTags: z
           .boolean()
@@ -1030,9 +1364,23 @@ export function buildMcpServer(): McpServer {
           .describe(
             "file.cheap time-to-live, e.g. 30d; omitted = never expires",
           ),
+        include: z
+          .array(EvidenceCategorySchema)
+          .optional()
+          .describe(
+            "Evidence categories (text, screenshots, traces, videos, downloads); default config stash.include, else text + screenshots",
+          ),
       },
     },
-    async ({ runId, artifactRoot, tag, labelsAsTags, ttl }) => {
+    async ({
+      runId,
+      artifactRoot,
+      config,
+      tag,
+      labelsAsTags,
+      ttl,
+      include,
+    }) => {
       const available = await isFcheapAvailable();
       if (!available) {
         return {
@@ -1045,15 +1393,25 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-      const root = await resolveArtifactRoot(
-        artifactRoot ? { artifactRoot } : {},
-      );
+      const root = await resolveArtifactRoot({
+        ...(artifactRoot ? { artifactRoot } : {}),
+        ...(config ? { config } : {}),
+      });
       const runDir = await resolveRunRef(runId, root);
       const resolvedRunId = basename(runDir);
-      const saved = await stashDirectory(runDir, {
+      const stashConfig = await loadStashConfig(config);
+      const effectiveInclude =
+        parseIncludeFlag(include) ?? stashConfig?.include;
+      const saved = await stashRunDirectory(runDir, {
+        action: "manual",
         tool: "cairntrace",
         tags: await stashTagsForRun(runDir, tag, labelsAsTags),
         ...(ttl ? { ttl } : {}),
+        ...(effectiveInclude ? { include: effectiveInclude } : {}),
+        ...(stashConfig?.unsafeIncludeRawTraces
+          ? { unsafeIncludeRawTraces: true }
+          : {}),
+        meta: stashConfig?.meta !== false,
       });
       if (!saved.ok || !saved.stashId) {
         return {
@@ -1070,6 +1428,8 @@ export function buildMcpServer(): McpServer {
             ...(saved.stashId ? { stashId: saved.stashId } : {}),
             ...(saved.status ? { status: saved.status } : {}),
             ...(saved.failures?.length ? { failures: saved.failures } : {}),
+            ...(saved.reason ? { reason: saved.reason } : {}),
+            ...(saved.excluded.length > 0 ? { excluded: saved.excluded } : {}),
             error: saved.error ?? "missing stash id",
           },
           isError: true,
@@ -1081,7 +1441,11 @@ export function buildMcpServer(): McpServer {
             type: "text",
             text: saved.warning
               ? `Stashed run ${resolvedRunId} → ${saved.stashId} with post-save failures: ${saved.warning}`
-              : `Stashed run ${resolvedRunId} → ${saved.stashId}`,
+              : `Stashed run ${resolvedRunId} → ${saved.stashId}${
+                  saved.excluded.length > 0
+                    ? ` (left out: ${saved.excluded.join(", ")})`
+                    : ""
+                }`,
           },
         ],
         structuredContent: {
@@ -1092,9 +1456,405 @@ export function buildMcpServer(): McpServer {
           ...(saved.status ? { status: saved.status } : {}),
           ...(saved.failures?.length ? { failures: saved.failures } : {}),
           ...(saved.warning ? { warning: saved.warning } : {}),
+          ...(saved.excluded.length > 0 ? { excluded: saved.excluded } : {}),
+          ...(saved.secretsFound !== undefined
+            ? { secretsFound: saved.secretsFound }
+            : {}),
+          ...(saved.ttl ? { ttl: saved.ttl } : {}),
+          ...(saved.expiresAt ? { expiresAt: saved.expiresAt } : {}),
+          ...(saved.receipt ? { receipt: saved.receipt } : {}),
         },
         ...(saved.warning ? { isError: true } : {}),
       };
+    },
+  );
+
+  server.registerTool(
+    "cairn_pin",
+    {
+      title: "Pin (or unpin) a run",
+      description:
+        "Keep a run past retention: writes run.json pinned {at, reason?}; " +
+        "retention never prunes a pinned run (cairn clean --include-pinned " +
+        "overrides). `stash: true` also saves it to file.cheap with the keep " +
+        "tag and no TTL. `unpin: true` removes the pin. Mirrors cairn pin / cairn unpin.",
+      inputSchema: {
+        runId: z.string().min(1).describe("Run id, 'latest', or 'previous'"),
+        reason: z.string().max(500).optional().describe("Why the run is kept"),
+        stash: z
+          .boolean()
+          .optional()
+          .describe("Also stash it (tag keep, no TTL)"),
+        unpin: z.boolean().optional().describe("Remove the pin instead"),
+        artifactRoot: z
+          .string()
+          .optional()
+          .describe("Override run artifact root directory"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml"),
+      },
+    },
+    async ({ runId, reason, stash, unpin, artifactRoot, config }) => {
+      const where = {
+        ...(artifactRoot ? { artifactRoot } : {}),
+        ...(config ? { config } : {}),
+      };
+      try {
+        const outcome = unpin
+          ? await unpinRunRef(runId, where)
+          : await pinRunRef(runId, {
+              ...where,
+              ...(reason ? { reason } : {}),
+              ...(stash ? { stash: true } : {}),
+            });
+        const stashFailed = outcome.stash !== undefined && !outcome.stash.ok;
+        return {
+          content: [
+            {
+              type: "text",
+              text: outcome.pinned
+                ? `Pinned ${outcome.runId}${
+                    outcome.stash?.ok
+                      ? ` and stashed it → ${outcome.stash.stashId}`
+                      : stashFailed
+                        ? ` (stash failed: ${outcome.stash?.error ?? "unknown"})`
+                        : ""
+                  }`
+                : `${
+                    outcome.changed ? "Unpinned" : "Was not pinned:"
+                  } ${outcome.runId}`,
+            },
+          ],
+          structuredContent: { ...outcome },
+          ...(stashFailed ? { isError: true } : {}),
+        };
+      } catch (error) {
+        return toolError(`cairn_pin: ${(error as Error).message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_wait",
+    {
+      title: "Wait for readiness gates",
+      description:
+        "Wait for typed readiness gates in order, stopping at the first that " +
+        "is not ready — config gates: names (tcp / http with status, json and " +
+        "auth / command; all/any; stable; every; timeout), http(s):// URLs " +
+        "(2xx/3xx unless status or anyResponse) or tcp://host:port. Returns " +
+        "urn:cairntrace.dev:wait:v1 {ok, gates[{name, ok, attempts, " +
+        "durationMs, budgetMs, lastDetail, timedOut?, cancelled?}], exitCode " +
+        "(0 ready, 1 not ready, 2 error, 4 invalid input), error?}. Mirrors " +
+        "cairn wait. Cancelling the request stops the wait; keep timeoutMs " +
+        "below your client's tool timeout.",
+      inputSchema: {
+        targets: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe("Gate names, http(s):// URLs or tcp://host:port, in order"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml (its gates: registry)"),
+        env: z
+          .string()
+          .optional()
+          .describe("Environment whose scoped secrets gates may reference"),
+        status: z
+          .string()
+          .optional()
+          .describe("Accepted statuses for URL targets, e.g. 2xx,401,200-299"),
+        anyResponse: z
+          .boolean()
+          .optional()
+          .describe("URL targets accept any HTTP answer"),
+        timeoutMs: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Override every target's budget (0 = no deadline)"),
+        everyMs: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Override the pause between attempts"),
+        stable: z
+          .number()
+          .int()
+          .min(1)
+          .max(1000)
+          .optional()
+          .describe("Override the consecutive passing attempts required"),
+      },
+    },
+    async (
+      { targets, config, env, status, anyResponse, timeoutMs, everyMs, stable },
+      extra,
+    ) => {
+      const result = await runWait({
+        targets,
+        ...(config !== undefined ? { config } : {}),
+        ...(env !== undefined ? { env } : {}),
+        ...(status !== undefined ? { status } : {}),
+        ...(anyResponse ? { anyResponse: true } : {}),
+        ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
+        ...(everyMs !== undefined ? { every: everyMs } : {}),
+        ...(stable !== undefined ? { stable } : {}),
+        signal: extra.signal,
+      });
+      const lines = result.error
+        ? [`cairn_wait: ${result.error}`]
+        : result.gates.map(
+            (gate) =>
+              `${
+                gate.ok ? "ready" : "NOT READY"
+              } ${gate.name} — ${gate.attempts} attempt(s), ${gate.durationMs}ms: ${gate.lastDetail}`,
+          );
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        structuredContent: { ...result },
+        ...(result.ok ? {} : { isError: true }),
+      };
+    },
+  );
+
+  // F3b: config fixtures registry — one tool per `cairn fixtures` verb.
+  const fixtureScopeInput = {
+    config: z
+      .string()
+      .optional()
+      .describe("Explicit cairntrace.config.yml (its fixtures: registry)"),
+    env: z
+      .string()
+      .optional()
+      .describe(
+        "Environment (datasources, vars, secrets, policy); default: config defaultEnvironment, else local",
+      ),
+  };
+  const fixtureVerbInput = {
+    ...fixtureScopeInput,
+    name: z.string().min(1).describe("Fixture name (config fixtures:)"),
+    with: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Fixture parameters (override the fixture's with: defaults)"),
+    allowWrites: z
+      .boolean()
+      .optional()
+      .describe(
+        "Write on an environment whose policy trait is shared or protected (otherwise the verb is dry-run there; policy.mutations: deny keeps it dry-run regardless)",
+      ),
+  };
+
+  server.registerTool(
+    "cairn_fixtures_list",
+    {
+      title: "List config fixtures",
+      description:
+        "List the config fixtures: registry — name, kind (exec | mongo | http), scope (run | suite | seed), verbs (ensure/reset/verify/teardown), needs, output keys, owner, ttl. Specs reference them as fixtures: [name | name.reset | {use, with, write}] and splice ${fixtures.<name>.<key>}. Mirrors cairn fixtures list. " +
+        FIXTURES_SCHEMA_NOTE,
+      inputSchema: fixtureScopeInput,
+    },
+    async ({ config, env }, extra) =>
+      fixturesToolResult(
+        await runFixturesTool(
+          "list",
+          {
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+          },
+          extra.signal,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "cairn_fixtures_status",
+    {
+      title: "Fixture ledger status",
+      description:
+        "Ledger state of each fixture in the environment (~/.cairntrace/fixtures/<project>.ledger.jsonl): live, expired, failed, torn-down, released or never, with ensuredAt, expiresAt, last verb and recorded outputs (a run-scoped fixture shows its newest open instance and `instances` when several runs left one open); verify: true runs each fixture's read-only verify verb against its recorded outputs. Mirrors cairn fixtures status. " +
+        FIXTURES_SCHEMA_NOTE,
+      inputSchema: {
+        ...fixtureScopeInput,
+        names: z
+          .array(z.string().min(1))
+          .optional()
+          .describe("Only these fixtures (default: all)"),
+        verify: z
+          .boolean()
+          .optional()
+          .describe("Run each recorded fixture's verify verb"),
+      },
+    },
+    async ({ config, env, names, verify }, extra) =>
+      fixturesToolResult(
+        await runFixturesTool(
+          "status",
+          {
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+            ...(names ? { names } : {}),
+            ...(verify ? { verify: true } : {}),
+          },
+          extra.signal,
+        ),
+      ),
+  );
+
+  for (const verb of ["ensure", "reset", "teardown"] as const) {
+    server.registerTool(
+      `cairn_fixtures_${verb}`,
+      {
+        title: `Fixture ${verb}`,
+        description: `${
+          verb === "ensure"
+            ? "Ensure a fixture (its needs first) and record it in the ledger; nothing is torn down afterwards (cairn_fixtures_teardown or cairn_fixtures_sweep does)."
+            : verb === "reset"
+              ? "Ensure a fixture's needs, then run its reset verb."
+              : "Tear a fixture down with the outputs and parameters its ensure recorded in the ledger (every open instance of a run-scoped fixture); a record the ensure found but did not create is left in place."
+        } On an environment whose policy trait is shared or protected the verb is dry-run unless allowWrites; under policy.mutations: deny it is always dry-run. Events in \`events\` (fixture.${verb} {name, adapter, status ok|failed|skipped|dry-run, durationMs, outputs?, error?}). Mirrors cairn fixtures ${verb}. ${FIXTURES_SCHEMA_NOTE}`,
+        inputSchema: fixtureVerbInput,
+      },
+      async ({ config, env, name, with: params, allowWrites }, extra) =>
+        fixturesToolResult(
+          await runFixturesTool(
+            verb,
+            {
+              names: [name],
+              ...(config !== undefined ? { config } : {}),
+              ...(env !== undefined ? { env } : {}),
+              ...(params ? { with: params } : {}),
+              ...(allowWrites ? { allowWrites: true } : {}),
+            },
+            extra.signal,
+          ),
+        ),
+    );
+  }
+
+  server.registerTool(
+    "cairn_fixtures_sweep",
+    {
+      title: "Sweep leftover fixtures",
+      description:
+        "Find fixtures the ledger still shows live or failed in the environment (a crash or a kill skipped their teardown; one row per run instance of a run-scoped fixture) and, with apply: true, tear them down. Skips fixtures whose recording process is still running, those without a teardown verb or no longer in the config, records the ensure found but did not create (skipped-adopted), those younger than olderThan (default 1h; an expired ttl always qualifies) and seed fixtures unless includeSeed; a failed ensure whose teardown needs outputs it never recorded is skipped-no-outputs, and apply releases it from the ledger. Mirrors cairn fixtures sweep. " +
+        FIXTURES_SCHEMA_NOTE,
+      inputSchema: {
+        ...fixtureScopeInput,
+        olderThan: z
+          .string()
+          .optional()
+          .describe("Minimum age: ms or 30m / 2h / 1d (default 1h)"),
+        apply: z
+          .boolean()
+          .optional()
+          .describe("Tear the candidates down (default: report only)"),
+        includeSeed: z
+          .boolean()
+          .optional()
+          .describe("Seed-scoped fixtures too"),
+        allowWrites: z
+          .boolean()
+          .optional()
+          .describe(
+            "Write on an environment whose policy trait is shared or protected",
+          ),
+      },
+    },
+    async (
+      { config, env, olderThan, apply, includeSeed, allowWrites },
+      extra,
+    ) =>
+      fixturesToolResult(
+        await runFixturesTool(
+          "sweep",
+          {
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+            ...(olderThan !== undefined ? { olderThan } : {}),
+            ...(apply ? { apply: true } : {}),
+            ...(includeSeed ? { includeSeed: true } : {}),
+            ...(allowWrites ? { allowWrites: true } : {}),
+          },
+          extra.signal,
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "cairn_publish",
+    {
+      title: "Publish a run to file.cheap",
+      description:
+        "Publish one run to the private file.cheap artifact service (fcheap publish) " +
+        "with a metadata-only RunIndexV1 sidecar, then record publish-receipt.json " +
+        "and an artifact.publish event. Needs FILECHEAP_ARTIFACT_SERVICE_URL and " +
+        "FILECHEAP_INGEST_TOKEN. Same evidence gate as cairn publish (default " +
+        "text + screenshots; secret-bearing members and traces never leave). Mirrors cairn publish.",
+      inputSchema: {
+        runId: z.string().min(1).describe("Run id, 'latest', or 'previous'"),
+        retentionDays: z
+          .number()
+          .int()
+          .min(1)
+          .max(31)
+          .optional()
+          .describe(
+            "Remote retention in days (default config retention.publish.retentionDays, else 7)",
+          ),
+        include: z
+          .array(EvidenceCategorySchema)
+          .optional()
+          .describe(
+            "Evidence categories (default config retention.publish.include, else text + screenshots)",
+          ),
+        artifactRoot: z
+          .string()
+          .optional()
+          .describe("Override run artifact root directory"),
+        config: z
+          .string()
+          .optional()
+          .describe("Explicit cairntrace.config.yml"),
+      },
+    },
+    async ({ runId, retentionDays, include, artifactRoot, config }) => {
+      try {
+        const effectiveInclude = parseIncludeFlag(include);
+        const outcome = await publishRunRef(runId, {
+          ...(artifactRoot ? { artifactRoot } : {}),
+          ...(config ? { config } : {}),
+          ...(retentionDays !== undefined ? { retentionDays } : {}),
+          ...(effectiveInclude ? { include: effectiveInclude } : {}),
+        });
+        const uri =
+          typeof outcome.artifactRef?.uri === "string"
+            ? outcome.artifactRef.uri
+            : undefined;
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                outcome.status === "published"
+                  ? `Published ${outcome.runId}${
+                      uri ? ` → ${uri}` : ""
+                    } (expires ${outcome.expiresAt})`
+                  : `Publish failed (${outcome.reason ?? "unknown"}): ${outcome.error ?? "unknown"}`,
+            },
+          ],
+          structuredContent: { ...outcome },
+          ...(outcome.status === "published" ? {} : { isError: true }),
+        };
+      } catch (error) {
+        return toolError(`cairn_publish: ${(error as Error).message}`);
+      }
     },
   );
 
@@ -1507,10 +2267,10 @@ export function buildMcpServer(): McpServer {
 
       let stashId: string | undefined;
       if (opts.stash) {
-        const stashResult = await stashDirectory(runDir, {
-          tags: [...(opts.tags ?? []), "vidtrace-clip", "mcp"],
-          tool: "cairntrace",
-          source: sourceVideo,
+        // Same gated stash as `cairn clip --stash` (config stash.include).
+        const stashResult = await stashClipRun(runDir, sourceVideo, {
+          ...(opts.tags ? { tags: opts.tags } : {}),
+          extraTags: ["mcp"],
         });
         if (stashResult?.ok && stashResult.stashId) {
           stashId = stashResult.stashId;
@@ -1700,6 +2460,18 @@ export function buildMcpServer(): McpServer {
           .boolean()
           .optional()
           .describe("Clear browser state before running (default: true)"),
+        reuseServices: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run against the services cairn_services_up owns for this config + env (no start, no teardown); without it the audit refuses (exit 4) while that lock exists",
+          ),
+        noServices: z
+          .boolean()
+          .optional()
+          .describe(
+            "Skip the config services lifecycle (the stack is already up). A config whose services would start refuses (exit 4) unless the server runs with --allow-services",
+          ),
       },
       outputSchema: AuditResultSchema,
     },
@@ -1717,6 +2489,9 @@ export function buildMcpServer(): McpServer {
           index: args.index,
           env: args.env,
           coldStart: args.coldStart ?? true,
+          ...(args.reuseServices ? { reuseServices: true } : {}),
+          ...(args.noServices ? { noServices: true } : {}),
+          allowServicesBoot: allowServices,
         }),
       );
       return {
@@ -1950,14 +2725,9 @@ export function buildMcpServer(): McpServer {
 
   /* ----- discovery sessions ----- */
 
+  // Live discovery sessions (tools in ./discoveryTools.ts; each journals to
+  // <artifactRoot>/_sessions/<id>/, which outlives the browser).
   const sessions: SessionRegistry = new Map();
-  // Cap concurrent live browser sessions so a runaway loop can't exhaust
-  // processes / file descriptors by opening sessions without closing them.
-  const MAX_DISCOVERY_SESSIONS = 8;
-  // Counts opens that passed the cap check but haven't registered their session
-  // yet. The cap check and this increment are synchronous (no await between),
-  // so two concurrent opens can't both slip under the cap (TOCTOU).
-  let pendingOpens = 0;
 
   // Auto-sweep expired sessions every 60s
   const sweepTimer = setInterval(() => {
@@ -1988,6 +2758,7 @@ export function buildMcpServer(): McpServer {
     // exits on a signal, so synchronously kill each backend's daemon/browser
     // first — otherwise every open discovery session orphans an agent-browser
     // daemon + Chrome on Ctrl-C. Then best-effort async close for the rest.
+    endAllJournalsSync(sessions);
     for (const handle of sessions.values()) {
       try {
         handle.backend.terminateSync?.();
@@ -2000,9 +2771,11 @@ export function buildMcpServer(): McpServer {
     void closeAllAccompany();
   }
   function onSigint(): void {
+    runInvocations.terminateAllSync("SIGINT");
     shutdownDiscovery();
   }
   function onSigterm(): void {
+    runInvocations.terminateAllSync("SIGTERM");
     shutdownDiscovery();
   }
   // 'exit' covers the cases the signal handlers miss — an uncaught-exception
@@ -2010,6 +2783,8 @@ export function buildMcpServer(): McpServer {
   // terminateSync is, so each daemon is killed instead of orphaned. Idempotent
   // with the signal path (killing an already-dead daemon is a no-op).
   function onExit(): void {
+    runInvocations.terminateAllSync("SIGTERM");
+    endAllJournalsSync(sessions);
     for (const handle of sessions.values()) {
       try {
         handle.backend.terminateSync?.();
@@ -2033,718 +2808,19 @@ export function buildMcpServer(): McpServer {
   // oxlint-disable-next-line unicorn/prefer-add-event-listener
   server.server.onclose = () => {
     disposeSignalState();
+    void runInvocations.shutdown();
     void closeAllSessions(sessions);
     void closeAllAccompany();
     prevOnClose?.();
   };
 
-  server.registerTool(
-    "cairn_discover_open",
-    {
-      title: "Open a discovery session",
-      description:
-        "Create a stateful browser session, navigate to a URL, and return " +
-        "the initial accessibility snapshot + locator inventory. The agent " +
-        "can then interact, navigate, and snapshot within this session before " +
-        "exporting recorded steps as a spec YAML. Use mock=true for fast " +
-        "offline exploration. Close with cairn_discover_close when done.",
-      inputSchema: {
-        url: z.string().min(1).describe("URL or path to navigate to"),
-        env: z
-          .string()
-          .optional()
-          .describe("Environment name for config baseUrl"),
-        mock: z
-          .boolean()
-          .optional()
-          .describe("Use mock backend (no real browser)"),
-        headed: z
-          .boolean()
-          .optional()
-          .describe("Show the browser window (real backends only)"),
-        waitUntil: z
-          .enum(["networkidle", "load", "domcontentloaded"])
-          .optional()
-          .describe("Wait condition after navigation"),
-        sessionName: z
-          .string()
-          .optional()
-          .describe("Custom agent-browser session name"),
-        provider: z
-          .string()
-          .optional()
-          .describe(
-            "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
-          ),
-        device: z
-          .string()
-          .optional()
-          .describe(
-            'iOS device name, e.g. "iPhone 15 Pro" (with provider: ios)',
-          ),
-      },
+  registerDiscoveryTools(server, {
+    sessions,
+    clientName: () => {
+      const info = server.server.getClientVersion();
+      return info ? `${info.name}/${info.version}` : undefined;
     },
-    async ({
-      url,
-      env,
-      mock,
-      headed,
-      waitUntil,
-      sessionName,
-      provider,
-      device,
-    }) => {
-      // Sweep expired sessions first so the cap reflects live sessions only.
-      await sweepSessions(sessions);
-      if (sessions.size + pendingOpens >= MAX_DISCOVERY_SESSIONS) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `too many open discovery sessions (${sessions.size}/${MAX_DISCOVERY_SESSIONS}); close some with cairn_discover_close before opening more`,
-            },
-          ],
-          isError: true,
-        };
-      }
-      // Reserve the slot synchronously — no await between the cap check and
-      // this increment, so a concurrent open can't also pass the check.
-      pendingOpens++;
-      try {
-        // Resolve relative URLs against config baseUrl when env is provided
-        const resolvedUrl = env
-          ? await resolveDiscoverUrl(url, { env }).catch(() => url)
-          : url;
-        const backend = mock
-          ? new MockBrowserBackend()
-          : new AgentBrowserAdapter({
-              session: sessionName ?? `cairntrace-disc-${process.pid}`,
-              ...(headed !== undefined ? { headed } : {}),
-              ...(provider !== undefined ? { provider } : {}),
-              ...(device !== undefined ? { device } : {}),
-            });
-        try {
-          const handle = await openSession(
-            backend,
-            resolvedUrl,
-            waitUntil !== undefined ? { waitUntil } : undefined,
-          );
-
-          // Collect initial inventory (best-effort) before registering.
-          let inventory;
-          try {
-            inventory = await getInventory(handle);
-          } catch {
-            // inventory is best-effort
-          }
-
-          const result = {
-            sessionId: handle.session.id,
-            url: handle.session.currentUrl,
-            snapshot: handle.session.lastSnapshot,
-            ...(inventory ? { inventory } : {}),
-          };
-          // Parse before registering so a schema failure can't leave a dead
-          // handle in the registry counting against the session cap.
-          const structuredContent = DiscoveryOpenResultSchema.parse(result);
-          sessions.set(handle.session.id, handle);
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: [
-                  `Session ${handle.session.id} opened at ${handle.session.currentUrl}`,
-                  `${handle.session.lastSnapshot.length} snapshot elements`,
-                  ...(inventory?.roles
-                    ? [`${inventory.roles.length} role locators`]
-                    : []),
-                  ...(inventory?.testids
-                    ? [`${inventory.testids.length} testid locators`]
-                    : []),
-                  `Use cairn_discover_interact / cairn_discover_snapshot to explore.`,
-                ].join("\n"),
-              },
-            ],
-            structuredContent: structuredContent as unknown as Record<
-              string,
-              unknown
-            >,
-          };
-        } catch (e) {
-          await backend.close().catch(() => undefined);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `discovery open failed: ${(e as Error).message}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-      } finally {
-        pendingOpens--;
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_snapshot",
-    {
-      title: "Capture current page snapshot",
-      description:
-        "Capture the accessibility tree of the current page in a discovery " +
-        "session. Returns structured SnapshotElement[] with role, name, " +
-        "level, and ref for each element.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-      },
-    },
-    async ({ sessionId }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      try {
-        const { snapshot, url } = await captureSnapshot(handle);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Snapshot at ${url}: ${snapshot.length} elements`,
-            },
-          ],
-          structuredContent: DiscoverySnapshotResultSchema.parse({
-            snapshot,
-            url,
-          }) as unknown as Record<string, unknown>,
-        };
-      } catch (e) {
-        return {
-          content: [
-            { type: "text", text: `snapshot failed: ${(e as Error).message}` },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_interact",
-    {
-      title: "Interact with the page in a discovery session",
-      description:
-        "Perform an action (click, fill, hover, type, select, upload, scroll, " +
-        "press) on the current page. The interaction is recorded as a " +
-        "spec-compatible step. Returns the post-interaction snapshot and " +
-        "resolved element. Use cairn_discover_export to write all recorded " +
-        "steps as a spec YAML.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-        action: z
-          .enum([
-            "click",
-            "fill",
-            "hover",
-            "type",
-            "select",
-            "upload",
-            "scroll",
-            "press",
-          ])
-          .describe("Action to perform"),
-        target: z
-          .union([LocatorSchema, z.string().min(1)])
-          .optional()
-          .describe(
-            'Element locator (role/label/text/selector) or CSS selector string. Required for click/fill/hover/type. Optional for scroll. Use a stable locator from cairn_discover_inventory — snapshot @refs (e.g. "@e2") are rejected because they cannot replay.',
-          ),
-        value: z
-          .string()
-          .optional()
-          .describe(
-            "Value for fill/type (text input), press (key name), or select (option value attribute). For scroll, use scrollDirection + scrollPixels instead.",
-          ),
-        label: z
-          .string()
-          .optional()
-          .describe(
-            "select action: the option's visible text (alternative to value; provide exactly one of value | label)",
-          ),
-        path: z
-          .string()
-          .optional()
-          .describe("upload action: the file path to set on the file input"),
-        scrollDirection: z
-          .enum(["up", "down", "left", "right"])
-          .optional()
-          .describe("Scroll direction (scroll action only)"),
-        scrollPixels: z
-          .number()
-          .int()
-          .min(0)
-          .optional()
-          .describe("Pixels to scroll (scroll action only, default 500)"),
-      },
-    },
-    async ({
-      sessionId,
-      action,
-      target,
-      value,
-      label,
-      path,
-      scrollDirection,
-      scrollPixels,
-    }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      try {
-        const result = await interact(handle, {
-          action,
-          ...(target !== undefined ? { target: target as never } : {}),
-          ...(value !== undefined ? { value } : {}),
-          ...(label !== undefined ? { label } : {}),
-          ...(path !== undefined ? { path } : {}),
-          ...(scrollDirection !== undefined ? { scrollDirection } : {}),
-          ...(scrollPixels !== undefined ? { scrollPixels } : {}),
-        });
-        return {
-          content: [
-            {
-              type: "text",
-              text: result.ok
-                ? `${action} ok at ${result.url} (${result.snapshot.length} elements)`
-                : `${action} failed: ${result.error ?? "unknown"}`,
-            },
-          ],
-          structuredContent: DiscoveryActionResultSchema.parse(
-            result,
-          ) as unknown as Record<string, unknown>,
-          isError: !result.ok,
-        };
-      } catch (e) {
-        return {
-          content: [
-            { type: "text", text: `interact failed: ${(e as Error).message}` },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_navigate",
-    {
-      title: "Navigate to a new URL in a discovery session",
-      description:
-        "Navigate the session's browser to a new URL. The navigation is " +
-        "recorded as an open step. Returns the new page snapshot.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-        url: z.string().min(1).describe("URL or path to navigate to"),
-        waitUntil: z
-          .enum(["networkidle", "load", "domcontentloaded"])
-          .optional()
-          .describe("Wait condition after navigation"),
-      },
-    },
-    async ({ sessionId, url, waitUntil }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      try {
-        const result = await navigate(
-          handle,
-          url,
-          waitUntil !== undefined ? { waitUntil } : undefined,
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: result.ok
-                ? `Navigated to ${result.url} (${result.snapshot.length} elements)`
-                : `Navigation failed: ${result.url}`,
-            },
-          ],
-          structuredContent: DiscoveryActionResultSchema.parse(
-            result,
-          ) as unknown as Record<string, unknown>,
-          isError: !result.ok,
-        };
-      } catch (e) {
-        return {
-          content: [
-            { type: "text", text: `navigate failed: ${(e as Error).message}` },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_inventory",
-    {
-      title: "Get locator inventory from current page",
-      description:
-        "Collect role-based and data-testid locator inventory from the " +
-        "current page in the session. Returns structured locator entries " +
-        "with refs, counts, and ready-to-use spec locator objects.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-        roles: z
-          .boolean()
-          .optional()
-          .describe("Include role locators (default: true if neither set)"),
-        testids: z
-          .boolean()
-          .optional()
-          .describe(
-            "Include data-testid locators (default: true if neither set)",
-          ),
-      },
-    },
-    async ({ sessionId, roles, testids }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      try {
-        const inventory = await getInventory(handle, {
-          ...(roles !== undefined ? { roles } : {}),
-          ...(testids !== undefined ? { testids } : {}),
-        });
-        const result = {
-          ...(inventory.roles ? { roles: inventory.roles } : {}),
-          ...(inventory.testids ? { testids: inventory.testids } : {}),
-          ...(inventory.total !== undefined ? { total: inventory.total } : {}),
-          ...(inventory.truncated !== undefined
-            ? { truncated: inventory.truncated }
-            : {}),
-          ...(inventory.limit !== undefined ? { limit: inventory.limit } : {}),
-        };
-        return {
-          content: [
-            {
-              type: "text",
-              text: [
-                `Inventory at ${handle.session.currentUrl}:`,
-                ...(inventory.roles
-                  ? [`  ${inventory.roles.length} role locators`]
-                  : []),
-                ...(inventory.testids
-                  ? [`  ${inventory.testids.length} testid locators`]
-                  : []),
-              ].join("\n"),
-            },
-          ],
-          structuredContent: DiscoveryInventoryResultSchema.parse(
-            result,
-          ) as unknown as Record<string, unknown>,
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `inventory failed: ${(e as Error).message}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_suggest",
-    {
-      title: "Show recorded steps as spec YAML",
-      description:
-        "Return the session's exportable steps (failed interactions excluded — " +
-        "exactly what cairn_discover_export will write) as spec-compatible YAML " +
-        "text. The agent can review this before exporting to a file, or copy " +
-        "steps into an existing spec manually.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-      },
-    },
-    async ({ sessionId }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      const { steps, skippedFailed } = getExportableSteps(handle);
-      const yaml = yamlStringify(steps);
-      const skipNote =
-        skippedFailed > 0
-          ? `# (excluded ${skippedFailed} failed step${
-              skippedFailed === 1 ? "" : "s"
-            } that did not replay)\n`
-          : "";
-      return {
-        content: [{ type: "text", text: skipNote + yaml }],
-        structuredContent: DiscoverySuggestResultSchema.parse({
-          steps,
-          stepCount: steps.length,
-          skippedFailed,
-        }) as unknown as Record<string, unknown>,
-      };
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_export",
-    {
-      title: "Export recorded steps as a spec YAML",
-      description:
-        "Write the recorded discovery steps + provided intent + outcomes as " +
-        "a valid spec YAML file. The spec is immediately verified with " +
-        "cairn spec verify. Use this when the agent has explored the flow and " +
-        "is ready to write the test.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-        path: z.string().min(1).describe("Output path for the spec YAML file"),
-        intent: z
-          .string()
-          .min(1)
-          .describe("One-line intent statement for the spec"),
-        outcomes: z
-          .array(
-            z.object({
-              id: z.string().min(1).describe("Snake_case outcome ID"),
-              description: z
-                .string()
-                .min(1)
-                .describe("Human-readable outcome description"),
-              verify: VerifierSchema.describe(
-                "Verifier object (e.g. { text: { contains: 'Dashboard' } })",
-              ),
-            }),
-          )
-          .min(1)
-          .describe("Outcome definitions (the spec contract)"),
-        overwrite: z
-          .boolean()
-          .optional()
-          .describe(
-            "Replace an existing spec even if it carries a stamped contractHash. Without this, exporting over a stamped spec is refused so its locked intent/outcomes aren't silently clobbered.",
-          ),
-        resume: z
-          .string()
-          .regex(/^[a-z][a-z0-9-_]*$/i)
-          .optional()
-          .describe(
-            "Checkpoint name to resume from (captured via cairn_checkpoint_capture). Sets `session: { resume: <name> }` so the exported spec satisfies the cold-start contract for an authenticated flow.",
-          ),
-      },
-    },
-    async ({ sessionId, path, intent, outcomes, overwrite, resume }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      try {
-        // Guard an existing stamped spec: its contractHash means its
-        // intent/outcomes are locked, so refuse to clobber it unless the
-        // caller explicitly opts in (mirrors the `cairn spec verify --stamp`
-        // immutability contract).
-        if (!overwrite) {
-          const existingHash = await readContractHash(resolvePath(path));
-          if (existingHash) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `export failed: ${path} already exists with a stamped contractHash (${existingHash}); pass overwrite:true to replace it`,
-                },
-              ],
-              isError: true,
-            };
-          }
-        }
-
-        const { steps, skippedFailed } = getExportableSteps(handle);
-        const name = deriveSpecName(path);
-        const { yaml, stepCount } = buildSpecYaml({
-          name,
-          intent,
-          outcomes,
-          steps,
-          ...(resume !== undefined ? { resume } : {}),
-        });
-
-        // Validate in-memory BEFORE writing so an invalid spec (e.g. a bad
-        // derived name or a malformed recorded step) never lands on disk.
-        const precheck = SpecSchema.safeParse(parseYaml(yaml));
-        if (!precheck.success) {
-          const issues = precheck.error.issues
-            .map((i) => `${i.path.join(".") || "spec"}: ${i.message}`)
-            .join("; ");
-          return {
-            content: [
-              { type: "text", text: `export failed: invalid spec: ${issues}` },
-            ],
-            isError: true,
-          };
-        }
-
-        await writeFile(resolvePath(path), yaml, "utf8");
-
-        // Verify the spec — parseSpec validates via SpecSchema internally, then
-        // surface the same cold-start + contractHash warnings `cairn spec
-        // verify` reports. A parseable spec is not necessarily stamped or
-        // cold-start-replayable, so the agent must see those gaps explicitly.
-        let verifyOk = true;
-        let verifyErrors: string[] | undefined;
-        const warnings: string[] = [];
-        try {
-          const parsed = await parseSpec(path);
-          if (!parsed.spec.contractHash) {
-            warnings.push(
-              "spec has no contractHash; run `cairn spec verify <file> --stamp` to lock it",
-            );
-          }
-          const coldStartWarning = coldStartLint(parsed.spec);
-          if (coldStartWarning) warnings.push(coldStartWarning);
-        } catch (e) {
-          verifyOk = false;
-          verifyErrors = [(e as Error).message];
-        }
-
-        const skipNote =
-          skippedFailed > 0
-            ? ` (excluded ${skippedFailed} failed step${
-                skippedFailed === 1 ? "" : "s"
-              } that did not replay)`
-            : "";
-        const warningNote =
-          warnings.length > 0 ? ` Warnings: ${warnings.join(" ")}` : "";
-        const result = {
-          path,
-          verifyOk,
-          ...(verifyErrors ? { verifyErrors } : {}),
-          ...(warnings.length > 0 ? { warnings } : {}),
-          stepCount,
-          skippedFailed,
-        };
-        return {
-          content: [
-            {
-              type: "text",
-              text: verifyOk
-                ? `Exported ${stepCount} steps to ${path} (parses OK)${skipNote}.${warningNote}`
-                : `Exported ${stepCount} steps to ${path} (verify FAILED: ${verifyErrors?.join("; ")})${skipNote}`,
-            },
-          ],
-          structuredContent: DiscoveryExportResultSchema.parse(
-            result,
-          ) as unknown as Record<string, unknown>,
-          isError: !verifyOk,
-        };
-      } catch (e) {
-        return {
-          content: [
-            { type: "text", text: `export failed: ${(e as Error).message}` },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_close",
-    {
-      title: "Close a discovery session",
-      description:
-        "Close the browser session and free the backend. Call this when " +
-        "exploration is complete and the spec has been exported.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Discovery session ID"),
-      },
-    },
-    async ({ sessionId }) => {
-      const handle = sessions.get(sessionId);
-      if (!handle) {
-        return {
-          content: [{ type: "text", text: `session not found: ${sessionId}` }],
-          isError: true,
-        };
-      }
-      // Remove from the registry before closing so a concurrent call sees
-      // "session not found" rather than racing the teardown.
-      sessions.delete(sessionId);
-      await closeSession(handle);
-      return {
-        content: [{ type: "text", text: `Session ${sessionId} closed` }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "cairn_discover_list",
-    {
-      title: "List active discovery sessions",
-      description:
-        "List all active discovery sessions with their IDs, URLs, and " +
-        "recorded step counts. Useful for debugging stale sessions.",
-      inputSchema: {},
-    },
-    async () => {
-      const list = [...sessions.values()].map((h) => ({
-        sessionId: h.session.id,
-        url: h.session.currentUrl,
-        stepCount: h.session.steps.length,
-        lastActivity: new Date(h.session.lastActivity).toISOString(),
-      }));
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              list.length === 0
-                ? "No active discovery sessions"
-                : list
-                    .map(
-                      (s) =>
-                        `  ${s.sessionId} → ${s.url} (${s.stepCount} steps, last: ${s.lastActivity})`,
-                    )
-                    .join("\n"),
-          },
-        ],
-        structuredContent: DiscoveryListResultSchema.parse({
-          sessions: list,
-        }) as unknown as Record<string, unknown>,
-      };
-    },
-  );
+  });
 
   server.registerTool(
     "cairn_export_brief",
@@ -2794,214 +2870,6 @@ export function buildMcpServer(): McpServer {
           isError: true,
         };
       }
-    },
-  );
-
-  server.registerTool(
-    "cairn_accompany_open",
-    {
-      title: "Open an accompanied spec run",
-      description:
-        "Run a spec with try-then-ask: authored locators are attempted first. " +
-        "On a miss the session parks with a brief + live inventory. Choose a locator " +
-        "with cairn_accompany_choose. The harness chooses WHERE; values stay authored.",
-      inputSchema: {
-        path: z.string().min(1).describe("Path to the spec YAML"),
-        env: z.string().optional().describe("Environment name override"),
-        mock: z.boolean().optional().describe("Use the in-memory backend"),
-        backend: z
-          .enum(["agent-browser", "playwright", "mock"])
-          .optional()
-          .describe("Browser backend"),
-        coldStart: z
-          .boolean()
-          .optional()
-          .describe("Wipe browser state before steps"),
-        headed: z
-          .boolean()
-          .optional()
-          .describe("Show the browser window (real backends only)"),
-        config: z.string().optional().describe("cairntrace.config.yml path"),
-        var: z
-          .array(z.string())
-          .optional()
-          .describe("Repeatable key=value overrides for ${vars.X}"),
-      },
-    },
-    async ({
-      path,
-      env,
-      mock,
-      backend: backendChoice,
-      coldStart,
-      headed,
-      config,
-      var: varFlags,
-    }) => {
-      const backend = createBackend({
-        ...(backendChoice !== undefined ? { backend: backendChoice } : {}),
-        mock,
-        session: `cairntrace-accompany-${process.pid}-${randomUUID()}`,
-        ...(headed !== undefined ? { headed } : {}),
-      });
-      try {
-        const varOverrides = parseVarFlags(varFlags);
-        const scopedSecrets = await resolveScopedSecrets(path, {
-          ...(env !== undefined ? { environmentOverride: env } : {}),
-          ...(config !== undefined ? { configPath: config } : {}),
-          ...(Object.keys(varOverrides).length > 0
-            ? { vars: varOverrides }
-            : {}),
-        });
-        const { open } = await openAccompany({
-          specPath: path,
-          backend,
-          env: scopedSecrets.env,
-          childEnv: scopedSecrets.childEnv,
-          secretValues: scopedSecrets.secretValues,
-          selectedTvaultKeys: scopedSecrets.selectedKeys,
-          ...(env !== undefined ? { environmentOverride: env } : {}),
-          ...(coldStart !== undefined ? { coldStart } : {}),
-          ...(config !== undefined ? { configPath: config } : {}),
-          ...(Object.keys(varOverrides).length > 0
-            ? { vars: varOverrides }
-            : {}),
-        });
-        const text =
-          open.status === "needs_choice" && open.parked
-            ? renderBriefStepMarkdown(open.parked.step)
-            : `accompany ${open.status}`;
-        return {
-          content: [{ type: "text", text }],
-          structuredContent: open as unknown as Record<string, unknown>,
-        };
-      } catch (e) {
-        await backend.close().catch(() => undefined);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `accompany open failed: ${(e as Error).message}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_accompany_choose",
-    {
-      title: "Choose a locator for a parked accompany step",
-      description:
-        "Supply a Locator or a snapshot ref (e12 / @e12) for the parked step. " +
-        "Cairntrace retries the same authored value against that locator.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Accompany session ID"),
-        locator: LocatorSchema.optional().describe("Chosen locator (WHERE)"),
-        ref: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Snapshot ref from the miss packet (e12 or @e12)"),
-      },
-    },
-    async ({ sessionId, locator, ref }) => {
-      try {
-        const chosen = locator ?? locatorFromAccompanyRef(sessionId, ref);
-        const open = await chooseAccompany(sessionId, chosen);
-        return {
-          content: [{ type: "text", text: `accompany ${open.status}` }],
-          structuredContent: open as unknown as Record<string, unknown>,
-        };
-      } catch (e) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `accompany choose failed: ${(e as Error).message}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    },
-  );
-
-  server.registerTool(
-    "cairn_accompany_status",
-    {
-      title: "Accompany session status",
-      description: "Current cursor, parked miss packet, and outcomes so far.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Accompany session ID"),
-      },
-    },
-    async ({ sessionId }) => {
-      const handle = statusAccompany(sessionId);
-      if (!handle) {
-        return {
-          content: [
-            { type: "text", text: `accompany session not found: ${sessionId}` },
-          ],
-          isError: true,
-        };
-      }
-      return {
-        content: [{ type: "text", text: `accompany ${handle.status}` }],
-        structuredContent: handle as unknown as Record<string, unknown>,
-      };
-    },
-  );
-
-  server.registerTool(
-    "cairn_accompany_close",
-    {
-      title: "Close an accompany session",
-      description:
-        "Abort a parked miss if needed, write the run if it finished, free the backend.",
-      inputSchema: {
-        sessionId: z.string().min(1).describe("Accompany session ID"),
-      },
-    },
-    async ({ sessionId }) => {
-      await closeAccompany(sessionId);
-      return {
-        content: [{ type: "text", text: "closed" }],
-        structuredContent: { closed: true, sessionId },
-      };
-    },
-  );
-
-  server.registerTool(
-    "cairn_accompany_list",
-    {
-      title: "List accompany sessions",
-      description: "Active try-then-ask sessions.",
-      inputSchema: {},
-    },
-    async () => {
-      const accompanySessions = listAccompany().map((s) => ({
-        sessionId: s.id,
-        status: s.status,
-        lastActivity: new Date(s.lastActivity).toISOString(),
-        parkedStep: s.parked?.step.id,
-      }));
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              accompanySessions.length === 0
-                ? "no accompany sessions"
-                : accompanySessions
-                    .map((s) => `  ${s.sessionId} ${s.status}`)
-                    .join("\n"),
-          },
-        ],
-        structuredContent: { sessions: accompanySessions },
-      };
     },
   );
 
@@ -3070,182 +2938,77 @@ export function buildMcpServer(): McpServer {
       env,
       var: varFlags,
     }) => {
-      const { exportPlaywrightCommand } = await import(
-        "../cli/commands/export"
-      );
-      // Capture stdout by temporarily writing via the same logic as CLI.
-      // For structured results we re-implement a thin path using the exporter core.
-      const { exportPlaywright, exportExtension } = await import(
+      // Same code paths as `cairn export playwright`: project/into exports
+      // copy upload fixtures and write `.cairn-export.json`; batch `outDir`
+      // exports write the README and manifest too.
+      const { parseForExport, writeBatchExport, writeProjectExport } =
+        await import("../cli/commands/export");
+      const { exportPlaywright } = await import(
         "../core/exporters/playwrightExporter"
       );
       const { expandSpecArgs } = await import("../cli/commands/run");
       const resolvedLang = lang ?? "ts";
+      const runtimeOpts = {
+        ...(config !== undefined ? { config } : {}),
+        ...(env !== undefined ? { env } : {}),
+        ...(varFlags !== undefined ? { var: varFlags } : {}),
+      };
 
       try {
+        const paths = await expandSpecArgs([inputPath]);
         if (project || into) {
-          if (into && project) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "use either project or into, not both",
-                },
-              ],
-              isError: true,
-            };
-          }
+          if (into && project)
+            return toolError("use either project or into, not both");
           const dest = into ?? outDir;
           if (!dest) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: project
-                    ? "project export requires outDir"
-                    : "into requires a directory",
-                },
-              ],
-              isError: true,
-            };
+            return toolError(
+              project
+                ? "project export requires outDir"
+                : "into requires a directory",
+            );
           }
-          const projectPaths = await expandSpecArgs([inputPath]);
-          if (projectPaths.length === 0) {
-            return {
-              content: [
-                { type: "text", text: `no specs found at ${inputPath}` },
-              ],
-              isError: true,
-            };
-          }
-          const { exportPlaywrightProject } = await import(
-            "../core/exporters/playwrightProject"
+          if (paths.length === 0)
+            return toolError(`no specs found at ${inputPath}`);
+          const report = await writeProjectExport(
+            paths,
+            resolvedLang,
+            {
+              ...runtimeOpts,
+              ...(into ? { into } : { project: true }),
+              outDir: dest,
+            },
+            inputPath,
           );
-          const { parseVarFlags } = await import("../cli/commands/run");
-          const { stat } = await import("node:fs/promises");
-          const varOverrides = parseVarFlags(varFlags);
-          const parsedSpecs = [];
-          let baseUrl: string | undefined;
-          let projectRoot: string | undefined;
-          let testIdAttribute: string | undefined;
-          let viewport: { width: number; height: number } | undefined;
-          for (const specFile of projectPaths) {
-            const runtime = await resolveSpecRuntimeContext(specFile, {
-              ...(env !== undefined ? { envOverride: env } : {}),
-              ...(config !== undefined ? { configPath: config } : {}),
-              ...(Object.keys(varOverrides).length > 0
-                ? { vars: varOverrides }
-                : {}),
-              envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-            });
-            parsedSpecs.push(
-              await parseSpec(specFile, {
-                vars: runtime.vars,
-                ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
-                secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-                runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
-              }),
-            );
-            baseUrl = baseUrl ?? runtime.baseUrl;
-            projectRoot =
-              projectRoot ??
-              (runtime.configPath
-                ? dirname(runtime.configPath)
-                : dirname(specFile));
-            testIdAttribute =
-              testIdAttribute ?? runtime.config?.browser?.testIdAttribute;
-            viewport =
-              viewport ?? parsedSpecs.at(-1)?.spec.viewport ?? runtime.viewport;
-          }
-          const absInput = isAbsolute(inputPath)
-            ? inputPath
-            : resolvePath(process.cwd(), inputPath);
-          const sourceRoot = (await stat(absInput)).isDirectory()
-            ? absInput
-            : dirname(absInput);
-          const destDir = isAbsolute(dest)
-            ? dest
-            : resolvePath(process.cwd(), dest);
-          const projectResult = exportPlaywrightProject(parsedSpecs, {
-            lang: resolvedLang,
-            outDir: destDir,
-            sourceRoot,
-            ...(baseUrl ? { baseUrl } : {}),
-            ...(projectRoot ? { projectRoot } : {}),
-            ...(testIdAttribute ? { testIdAttribute } : {}),
-            ...(viewport ? { viewport } : {}),
-            ...(into ? { into: true } : {}),
-          });
-          for (const file of projectResult.files) {
-            const abs = join(destDir, file.relPath);
-            await mkdir(dirname(abs), { recursive: true });
-            await writeFile(abs, file.source);
-          }
-          for (const copied of [
-            ...projectResult.verifierFiles,
-            ...projectResult.evalFiles,
-          ]) {
-            const destFile = join(destDir, copied.relPath);
-            await mkdir(dirname(destFile), { recursive: true });
-            await writeFile(
-              destFile,
-              await readFile(copied.sourcePath, "utf8"),
-            );
-          }
           return {
             content: [
               {
                 type: "text",
                 text: `Exported Playwright ${
                   into ? "into" : "project"
-                } at ${destDir}`,
+                } at ${report.outDir} (manifest: ${report.manifest})`,
               },
             ],
-            structuredContent: {
-              status: "written",
-              outDir: destDir,
-              files: projectResult.files.map((file) => file.relPath),
-              requiredEnv: projectResult.requiredEnv,
-            },
+            structuredContent: { ...report },
           };
         }
-        const paths = await expandSpecArgs([inputPath]);
-        if (paths.length === 0) {
-          return {
-            content: [{ type: "text", text: `no specs found at ${inputPath}` }],
-            isError: true,
-          };
-        }
+        if (paths.length === 0)
+          return toolError(`no specs found at ${inputPath}`);
         if (stdout) {
           if (paths.length !== 1) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: "stdout requires a single spec file",
-                },
-              ],
-              isError: true,
-            };
+            return toolError("stdout requires a single spec file");
           }
-          const { parseVarFlags } = await import("../cli/commands/run");
-          const varOverrides = parseVarFlags(varFlags);
-          const runtime = await resolveSpecRuntimeContext(paths[0]!, {
-            ...(env !== undefined ? { envOverride: env } : {}),
-            ...(config !== undefined ? { configPath: config } : {}),
-            ...(Object.keys(varOverrides).length > 0
-              ? { vars: varOverrides }
-              : {}),
-            envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-          });
-          const parsed = await parseSpec(paths[0]!, {
-            vars: runtime.vars,
-            ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
-            secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-            runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
-          });
+          const { parsed, envTarget } = await parseForExport(
+            paths[0]!,
+            runtimeOpts,
+          );
           const result = exportPlaywright(parsed.resolved, {
             sourcePath: parsed.path,
             lang: resolvedLang,
+            // Like `cairn export playwright --stdout`: an imported action's
+            // eval.file / upload.path resolve against the action (F13), and
+            // the requires guard follows the baked environment.
+            stepOrigins: parsed,
+            ...(envTarget ? { envTarget } : {}),
           });
           return {
             content: [{ type: "text", text: result.source }],
@@ -3259,92 +3022,40 @@ export function buildMcpServer(): McpServer {
           };
         }
         if (paths.length > 1 && !outDir) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "directory export requires outDir",
-              },
-            ],
-            isError: true,
-          };
+          return toolError("directory export requires outDir");
         }
-        // Delegate write+report shape via CLI helper by capturing process.stdout is fragile;
-        // write files here and build the same report object.
-        const files: Array<{
-          source: string;
-          path: string;
-          name: string;
-          coverage: ReturnType<typeof exportPlaywright>["coverage"];
-          status: "written" | "partial";
-        }> = [];
-        const { parseVarFlags } = await import("../cli/commands/run");
-        const varOverrides = parseVarFlags(varFlags);
-        for (const p of paths) {
-          const runtime = await resolveSpecRuntimeContext(p, {
-            ...(env !== undefined ? { envOverride: env } : {}),
-            ...(config !== undefined ? { configPath: config } : {}),
-            ...(Object.keys(varOverrides).length > 0
-              ? { vars: varOverrides }
-              : {}),
-            envRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-          });
-          const parsed = await parseSpec(p, {
-            vars: runtime.vars,
-            ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
-            secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
-            runtime: { runToken: "__CAIRN_RUN_TOKEN__" },
-          });
-          const result = exportPlaywright(parsed.resolved, {
-            sourcePath: parsed.path,
-            lang: resolvedLang,
-          });
-          const ext = exportExtension(resolvedLang);
-          let outPath: string;
-          if (out && paths.length === 1) {
-            outPath = isAbsolute(out) ? out : resolvePath(process.cwd(), out);
-          } else if (outDir) {
-            const dir = isAbsolute(outDir)
-              ? outDir
-              : resolvePath(process.cwd(), outDir);
-            await mkdir(dir, { recursive: true });
-            outPath = join(dir, `${parsed.spec.name}${ext}`);
-          } else {
-            outPath = join(
-              dirname(resolvePath(p)),
-              `${parsed.spec.name}${ext}`,
-            );
-          }
-          await mkdir(dirname(outPath), { recursive: true });
-          await writeFile(outPath, result.source);
-          files.push({
-            source: resolvePath(p),
-            path: outPath,
-            name: parsed.spec.name,
-            coverage: result.coverage,
-            status: result.coverage.skips.length > 0 ? "partial" : "written",
-          });
+        if (out && paths.length > 1) {
+          return toolError("out is for a single spec; use outDir for batch");
         }
-        const partial = files.filter((f) => f.status === "partial").length;
-        const written = files.filter((f) => f.status === "written").length;
-        const report = {
-          status: (partial > 0 ? "partial" : "written") as
-            | "partial"
-            | "written",
-          lang: resolvedLang,
-          files,
-          summary: { written, partial, failed: 0 },
-        };
-        // Keep import for tree-shake awareness; CLI command remains the public path.
-        void exportPlaywrightCommand;
+        const written = await writeBatchExport(
+          paths,
+          resolvedLang,
+          {
+            ...runtimeOpts,
+            ...(out ? { out } : {}),
+            ...(outDir ? { outDir } : {}),
+          },
+          inputPath,
+        );
+        const failures = (written.report?.errors ?? written.errors)
+          .map((e) => `${e.source}: ${e.message}`)
+          .join("; ");
+        if (!written.report) {
+          return toolError(`export failed: ${failures || "nothing exported"}`);
+        }
+        const report = written.report;
         return {
           content: [
             {
               type: "text",
-              text: `Exported ${files.length} file(s) (${report.status}): ${files.map((f) => f.path).join(", ")}`,
+              text:
+                `Exported ${report.files.length} file(s) (${report.status}): ${report.files.map((f) => f.path).join(", ")}` +
+                (failures ? `; failed: ${failures}` : ""),
             },
           ],
-          structuredContent: report,
+          structuredContent: { ...report },
+          // A leaked late-bound placeholder is an exporter defect (CLI exit 2).
+          ...(written.leaked ? { isError: true } : {}),
         };
       } catch (e) {
         return {
@@ -3365,6 +3076,33 @@ export function buildMcpServer(): McpServer {
 
 /* ----- helpers (inlined from CLI counterparts) ----- */
 
+/** `cairn_spec_heal` error answer: the CLI's error document and exit code. */
+function healFailure(err: Error): {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent: Record<string, unknown>;
+  isError: true;
+} {
+  return {
+    content: [{ type: "text", text: `heal failed: ${err.message}` }],
+    structuredContent: {
+      $schema: "urn:cairntrace.dev:heal:v1",
+      version: "1",
+      status: "no-heal-possible",
+      error: { name: err.name, message: err.message },
+      exitCode: healErrorExitCode(err),
+    },
+    isError: true,
+  };
+}
+
+/** A tool-level error result (isError) with one text block. */
+function toolError(text: string): {
+  content: Array<{ type: "text"; text: string }>;
+  isError: true;
+} {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
 async function runDoctorChecks(): Promise<
   Array<{ name: string; ok: boolean; detail: string }>
 > {
@@ -3374,7 +3112,6 @@ async function runDoctorChecks(): Promise<
   for (const [name, command, args] of [
     ["bun", "bun", ["--version"]],
     ["agent-browser", "agent-browser", ["--version"]],
-    ["fcheap", resolveFcheapBinary(), ["--version"]],
     ["vecgrep", "vecgrep", ["version"]],
     ["vidtrace", "vidtrace", ["version"]],
     ["monitor", "monitor", ["--version"]],
@@ -3403,6 +3140,10 @@ async function runDoctorChecks(): Promise<
     }
   }
   checks.push(...(await resolvePlaywrightChecks()));
+  // Same file.cheap checks as `cairn doctor`: version and save --meta /
+  // publish --run-index support, console session, publisher readiness
+  // (never printing values).
+  checks.push(...(await resolveFcheapChecks()));
   return checks;
 }
 
@@ -3456,37 +3197,4 @@ async function writeScaffold(
     header + yamlStringify(spec, { indent: 2, lineWidth: 100 }),
   );
   return path;
-}
-
-function summarizeRun(r: RunResult): string {
-  const passed = r.outcomes.filter((o) => o.status === "passed").length;
-  return [
-    `${r.status.toUpperCase()}: ${r.spec.name} (${passed}/${r.outcomes.length} outcomes, ${r.durationMs}ms)`,
-    ...r.outcomes.map(
-      (o) =>
-        `  ${
-          o.status === "passed" ? "✓" : o.status === "failed" ? "✗" : "·"
-        } ${o.id}${o.evidence ? ` (${o.evidence})` : ""}`,
-    ),
-    `Run dir: ${r.runDir}`,
-  ].join("\n");
-}
-
-/**
- * Read the `contractHash` field from a spec file without full validation.
- * Returns undefined when the file is missing, unreadable, or unstamped — so
- * the discovery-export guard only refuses to clobber an *established*
- * (stamped) spec, and freely re-exports over a prior unstamped export.
- */
-async function readContractHash(path: string): Promise<string | undefined> {
-  try {
-    const raw = parseYaml(await readFile(path, "utf8"));
-    const hash =
-      raw && typeof raw === "object"
-        ? (raw as Record<string, unknown>)["contractHash"]
-        : undefined;
-    return typeof hash === "string" && hash.length > 0 ? hash : undefined;
-  } catch {
-    return undefined;
-  }
 }

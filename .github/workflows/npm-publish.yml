@@ -32,6 +32,10 @@ jobs:
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          # Same Bun as ci.yml: the tag-time verify gate must not run on an
+          # untested release (homebrew-tap.yml ships independently of it).
+          bun-version: 1.4.2
 
       - name: Assert tag matches package version
         # The release flow bumps package.json in the tag commit; publishing a

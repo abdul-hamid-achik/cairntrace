@@ -15,6 +15,12 @@ export const BatchSummarySchema = z
     passed: z.number().int().nonnegative(),
     failed: z.number().int().nonnegative(),
     errored: z.number().int().nonnegative(),
+    /**
+     * Specs the environment policy refused (status `refused`). Present when
+     * at least one was refused. Refused specs count in `total` only; they
+     * fail the batch (exit 7) only under `--strict-requires`.
+     */
+    refused: z.number().int().positive().optional(),
   })
   .strict();
 export type BatchSummary = z.infer<typeof BatchSummarySchema>;

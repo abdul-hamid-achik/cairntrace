@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Spec } from "../schema/spec.v1";
 import {
+  isDocumentaryPrecondition,
   PLAYWRIGHT_EXPORTED_TEST_MAX_TIMEOUT_MS,
   PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS,
   playwrightPreconditionTimeoutBudget,
@@ -41,10 +42,55 @@ function nodeOutcome(id: string, timeoutMs: number) {
 }
 
 describe("Playwright export timeout budgets", () => {
-  it("keeps short specs on the 30-minute compatibility floor", () => {
-    expect(playwrightTestTimeoutBudget(spec())).toMatchObject({
-      timeoutMs: PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS,
+  it("derives short UI-only specs from their budgets instead of a 30-minute floor", () => {
+    const budget = playwrightTestTimeoutBudget(spec());
+    expect(budget).toEqual({
+      declaredMs: 30_000,
+      overheadMs: 60_000,
+      timeoutMs: 90_000,
       capped: false,
+    });
+    expect(budget.floorReason).toBeUndefined();
+  });
+
+  it("keeps the 30-minute floor when a durable node verifier runs", () => {
+    expect(
+      playwrightTestTimeoutBudget(
+        spec({ outcomes: [nodeOutcome("processed", 60_000)] }),
+      ),
+    ).toMatchObject({
+      timeoutMs: PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS,
+      floorReason: "nodeVerifier",
+    });
+  });
+
+  it("floors the beforeAll budget only for long preconditions and ignores echo notes", () => {
+    const short = playwrightPreconditionTimeoutBudget(
+      spec({
+        preconditions: {
+          commands: [
+            { run: "echo app must be running" },
+            { run: "bun run seed", timeoutMs: 10_000 },
+          ],
+        },
+      }),
+    );
+    expect(short).toEqual({
+      declaredMs: 10_000,
+      overheadMs: 60_000,
+      timeoutMs: 70_000,
+      capped: false,
+    });
+    const long = playwrightPreconditionTimeoutBudget(
+      spec({
+        preconditions: {
+          commands: [{ run: "bun run migrate", timeoutMs: 6 * 60_000 }],
+        },
+      }),
+    );
+    expect(long).toMatchObject({
+      timeoutMs: PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS,
+      floorReason: "longPrecondition",
     });
   });
 
@@ -64,6 +110,7 @@ describe("Playwright export timeout budgets", () => {
       overheadMs: 720_000,
       timeoutMs: 7_920_000,
       capped: false,
+      floorReason: "nodeVerifier",
     });
   });
 
@@ -83,6 +130,7 @@ describe("Playwright export timeout budgets", () => {
       overheadMs: 270_000,
       timeoutMs: 2_970_000,
       capped: false,
+      floorReason: "nodeVerifier",
     });
   });
 
@@ -119,5 +167,81 @@ describe("Playwright export timeout budgets", () => {
       capped: false,
     });
     expect(project).toEqual(hook);
+  });
+
+  it("budgets a step by its network postcondition deadline when that is longer", () => {
+    const budget = playwrightTestTimeoutBudget(
+      spec({
+        steps: [
+          { id: "open", open: "/upload" },
+          {
+            id: "upload",
+            upload: { by: "label", name: "File", path: "./a.txt" },
+            postcondition: {
+              network: {
+                urlContains: "/api/upload",
+                status: { equals: 200 },
+                timeoutMs: 600_000,
+              },
+            },
+          },
+        ] as Spec["steps"],
+      }),
+    );
+    // open 30s + max(upload 30s, postcondition 600s) + text outcome 30s.
+    expect(budget.declaredMs).toBe(660_000);
+    expect(budget.timeoutMs).toBeGreaterThan(600_000);
+    expect(budget.timeoutMs).toBe(726_000);
+  });
+
+  it("keeps the action budget when it exceeds the postcondition default", () => {
+    const budget = playwrightTestTimeoutBudget(
+      spec({
+        outcomes: [],
+        steps: [
+          {
+            id: "slow_click",
+            click: {
+              by: "role",
+              role: "button",
+              name: "Save",
+              until: { text: "Saved", timeoutMs: 90_000 },
+            },
+            postcondition: {
+              network: { urlContains: "/api/save", status: { equals: 200 } },
+            },
+          },
+        ] as Spec["steps"],
+      }),
+    );
+    expect(budget.declaredMs).toBe(90_000);
+  });
+});
+
+describe("isDocumentaryPrecondition", () => {
+  it.each([
+    "echo demo-app must be running on :8787",
+    'echo "stack is assumed up; seed first"',
+    "echo 'uses && and | inside single quotes'",
+    "  echo",
+  ])("treats %j as a note", (run) => {
+    expect(isDocumentaryPrecondition(run)).toBe(true);
+  });
+
+  it.each([
+    'echo "resetting database" && docker compose exec db psql -c "truncate items"',
+    "echo reset || make reset",
+    "echo a; make seed",
+    "echo a | tee /tmp/log",
+    "echo a > /tmp/flag",
+    "echo $(make seed)",
+    'echo "$(make seed)"',
+    "echo `make seed`",
+    "echo a & make seed",
+    "echo a\nmake seed",
+    "echoed-tool --reset",
+    "make seed",
+  ])("treats %j as executable", (run) => {
+    expect(isDocumentaryPrecondition(run)).toBe(false);
   });
 });

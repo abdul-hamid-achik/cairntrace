@@ -1,4 +1,7 @@
-import { CheckpointStore } from "../../../core/checkpoint/CheckpointStore";
+import {
+  CheckpointStore,
+  type CheckpointInfo,
+} from "../../../core/checkpoint/CheckpointStore";
 import { emit, resolveFormat } from "../../format";
 
 export interface ListOptions {
@@ -8,6 +11,29 @@ export interface ListOptions {
   md?: boolean;
 }
 
+/**
+ * One checkpoint row of `cairn checkpoint list --json`. `health` is `ok`
+ * (scoped, not expired), `expired`, or `unscoped` (no usable metadata:
+ * captured before checkpoints recorded their baseUrl/env/ttl or by another
+ * tool — still resumable). `staleMeta: true` = a sidecar exists but the
+ * state file was rewritten after it, so it is ignored.
+ */
+export function checkpointRow(c: CheckpointInfo): Record<string, unknown> {
+  return {
+    name: c.name,
+    path: c.path,
+    sizeBytes: c.sizeBytes,
+    modifiedAt: c.modifiedAt.toISOString(),
+    health: c.health,
+    ...(c.staleMeta ? { staleMeta: true } : {}),
+    ...(c.meta?.env ? { env: c.meta.env } : {}),
+    ...(c.meta?.baseUrl ? { baseUrl: c.meta.baseUrl } : {}),
+    ...(c.meta?.createdAt ? { createdAt: c.meta.createdAt } : {}),
+    ...(c.meta?.ttl ? { ttl: c.meta.ttl } : {}),
+    ...(c.meta?.expiresAt ? { expiresAt: c.meta.expiresAt } : {}),
+  };
+}
+
 export async function listCheckpointsCommand(opts: ListOptions): Promise<void> {
   const format = resolveFormat(opts, "md");
   const store = new CheckpointStore();
@@ -15,23 +41,31 @@ export async function listCheckpointsCommand(opts: ListOptions): Promise<void> {
 
   const data = {
     root: store.root,
-    checkpoints: list.map((c) => ({
-      name: c.name,
-      path: c.path,
-      sizeBytes: c.sizeBytes,
-      modifiedAt: c.modifiedAt.toISOString(),
-    })),
+    checkpoints: list.map(checkpointRow),
   };
 
   process.stdout.write(
-    emit(format, data, (d) => {
-      if (d.checkpoints.length === 0) {
-        return `# Checkpoints\n\n(empty — none saved at ${d.root})`;
+    emit(format, data, () => {
+      if (list.length === 0) {
+        return `# Checkpoints\n\n(empty — none saved at ${data.root})`;
       }
-      const lines = [`# Checkpoints (${d.checkpoints.length})`, ""];
-      for (const c of d.checkpoints) {
+      const lines = [`# Checkpoints (${list.length})`, ""];
+      for (const c of list) {
         const kb = (c.sizeBytes / 1024).toFixed(1);
-        lines.push(`- **${c.name}** — ${kb} KB — ${c.modifiedAt}`);
+        const scope = [
+          c.meta?.env ? `env ${c.meta.env}` : undefined,
+          c.meta?.baseUrl,
+          c.meta?.expiresAt ? `expires ${c.meta.expiresAt}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        lines.push(
+          `- **${c.name}** — ${c.health}${
+            c.staleMeta ? " (stale scope ignored)" : ""
+          } — ${kb} KB — ${c.modifiedAt.toISOString()}${
+            scope ? ` — ${scope}` : ""
+          }`,
+        );
         lines.push(`    ${c.path}`);
       }
       return lines.join("\n");

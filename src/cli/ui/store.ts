@@ -44,6 +44,8 @@ export interface Row {
   startedAt?: number;
   durationMs?: number;
   error?: string;
+  /** Latest progress message while running (CAIRN_PROGRESS_FILE). */
+  detail?: string;
 }
 
 export interface OutcomeRow {
@@ -52,6 +54,8 @@ export interface OutcomeRow {
   startedAt?: number;
   expected?: string;
   actual?: string;
+  /** Latest `ctx.progress()` message while the verifier runs. */
+  detail?: string;
 }
 
 export interface BatchRow {
@@ -72,6 +76,8 @@ export interface BatchSummary {
   passed: number;
   failed: number;
   errored: number;
+  /** Specs the environment policy refused (present when > 0). */
+  refused?: number;
   durationMs: number;
 }
 
@@ -115,6 +121,8 @@ export type TuiEvent =
       durationMs: number;
       error?: string;
     }
+  | { type: "precondition-progress"; id: string; message: string }
+  | { type: "outcome-progress"; id: string; message: string }
   | { type: "step-start"; id: string }
   | {
       type: "step-finish";
@@ -314,6 +322,26 @@ export function reduceTui(state: TuiState, event: TuiEvent): TuiState {
         error: event.error,
       });
       return next;
+
+    case "precondition-progress": {
+      const row = next.preconditions.find((r) => r.id === event.id);
+      if (!row || row.status !== "running") return next;
+      next.preconditions = replaceRow(next.preconditions, event.id, {
+        ...row,
+        detail: event.message,
+      });
+      return next;
+    }
+
+    case "outcome-progress": {
+      const row = next.outcomes.find((r) => r.id === event.id);
+      if (!row || row.status !== "running") return next;
+      next.outcomes = upsertOutcome(next.outcomes, {
+        ...row,
+        detail: event.message,
+      });
+      return next;
+    }
 
     case "step-start":
       next.steps = replaceRow(next.steps, event.id, {

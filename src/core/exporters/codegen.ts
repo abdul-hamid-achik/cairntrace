@@ -10,8 +10,11 @@
  *  - comments are comment NODES, so they can never be half-escaped into code.
  *
  * String QUOTING is owned by templateValue.ts (emitStr/emitValue) — raw()
- * lines receive already-emitted expressions, never raw user text.
+ * lines receive already-emitted expressions, never raw user text. Comment text
+ * goes through humanizeSentinels() so a step id, when-predicate, or
+ * precondition echoed into a comment can never carry a late-bound sentinel.
  */
+import { humanizeSentinels } from "./templateValue";
 
 export type Stmt =
   /** One already-rendered line of code. Must not contain newlines. */
@@ -72,7 +75,7 @@ function emitInto(stmts: Stmt[], depth: number, out: string[]): void {
         out.push(pad + s.code);
         break;
       case "comment":
-        for (const line of s.text.split("\n")) {
+        for (const line of humanizeSentinels(s.text).split("\n")) {
           out.push(line ? `${pad}// ${line}` : `${pad}//`);
         }
         break;

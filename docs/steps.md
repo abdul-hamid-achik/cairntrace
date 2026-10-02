@@ -191,6 +191,8 @@ Scroll the page by direction/pixels, or bring a locator into view.
 
 ## File
 
+Relative file paths in steps — `upload.path`, `transform.file` and `transform.input`, `eval.file`, and the eval host files `args.filePath` / `args.fixtureFiles` — resolve against the directory of the file that **declares** the step. In a spec that is the spec's folder; in an imported action it is the action's folder, so a shared action and its fixtures move together. An action path that only exists next to the importing spec (the old resolution) still works, with a deprecation warning naming the action and step (once per process on stderr, in every run's `run.log`). Eval host files in a spec keep their order: absolute, then the current directory, then the spec's folder. `${file.dir}` (alias `${project.root}`) is the declaring file's directory and `${config.dir}` the config's; `cairn spec verify` exits 4 when one of these files is missing where a run would look.
+
 ### `upload`
 
 Set a file input from a local path.
@@ -378,6 +380,113 @@ Capture a process profile or a one-shot sample of the backend's browser process 
 - `action: snapshot` captures a single `monitor process <pid>` sample, optionally labeled.
 
 `monitor` is handled by the runner _before_ adapter dispatch — it is not a backend interaction. Pair it with the run-wide `--monitor` flag and the `process` verifier (see [Process monitoring](/monitor)) to turn "the spec got slow" into an assertable budget.
+
+### `run`
+
+Run a host command or a node script as a step: provision a fixture, seed rows, restart a worker, clean up. Use it instead of an outcome with side effects (outcomes are the contract and must stay pure) or of a precondition that only exists to mutate.
+
+```yaml
+steps:
+  - id: provision
+    run:
+      node: ./fixtures/provision-entities.mjs   # relative to the file that declares the step
+      args: [--count, 3]
+      timeoutMs: 60000
+      assign: fixture                           # last stdout line must be JSON
+  - open: /entities/${runs.fixture.entity.id}
+  - run:                                        # object form: args become $1…$n
+      shell: 'node ./fixtures/clear-rows.mjs "$1"'
+      args: ["${runs.fixture.entity.id}"]
+  - run: 'node ./fixtures/reset-cache.mjs'      # string form = shell, no args
+```
+
+- `shell` runs through `/bin/sh -c`; `args` arrive as `$1…$n` and are never spliced into the script text. The string form is a `shell` with **no** `args`, so `$1` is always empty there — pass values through the object form's `args`. `node` runs `node <file> [args]` (the `node` on `PATH`). Exactly one of the two. `cwd` defaults to the declaring file's directory; `env` adds variables.
+- The child gets the run context: `CAIRN_ENV`, `CAIRN_BASE_URL`, `CAIRN_RUN_ID`, `CAIRN_RUN_DIR`, `CAIRN_RUN_TOKEN`, `CAIRN_CONFIG_DIR` (and, in `teardown:`, `CAIRN_RUN_STATUS`). It never gets the publisher or TinyVault control variables.
+- `timeoutMs` (default 120000) is a hard deadline: the command runs in its own process group, and the whole group — background processes included — is killed; the step fails with the tail of its output. A cancelled run kills it the same way. A non-zero exit fails the step.
+- The step ends when the command exits, even if a process it started in the background (`server &`) still holds its output open; the step then stops reading that output, so redirect a background process's output (`server > server.log 2>&1 &`) if it must keep running.
+- With `assign`, the last non-empty stdout line is parsed as JSON (print progress on stderr). Later steps — and teardown — splice it as `${runs.<assign>.<path>}`; objects render as JSON, unknown paths as `""`.
+- Step events use kind `run` and a label without the command text (`run node provision-entities.mjs → fixture`), because substituted placeholders may hold secrets. Output is captured, not streamed live.
+
+## Teardown
+
+`teardown:` is a spec-level list of steps that always runs after the steps and outcomes — when the run passed, failed, errored (a failed precondition or [readiness gate](/services#readiness-gates) included) or was cancelled. Use it for the cleanup that used to hide in outcomes or in `--after` hooks.
+
+```yaml
+teardown:
+  - run:
+      shell: 'node ./fixtures/cleanup.mjs "$1" "$CAIRN_RUN_STATUS"'
+      # args resolve like any step: ${runs.<assign>…}, ${requests.<name>…}, ${evals.<name>…}
+      args: ["${runs.fixture.entity.id}"]
+  - request: { method: DELETE, url: "/api/entities/${runs.fixture.entity.id}" }
+```
+
+With a policy:
+
+```yaml
+teardown:
+  failRun: true      # a failed teardown step errors a run that passed (default false)
+  timeoutMs: 120000  # budget of the whole teardown (default 300000)
+  steps:
+    - run: { node: ./fixtures/cleanup.mjs, timeoutMs: 30000 }
+```
+
+- Every item runs, in order, even after an earlier one failed; each is bounded by what is left of `timeoutMs`. Teardown supports `run`, `request`, `eval` and browser actions; `use:` is not expanded there (inline the steps), and `download` / `upload` / `transform` / `monitor` (they produce run artifacts) and `expect` / `capture` (cleanup does not verify) are refused by the schema.
+- `CAIRN_RUN_STATUS` is `passed`, `failed` or `errored` — the verdict before teardown. A cancel reports `errored`; its browser was closed, so browser items are `skipped` while `run` items still run (a cancel does not kill teardown commands).
+- On **SIGINT/SIGTERM** the process is about to exit: the `run` items that have not started yet run synchronously from the signal handler, before the CLI kills the browser and services, within min(`timeoutMs`, 30000) ms, with `CAIRN_RUN_STATUS=errored` and `CAIRN_RUN_SIGNAL`. Other kinds cannot run there. Each item still runs once: a host that survives the signal (`cairn mcp`) finishes the cancelled run, and its teardown skips the items the signal handler already ran.
+- A failed teardown item is reported — `teardown.started` / `teardown.finished` events (`index`, `kind`, `stepId`, `status` passed | failed | skipped, `durationMs`, `error`), a `run.log` line and a CLI warning — but the run keeps its status. Only `failRun: true` changes it, and only from `passed` to `errored` (`failure.phase: teardown`); an outcome failure stays the verdict. The banner shows `phase: teardown` with the item and its budget.
+
+## Assertions & captured values
+
+### `expect`
+
+Assert mid-flow and record evidence like an outcome — the typed replacement for an `eval` that throws when the page is in the wrong state. A locator (the same `by: role|label|text|selector|testid` vocabulary and strict matching rules as `click`) plus any of these assertions; every present one must hold:
+
+```yaml
+steps:
+  - expect: { id: saved_banner, by: role, role: status, visible: true, text: { contains: Saved } }
+  - expect: { by: role, role: button, name: Submit, enabled: false }
+  - expect: { by: selector, selector: ".worker-row", count: { atLeast: 1 } }
+  - expect: { by: label, name: Email, value: ops@example.test }
+  - expect: { by: role, role: link, name: Next, attribute: { name: href, contains: "page=2" } }
+  - expect: { by: role, role: dialog, hidden: true, timeoutMs: 10000 }
+  - expect:
+      request: { url: "/api/orders/${captures.order.id}", json: { status: shipped } }
+```
+
+| Assertion | Meaning |
+|---|---|
+| `visible: true` | a visible match exists (`nth` picks one) |
+| `hidden: true` / `visible: false` | no visible match (absent or hidden) |
+| `count` | number of matches: a number or `{ equals \| atLeast \| atMost }` (semantic locators count visible matches, CSS/testid count DOM matches) |
+| `text` | string (= `equals`) or `{ equals \| contains \| matches, caseSensitive }` — whitespace-normalized, case-insensitive by default |
+| `value` | live control value: string or `{ equals \| contains \| matches }`, raw |
+| `attribute` | `{ name, equals \| contains \| matches \| exists }` |
+| `enabled` | `true` / `false` (disabled, `aria-disabled`, inside a disabled fieldset) |
+
+- `text`, `value`, `attribute` and `enabled` need one target: several matches narrow to the visible one, otherwise add `nth`.
+- Inside `expect`, `visible` / `hidden` are assertions (not the locator's include-hidden switch). For `by: text` the `text` key is the locator, not a text assertion.
+- `request` sends `{ method (default GET), url, headers?, body? }` with the browser session (like a `request` step) and checks `status` (default 2xx; a number or `{ equals | below | atLeast | in }`) and `json: { path: matcher }` ([matchers](/verifiers#matchers)). Only GET/HEAD are repeated while waiting.
+- The expectation is retried every 250ms until `timeoutMs` (default 5000, scaled by `waitScale`). A mismatch fails the step: `expect <id>: expected …; got …`.
+- Evidence: `expects/<NNN>_<id>.json` (`{ id, stepId, status, kind, expected, actual, attempts, durationMs, observed }`, redacted and bounded) and an `expect.passed` / `expect.failed` event; `id` defaults to the step id.
+- The page is read through one bounded `backend.evaluate` probe per attempt that resolves the locator in the page (accessible role and name computed from `role`, implicit HTML roles, `aria-labelledby`, `aria-label`, labels, `alt`, `title`, `placeholder` and content). Rare edge cases can differ from a backend's snapshot; use `by: testid` / `by: selector` when exact DOM identity matters.
+
+### `capture`
+
+Store a structured value from the page for later steps and outcome verifiers, as `${captures.<assign>…}` (and `captures/<assign>.json`). Exactly one source:
+
+```yaml
+steps:
+  - capture: { assign: rowsBefore, table: { by: testid, testid: workers-table } }
+  - capture: { assign: companyName, text: { by: role, role: heading, name: Company } }
+  - capture: { assign: email, value: { by: label, name: Email } }
+  - capture: { assign: nextHref, attribute: { by: role, role: link, name: Next, attributeName: href } }
+  - fill: { by: label, name: Search, value: "${captures.companyName}" }
+```
+
+- `text`: the target's whitespace-normalized text. `value`: the live control value. `attribute`: the attribute named by `attributeName` (`null` when absent).
+- `table`: `{ headers, rows: [{ <header>: <cell> }], cells: [[…]], rowCount }` from a `<table>` or role `table`/`grid` (hidden rows skipped; an empty header becomes `columnN`). Read `${captures.rowsBefore.rowCount}` or `${captures.rowsBefore.rows.0.Name}`.
+- Waits up to `timeoutMs` (default 5000 × `waitScale`) for the target; a missing or ambiguous target fails the step.
+- In later steps a capture splices as text (objects as JSON; unknown names as `""`). `expect` and `capture` steps resolve references themselves: locator and text fields as text, `count` and `expect.request` `json` values typed (`count: "${captures.rows.rowCount}"` compares a number), and an unknown name fails the step instead of becoming `""`. In outcome verifiers (`value`, `mongo`, `http`, …) a string that is exactly one `${captures.…}` keeps its type, and an unknown name fails or blocks the outcome instead of becoming `""`.
 
 ## Step output
 

@@ -151,6 +151,23 @@ describe("investigate module", () => {
         error: "file.cheap contract failed",
       }),
     ).toBe(2);
+    // A `cairn services up` lock refused the audit before any run.
+    expect(
+      auditResultExitCode({
+        ...base,
+        exitCode: 4,
+        error: "services for project ... are owned by `cairn services up`",
+      }),
+    ).toBe(4);
+    // A run that exited 4 and a later error stays exit 2.
+    expect(
+      auditResultExitCode({
+        ...base,
+        runId: "r1",
+        exitCode: 4,
+        error: "file.cheap contract failed",
+      }),
+    ).toBe(2);
   });
 
   it("keeps vidtrace bundles inside the run and redacts their text artifacts", async () => {
@@ -194,11 +211,14 @@ describe("investigate module", () => {
   });
 });
 
-describe("cairn investigate CLI contract", () => {
+// Each test spawns bin/cairn (up to three times). Under a loaded full-suite
+// run (the explain parity test spawns ~40 CLIs concurrently) vitest's 5s
+// default timeout has been hit; the spawned commands themselves are fast.
+describe("cairn investigate CLI contract", { timeout: 30_000 }, () => {
   it("uses config defaults, forwards --query, and lets --codebase/--connect select connection", async () => {
     const root = mkdtempSync(join(tmpdir(), "cairn-investigate-cli-"));
     const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run-smoke");
+    const runDir = join(runsRoot, "2026-07-01T00-00-01-000Z_run_smoke_a1b2c3");
     const codebase = join(root, "codebase");
     const binDir = join(root, "bin");
     const argsFile = join(root, "fcheap-args.txt");
@@ -271,7 +291,7 @@ exit 2
 
       expect(command.exitCode).toBe(0);
       expect(JSON.parse(command.stdout)).toMatchObject({
-        runId: "run-smoke",
+        runId: "2026-07-01T00-00-01-000Z_run_smoke_a1b2c3",
         stashId: "stash-cli",
         query: "custom query",
         mode: "keyword",
@@ -311,6 +331,17 @@ exit 2
       const context = readFileSync(join(runDir, "agent_context.md"), "utf8");
       expect(context).toContain("## Code Matches");
       expect(context).toContain("src/auth.ts:12 (score: 0.90)");
+      // The run stash went through the evidence gate as a manual stash: a
+      // receipt (no TTL, like `cairn stash save` without --ttl).
+      const receipt = JSON.parse(
+        readFileSync(join(runDir, "stash-receipt.json"), "utf8"),
+      ) as Record<string, unknown>;
+      expect(receipt).toMatchObject({
+        stashId: "stash-cli",
+        action: "manual",
+        tags: ["investigate-2026-07-01T00-00-01-000Z_run_smoke_a1b2c3"],
+      });
+      expect(receipt.ttl).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -319,7 +350,10 @@ exit 2
   it("returns exit 2 when file.cheap connect violates its JSON contract", async () => {
     const root = mkdtempSync(join(tmpdir(), "cairn-investigate-invalid-"));
     const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run-invalid");
+    const runDir = join(
+      runsRoot,
+      "2026-07-01T00-00-02-000Z_run_invalid_a1b2c3",
+    );
     const fakeFcheap = join(root, "fcheap");
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "run.json"), '{"status":"failed"}');
@@ -371,7 +405,10 @@ exit 2
       join(tmpdir(), "cairn-investigate-index-missing-"),
     );
     const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run-index-missing");
+    const runDir = join(
+      runsRoot,
+      "2026-07-01T00-00-03-000Z_run_index_missing_a1b2c3",
+    );
     const codebase = join(root, "codebase");
     const argsFile = join(root, "fcheap-args.txt");
     const fakeFcheap = join(root, "fcheap");
@@ -423,7 +460,7 @@ exit 2
 
       expect(command.exitCode).toBe(2);
       expect(JSON.parse(command.stdout)).toMatchObject({
-        runId: "run-index-missing",
+        runId: "2026-07-01T00-00-03-000Z_run_index_missing_a1b2c3",
         stashId: "stash-index-missing",
         indexStatus: "missing",
         codeMatches: [],
@@ -442,7 +479,10 @@ exit 2
   it("returns structured exit 2 results when investigate or audit setup fails", async () => {
     const root = mkdtempSync(join(tmpdir(), "cairn-investigate-setup-error-"));
     const runsRoot = join(root, "runs");
-    const runDir = join(runsRoot, "run-invalid-config");
+    const runDir = join(
+      runsRoot,
+      "2026-07-01T00-00-04-000Z_run_invalid_config_a1b2c3",
+    );
     const invalidConfig = join(root, "cairntrace.config.yml");
     const missingSpec = join(root, "missing-spec.yml");
     mkdirSync(runDir, { recursive: true });

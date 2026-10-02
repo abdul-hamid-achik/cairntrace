@@ -6,7 +6,18 @@ import { z } from "zod";
  * Spec/result schemas reference these by import.
  */
 
-export const RunStatusSchema = z.enum(["passed", "failed", "errored"]);
+/**
+ * `refused`: the environment policy refused the spec before anything started
+ * (no services, preconditions or browser, and no run directory). Additive;
+ * readers that switch on status should treat an unknown value as "did not
+ * pass".
+ */
+export const RunStatusSchema = z.enum([
+  "passed",
+  "failed",
+  "errored",
+  "refused",
+]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
 export const OutcomeStatusSchema = z.enum(["passed", "failed", "skipped"]);
@@ -61,5 +72,6 @@ export const ExitCodeSchema = z.union([
   z.literal(4), // lint failed
   z.literal(5), // heal-no-progress
   z.literal(6), // contract hash mismatch
+  z.literal(7), // refused by the environment policy (requires.env / mutates)
 ]);
 export type ExitCode = z.infer<typeof ExitCodeSchema>;

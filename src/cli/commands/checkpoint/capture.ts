@@ -1,7 +1,14 @@
 import { AgentBrowserAdapter } from "../../../adapters/agent-browser/AgentBrowserAdapter";
 import { CheckpointStore } from "../../../core/checkpoint/CheckpointStore";
+import { UnknownEnvironmentError } from "../../../core/config/runtimeContext";
+import {
+  type CheckpointScope,
+  type CheckpointScopeOptions,
+  checkpointMetaFor,
+  resolveCheckpointScope,
+} from "./scope";
 
-export interface CaptureOptions {
+export interface CaptureOptions extends CheckpointScopeOptions {
   /** agent-browser session to read state from. REQUIRED. */
   session?: string;
   /** Override the checkpoint root directory (rarely needed). */
@@ -27,11 +34,13 @@ export async function captureFromSessionCommand(
 
   const store = new CheckpointStore(opts.root);
   let outPath: string;
+  let scope: CheckpointScope;
   try {
     outPath = store.pathFor(name);
+    scope = await resolveCheckpointScope(opts);
   } catch (e) {
     process.stderr.write(`cairn checkpoint: ${(e as Error).message}\n`);
-    process.exit(2);
+    process.exit(e instanceof UnknownEnvironmentError ? e.exitCode : 2);
   }
 
   await store.ensureRoot();
@@ -49,7 +58,21 @@ export async function captureFromSessionCommand(
       );
       process.exit(2);
     }
+    // Scope: the environment's baseUrl, else the session's current origin.
+    const pageUrl = scope.envBaseUrl
+      ? undefined
+      : await adapter.getUrl().catch(() => undefined);
+    const meta = checkpointMetaFor(name, scope, {
+      ...(pageUrl ? { pageUrl } : {}),
+      capturedBy: "capture-from-session",
+    });
+    await store.writeMeta(outPath, meta);
     process.stdout.write(`Checkpoint saved: ${outPath}\n`);
+    process.stdout.write(
+      `Scope: ${meta.baseUrl ?? "(no baseUrl)"}${
+        meta.env ? ` env ${meta.env}` : ""
+      }${meta.expiresAt ? `, expires ${meta.expiresAt}` : ""}\n`,
+    );
     process.stdout.write(`Reference it with:  session: { resume: ${name} }\n`);
   } finally {
     // Do not close the session — the user might still be using it. capture-from-session

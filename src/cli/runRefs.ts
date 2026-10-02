@@ -1,6 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { isRunDirName } from "../core/artifacts/retention";
 import { loadConfig, type LoadedConfig } from "../core/config/loader";
 
 export interface ArtifactRootOptions {
@@ -61,8 +62,10 @@ export async function listRunDirsNewestFirst(
       }
     }),
   );
+  // Only real run directories: `latest`/`previous` must never resolve to
+  // `_invocations/` (or any other non-run folder) under the artifact root.
   return stats
-    .filter((s) => s.isDir)
+    .filter((s) => s.isDir && isRunDirName(s.name))
     .toSorted((a, b) => b.mtime - a.mtime)
     .map((s) => join(runsRoot, s.name));
 }

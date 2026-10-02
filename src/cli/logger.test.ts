@@ -156,6 +156,29 @@ describe("logger levels + format", () => {
     expect(out).not.toContain("\x1b[31mplain line");
   });
 
+  it("raw() keeps stderr NDJSON under --log-format json", () => {
+    configureLoggerFromFlags({
+      logLevel: "info",
+      logFormat: "json",
+      color: false,
+    });
+    log
+      .scope("services")
+      .raw("Container db Started\r\n\nContainer web Started\n");
+    const lines = cap.lines.join("").trim().split("\n");
+    expect(lines).toHaveLength(2);
+    const entries = lines.map(
+      (line) => JSON.parse(line) as Record<string, unknown>,
+    );
+    expect(entries[0]).toMatchObject({
+      level: "info",
+      scope: "services",
+      stream: "raw",
+      msg: "Container db Started",
+    });
+    expect(entries[1]!.msg).toBe("Container web Started");
+  });
+
   it("human format renders level icons", () => {
     configureLoggerFromFlags({ logLevel: "debug", color: false });
     log.warn("watch out");

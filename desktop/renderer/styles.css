@@ -22,6 +22,10 @@
   --bad: #e5655e;
   --warn: #e0b341;
   --info: #6fa8dc;
+  /* refused by the environment policy: nothing ran, not a failure */
+  --refused: #a78bfa;
+  /* pinned: retention keeps the run */
+  --pin: #7dd3fc;
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto,
     sans-serif;
@@ -248,6 +252,11 @@ textarea {
   overflow: auto;
   padding: 16px 18px 40px;
   outline: none;
+}
+
+/* One per mount (app.js): lays out as if its children sat in .view. */
+.view-host {
+  display: contents;
 }
 
 .statusbar {
@@ -513,6 +522,11 @@ p.view-sub {
   background: var(--text-faint);
 }
 
+.dot-refused {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--refused);
+}
+
 .dot-running {
   background: var(--info);
   animation: pulse 1.1s ease-in-out infinite;
@@ -566,6 +580,19 @@ p.view-sub {
   background: rgba(111, 168, 220, 0.08);
 }
 
+.tag-refused {
+  color: var(--refused);
+  border-color: rgba(167, 139, 250, 0.4);
+  border-style: dashed;
+  background: rgba(167, 139, 250, 0.08);
+}
+
+.tag-pin {
+  color: var(--pin);
+  border-color: rgba(125, 211, 252, 0.4);
+  background: rgba(125, 211, 252, 0.08);
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -582,6 +609,16 @@ p.view-sub {
   border-color: rgba(111, 168, 220, 0.4);
   color: var(--info);
   background: rgba(111, 168, 220, 0.1);
+}
+
+.pill-lock {
+  border-color: rgba(224, 179, 65, 0.4);
+  color: var(--warn);
+  background: rgba(224, 179, 65, 0.1);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── tables ────────────────────────────────────────────────────────────── */
@@ -936,6 +973,7 @@ pre.code.tight {
 .shot img {
   display: block;
   width: 100%;
+  max-width: var(--shot-max, 720px);
   height: auto;
   background: #fff;
 }
@@ -1391,6 +1429,25 @@ pre.code.tight {
   margin-bottom: 12px;
 }
 
+/* A refusal is not a failure: nothing ran. Dashed violet, not red. */
+.refusal-box {
+  border: 1px dashed rgba(167, 139, 250, 0.55);
+  background: rgba(167, 139, 250, 0.07);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: #d9cffc;
+  font-size: 12.5px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.refusal-box .refusal-requires {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .error-box pre {
   margin: 7px 0 0;
   font-family: var(--mono);
@@ -1502,10 +1559,400 @@ dialog.modal::backdrop {
   background: #3a4351;
 }
 
+/* ── live view: incremental cards ──────────────────────────────────────── */
+
+.live-group {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-dim);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  margin-bottom: 16px;
+  padding: 10px 12px 2px;
+}
+
+.group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-body {
+  margin: 8px 0;
+}
+
+.group-members {
+  margin-top: 6px;
+}
+
+.argv-line {
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planned-list {
+  margin: 6px 0 0;
+  padding-left: 22px;
+  font-size: 11.5px;
+}
+
+.planned-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 1px 0;
+}
+
+.planned-pending {
+  color: var(--text-faint);
+}
+
+.live-card {
+  margin-bottom: 14px;
+}
+
+.live-card .panel-head {
+  flex-wrap: wrap;
+}
+
+.card-title {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46ch;
+}
+
+.card-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.card-note {
+  margin-bottom: 10px;
+}
+
+.badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.run-badges {
+  margin: -6px 0 12px;
+}
+
+.phase-banner {
+  margin: 0;
+  padding: 6px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--info);
+  background: rgba(111, 168, 220, 0.08);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.phase-banner.over-budget {
+  color: var(--warn);
+  background: rgba(224, 179, 65, 0.1);
+}
+
+.steps-scroll {
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.step-live {
+  grid-template-columns: 16px 1fr auto;
+}
+
+.step-live .step-pos {
+  color: var(--text-faint);
+}
+
+.inline-error,
+.outcome-progress {
+  grid-column: 2 / -1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+}
+
+.outcome-progress {
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+.live-shot {
+  margin-bottom: 12px;
+}
+
+.output-panel {
+  min-width: 0;
+}
+
+.mini-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.mini-tab {
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-tab.active {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.follow-wrap {
+  position: relative;
+}
+
+.jump-latest {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.log-line.log-empty {
+  color: var(--text-faint);
+}
+
+.log-line .detail {
+  color: var(--text-faint);
+}
+
+.lock-banner {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border: 1px solid rgba(224, 179, 65, 0.4);
+  border-radius: var(--radius);
+  background: rgba(224, 179, 65, 0.08);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* ── run detail: failure-first, media, history ─────────────────────────── */
+
+.failure-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.failure-panel {
+  margin-bottom: 14px;
+}
+
+.diag-summary {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.video-figure {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #000;
+}
+
+.video-figure video {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  margin: 0 auto;
+}
+
+.video-figure figcaption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  background: var(--panel);
+  color: var(--text-dim);
+}
+
+.trace-card,
+.binary-notice {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.history-host {
+  margin: -4px 0 12px;
+}
+
+.history {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.history-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 28px;
+}
+
+.history-cell {
+  width: 9px;
+  border: 0;
+  border-radius: 2px;
+  padding: 0;
+  cursor: pointer;
+  background: var(--text-faint);
+  opacity: 0.75;
+}
+
+.history-cell:hover,
+.history-cell.current {
+  opacity: 1;
+  outline: 1px solid var(--text);
+}
+
+.history-ok {
+  background: var(--ok);
+}
+
+.history-bad {
+  background: var(--bad);
+}
+
+.history-warn {
+  background: var(--warn);
+}
+
+.history-refused {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--refused);
+}
+
+/* ── runs table extras ─────────────────────────────────────────────────── */
+
+.cell-labels {
+  max-width: 260px;
+}
+
+.label-tag {
+  margin: 1px 3px 1px 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+table.grid tr.group-row td {
+  background: var(--panel-2);
+  font-size: 11.5px;
+  cursor: default;
+}
+
+.filter-chips {
+  margin-top: -4px;
+}
+
+.chip-filter {
+  gap: 4px;
+}
+
+.chip-x {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.cli-line code {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 80ch;
+}
+
+.row-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.stash-info {
+  margin-top: 14px;
+}
+
+.small-editor {
+  min-height: 70px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* ── density ───────────────────────────────────────────────────────────── */
+
+body.density-compact {
+  font-size: 12px;
+}
+
+body.density-compact table.grid td {
+  padding: 3px 8px;
+}
+
+body.density-compact .timeline-row,
+body.density-compact .step-row {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+body.density-compact .panel-body:not(.tight) {
+  padding: 9px 11px;
+}
+
+body.density-compact .log-pane {
+  line-height: 1.45;
+}
+
 /* ── narrow windows ────────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
   .live-grid,
+  .failure-grid,
   .specs-grid,
   .doc-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -1519,4 +1966,909 @@ dialog.modal::backdrop {
     width: 100%;
     margin-left: 0;
   }
+}
+
+/* ── keyboard focus ────────────────────────────────────────────────────── */
+/* One visible ring for everything focusable by keyboard (mouse clicks do
+ * not show it: :focus-visible). Inputs keep their own border glow above. */
+
+:where(
+    button,
+    [role="option"],
+    [role="tab"],
+    [tabindex]:not([tabindex="-1"]),
+    tr[tabindex],
+    summary,
+    a
+  ):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.nav-item:focus-visible,
+.tab:focus-visible,
+.mini-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+table.grid tbody tr:focus-visible {
+  outline-offset: -2px;
+  background: var(--panel-2);
+}
+
+.log-pane:focus-visible {
+  outline-offset: 0;
+}
+
+.tree-toggle {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+}
+
+/* ── setup notice + origin tags ────────────────────────────────────────── */
+
+.setup-notice {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(224, 179, 65, 0.4);
+  border-radius: var(--radius);
+  background: rgba(224, 179, 65, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.setup-row .btn {
+  margin-left: auto;
+}
+
+.origin-slot:empty,
+.liveness-slot:empty {
+  display: none;
+}
+
+.origin-tag.origin-mcp {
+  color: #c4a7f5;
+  border-color: rgba(196, 167, 245, 0.35);
+  background: rgba(196, 167, 245, 0.08);
+}
+
+.origin-tag.origin-app {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+time.rel-time {
+  white-space: nowrap;
+}
+
+/* ── live: no layout jumps ─────────────────────────────────────────────── */
+/* The phase banner always holds its line, the elapsed clock has a fixed
+ * width, and the screenshot sits in a fixed-ratio frame from the start. */
+
+.phase-banner {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Only the phase and item shorten; the elapsed time against the budget and
+ * the missing-heartbeat warning stay readable (the full line is the title). */
+.phase-banner .phase-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.phase-banner .phase-detail {
+  flex: none;
+}
+
+.phase-banner.idle {
+  color: var(--text-faint);
+  background: transparent;
+}
+
+/* No heartbeat lately: the phase shown may be out of date. */
+.phase-banner.stale {
+  color: var(--text-dim);
+  background: rgba(224, 179, 65, 0.06);
+  border-bottom-style: dashed;
+  border-bottom-color: var(--warn);
+}
+
+.phase-banner.stale .phase-detail {
+  color: var(--warn);
+}
+
+.elapsed {
+  font-variant-numeric: tabular-nums;
+  min-width: 7ch;
+  text-align: right;
+}
+
+.live-card .log-pane,
+.inv-detail .log-pane {
+  height: 260px;
+  max-height: none;
+}
+
+.shot-frame {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  max-width: var(--shot-max, 720px);
+  background: var(--bg-sunken);
+}
+
+.shot-frame img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+
+.shot-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.group-details {
+  margin-left: auto;
+}
+
+/* ── invocations view ──────────────────────────────────────────────────── */
+
+.inv-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.inv-list-panel {
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+
+.inv-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.inv-item {
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.inv-item:hover {
+  background: var(--panel-2);
+}
+
+.inv-item.selected {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.inv-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inv-elapsed {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.inv-item-title {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inv-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.inv-head {
+  flex-wrap: wrap;
+}
+
+.inv-facts .kv {
+  margin-bottom: 12px;
+}
+
+.inv-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.inv-plan .planned-item {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.inv-plan .planned-item > .cell-dim:not(.planned-status) {
+  grid-column: 2 / -1;
+  grid-row: 2;
+}
+
+.planned-spec {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planned-not-run {
+  color: var(--text-faint);
+}
+
+.inv-detail-empty {
+  padding: 30px 16px;
+  text-align: center;
+}
+
+@media (max-width: 1100px) {
+  .inv-layout,
+  .inv-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inv-list-panel {
+    position: static;
+    max-height: 40vh;
+  }
+}
+
+/* A long invocation error (a web server's log tail) must not push the plan
+ * and the logs off screen: it scrolls inside its box. */
+.inv-detail .error-box pre {
+  max-height: 220px;
+  overflow: auto;
+}
+
+/* ── evidence: stash, publish, pin, refusal, environment policy ───────── */
+
+.log-line.level-refused {
+  color: var(--refused);
+}
+
+table.grid tbody tr.run-row.pinned td:first-child {
+  box-shadow: inset 3px 0 0 var(--pin);
+}
+
+table.grid tbody tr.run-row.refused td {
+  color: var(--text-dim);
+}
+
+table.grid tbody tr.run-row.refused td.status-cell {
+  color: var(--refused);
+}
+
+.evidence-lines {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.evidence-lines li.warn {
+  color: var(--warn);
+}
+
+.evidence-block + .evidence-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.evidence-block .toolbar {
+  margin-bottom: 2px;
+}
+
+.prompt-input {
+  width: 100%;
+  min-width: 320px;
+}
+
+.policy-warning {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px dashed rgba(167, 139, 250, 0.55);
+  border-radius: var(--radius);
+  background: rgba(167, 139, 250, 0.07);
+  color: #d9cffc;
+  font-size: 12px;
+}
+
+.env-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.requires-tag {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.planned-refusal {
+  color: var(--refused);
+  font-size: 11px;
+}
+
+/* ── sessions view (discovery / accompany journals) ───────────────────── */
+
+.ses-detail .section-title .count {
+  font-family: var(--mono);
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 4px;
+}
+
+.ses-result:empty {
+  display: none;
+}
+
+.ses-result {
+  margin-bottom: 12px;
+}
+
+.ses-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.ses-timeline,
+.ses-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.ses-action {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ses-action.selected {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.ses-action.failed .ses-action-kind {
+  color: var(--bad);
+}
+
+.ses-action-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ses-action-head .step-meta {
+  margin-left: auto;
+}
+
+.ses-index {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ses-action-kind,
+.ses-step-kind {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.ses-locator,
+.ses-url,
+.ses-step-text {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.ses-mutations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ses-mutation {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.ses-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ses-preview-head .section-title {
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--mono);
+}
+
+.ses-preview-head .btn {
+  margin: 12px 0 0 auto;
+}
+
+.ses-thumbs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 0;
+}
+
+.ses-thumb {
+  flex: 0 0 auto;
+  width: 84px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ses-thumb img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  background: #fff;
+}
+
+.ses-thumb.selected {
+  border-color: var(--accent);
+}
+
+.ses-thumb-label {
+  font-size: 10px;
+  color: var(--text-faint);
+  padding: 1px 4px;
+}
+
+.ses-snapshot,
+.ses-network {
+  margin-top: 8px;
+}
+
+.ses-snapshot > summary,
+.ses-network > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+.ses-snapshot-text,
+.ses-network-text {
+  max-height: 340px;
+  overflow: auto;
+  margin-top: 6px;
+}
+
+.ses-step {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.ses-draft-tabs {
+  margin-bottom: 8px;
+}
+
+.ses-draft-text,
+.ses-diff {
+  max-height: 460px;
+  overflow: auto;
+}
+
+.ses-diff .diff-add,
+.ses-added-steps .diff-add {
+  color: var(--ok);
+}
+
+.ses-diff .diff-del {
+  color: var(--bad);
+}
+
+.ses-diff .diff-ctx {
+  color: var(--text-dim);
+}
+
+.ses-diff .diff-gap {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.ses-added-steps {
+  margin: 4px 0;
+  padding-left: 16px;
+  font-size: 11.5px;
+}
+
+.ses-export + .ses-export {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.ses-export-path {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60ch;
+}
+
+@media (max-width: 1100px) {
+  .ses-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── catalog view ─────────────────────────────────────────────────────── */
+
+.catalog-cli:empty,
+.catalog-warnings:empty {
+  display: none;
+}
+
+.catalog-table td {
+  vertical-align: top;
+}
+
+.catalog-table .cell-spec {
+  white-space: nowrap;
+}
+
+.catalog-file {
+  font-size: 11px;
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-snippet {
+  margin-left: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.catalog-input {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.catalog-input.required {
+  border-color: var(--accent-dim);
+}
+
+.catalog-group td {
+  background: var(--panel-2);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.catalog-uses {
+  margin: 0;
+  padding-left: 14px;
+  font-size: 11.5px;
+}
+
+.catalog-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── environment: services up / down ──────────────────────────────────── */
+
+.services-lock {
+  white-space: nowrap;
+}
+
+.services-owner {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* ── wave 4: structured evidence, gates, teardown, fixtures ──────────── */
+
+.data-evidence {
+  margin-top: 6px;
+}
+
+.data-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.data-table-wrap {
+  margin: 8px 0;
+}
+
+.data-table-scroll {
+  overflow-x: auto;
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+table.grid.data-table {
+  font-size: 11.5px;
+}
+
+table.grid.data-table tbody tr {
+  cursor: default;
+}
+
+table.grid.data-table td {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.data-note {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.data-request {
+  margin-top: 8px;
+}
+
+.attempts {
+  margin-top: 8px;
+}
+
+.attempt-list {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.attempt-row {
+  display: grid;
+  grid-template-columns: 10px 44px 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11.5px;
+}
+
+.attempt-row:last-child {
+  border-bottom: 0;
+}
+
+.attempt-row.attempt-gap,
+.attempt-list > .attempt-row.mono {
+  display: block;
+  font-style: italic;
+}
+
+.attempt-list > .attempt-row.mono {
+  font-style: normal;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.attempt-n {
+  color: var(--text-faint);
+}
+
+.attempt-summary {
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.attempt-bad .attempt-summary {
+  color: var(--text-dim);
+}
+
+.attempt-pos {
+  margin-right: 4px;
+}
+
+.outputs-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.outputs-list dt {
+  color: var(--text-faint);
+}
+
+.outputs-list dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-what {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+
+.step-error-output {
+  margin: 6px 0 0;
+  color: var(--bad);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.expect-entry,
+.capture-entry {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--info);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+
+.expect-entry.expect-passed {
+  border-left-color: var(--ok);
+}
+
+.expect-entry.expect-failed {
+  border-left-color: var(--bad);
+}
+
+.expect-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+  font-size: 11.5px;
+}
+
+.expects-section {
+  margin-top: 16px;
+}
+
+.expect-live {
+  grid-column: 2 / -1;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.expect-live.expect-failed {
+  color: var(--bad);
+}
+
+.run-output {
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.gate-card .outcome-body .key-value,
+.gate-card .outcome-body dl {
+  margin-bottom: 6px;
+}
+
+.gate-live .label {
+  color: var(--text);
+}
+
+.teardown-live-row .step-pos {
+  color: var(--text-faint);
+}
+
+.fixture-live .tag {
+  margin-left: 4px;
+}
+
+.fixture-outputs {
+  color: var(--text-faint);
+}
+
+table.grid.fixtures-table tbody tr,
+table.grid.datasources-table tbody tr,
+table.grid.gates-table tbody tr,
+table.grid.fixtures-registry tbody tr {
+  cursor: default;
+}
+
+table.grid.datasources-table tr.ds-disabled td {
+  color: var(--text-faint);
+}
+
+table.grid.datasources-table td.ds-target {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attempts-tag {
+  font-family: var(--mono);
 }

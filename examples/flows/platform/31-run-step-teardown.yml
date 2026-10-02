@@ -1,0 +1,65 @@
+# Platform provisioning — a `run:` step creates data, `teardown:` removes it.
+#
+# Demonstrates: a `run:` step that provisions a product through a node script
+# and hands its JSON result to later steps (`assign` → ${runs.seeded.*}),
+# `expect` on the rendered row, `capture` of its name, the `value` verifier on
+# both, an `http` verifier without a datasource (relative URL, environment
+# baseUrl), and a spec `teardown:` that always deletes the product — after a
+# pass, a failure or a cancel — with CAIRN_RUN_STATUS in its environment.
+version: 1
+name: run_step_teardown
+intent: a product provisioned by a run step shows in the catalog and is removed again by the spec teardown
+environment: local
+vars:
+  productSku: "RS-${run.token}"
+  productName: Demo label printer
+imports:
+  - ../../actions/login_demo_app.yml
+outcomes:
+  - id: run_step_reported_product
+    description: the provisioning run step reported the product it created
+    verify:
+      value:
+        actual: "${runs.seeded}"
+        expect: { sku: "${vars.productSku}", name: "${vars.productName}", stock: 3 }
+  - id: captured_name_matches
+    description: the catalog row shows the provisioned product's name
+    verify:
+      value:
+        actual: "${captures.shownName}"
+        expect: { $: "${vars.productName}" }
+  - id: api_lists_product
+    description: the products API lists the provisioned SKU once
+    verify:
+      http:
+        url: "/api/products?sku=${vars.productSku}"
+        expect:
+          json: { total: 1, "products[0].category": office }
+steps:
+  - id: provision_product
+    run:
+      node: ../../fixtures/demo-product.mjs
+      args: [create, "${vars.productSku}", "3", "${vars.productName}"]
+      timeoutMs: 30000
+      assign: seeded
+  - id: sign_in
+    use: login_demo_app
+  - id: open_product
+    open: "/products.html?sku=${runs.seeded.sku}"
+  - id: row_shows_stock
+    expect:
+      by: role
+      role: row
+      name: "${vars.productSku} ${vars.productName} office $4.50 3"
+      visible: true
+  - id: capture_name
+    capture:
+      assign: shownName
+      text: { by: role, role: cell, name: "${vars.productName}" }
+teardown:
+  - id: delete_product
+    run:
+      node: ../../fixtures/demo-product.mjs
+      args: [delete, "${vars.productSku}"]
+      timeoutMs: 30000
+contractHash: sha256:555c7ea5d740a88f3ba0b67d47ffcbdf23e23e0b914cd0e185d45141af3a6353

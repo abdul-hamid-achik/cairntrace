@@ -14,11 +14,22 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  // Main-process surface only: the trust boundary (ipc.js), the spawn/kill
-  // logic (lib/cli.js), and the artifact readers (lib/runs.js) are where a
-  // type mistake costs a wedged child or a wrong path. The renderer is
-  // classic-script DOM glue, covered by oxlint, the node:test suite, and the
-  // `--smoke` boot harness instead.
+  // Main-process surface: the trust boundary (ipc.js), the spawn/kill logic
+  // (lib/cli.js), and the artifact readers (lib/runs.js) are where a type
+  // mistake costs a wedged child or a wrong path. The sandboxed renderer has
+  // its own program (tsconfig.renderer.json: DOM lib, no Node types, the
+  // window.Studio / window.cairn globals in renderer/globals.d.ts); the tests
+  // that load renderer scripts into a DOM are excluded here for that reason.
   "include": ["main.js", "preload.js", "ipc.js", "windows.js", "lib/**/*.js", "test/**/*.js"],
-  "exclude": ["node_modules", "dist", "renderer", "test/dom.test.js", "test/state.test.js"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "renderer",
+    "test/dom.test.js",
+    "test/state.test.js",
+    "test/views.dom.test.js",
+    "test/app.dom.test.js",
+    "test/*.dom.test.js",
+    "test/dom-env.js"
+  ]
 }

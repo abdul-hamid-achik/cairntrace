@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseSnapshot } from "../../../core/healer/snapshotParser";
 import {
@@ -1244,26 +1247,238 @@ describe("screenshot timeout", () => {
     execaMock.mockReset();
   });
 
-  it("hard-bounds capture at 15s and retains a rendering-surface hint", async () => {
-    execaMock.mockResolvedValueOnce({
-      timedOut: true,
-      exitCode: undefined,
-      stdout: "",
-      stderr: "",
-    });
+  const killed = {
+    timedOut: true,
+    exitCode: undefined,
+    stdout: "",
+    stderr: "",
+  };
+  const drained = { exitCode: 0, stdout: "about:blank\n", stderr: "" };
+
+  it("hard-bounds capture at 15s, drains the queue, and retains a rendering-surface hint", async () => {
+    execaMock.mockResolvedValueOnce(killed).mockResolvedValueOnce(drained);
     const adapter = new AgentBrowserAdapter({ session: "screenshot-hang" });
 
-    const result = await adapter.screenshot({ path: "/tmp/hung.png" });
+    const result = await adapter.screenshot({ path: "/nonexistent/hung.png" });
 
     expect(result.ok).toBe(false);
-    expect(execaMock).toHaveBeenCalledWith(
+    expect(execaMock).toHaveBeenNthCalledWith(
+      1,
       "agent-browser",
-      ["--session", "screenshot-hang", "screenshot", "/tmp/hung.png"],
+      ["--session", "screenshot-hang", "screenshot", "/nonexistent/hung.png"],
       expect.objectContaining({ timeout: 20_000 }),
+    );
+    // The daemon's serial queue is settled before the next command runs.
+    expect(execaMock).toHaveBeenNthCalledWith(
+      2,
+      "agent-browser",
+      ["--session", "screenshot-hang", "get", "url"],
+      expect.objectContaining({ timeout: 25_000 }),
     );
     expect(result.error).toContain("no rendering surface");
     expect(result.error).toContain("display asleep/headless");
-    expect(adapter.isWedged()).toBe(true);
+    // Drained: optional evidence never marks the session wedged.
+    expect(adapter.isWedged()).toBe(false);
+  });
+
+  it("skips later captures without invoking agent-browser, and steps keep running", async () => {
+    execaMock.mockResolvedValueOnce(killed).mockResolvedValueOnce(drained);
+    const adapter = new AgentBrowserAdapter({ session: "screenshot-skip" });
+    await adapter.screenshot({ path: "/nonexistent/first.png" });
+    expect(execaMock).toHaveBeenCalledTimes(2);
+
+    const skipped = await adapter.screenshot({
+      path: "/nonexistent/second.png",
+    });
+    expect(skipped).toMatchObject({
+      ok: false,
+      path: "/nonexistent/second.png",
+      durationMs: 0,
+    });
+    expect(skipped.error).toMatch(/^screenshot skipped: an earlier capture/);
+    // Still a timeout/rendering-surface hint for the run's diagnostic note.
+    expect(skipped.error).toContain("no rendering surface");
+    expect(execaMock).toHaveBeenCalledTimes(2);
+
+    execaMock.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    const step = await adapter.runStep({ open: "/next" });
+    expect(step.ok).toBe(true);
+    expect(execaMock).toHaveBeenLastCalledWith(
+      "agent-browser",
+      ["--session", "screenshot-skip", "navigate", "/next"],
+      expect.objectContaining({ timeout: 65_000 }),
+    );
+    expect(adapter.isWedged()).toBe(false);
+  });
+
+  it("a capture that finishes while the queue drains is a late but real screenshot", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairn-ab-shot-"));
+    const path = join(dir, "late.png");
+    execaMock.mockResolvedValueOnce(killed).mockImplementationOnce(async () => {
+      // The daemon wrote the file before it answered the drain probe.
+      await writeFile(path, "png-bytes");
+      return drained;
+    });
+    const adapter = new AgentBrowserAdapter({ session: "screenshot-late" });
+    try {
+      const late = await adapter.screenshot({ path });
+      expect(late).toMatchObject({ ok: true, path });
+      expect(late.error).toBeUndefined();
+      expect(adapter.isWedged()).toBe(false);
+
+      // Screenshots stay on: the next capture is attempted.
+      execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+      const next = await adapter.screenshot({ path: join(dir, "next.png") });
+      expect(next.ok).toBe(true);
+      expect(execaMock).toHaveBeenCalledTimes(3);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a file that was already at the path is not taken for a late capture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairn-ab-shot-"));
+    const path = join(dir, "stale.png");
+    await writeFile(path, "older-bytes");
+    execaMock.mockResolvedValueOnce(killed).mockResolvedValueOnce(drained);
+    const adapter = new AgentBrowserAdapter({ session: "screenshot-stale" });
+    try {
+      const shot = await adapter.screenshot({ path });
+      expect(shot.ok).toBe(false);
+      expect(shot.error).toContain("no rendering surface");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a failed capture that is not a timeout keeps screenshots on", async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "no page" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({ session: "screenshot-fail" });
+    const failed = await adapter.screenshot({ path: "/tmp/a.png" });
+    expect(failed).toMatchObject({ ok: false, error: "no page" });
+    const next = await adapter.screenshot({ path: "/tmp/b.png" });
+    expect(next.ok).toBe(true);
+    expect(execaMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("the watchdog kills only the screenshot client, never the session daemon", async () => {
+    vi.useFakeTimers();
+    try {
+      // A client that only settles once it is killed (here: by hand).
+      const pending: Array<(value: unknown) => void> = [];
+      execaMock.mockImplementation(
+        () => new Promise((resolveClient) => pending.push(resolveClient)),
+      );
+      const adapter = new AgentBrowserAdapter({
+        session: "screenshot-watchdog",
+        stateDir: "/nonexistent/agent-browser-state",
+      });
+      const terminate = vi.spyOn(
+        adapter as unknown as { terminateDaemon: () => boolean },
+        "terminateDaemon",
+      );
+
+      const shot = adapter.screenshot({ path: "/nonexistent/hung.png" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      pending.shift()!({ exitCode: undefined, stdout: "", stderr: "" });
+      // The drain probe: the daemon finishes the capture within the window.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(pending).toHaveLength(1);
+      pending.shift()!(drained);
+      const result = await shot;
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("timed out after 15000ms");
+      expect(terminate).not.toHaveBeenCalled();
+      expect(adapter.isWedged()).toBe(false);
+      expect(execaMock).toHaveBeenCalledTimes(2);
+
+      // A real interaction that hits its deadline still takes the wedge path.
+      const snap = adapter.snapshot();
+      await vi.advanceTimersByTimeAsync(60_000);
+      pending.shift()!({ exitCode: undefined, stdout: "", stderr: "" });
+      await snap;
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(adapter.isWedged()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      execaMock.mockReset();
+    }
+  });
+
+  it("a capture still stuck after the drain stops the session at once and names it", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending: Array<(value: unknown) => void> = [];
+      execaMock.mockImplementation(
+        () => new Promise((resolveClient) => pending.push(resolveClient)),
+      );
+      const adapter = new AgentBrowserAdapter({
+        session: "screenshot-stuck",
+        stateDir: "/nonexistent/agent-browser-state",
+      });
+      const terminate = vi.spyOn(
+        adapter as unknown as { terminateDaemon: () => boolean },
+        "terminateDaemon",
+      );
+
+      const shot = adapter.screenshot({ path: "/nonexistent/stuck.png" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      pending.shift()!({ exitCode: undefined, stdout: "", stderr: "" });
+      // The probe queues behind the capture and hits its own deadline.
+      await vi.advanceTimersByTimeAsync(20_000);
+      pending.shift()!({ exitCode: undefined, stdout: "", stderr: "" });
+      const result = await shot;
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("timed out after 15000ms");
+      expect(result.error).toContain("still stuck on it 20000ms later");
+      expect(result.error).toContain("rendering surface");
+      expect(terminate).toHaveBeenCalledTimes(1);
+      expect(adapter.isWedged()).toBe(true);
+      expect(execaMock).toHaveBeenCalledTimes(2);
+
+      // The next step is refused at once, naming the capture — it never
+      // runs on the fresh, empty browser a lazy daemon respawn would give.
+      const step = await adapter.runStep({
+        wait: { text: "hello", timeoutMs: 3000 },
+      });
+      expect(step.ok).toBe(false);
+      expect(step.stderr).toMatch(/^not run: .*screenshot capture/);
+      expect(step.stderr).not.toMatch(/timed out/i);
+      expect(
+        await adapter.screenshot({ path: "/nonexistent/later.png" }),
+      ).toMatchObject({ ok: false, durationMs: 0 });
+      expect(execaMock).toHaveBeenCalledTimes(2);
+
+      const closed = await adapter.close();
+      expect(closed.ok).toBe(true);
+      expect(closed.stdout).toContain("screenshot capture hung");
+      expect(execaMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      execaMock.mockReset();
+    }
+  });
+
+  it("closes with the normal command budget after a drained capture timeout", async () => {
+    execaMock
+      .mockResolvedValueOnce(killed)
+      .mockResolvedValueOnce(drained)
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({
+      session: "screenshot-close",
+      stateDir: "/nonexistent/agent-browser-state",
+    });
+    await adapter.screenshot({ path: "/nonexistent/hung.png" });
+    const closed = await adapter.close();
+    expect(closed.ok).toBe(true);
+    expect(execaMock).toHaveBeenLastCalledWith(
+      "agent-browser",
+      ["--session", "screenshot-close", "close"],
+      expect.objectContaining({ timeout: 65_000 }),
+    );
   });
 });
 
@@ -1720,9 +1935,6 @@ async function pidFixture(session: string): Promise<{
   stateDir: string;
   exitSignal: Promise<NodeJS.Signals | null>;
 }> {
-  const { mkdtemp, writeFile } = await import("node:fs/promises");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
   const { spawn } = await import("node:child_process");
   const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-state-"));
   const child = spawn("sleep", ["30"]);
@@ -1734,7 +1946,7 @@ async function pidFixture(session: string): Promise<{
   return { stateDir, exitSignal };
 }
 
-describe("daemon teardown", () => {
+describe("daemon teardown", { timeout: 30_000 }, () => {
   beforeEach(() => {
     execaMock.mockReset();
   });
@@ -1804,9 +2016,6 @@ describe("daemon teardown", () => {
   });
 
   it("terminateSync() is a no-op without a pid file", async () => {
-    const { mkdtemp } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
     const stateDir = await mkdtemp(join(tmpdir(), "cairn-ab-empty-"));
     const adapter = new AgentBrowserAdapter({
       session: "no-daemon",

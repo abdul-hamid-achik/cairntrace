@@ -15,7 +15,8 @@ Cairn is built for AI coding agents as much as for people. Every CLI command tak
 | **Focus on one task** | `cairn_docs` | focused guidance on authoring, steps, verifiers, downloads, scripts, artifacts, mcp, backends, discovery, export, brief |
 | **Locators miss in another env** | `cairn_export_brief` / `cairn_accompany_*` | operator instructions + try-then-ask; see [Journey briefs](/brief) |
 | **Validate a spec before running** | `cairn_spec_verify` | schema, contract hash, dead-link check |
-| **Replays from a fresh browser** | `cairn_run` with `cold_start=true` | one golden run; rewrites artifact pack |
+| **Replays from a fresh browser** | `cairn_run` with `coldStart: true` | one golden run; rewrites artifact pack |
+| **A long suite** | `cairn_run` with `wait: false`, then `cairn_run_status` / `cairn_logs` | an invocation id at once; poll status and live logs, `cairn_run_cancel` to stop |
 | **Read what failed** | `cairn_context` (latest) | the agent-readable failure narrative |
 
 The two stages that protect a run from being a flaky green-check theater are:
@@ -48,7 +49,25 @@ Do not grep through `events.ndjson` until you have read these. The artifact pack
 
 ## MCP tools vs CLI
 
-Every CLI surface has a matching MCP tool of the form `cairn_<name>`. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`). Output JSON is identical between the two, so the agent does not have to special-case which transport is in use.
+Every CLI surface has a matching MCP tool of the form `cairn_<name>`. Naming mirrors the CLI verb (`cairn_run` ↔ `cairn run`, `cairn_spec_verify` ↔ `cairn spec verify`), and the structured result is the document the CLI prints with `--format json`, so the agent does not have to special-case which transport is in use.
+
+For runs this holds by construction: `cairn run` and `cairn_run` call one engine with one options schema. Every run flag is a `cairn_run` input under its camelCase name (`--cold-start` → `coldStart`, `--no-services` → `noServices`, `--since-codemap` → `sinceCodemap`, `--stamp-if-green` → `stampIfGreen`), so a run over MCP reads the same config and `browser:` block (`testIdAttribute`), resolves the same vars and scoped secrets, boots the same services and webServer, runs the same post-run stash/investigate/annotate and retention adapters, and writes the same run directory and invocation journal. Only presentation flags (`--format`, `--progress`, logging) are CLI-only. MCP adds `specs` (paths or directories), `path` (one spec) and `wait`.
+
+Long runs do not have to hold a tool call open:
+
+```text
+cairn_run        { specs: ["flows/"], wait: false }   → { invocationId, journalDir, status: "running" }
+cairn_run_status { invocationId }                     → status, runs started so far, summary, final document
+cairn_logs       { invocationId, log: "narration", cursor } → { text, nextCursor, eof, settled }
+cairn_logs       { invocationId, run: "current" }     → the running spec's events.ndjson
+cairn_run_cancel { invocationId }                     → browsers and running hooks killed, rest skipped, journal "aborted"
+```
+
+Pass `nextCursor` back as `cursor` until `settled` and `eof` are both true; it keeps one position per file, which the multi-file logs (`precondition`, `outcome`, `services`, `hook`) need. In the default synchronous mode, a request that carries a `progressToken` receives `notifications/progress` for each run, step and outcome, and cancelling the request cancels the run. A client whose tool timeout expires cancels the request as well, so use `wait: false` for anything that can outlast that timeout. A cancel kills the process tree of whatever command is running (a hook, a services boot command, a precondition, a node transform or script verifier) and skips the rest; only teardown commands and an in-flight `file`/`xlsx` check (until its own timeout, result ignored) keep running (see [MCP](/mcp)).
+
+The structured result matches `--format json` with one exception: for `repeat`/`matrix` the CLI prints one document per iteration and `cairn_run` returns one BatchRunResult over all of them. Like `cairn run`, `cairn_run` boots the config's services and webServer and runs their teardown; pass `noServices` / `noWebServer` when the stack is yours to manage.
+
+Three safety rules apply to MCP runs only. `before`/`after` hooks are arbitrary shell, so `cairn_run` rejects them unless the server was started as `cairn mcp --allow-hooks` (or with `CAIRN_MCP_ALLOW_HOOKS=1`). Config `services` (docker/seed/tmux) and their teardown start only on a server started as `cairn mcp --allow-services` (or with `CAIRN_MCP_ALLOW_SERVICES=1`); without it a `cairn_run`, `cairn_spec_finish` or `cairn_audit` that would start them fails with exit 4 before anything starts — pass `noServices: true` when the stack is up, or `reuseServices: true` after `cairn services up`. Neither gate is a sandbox: webServer commands, spec preconditions and `script` verifiers are shell too and run without them. Invocations that boot services or a webServer from the same config file run one at a time inside the server, whatever their `env`, so two agents never fight over one docker/tmux stack; an invocation that boots neither (`noServices` and `noWebServer`, or a config without them) never waits.
 
 If you are writing an agent that runs against many harnesses, prefer the MCP transport — Vercel-functions-style stdio keeps the artifact format consistent across Claude Code, Codex, Cursor, and OpenCode. The CLI is for ad-hoc work and CI.
 

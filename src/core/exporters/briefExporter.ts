@@ -34,6 +34,7 @@ import {
   type TextMatcher,
   type UrlMatcher,
 } from "../schema/verifier.v1";
+import { verifierKind } from "../schema/verifier.v1";
 import { describeWaitUrl } from "../locators";
 import { isSensitiveEnvKey } from "../artifacts/redaction";
 import { parseTemplateValue } from "./templateValue";
@@ -343,6 +344,18 @@ function compileStep(step: Step, id: string): BriefStep {
   }
   if ("use" in step) {
     return machine(id, "use: should be expanded by parseSpec before export");
+  }
+  if ("expect" in step) {
+    return machine(
+      id,
+      "expect is machine-checked: cairntrace asserts it and records expects/<id>.json",
+    );
+  }
+  if ("capture" in step) {
+    return machine(
+      id,
+      "capture is machine-only: cairntrace stores the value for ${captures.…}",
+    );
   }
   return machine(id, "unrecognized step");
 }
@@ -713,9 +726,18 @@ function isNonUiOutcome(outcome: Outcome): boolean {
     isScriptVerifier(v) ||
     isProcessVerifier(v) ||
     isXlsxVerifier(v) ||
-    isHttpJsonVerifier(v)
+    isHttpJsonVerifier(v) ||
+    DATA_VERIFIER_KINDS.has(verifierKind(v))
   );
 }
+
+/** Datasource / value verifiers: checked by cairntrace, never by the page. */
+const DATA_VERIFIER_KINDS: ReadonlySet<string> = new Set([
+  "mongo",
+  "temporal",
+  "http",
+  "value",
+]);
 
 function outcomeKind(outcome: Outcome): string {
   const v = outcome.verify;
@@ -723,6 +745,7 @@ function outcomeKind(outcome: Outcome): string {
   if (isProcessVerifier(v)) return "process";
   if (isXlsxVerifier(v)) return "xlsx";
   if (isHttpJsonVerifier(v)) return "httpJson";
+  if (DATA_VERIFIER_KINDS.has(verifierKind(v))) return verifierKind(v);
   return "outcome";
 }
 

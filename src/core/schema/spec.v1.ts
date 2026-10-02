@@ -1,11 +1,15 @@
 import { z } from "zod";
 import { ClipPointSchema, type ClipPoint } from "./config.v1";
 import { BackendSchema, ContractHashSchema } from "./shared";
+import { GateRefListSchema } from "../gates/schema";
 import {
   HttpMethodSchema,
+  PathMatchersSchema,
   StatusMatcherSchema,
+  ValueMatcherSchema,
   VerifierSchema,
 } from "./verifier.v1";
+import { SpecFixturesSchema } from "../fixtures/schema";
 export { ClipPointSchema };
 export type { ClipPoint };
 
@@ -635,7 +639,10 @@ export const EvalStepSchema = z
       .object({
         /** Inline JS source. Exactly one of `js` | `file` is required. */
         js: z.string().min(1).optional(),
-        /** Path to a .js file (resolved against specDir at run time). */
+        /**
+         * Path to a .js file, resolved against the directory of the file
+         * that declares the step (an imported action's own directory).
+         */
         file: z.string().min(1).optional(),
         /** Capture return value → `evals/<assign>.json` + `${evals.<assign>.…}`. */
         assign: z.string().optional(),
@@ -863,6 +870,251 @@ export const MonitorStepSchema = z
   .strict();
 export type MonitorStep = z.infer<typeof MonitorStepSchema>;
 
+/**
+ * Run a host shell command or a node script as a step (F3a) — fixtures,
+ * seeds, worker kills, cleanup — instead of an outcome with side effects or
+ * a precondition. `shell` runs through `/bin/sh -c` (`args` become `$1…$n`);
+ * `node` runs `node <file> [args]` with the file resolved against the file
+ * that declares the step. `cwd` resolves the same way. The child gets the
+ * run context (`CAIRN_ENV`, `CAIRN_BASE_URL`, `CAIRN_RUN_ID`, `CAIRN_RUN_DIR`,
+ * `CAIRN_RUN_TOKEN`, `CAIRN_CONFIG_DIR`; in `teardown:` also
+ * `CAIRN_RUN_STATUS`) and its process tree is killed past `timeoutMs`
+ * (default 120000) or on cancel. A non-zero exit fails the step. With
+ * `assign`, the last non-empty stdout line must be JSON; later steps splice
+ * it as `${runs.<assign>.<path>}`. The string form is `shell` shorthand.
+ */
+export const RunStepSchema = z
+  .object({
+    ...stepCommon,
+    run: z.union([
+      z.string().min(1),
+      z
+        .object({
+          shell: z.string().min(1).optional(),
+          node: z.string().min(1).optional(),
+          args: z
+            .array(z.union([z.string(), z.number(), z.boolean()]))
+            .optional(),
+          cwd: z.string().optional(),
+          env: z
+            .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+            .optional(),
+          timeoutMs: z.number().int().positive().optional(),
+          assign: z
+            .string()
+            .regex(
+              /^[a-z][A-Za-z0-9_]*$/,
+              "assign must start with a lowercase letter (letters, digits, _)",
+            )
+            .optional(),
+        })
+        .strict()
+        .refine(
+          (run) => (run.shell === undefined) !== (run.node === undefined),
+          {
+            message: "run needs exactly one of shell or node",
+          },
+        ),
+    ]),
+  })
+  .strict();
+export type RunStep = z.infer<typeof RunStepSchema>;
+
+/* ----- expect / capture (typed in-flow assertions and values) ----- */
+
+const ExpectTextMatcherSchema = z
+  .object({
+    equals: z.string().optional(),
+    contains: z.string().optional(),
+    matches: z.string().optional(),
+    caseSensitive: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (m) =>
+      [m.equals, m.contains, m.matches].filter((x) => x !== undefined)
+        .length === 1,
+    {
+      message: "exactly one of: equals, contains, matches",
+    },
+  );
+
+const ExpectValueMatcherSchema = z
+  .object({
+    equals: z.string().optional(),
+    contains: z.string().optional(),
+    matches: z.string().optional(),
+  })
+  .strict()
+  .refine(
+    (m) =>
+      [m.equals, m.contains, m.matches].filter((x) => x !== undefined)
+        .length === 1,
+    {
+      message: "exactly one of: equals, contains, matches",
+    },
+  );
+
+const ExpectAttributeSchema = z
+  .object({
+    name: z.string().min(1),
+    equals: z.string().optional(),
+    contains: z.string().optional(),
+    matches: z.string().optional(),
+    exists: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (m) =>
+      [m.equals, m.contains, m.matches, m.exists].filter((x) => x !== undefined)
+        .length === 1,
+    { message: "exactly one of: equals, contains, matches, exists" },
+  );
+
+const ExpectIdSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9_]*$/, "id must be snake_case starting with a letter");
+
+/**
+ * Assertions of an `expect` step on a locator. Inside `expect`, `visible`
+ * and `hidden` are assertions (not the locator's include-hidden switch).
+ * Text is whitespace-normalized and case-insensitive (like `wait`/`text`);
+ * `value` and `attribute` compare raw. `count` takes a number or a
+ * `{equals|atLeast|atMost|…}` matcher.
+ */
+const expectAssertionShape = {
+  /** Evidence id (`expects/<id>.json`); default: the step id. */
+  id: ExpectIdSchema.optional(),
+  visible: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+  count: ValueMatcherSchema.optional(),
+  text: z.union([z.string(), ExpectTextMatcherSchema]).optional(),
+  value: z.union([z.string(), ExpectValueMatcherSchema]).optional(),
+  attribute: ExpectAttributeSchema.optional(),
+  enabled: z.boolean().optional(),
+  /** Retry budget until the expectation holds (default 5000ms × waitScale). */
+  timeoutMs: z.number().int().positive().optional(),
+};
+
+/**
+ * `by: text` locators already match on their text, so their `text` key stays
+ * the locator (no text assertion on that variant).
+ */
+const { text: _expectTextAssertion, ...expectAssertionShapeForText } =
+  expectAssertionShape;
+
+/** `expect.request`: a session-cookie API call checked like an outcome. */
+const ExpectRequestSchema = z
+  .object({
+    method: HttpMethodSchema.default("GET"),
+    url: z.string().min(1),
+    headers: z.record(z.string(), z.string()).optional(),
+    body: z.unknown().optional(),
+    status: z.union([z.number().int(), StatusMatcherSchema]).optional(),
+    json: PathMatchersSchema.optional(),
+  })
+  .strict();
+
+export const ExpectSchema = z
+  .union([
+    RoleLocatorSchema.extend(expectAssertionShape).strict(),
+    LabelLocatorSchema.extend(expectAssertionShape).strict(),
+    TextLocatorSchema.extend(expectAssertionShapeForText).strict(),
+    SelectorLocatorSchema.extend(expectAssertionShape).strict(),
+    TestIdLocatorSchema.extend(expectAssertionShape).strict(),
+    z
+      .object({
+        id: ExpectIdSchema.optional(),
+        request: ExpectRequestSchema,
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+  ])
+  .superRefine((e, ctx) => {
+    if ("request" in e) return;
+    const assertions = [
+      "visible",
+      "hidden",
+      "count",
+      ...(e.by === "text" ? [] : ["text"]),
+      "value",
+      "attribute",
+      "enabled",
+    ].filter((key) => (e as Record<string, unknown>)[key] !== undefined);
+    if (assertions.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "expect needs at least one of: visible, hidden, count, text, value, attribute, enabled (or request)",
+      });
+    }
+    if (e.visible !== undefined && e.hidden !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["hidden"],
+        message: "use visible or hidden, not both",
+      });
+    }
+  });
+export type Expect = z.infer<typeof ExpectSchema>;
+
+/**
+ * `expect` — assert mid-flow and record evidence like an outcome
+ * (`expects/<id>.json`, `expect.passed` / `expect.failed` events); a
+ * mismatch fails the step. Retries until `timeoutMs`.
+ */
+export const ExpectStepSchema = z
+  .object({ ...stepCommon, expect: ExpectSchema })
+  .strict();
+export type ExpectStep = z.infer<typeof ExpectStepSchema>;
+
+const captureAttributeTarget = z.union([
+  RoleLocatorSchema.extend({ attributeName: z.string().min(1) }).strict(),
+  LabelLocatorSchema.extend({ attributeName: z.string().min(1) }).strict(),
+  TextLocatorSchema.extend({ attributeName: z.string().min(1) }).strict(),
+  SelectorLocatorSchema.extend({ attributeName: z.string().min(1) }).strict(),
+  TestIdLocatorSchema.extend({ attributeName: z.string().min(1) }).strict(),
+]);
+
+/**
+ * `capture` — store a structured value from the page as
+ * `${captures.<assign>…}` for later steps and outcome verifiers (and
+ * `captures/<assign>.json`). Exactly one of: `text` (normalized text),
+ * `value` (live control value), `attribute` (with `attributeName`), `table`
+ * (`{headers, rows: [{<header>: <cell>}], cells, rowCount}`).
+ */
+export const CaptureStepSchema = z
+  .object({
+    ...stepCommon,
+    capture: z
+      .object({
+        assign: z
+          .string()
+          .regex(
+            /^[a-z][A-Za-z0-9_]*$/,
+            "assign must start with a lowercase letter (letters, digits, _)",
+          ),
+        text: LocatorSchema.optional(),
+        value: LocatorSchema.optional(),
+        attribute: captureAttributeTarget.optional(),
+        table: LocatorSchema.optional(),
+        /** Wait for the target to appear (default 5000ms × waitScale). */
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .refine(
+        (c) =>
+          [c.text, c.value, c.attribute, c.table].filter((x) => x !== undefined)
+            .length === 1,
+        {
+          message:
+            "capture needs exactly one of: text, value, attribute, table",
+        },
+      ),
+  })
+  .strict();
+export type CaptureStep = z.infer<typeof CaptureStepSchema>;
+
 const browserActionKeys = [
   "open",
   "click",
@@ -899,6 +1151,9 @@ export const StepSchema = z
     BatchStepSchema,
     EvalStepSchema,
     MonitorStepSchema,
+    RunStepSchema,
+    ExpectStepSchema,
+    CaptureStepSchema,
   ])
   .superRefine((step, ctx) => {
     if (
@@ -952,9 +1207,96 @@ export const PreconditionsSchema = z
           .strict(),
       )
       .optional(),
+    /**
+     * Readiness gates waited in order BEFORE `commands` (config `gates:`
+     * names, `http(s)://…`, `tcp://host:port`, or inline gates). A gate that
+     * is not ready fails the run like a failed precondition.
+     */
+    wait: GateRefListSchema.optional(),
   })
   .strict();
 export type Preconditions = z.infer<typeof PreconditionsSchema>;
+
+/**
+ * Spec teardown (F3a): steps that run after the steps and outcomes on every
+ * exit path — passed, failed, errored (a failed precondition or gate
+ * included) and cancelled; on SIGINT/SIGTERM only its `run` steps run,
+ * synchronously, within min(timeoutMs, 30000). Children see
+ * `CAIRN_RUN_STATUS` (passed | failed | errored). Every item runs even when
+ * an earlier one failed. A failed teardown is reported (teardown.* events,
+ * run.log) but keeps the run status unless `failRun: true`, which turns a
+ * passed run into an errored one (`failure.phase: teardown`).
+ * `use:` is not expanded here: inline the steps.
+ */
+export const TeardownSchema = z
+  .union([
+    z.array(StepSchema).min(1),
+    z
+      .object({
+        steps: z.array(StepSchema).min(1),
+        /** A failed teardown step errors a passed run (default false). */
+        failRun: z.boolean().optional(),
+        /** Budget of the whole teardown in ms (default 300000). */
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict(),
+  ])
+  .superRefine((teardown, ctx) => {
+    const steps = Array.isArray(teardown) ? teardown : teardown.steps;
+    steps.forEach((step, index) => {
+      const path = Array.isArray(teardown) ? [index] : ["steps", index];
+      if ("use" in step) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message:
+            "teardown does not expand use: — inline the action's steps here",
+        });
+      }
+      const unsupported = TEARDOWN_UNSUPPORTED_KINDS.find(
+        (kind) => kind in step,
+      );
+      if (unsupported) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `${unsupported} steps are not supported in teardown (use run, request, eval or a browser action)`,
+        });
+      }
+    });
+  });
+
+/**
+ * Step kinds a teardown refuses: they produce run artifacts, or (expect,
+ * capture) are assertions and captures of the run's own verdict path —
+ * cleanup does not verify.
+ */
+const TEARDOWN_UNSUPPORTED_KINDS = [
+  "download",
+  "upload",
+  "transform",
+  "monitor",
+  "expect",
+  "capture",
+] as const;
+export type Teardown = z.infer<typeof TeardownSchema>;
+
+/** The teardown's steps and policy, whichever form was authored. */
+export function teardownPlan(teardown: Teardown | undefined): {
+  steps: Step[];
+  failRun: boolean;
+  timeoutMs: number;
+} {
+  if (!teardown) return { steps: [], failRun: false, timeoutMs: 300_000 };
+  if (Array.isArray(teardown)) {
+    return { steps: teardown, failRun: false, timeoutMs: 300_000 };
+  }
+  return {
+    steps: teardown.steps,
+    failRun: teardown.failRun ?? false,
+    timeoutMs: teardown.timeoutMs ?? 300_000,
+  };
+}
 
 export const SessionSchema = z
   .object({
@@ -997,6 +1339,11 @@ export const ArtifactsConfigSchema = z
         trace: CapturePolicySchema.default("on-failure"),
         video: CapturePolicySchema.default("never"),
         agentContext: CapturePolicySchema.default("always"),
+        /**
+         * Largest trace kept, in bytes (default 50 MiB). A bigger trace is
+         * dropped with an `artifact.trace` event instead of filling the disk.
+         */
+        traceMaxBytes: z.number().int().positive(),
       })
       .strict()
       .partial(),
@@ -1030,6 +1377,56 @@ export const SpecMetadataSchema = z
   .strict();
 export type SpecMetadata = z.infer<typeof SpecMetadataSchema>;
 
+/* ----- environment requirements (`requires:`) ----- */
+
+/**
+ * One `requires.env` entry: a plain environment name (`local`), or a
+ * single-key map that also needs an opt-in variable set to `1`/`true` in the
+ * caller's environment (`{ dev: { optIn: CAIRN_ALLOW_DEV_MUTATIONS } }`).
+ */
+export const RequiresEnvEntrySchema = z.union([
+  z.string().min(1),
+  z
+    .record(
+      z.string().min(1),
+      z
+        .object({
+          /** Variable that must be `1` or `true` for this environment. */
+          optIn: z
+            .string()
+            .min(1)
+            .regex(
+              /^[A-Za-z_][A-Za-z0-9_]*$/,
+              "optIn must be an environment variable name",
+            ),
+        })
+        .strict(),
+    )
+    .refine((entry) => Object.keys(entry).length === 1, {
+      message:
+        "a requires.env map entry names exactly one environment: { <env>: { optIn: VAR } }",
+    }),
+]);
+export type RequiresEnvEntry = z.infer<typeof RequiresEnvEntrySchema>;
+
+/**
+ * Where a spec may run. Evaluated by `cairn run` before services, hooks,
+ * preconditions or a browser start; a spec the policy refuses ends with
+ * status `refused` (exit 7) and never gets a run directory.
+ *
+ * - `env`: the environments the spec may run in. Absent = any environment
+ *   that is not `policy.trait: protected`.
+ * - `mutates`: the spec changes shared data; refused where the environment's
+ *   `policy.mutations` is `deny`.
+ */
+export const SpecRequiresSchema = z
+  .object({
+    env: z.array(RequiresEnvEntrySchema).min(1).optional(),
+    mutates: z.boolean().optional(),
+  })
+  .strict();
+export type SpecRequires = z.infer<typeof SpecRequiresSchema>;
+
 /* ----- the spec itself ----- */
 
 export const SpecSchema = z
@@ -1045,6 +1442,8 @@ export const SpecSchema = z
     intent: z.string().min(1),
 
     environment: z.string().optional(),
+    /** Environment policy requirements (see SpecRequiresSchema). */
+    requires: SpecRequiresSchema.optional(),
     backend: BackendSchema.optional(),
     mode: z.enum(["normal", "debug"]).default("normal"),
     /** Spec-local `${vars.X}` values. Config env vars < spec vars < CLI --var. */
@@ -1074,10 +1473,22 @@ export const SpecSchema = z
     coldStart: z.literal("guest").optional(),
     imports: z.array(z.string()).optional(),
     preconditions: PreconditionsSchema.optional(),
+    /**
+     * Config `fixtures:` this spec uses, ensured (needs first) after the
+     * preconditions and before the browser starts: `name` (ensure),
+     * `name.reset` (ensure, then its reset verb) or `{use, with, write}`.
+     * Outputs splice as `${fixtures.<name>.<key>}` (a reference the spec
+     * does not list, or one left without a value, errors the run in phase
+     * fixture before the browser starts); run-scoped ones are torn down
+     * after the spec teardown, on every exit path.
+     */
+    fixtures: SpecFixturesSchema.optional(),
     session: SessionSchema.optional(),
 
     outcomes: z.array(OutcomeSchema).min(1),
     steps: z.array(StepSchema).optional(),
+    /** Always-run cleanup steps (see TeardownSchema). */
+    teardown: TeardownSchema.optional(),
 
     artifacts: ArtifactsConfigSchema.optional(),
     redaction: RedactionConfigSchema.optional(),
@@ -1088,6 +1499,15 @@ export const SpecSchema = z
      * or stale and exits 6 if mismatch is detected at lint time.
      */
     contractHash: ContractHashSchema.optional(),
+
+    /**
+     * file.cheap stash settings for this spec's runs: `tags` extend the
+     * config `stash.tags` on auto-stash and `cairn run --stash`.
+     */
+    stash: z
+      .object({ tags: z.array(z.string().min(1)).optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 export type Spec = z.infer<typeof SpecSchema>;
@@ -1095,8 +1515,70 @@ export type Spec = z.infer<typeof SpecSchema>;
 /* ----- reusable action (action YAML files) ----- */
 
 /**
+ * One documented action input (`inputs.<name>` on an action): a `${vars.X}`
+ * the action reads. Documentation for authors and `cairn catalog`; the value
+ * a run uses still comes from the action's `vars:` defaults, config
+ * environment vars, the importing spec's `vars:`, `--var`, and a call site's
+ * `use: { action, vars }` (which overrides the others for that call).
+ */
+export const ActionInputSchema = z
+  .object({
+    description: z.string().min(1).optional(),
+    /**
+     * The action declares no `vars:` default: the importing spec's `vars:`,
+     * a config environment var or `--var` must supply it. Imports are
+     * resolved once before any `use:` expands, so a value passed only in
+     * `use: { action, vars }` is not enough (it can override one, per call).
+     */
+    required: z.boolean().optional(),
+    /** Mirrors `vars.<name>`; when set it must equal that default. */
+    default: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  })
+  .strict();
+export type ActionInput = z.infer<typeof ActionInputSchema>;
+
+/**
+ * Problems between an action's declared `inputs:` and its `vars:` defaults
+ * (empty when consistent): an input `default` must equal `vars.<name>` (the
+ * value runs actually use), and a `required` input cannot have one.
+ */
+export function actionInputProblems(action: {
+  vars?: Record<string, string | number | boolean> | undefined;
+  inputs?: Record<string, ActionInput> | undefined;
+}): Array<{ input: string; message: string }> {
+  const problems: Array<{ input: string; message: string }> = [];
+  const vars = action.vars ?? {};
+  for (const [name, input] of Object.entries(action.inputs ?? {})) {
+    const hasVar = Object.hasOwn(vars, name);
+    if (input.required === true && (hasVar || input.default !== undefined)) {
+      problems.push({
+        input: name,
+        message: `inputs.${name} is required but has a default (${
+          hasVar ? `vars.${name}` : `inputs.${name}.default`
+        }); drop required or the default`,
+      });
+      continue;
+    }
+    if (input.default === undefined) continue;
+    if (!hasVar) {
+      problems.push({
+        input: name,
+        message: `inputs.${name}.default is not a vars default; add vars.${name}: ${JSON.stringify(input.default)} (runs read vars:)`,
+      });
+    } else if (String(vars[name]) !== String(input.default)) {
+      problems.push({
+        input: name,
+        message: `inputs.${name}.default (${JSON.stringify(input.default)}) does not match vars.${name} (${JSON.stringify(vars[name])})`,
+      });
+    }
+  }
+  return problems;
+}
+
+/**
  * A reusable action lives in `actions/<name>.yml` and is imported by specs.
- * It has steps but no outcomes — it's a fragment, not a spec.
+ * It has steps but no outcomes — it's a fragment, not a spec. `description`
+ * and `inputs` document it for authors and `cairn catalog`.
  */
 export const ReusableActionSchema = z
   .object({
@@ -1105,6 +1587,8 @@ export const ReusableActionSchema = z
       .string()
       .min(1)
       .regex(/^[a-z][a-z0-9_]*$/),
+    /** What the action does, for authors and `cairn catalog`. */
+    description: z.string().min(1).optional(),
     /**
      * Default `${vars.X}` values for this action. Merged under the spec's
      * vars: action defaults < config env vars < spec vars < CLI `--var`.
@@ -1112,7 +1596,24 @@ export const ReusableActionSchema = z
     vars: z
       .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
       .optional(),
+    /** Documented inputs (see ActionInputSchema); checked against `vars`. */
+    inputs: z.record(z.string().min(1), ActionInputSchema).optional(),
+    /**
+     * Other action files this action `use:`s, relative to THIS file. An
+     * action's `use:` resolves against its own imports first, then its
+     * importer's; import cycles are a parse error.
+     */
+    imports: z.array(z.string()).optional(),
     steps: z.array(StepSchema).min(1),
   })
-  .strict();
+  .strict()
+  .superRefine((action, ctx) => {
+    for (const problem of actionInputProblems(action)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["inputs", problem.input],
+        message: problem.message,
+      });
+    }
+  });
 export type ReusableAction = z.infer<typeof ReusableActionSchema>;

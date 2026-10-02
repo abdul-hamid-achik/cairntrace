@@ -12,6 +12,11 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { installFcheapTestGuard } from "./src/testing/fcheapTestGuard";
+
+// No test may write to a real file.cheap vault: a real `fcheap save`/
+// `publish`/… without a temp --stash-dir fails the test that ran it.
+installFcheapTestGuard();
 
 if (!process.env.CAIRN_TEST_HOME) {
   const realHome = process.env.HOME;

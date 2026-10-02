@@ -174,9 +174,11 @@ describe("clipCommand", () => {
     vi.spyOn(vidtraceClip, "moveClipsIntoRunDir").mockResolvedValue({
       issue: "videos/clips/issue.mp4",
     });
-    vi.spyOn(stash, "stashDirectory").mockResolvedValue({
+    const stashRun = vi.spyOn(stash, "stashRunDirectory").mockResolvedValue({
       ok: true,
       stashId: "stash-123",
+      excluded: [],
+      tags: ["demo", "vidtrace-clip"],
     });
 
     let output = "";
@@ -190,12 +192,23 @@ describe("clipCommand", () => {
     await clipCommand(runDir, {
       labels: ["issue=0:10-0:20"],
       stash: true,
-      tags: ["intel"],
+      tags: ["demo"],
       json: true,
     });
 
     const parsed = JSON.parse(output) as ClipResult;
     expect(parsed.stashId).toBe("stash-123");
+    // The run goes through the evidence gate as a manual stash (receipt),
+    // with run identity meta; vidtrace stashed the clips themselves.
+    expect(stashRun).toHaveBeenCalledWith(
+      runDir,
+      expect.objectContaining({
+        action: "manual",
+        tags: ["demo", "vidtrace-clip"],
+        tool: "cairntrace",
+        meta: true,
+      }),
+    );
 
     stdoutSpy.mockRestore();
     vi.restoreAllMocks();

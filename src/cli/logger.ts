@@ -190,9 +190,19 @@ class Logger {
    * lines are heuristically colorized (errors red, warnings yellow, success
    * green) so a streaming build/startup tail is scannable at a glance. The
    * content is otherwise the child's own output — no level tags/timestamps.
+   * Under `--log-format json` each line is wrapped as an NDJSON entry.
    */
   raw(chunk: string): void {
     if (LEVEL_WEIGHT[this.opts.level] > LEVEL_WEIGHT.info) return;
+    if (this.opts.format === "json") {
+      // Keep stderr valid NDJSON under --log-format json: each streamed line
+      // becomes an info entry marked `stream: "raw"` instead of free text.
+      for (const line of chunk.split(/\r?\n/)) {
+        if (line.trim() === "") continue;
+        this.writeJson("info", line, { stream: "raw" });
+      }
+      return;
+    }
     if (!this.opts.color) {
       process.stderr.write(this.markerPrefix() + chunk);
       return;

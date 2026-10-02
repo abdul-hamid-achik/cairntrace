@@ -1,5 +1,6 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isRunDirName } from "../artifacts/retention";
 import type { RunResult } from "../schema/run.v1";
 import type {
   StatsDelta,
@@ -253,8 +254,9 @@ async function listRunDirsNewestFirst(
       }
     }),
   );
+  // Only run directories count toward `limit` (never `_invocations/`).
   return stats
-    .filter((s) => s.isDir)
+    .filter((s) => s.isDir && isRunDirName(s.name))
     .toSorted((a, b) => b.mtime - a.mtime)
     .slice(0, limit)
     .map((s) => s.name);

@@ -170,6 +170,29 @@ describe("expandSpecArgs", () => {
     ]);
   });
 
+  it("skips _-prefixed folders (drafts) below the argument but walks a named one", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-expand-"));
+    await mkdir(join(dir, "flows", "_drafts", "deep"), { recursive: true });
+    await mkdir(join(dir, "flows", "team"), { recursive: true });
+    await writeFile(join(dir, "flows", "a.yml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "team", "b.yml"), "version: 1\n");
+    await writeFile(join(dir, "flows", "_drafts", "c.yml"), "version: 1\n");
+    await writeFile(
+      join(dir, "flows", "_drafts", "deep", "d.yml"),
+      "version: 1\n",
+    );
+
+    await expect(expandSpecArgs(["flows"], dir)).resolves.toEqual([
+      join(dir, "flows", "a.yml"),
+      join(dir, "flows", "team", "b.yml"),
+    ]);
+    // Naming the drafts folder is explicit: its specs run.
+    await expect(expandSpecArgs(["flows/_drafts"], dir)).resolves.toEqual([
+      join(dir, "flows", "_drafts", "c.yml"),
+      join(dir, "flows", "_drafts", "deep", "d.yml"),
+    ]);
+  });
+
   it("preserves explicit files and missing paths", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairntrace-run-expand-"));
     await writeFile(join(dir, "_explicit.yml"), "version: 1\n");
@@ -1359,7 +1382,12 @@ exit 2
     const calls = (await readFile(argsPath, "utf8"))
       .split("\n")
       .filter(Boolean);
-    expect(calls.filter((call) => call.startsWith("save "))).toHaveLength(1);
+    // `save --help` is the --meta capability probe, not a stash.
+    expect(
+      calls.filter(
+        (call) => call.startsWith("save ") && !call.includes("--help"),
+      ),
+    ).toHaveLength(1);
     expect(calls).toContain(
       `connect stash-automation ${codebase} --json --mode keyword --limit 3 --index`,
     );

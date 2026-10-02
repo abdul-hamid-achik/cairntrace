@@ -109,12 +109,18 @@ describe("cairn logs", () => {
   });
 
   it("lists the latest run-local service pack with its manifest first", async () => {
-    const older = await writeRun("older_service_run", 60_000);
+    const older = await writeRun(
+      "2026-07-01T00-00-00-000Z_older_service_run_a1b2c3",
+      60_000,
+    );
     await mkdir(join(older, "services", "tmux"), { recursive: true });
     await writeFile(join(older, "services", "manifest.json"), "{}\n");
     await writeFile(join(older, "services", "tmux", "old-worker.log"), "old\n");
 
-    const latest = await writeRun("latest_service_run", 1_000);
+    const latest = await writeRun(
+      "2026-07-01T00-00-01-000Z_latest_service_run_a1b2c3",
+      1_000,
+    );
     await mkdir(join(latest, "services", "tmux"), { recursive: true });
     await mkdir(join(latest, "services", "docker"), { recursive: true });
     await writeFile(join(latest, "services", "tmux", "web-api.log"), "ready\n");

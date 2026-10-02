@@ -10,7 +10,8 @@ intent: the JSON API issues a session and reports the signed-in operator and cat
 environment: local
 vars:
   demoEmail: casey@cairntrace.dev
-  demoPassword: cairn-demo-2026
+  # The seeded demo operator; override with CAIRN_DEMO_PASSWORD.
+  demoPassword: "${env.CAIRN_DEMO_PASSWORD:-cairn-demo-2026}"
 coldStart: guest
 outcomes:
   - id: session_reports_operator

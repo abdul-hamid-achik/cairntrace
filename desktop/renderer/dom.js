@@ -6,7 +6,8 @@
  * an artifact path, or a log line can never inject markup into the UI.
  */
 (function bootDom() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   Studio.fmt = globalThis.CairnFormat;
 
   const BOOLEAN_PROPS = new Set([
@@ -34,7 +35,7 @@
   }
 
   /**
-   * @param {string} tag
+   * @param {string} tagName
    * @param {Record<string, any> | Node | any[] | string | null | undefined} [props]
    * @param {...any} children nodes, strings, arrays, null/undefined, or false
    * @returns {HTMLElement}
@@ -124,8 +125,9 @@
 
   /**
    * Remove every child and return the node, for cheap re-renders.
-   * @param {HTMLElement} node
-   * @returns {HTMLElement}
+   * @template {Node} T
+   * @param {T} node
+   * @returns {T}
    */
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
@@ -268,7 +270,9 @@
     const message =
       error instanceof Error
         ? error.message
-        : String(error?.message ?? error ?? "unknown error");
+        : String(
+            /** @type {any} */ (error)?.message ?? error ?? "unknown error",
+          );
     const stack = error instanceof Error && error.stack ? error.stack : null;
     return h(
       "div",
@@ -305,13 +309,19 @@
     const children = h("div", {
       class: `tree-children${collapsed ? " collapsed" : ""}`,
     });
-    const toggle = h("span", {
+    // A real button, so the tree opens from the keyboard too.
+    const toggle = h("button", {
       class: "tree-toggle",
+      type: "button",
+      ariaExpanded: collapsed ? "false" : "true",
+      ariaLabel: collapsed ? "expand" : "collapse",
       text: collapsed ? "▸" : "▾",
     });
     toggle.addEventListener("click", () => {
       const isCollapsed = children.classList.toggle("collapsed");
       toggle.textContent = isCollapsed ? "▸" : "▾";
+      toggle.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+      toggle.setAttribute("aria-label", isCollapsed ? "expand" : "collapse");
     });
     for (const [key, item] of entries) {
       children.appendChild(
@@ -335,7 +345,10 @@
     );
   }
 
-  Object.assign(Studio, {
+  // Typed against globals.d.ts: a member missing there, or one whose
+  // signature drifted from its declaration, fails the renderer typecheck.
+  /** @type {Partial<StudioGlobal>} */
+  const published = {
     h,
     isProps,
     clear,
@@ -350,5 +363,6 @@
     empty,
     errorBox,
     jsonTree,
-  });
+  };
+  Object.assign(Studio, published);
 })();

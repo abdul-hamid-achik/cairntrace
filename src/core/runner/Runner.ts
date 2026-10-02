@@ -1,6 +1,5 @@
 import { homedir } from "node:os";
-import { execa } from "execa";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ArtifactRef,
@@ -9,7 +8,7 @@ import type {
   NetworkEntry,
   ResolvedElement,
 } from "../../adapters/browserBackend";
-import { createProcessTreeWatchdog } from "../../adapters/agent-browser/processTree";
+import { runBoundedCommand } from "./boundedCommand";
 import {
   ArtifactWriter,
   type ArtifactRedactor,
@@ -19,14 +18,39 @@ import {
   pruneRuns,
   DEFAULT_KEEP_RUNS,
   DEFAULT_KEEP_FAILED_RUNS,
+  evidenceFailureReason,
+  pathFreeMessage,
+  type PruneResult,
+  type RetentionArchiveOutcome,
+  type RetentionEvidencePolicy,
+  type RetentionPublishOutcome,
 } from "../artifacts/retention";
 import {
-  createArtifactRedactor,
+  checkStoppedTrace,
+  DEFAULT_TRACE_MAX_BYTES,
+  sanitizeKeptTrace,
+  tracePathForBackend,
+} from "../artifacts/traceCapture";
+import {
+  createLiveArtifactRedactor,
   registerSecretValues,
 } from "../artifacts/redaction";
+import { LiveLog, logIndex, logSlug } from "../artifacts/liveLog";
+import { combineListeners, makePlainNarration } from "../artifacts/narration";
+import { PhaseTracker } from "../artifacts/phaseTracker";
+import {
+  CAIRN_PROGRESS_FILE_ENV,
+  ProgressFiles,
+  ProgressTail,
+} from "../artifacts/progressChannel";
+import { describeStep, withoutQuery } from "../artifacts/stepLabel";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { resolveSpecRuntimeContext } from "../config/runtimeContext";
-import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
+import { evaluateEnvPolicy, refusalDocument } from "../envPolicy";
+import {
+  cairnContextEnv,
+  targetChildEnvWithSelectedTvaultKeys,
+} from "../processEnv";
 import { parseSpec } from "../parser/parseSpec";
 import { computeContractHash } from "../contractHash";
 import { evaluateWhen } from "./conditions";
@@ -39,6 +63,7 @@ import {
 import type { ExitCode } from "../schema/shared";
 import {
   openPath,
+  teardownPlan,
   type EvalStep,
   type Locator,
   type MonitorStep,
@@ -47,14 +72,29 @@ import {
   type Step,
   type TransformStep,
 } from "../schema/spec.v1";
-import type { MonitorTargetConfig, RetentionConfig } from "../schema/config.v1";
+import type {
+  MonitorTargetConfig,
+  RetentionConfig,
+  StashConfig,
+} from "../schema/config.v1";
 import type {
   OutcomeResult,
   RunArtifacts,
   RunFailure,
+  RunInvocationRef,
+  RunRefusal,
   RunResult,
   StepResult,
 } from "../schema/run.v1";
+import {
+  PRECONDITION_OUTPUT_TAIL_CHARS,
+  type RunEvent,
+} from "../schema/events.v1";
+import {
+  isScriptVerifier,
+  verifierKind,
+  type Verifier,
+} from "../schema/verifier.v1";
 import type { BriefStep } from "../schema/brief.v1";
 import {
   isInteractiveLocatorStep,
@@ -64,7 +104,7 @@ import {
 import { buildReplayManifest } from "../schema/replay.v1";
 import type { Outcome } from "../schema/spec.v1";
 import { CAIRN_VERSION } from "../../cli/version";
-import { evaluateOutcomes } from "./OutcomeEvaluator";
+import { type EvaluatedOutcome, evaluateOutcomes } from "./OutcomeEvaluator";
 import { runNodeScript } from "./nodeScripts";
 import {
   deepMapStrings,
@@ -81,12 +121,59 @@ import {
 } from "../exporters/briefExporter";
 import { generateRunId } from "./runId";
 import {
+  gateFailureMessage,
+  GateReferenceError,
+  waitForGate,
+  assertGateRefs,
+  type GateContext,
+} from "../gates/evaluate";
+import { gateRefList } from "../gates/schema";
+import {
+  executeRunStep,
+  resolveRunPlaceholders,
+  runStepLabel,
+} from "./runStep";
+import {
+  armSignalTeardown,
+  createTeardownClaims,
+  runTeardown,
+  type TeardownItemResult,
+  type TeardownRunStatus,
+  type TeardownSummary,
+} from "./teardown";
+import {
+  resolveEvalHostFile,
+  resolveScopedEvalHostFile,
+  resolveStepFile,
+  specFileScope,
+  type StepFileScope,
+  stepFileScopeAt,
+} from "./stepFiles";
+import {
   applyWaitScale,
   resolveWaitScale,
   runResilientBrowserStep,
 } from "./interactionResilience";
 import { isRelativeUrl, joinUrl, resolveUrl } from "./url";
-import type { VerifierContext, VerifierEvaluation } from "./verifiers/types";
+import type { VerifierEvaluation } from "./verifiers/types";
+import type { ScriptVerifierContext } from "./verifiers/script";
+// F4/F16: datasources, ${captures.*} and expect/capture steps.
+import type { CaptureStep, ExpectStep } from "../schema/spec.v1";
+import { resolveEnvironmentDatasources } from "../datasources/resolve";
+import {
+  FixtureRuntime,
+  FixtureSetupError,
+  type FixtureHost,
+} from "../fixtures/runtime";
+import {
+  fixtureNamesReferenced,
+  resolveFixturePlaceholders,
+  unresolvedFixtureReferences,
+} from "../fixtures/template";
+import { planFixtures } from "../fixtures/runtime";
+import { expectLocator } from "./verifiers/expect";
+import { resolveCapturePlaceholders } from "./verifiers/refs";
+import { executeCaptureStep, executeExpectStep } from "./verifiers/stepChecks";
 import {
   type MonitorClient,
   type ProfileType,
@@ -123,6 +210,8 @@ export interface ProgressListener {
     environment: string,
   ): void;
   onPreconditionStart?(name: string, timeoutMs: number): void;
+  /** A line the precondition appended to its `CAIRN_PROGRESS_FILE`. */
+  onPreconditionProgress?(name: string, message: string): void;
   onPreconditionFinish?(
     name: string,
     exitCode: number | undefined,
@@ -139,8 +228,16 @@ export interface ProgressListener {
   ): void;
   onOutcomesStart?(total: number): void;
   onOutcomeStart?(outcome: Outcome): void;
+  /** A line a node script verifier reported via `ctx.progress()`. */
+  onOutcomeProgress?(outcome: Outcome, message: string): void;
   onOutcomeFinish?(outcome: Outcome, evaluation: VerifierEvaluation): void;
   onRunEnd?(result: RunResult): void;
+  /**
+   * A non-fatal authoring warning (e.g. a deprecated spec-relative path in
+   * an imported action). Each distinct warning reaches this hook once per
+   * process; every run also records it in its run.log.
+   */
+  onWarning?(message: string): void;
 }
 
 export interface RunOptions {
@@ -208,23 +305,29 @@ export interface RunOptions {
    * Best-effort archive of a pruned run dir (e.g. to fcheap) before deletion.
    * Only invoked when config `retention.archiveToStash` is true. Injected by
    * the CLI so the core runner stays free of the stash (fcheap) dependency.
+   * `evidence` carries the config `stash` gate (include, TTL); a resolved
+   * outcome is recorded as an `artifact.stash` archive event, a throw (an
+   * EvidenceTransferError carries a reason code) keeps the run on disk.
    */
   onArchiveRun?: (
     runDir: string,
     runId: string,
     tags: string[],
-  ) => Promise<void>;
+    evidence?: RetentionEvidencePolicy,
+  ) => Promise<void | RetentionArchiveOutcome>;
   /**
    * Explicit remote publication callback. It must validate a server-verified,
    * credential-free, byte-matching receipt before resolving; pruneRuns keeps
-   * the source on any failure.
+   * the source on any failure. `evidence.include` is
+   * `retention.publish.include`.
    */
   onPublishRun?: (
     runDir: string,
     runId: string,
     tags: string[],
     retentionDays: number,
-  ) => Promise<void>;
+    evidence?: RetentionEvidencePolicy,
+  ) => Promise<void | RetentionPublishOutcome>;
   /**
    * Free-form labels stamped into run.json (`cairn run --label key=value`).
    * Used by `cairn stats --group-by` for A/B cohorts. Optional.
@@ -246,6 +349,79 @@ export interface RunOptions {
   }>;
   /** Internal command-level video settings (used by `cairn audit`). */
   videoOptions?: { slowMo?: number; speed?: number };
+  /**
+   * The `cairn run` invocation this run belongs to. Stamped on the
+   * `run.started` event and on run.json when present.
+   */
+  invocation?: RunInvocationRef;
+  /**
+   * Cadence of `run.heartbeat` events (default 15000ms). Internal: tests use
+   * a short interval; `0` disables heartbeats.
+   */
+  heartbeatIntervalMs?: number;
+  /**
+   * Cancellation. On abort the running precondition (or node transform /
+   * script verifier) has its process tree killed, the remaining
+   * preconditions, steps and outcomes are skipped, and the run still writes
+   * a consistent run.json: status `errored`, `failure.phase: "cancelled"`.
+   * Aborted before the run directory exists, runSpec throws instead.
+   */
+  signal?: AbortSignal;
+  /** Checkpoint store for `session.resume` (default ~/.cairntrace/checkpoints). */
+  checkpointStore?: CheckpointStore;
+  /**
+   * Environment the policy reads `requires.env` opt-in variables from
+   * (default: the run environment). `cairn run` passes the caller's.
+   */
+  policyEnv?: Record<string, string | undefined>;
+  /**
+   * F3b: let mutating fixture verbs (ensure/reset/teardown) run on an
+   * environment whose policy trait is `shared` (`cairn run
+   * --allow-fixture-writes`). Without it they are dry-run there unless the
+   * spec's fixture reference says `write: true`.
+   */
+  allowFixtureWrites?: boolean;
+  /**
+   * The invocation's suite/seed fixture host: suite fixtures are ensured
+   * once per invocation and torn down when it ends; seed fixtures once per
+   * services seed. Without one they are handled by this run.
+   */
+  fixtureHost?: FixtureHost;
+}
+
+/** The failure message of a run its invocation cancelled. */
+export const RUN_CANCELLED_MESSAGE = "cairn: invocation cancelled";
+
+/**
+ * runSpec was asked to run a spec the environment policy refuses
+ * (`requires.env` / `requires.mutates` vs `environments.<name>.policy`).
+ * `cairn run` filters refused specs before runSpec; other callers (heal,
+ * audit) get this error before anything starts.
+ */
+export class SpecRefusedError extends Error {
+  readonly exitCode = 7 as const;
+  constructor(
+    public readonly refusal: RunRefusal,
+    public readonly specPath: string,
+    /** The parsed spec: its name and outcome ids (reported `skipped`). */
+    public readonly spec?: { name: string; outcomeIds: string[] },
+  ) {
+    super(
+      `refused in environment "${refusal.env}": ${refusal.reason} (${specPath})`,
+    );
+    this.name = "SpecRefusedError";
+  }
+}
+
+/**
+ * runSpec's invocation was cancelled before the spec started (no run
+ * directory exists yet). Callers report it as `failure.phase: "cancelled"`.
+ */
+export class RunCancelledError extends Error {
+  constructor() {
+    super(RUN_CANCELLED_MESSAGE);
+    this.name = "RunCancelledError";
+  }
 }
 
 export type LocatorMissDecision =
@@ -274,6 +450,51 @@ export interface MonitorConfig {
  * interface, so a MockBrowserBackend works for tests and `--mock` runs.
  */
 export async function runSpec(opts: RunOptions): Promise<RunResult> {
+  // The phase tracker owns an interval timer (run.heartbeat). Stop it on
+  // every exit path — including a throw from parse, a backend, or a write —
+  // so a failed run can never keep the process alive or append heartbeats
+  // after the run settled.
+  const lifecycle: RunLifecycle = { logs: new Set(), tails: new Set() };
+  try {
+    return await executeSpec(opts, lifecycle);
+  } catch (error) {
+    // A throw after the fixtures were set up (a writer I/O error, a
+    // listener) still owes the spec teardown and the fixture teardowns.
+    await lifecycle.abandon?.().catch(() => undefined);
+    throw error;
+  } finally {
+    lifecycle.tracker?.stop();
+    for (const tail of lifecycle.tails) tail.stop();
+    for (const log of lifecycle.logs) log.close();
+    lifecycle.progressFiles?.dispose();
+    lifecycle.disarmSignalTeardown?.();
+    lifecycle.disarmFixtureSignal?.();
+  }
+}
+
+/** Resources a run owns that must be released on every exit path. */
+interface RunLifecycle {
+  tracker?: PhaseTracker;
+  /** Open live logs (run.log, precondition and verifier logs). */
+  logs: Set<LiveLog>;
+  /** Progress-file tails of the item in flight. */
+  tails: Set<ProgressTail>;
+  progressFiles?: ProgressFiles;
+  /** Removes the SIGINT/SIGTERM teardown handler (spec `teardown:`). */
+  disarmSignalTeardown?: () => void;
+  /** Removes the SIGINT/SIGTERM fixture teardown handler (F3b). */
+  disarmFixtureSignal?: () => void;
+  /**
+   * Finally semantics on a throw out of executeSpec: the spec teardown and
+   * the run's fixture teardowns, once, best effort.
+   */
+  abandon?: () => Promise<void>;
+}
+
+async function executeSpec(
+  opts: RunOptions,
+  lifecycle: RunLifecycle,
+): Promise<RunResult> {
   const runEnv = targetChildEnvWithSelectedTvaultKeys(
     opts.env ?? (process.env as Record<string, string | undefined>),
     opts.selectedTvaultKeys ?? [],
@@ -296,14 +517,44 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     spec,
     resolved,
     path: specPath,
+    origins,
+    actionsByName,
   } = await parseSpec(opts.specPath, {
     env: runEnv,
     vars: resolvedVars,
+    // `${config.dir}` follows the resolved config (an explicit --config
+    // included), not only the one found by walking up from the spec.
+    configDir: runtime.configDir,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     runtime: { workerIndex, runToken },
   });
 
   const env = runtime.envName;
+  // Environment policy, before the run directory or anything else exists.
+  // `cairn run` already filtered refused specs; this guards other callers.
+  const envPolicy = runtime.config?.environments[env]?.policy;
+  const policyInput = {
+    ...(spec.requires ? { requires: spec.requires } : {}),
+    envName: env,
+    ...(envPolicy ? { policy: envPolicy } : {}),
+  };
+  const verdict = evaluateEnvPolicy({
+    ...policyInput,
+    env: opts.policyEnv ?? runEnv,
+  });
+  if (!verdict.allowed) {
+    throw new SpecRefusedError(
+      refusalDocument(verdict, policyInput),
+      specPath,
+      {
+        name: spec.name,
+        outcomeIds: spec.outcomes.map((outcome) => outcome.id),
+      },
+    );
+  }
+  // Cancelled before this spec started: no run directory.
+  if (opts.signal?.aborted) throw new RunCancelledError();
+  const cancelled = (): boolean => opts.signal?.aborted === true;
   const waitScale = resolveWaitScale(
     runtime.waitScale,
     runEnv["CAIRN_WAIT_SCALE"],
@@ -324,7 +575,10 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // finishes. Register spec-declared literals process-wide so those post-run
   // text artifacts use the same redaction boundary as the main artifact pack.
   registerSecretValues(spec.redaction?.values ?? []);
-  const redactor = createArtifactRedactor(
+  // Live: values registered later in the run (F3b secret fixture outputs,
+  // login tokens, outputs under a sensitive key) are scrubbed from every
+  // artifact written after they are known — steps and outcomes included.
+  const redactor = createLiveArtifactRedactor(
     spec.redaction,
     runEnv,
     opts.secretValues,
@@ -350,8 +604,540 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     type: "run.started",
     runId,
     spec: spec.name,
+    ...(opts.invocation ? { invocation: opts.invocation } : {}),
   });
-  opts.listener?.onRunStart?.(spec, runId, runDir, backendName, env);
+  // run.log: the plain narration of this run, always written (whatever
+  // --format/--progress the CLI uses), redacted line by line.
+  const runLog = openRunLog(writer, redactor, RUN_LOG_PATH);
+  lifecycle.logs.add(runLog);
+  const narration = makePlainNarration({
+    write: (text) => runLog.write(text),
+    runEnd: true,
+  });
+  // Every callback except onRunEnd: run.log must be complete before the
+  // manifest checksums it, while the caller's onRunEnd keeps firing after.
+  const listener = combineListeners(narration, opts.listener);
+  await writer.appendEvent({
+    ts: new Date().toISOString(),
+    type: "log.opened",
+    kind: "narration",
+    name: "run",
+    path: RUN_LOG_PATH,
+  });
+  lifecycle.progressFiles = new ProgressFiles();
+  const progressFiles = lifecycle.progressFiles;
+  listener.onRunStart?.(spec, runId, runDir, backendName, env);
+  // phase.changed + run.heartbeat (every 15s while active) for live viewers.
+  const tracker = new PhaseTracker({
+    append: (event) => writer.appendEvent(event),
+    ...(opts.heartbeatIntervalMs !== undefined
+      ? { intervalMs: opts.heartbeatIntervalMs }
+      : {}),
+  });
+  lifecycle.tracker = tracker;
+  // Non-secret context for precondition shells (and, via run.ts, hooks).
+  const contextEnv = cairnContextEnv({
+    environment: env,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+    runToken,
+    runId,
+    runDir,
+    ...(runtime.configPath ? { configDir: dirname(runtime.configPath) } : {}),
+  });
+
+  function createRunFixtures(): FixtureRuntime | undefined {
+    const refs = spec.fixtures ?? [];
+    if (refs.length === 0) return undefined;
+    const runtimeFixtures = new FixtureRuntime({
+      project: runtime.config?.project ?? "cairntrace",
+      envName: env,
+      registry: runtime.config?.fixtures ?? {},
+      configDir: runtime.configPath
+        ? dirname(runtime.configPath)
+        : dirname(specPath),
+      childEnv: opts.childEnv ?? runEnv,
+      ...(opts.selectedTvaultKeys !== undefined
+        ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+        : {}),
+      contextEnv,
+      vars: resolvedVars,
+      ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+      runToken,
+      datasourceSet: resolveEnvironmentDatasources(
+        runtime.config?.datasources,
+        runtime.config?.environments[env]?.datasources,
+      ),
+      ...(envPolicy?.trait ? { policyTrait: envPolicy.trait } : {}),
+      ...(envPolicy?.mutations ? { policyMutations: envPolicy.mutations } : {}),
+      allowWrites: opts.allowFixtureWrites === true,
+      origin: "run",
+      runId,
+      ...(opts.invocation ? { invocationId: opts.invocation.id } : {}),
+      ...(opts.fixtureHost ? { host: opts.fixtureHost } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      redact: (text) => redactor.text(text),
+      redactValue: (value) => redactor.value(value),
+      onEvent: (event) => writer.appendEvent(event),
+      onVerbStart: async ({ name, verb, budgetMs }) => {
+        const label = fixturePhaseLabel(verb, name);
+        await tracker.enter(
+          verb === "teardown" ? "teardown" : "preconditions",
+          {
+            item: label,
+            budgetMs,
+          },
+        );
+        if (verb !== "teardown")
+          listener.onPreconditionStart?.(label, budgetMs);
+      },
+      onVerbEnd: ({ name, verb, status, durationMs, error }) => {
+        const label = fixturePhaseLabel(verb, name);
+        runLog.writeLine(
+          `${label}: ${status} in ${durationMs}ms${error ? ` — ${error}` : ""}`,
+        );
+        if (verb !== "teardown") {
+          listener.onPreconditionFinish?.(
+            label,
+            status === "failed" ? 1 : 0,
+            durationMs,
+            {},
+          );
+        } else if (status === "failed") {
+          opts.listener?.onWarning?.(`${label} failed: ${error ?? "failed"}`);
+        }
+      },
+    });
+    lifecycle.disarmFixtureSignal = runtimeFixtures.armSignal((event) => {
+      try {
+        appendFileSync(
+          join(runDir, "events.ndjson"),
+          `${JSON.stringify(redactor.value(event))}\n`,
+        );
+      } catch {
+        // The process is exiting; evidence is best-effort here.
+      }
+    });
+    return runtimeFixtures;
+  }
+  // F3b: tear down the run's fixtures (after the spec teardown) and write
+  // <runDir>/fixtures.json. Runs once, on every exit path.
+  let fixturesSettled = false;
+  const settleFixtures = async (
+    runStatus: TeardownRunStatus,
+  ): Promise<void> => {
+    if (!fixtures || fixturesSettled) return;
+    fixturesSettled = true;
+    await fixtures.teardown(runStatus);
+    lifecycle.disarmFixtureSignal?.();
+    // A teardown's login token is known only now.
+    registerSecretValues(fixtures.secretValues());
+    await writer.writeJson("fixtures.json", fixtures.runLedger());
+  };
+
+  // F3a: `${runs.<assign>…}` values of run steps, and the request/eval
+  // splice sources once the step loop declares them (teardown may run from
+  // an early stop, before those maps exist).
+  const runValues: Record<string, unknown> = {};
+  const splice: {
+    responses: Record<string, unknown>;
+    evals: Record<string, unknown>;
+  } = { responses: {}, evals: {} };
+  // F3b: the spec's config fixtures (ensured after the preconditions), their
+  // outputs spliced as ${fixtures.<name>.<key>} into steps, teardown and
+  // verifiers. Armed BEFORE the spec teardown's signal handler so, on
+  // SIGINT/SIGTERM, the spec teardown runs first (like the normal path).
+  const fixtures = createRunFixtures();
+  const spliceRuntime = (s: string): string =>
+    resolveRunPlaceholders(
+      resolveEvalPlaceholders(
+        resolveResponsePlaceholders(
+          fixtures ? resolveFixturePlaceholders(s, fixtures.outputs()) : s,
+          splice.responses,
+        ),
+        splice.evals,
+      ),
+      runValues,
+    );
+  const runStepChildEnv = opts.childEnv ?? runEnv;
+  // F3a spec teardown: always runs once, after the outcomes or an early
+  // stop; on SIGINT/SIGTERM its `run` items run from the signal handler.
+  // Each item runs once: the two paths share one set of claims (a host
+  // that survives the signal still finishes the aborted run).
+  const teardown = teardownPlan(resolved.teardown);
+  const claimTeardownItem = createTeardownClaims();
+  let teardownSummary: TeardownSummary | undefined;
+  lifecycle.disarmSignalTeardown = armSignalTeardown({
+    steps: teardown.steps,
+    budgetMs: teardown.timeoutMs,
+    runDir,
+    redact: (event) => redactor.value(event),
+    claim: claimTeardownItem,
+    invocation: (step, _index, signal) => ({
+      step: deepMapStrings(step, spliceRuntime),
+      fileScope: specFileScope(dirname(specPath)),
+      childEnv: runStepChildEnv,
+      contextEnv: {
+        ...contextEnv,
+        CAIRN_RUN_STATUS: "errored",
+        CAIRN_RUN_SIGNAL: signal,
+      },
+      ...(opts.selectedTvaultKeys !== undefined
+        ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+        : {}),
+    }),
+  });
+  const executeTeardownStep = async (
+    step: Step,
+    runStatus: TeardownRunStatus,
+    remainingMs: number,
+  ): Promise<TeardownItemResult> => {
+    const prepared = deepMapStrings(step, spliceRuntime);
+    // A cancel killed the browser; a wedged backend would only time out.
+    const browserUsable = !cancelled() && opts.backend.isWedged?.() !== true;
+    if ("run" in prepared) {
+      const ran = await executeRunStep({
+        step: prepared,
+        fileScope: specFileScope(dirname(specPath)),
+        childEnv: runStepChildEnv,
+        contextEnv: { ...contextEnv, CAIRN_RUN_STATUS: runStatus },
+        ...(opts.selectedTvaultKeys !== undefined
+          ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+          : {}),
+        maxTimeoutMs: remainingMs,
+      });
+      if (ran.ok && ran.assign) runValues[ran.assign] = ran.value;
+      return ran.ok
+        ? { status: "passed" }
+        : {
+            status: "failed",
+            ...(ran.error ? { error: ran.error } : {}),
+            ...(ran.timedOut ? { timedOut: true } : {}),
+          };
+    }
+    if (!browserUsable) {
+      return {
+        status: "skipped",
+        error: cancelled()
+          ? "browser closed by the cancel"
+          : "browser backend is wedged",
+      };
+    }
+    if ("when" in prepared && prepared.when) {
+      if (!(await evaluateWhen(prepared.when, opts.backend))) {
+        return { status: "skipped" };
+      }
+    }
+    const bounded = async (
+      work: Promise<TeardownItemResult>,
+    ): Promise<TeardownItemResult> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<TeardownItemResult>((resolveExpired) => {
+        timer = setTimeout(
+          () =>
+            resolveExpired({
+              status: "failed",
+              error: `did not finish within the teardown budget (${remainingMs}ms left)`,
+              timedOut: true,
+            }),
+          remainingMs,
+        );
+      });
+      try {
+        return await Promise.race([work, expired]);
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    if ("request" in prepared) {
+      return bounded(
+        runRequestStep({
+          step: prepared,
+          backend: opts.backend,
+          requestIndex: 0,
+          baseUrl: runtime.baseUrl,
+        }).then((requested) => {
+          if (!requested.ok) {
+            return { status: "failed" as const, error: requested.error };
+          }
+          splice.responses[requested.assign] = requested.response;
+          return { status: "passed" as const };
+        }),
+      );
+    }
+    if ("eval" in prepared) {
+      return bounded(
+        runEvalStep({
+          step: prepared as EvalStep,
+          backend: opts.backend,
+          specDir: dirname(specPath),
+          fileScope: specFileScope(dirname(specPath)),
+          writer,
+        }).then((ev) => {
+          if (!ev.ok) return { status: "failed" as const, error: ev.error };
+          if (ev.assign) splice.evals[ev.assign] = { value: ev.value };
+          return { status: "passed" as const };
+        }),
+      );
+    }
+    let browserStep = resolveOpenStep(prepared, {
+      baseUrl: runtime.baseUrl,
+      artifacts: {},
+    });
+    browserStep = applyWaitScale(
+      applySpecClickSettle(browserStep, resolved.settleMs),
+      waitScale,
+    );
+    return bounded(
+      runResilientBrowserStep(browserStep, opts.backend, waitScale).then((r) =>
+        r.ok
+          ? { status: "passed" as const }
+          : {
+              status: "failed" as const,
+              error: r.stderr.trim() || `exit ${r.exitCode}`,
+            },
+      ),
+    );
+  };
+  const runSpecTeardown = async (
+    runStatus: TeardownRunStatus,
+    /** Abandoning a run that threw: evidence writes may fail; carry on. */
+    bestEffort = false,
+  ): Promise<TeardownSummary | undefined> => {
+    if (teardown.steps.length === 0 || teardownSummary) return teardownSummary;
+    const tolerate = async (work: () => unknown): Promise<void> => {
+      if (!bestEffort) {
+        await work();
+        return;
+      }
+      try {
+        await work();
+      } catch {
+        // The run already threw; its evidence is best effort from here.
+      }
+    };
+    teardownSummary = await runTeardown({
+      steps: teardown.steps,
+      budgetMs: teardown.timeoutMs,
+      runStatus,
+      emit: (event) => tolerate(() => writer.appendEvent(event)),
+      log: (line) => {
+        void tolerate(() => runLog.writeLine(line));
+      },
+      warn: (message) => opts.listener?.onWarning?.(message),
+      enter: (item, budgetMs) =>
+        tolerate(() => tracker.enter("teardown", { item, budgetMs })),
+      claim: claimTeardownItem,
+      execute: (step, _index, remainingMs) =>
+        executeTeardownStep(step, runStatus, remainingMs),
+    });
+    lifecycle.disarmSignalTeardown?.();
+    return teardownSummary;
+  };
+
+  // Settle a run that stops before its browser steps (failed precondition,
+  // unusable checkpoint, cancel): run.json, run.log end line, manifest and
+  // retention, exactly like a precondition failure always has.
+  const finishEarly = async (
+    input: Pick<
+      PreconditionFailureInput,
+      | "name"
+      | "durationMs"
+      | "timedOut"
+      | "message"
+      | "phase"
+      | "step"
+      | "steps"
+      | "signal"
+    >,
+  ): Promise<RunResult> => {
+    // F3a: the spec teardown runs on early stops too (status errored).
+    await runSpecTeardown("errored");
+    // F3b: then the run's fixtures, newest first (finally semantics).
+    await settleFixtures("errored");
+    // The run settles here: no heartbeat may follow run.errored/manifest.
+    tracker.stop();
+    const failureResult = await finalizePreconditionFailure({
+      writer,
+      redactor,
+      spec,
+      specPath,
+      runId,
+      runDir,
+      environment: env,
+      backend: backendName,
+      coldStart,
+      labels: opts.labels,
+      ...(opts.invocation ? { invocation: opts.invocation } : {}),
+      startedAt,
+      ...input,
+      listener: opts.listener,
+      beforeManifest: (failed) => {
+        narration.onRunEnd?.(failed);
+        runLog.close();
+      },
+      ...(opts.captureServicesArtifacts
+        ? { captureServicesArtifacts: opts.captureServicesArtifacts }
+        : {}),
+    });
+    await applyRunRetention({
+      retention: runtime.config?.retention,
+      stash: runtime.config?.stash,
+      artifactRoot,
+      writer,
+      opts,
+    });
+    return failureResult;
+  };
+
+  lifecycle.abandon = async (): Promise<void> => {
+    await runSpecTeardown("errored", true).catch(() => undefined);
+    if (fixtures && !fixturesSettled) {
+      fixturesSettled = true;
+      await fixtures.teardown("errored").catch(() => undefined);
+      lifecycle.disarmFixtureSignal?.();
+      registerSecretValues(fixtures.secretValues());
+      await writer
+        .writeJson("fixtures.json", fixtures.runLedger())
+        .catch(() => undefined);
+    }
+  };
+
+  // F3b: a spec that names unknown fixtures, or splices
+  // ${fixtures.<name>…} it does not list (or lists no fixtures at all), is
+  // a config error before anything runs (an unresolved placeholder would
+  // reach the browser, a shell or a verifier as literal text).
+  const fixtureProblem = checkFixtureReferences();
+  if (fixtureProblem) {
+    return finishEarly({
+      phase: "fixture",
+      name: fixtureProblem.name,
+      message: fixtureProblem.message,
+      durationMs: 0,
+      timedOut: false,
+    });
+  }
+  function fixtureReferenceText(): string {
+    return JSON.stringify({
+      steps: resolved.steps ?? [],
+      teardown: resolved.teardown ?? [],
+      outcomes: resolved.outcomes,
+    });
+  }
+  function checkFixtureReferences():
+    | { name: string; message: string }
+    | undefined {
+    const text = fixtureReferenceText();
+    const preconditionRefs = fixtureNamesReferenced(
+      JSON.stringify(resolved.preconditions ?? {}),
+    );
+    if (preconditionRefs.length > 0) {
+      return {
+        name: preconditionRefs[0]!,
+        message: `\${fixtures.${preconditionRefs[0]}…} is used in preconditions, which run before the fixtures are ensured; use it in steps, teardown or outcomes`,
+      };
+    }
+    if (!fixtures) {
+      const used = fixtureNamesReferenced(text);
+      if (used.length === 0) return undefined;
+      return {
+        name: used[0]!,
+        message: `\${fixtures.${used[0]}…} is referenced but the spec lists no fixtures; add fixtures: [${used[0]}]`,
+      };
+    }
+    let planned: string[];
+    try {
+      planned = planFixtures(
+        spec.fixtures ?? [],
+        runtime.config?.fixtures ?? {},
+      ).map((entry) => entry.name);
+    } catch (error) {
+      return error instanceof FixtureSetupError
+        ? { name: error.fixture, message: error.message }
+        : { name: "fixtures", message: (error as Error).message };
+    }
+    const unknown = fixtureNamesReferenced(text).filter(
+      (name) => !planned.includes(name),
+    );
+    if (unknown.length === 0) return undefined;
+    return {
+      name: unknown[0]!,
+      message: `\${fixtures.${unknown[0]}…} is referenced but the spec's fixtures (${planned.join(", ")}) do not include it; add it to fixtures:`,
+    };
+  }
+
+  // F2: `preconditions.wait` — readiness gates (config `gates:` names or
+  // inline), waited in order BEFORE the commands. Each gate's budget is the
+  // phase item (phase.changed); a gate that is not ready settles the run like
+  // a failed precondition named `wait <gate>`.
+  const preconditionGates = gateRefList(spec.preconditions?.wait);
+  if (preconditionGates.length > 0) {
+    const configDir = runtime.configPath
+      ? dirname(runtime.configPath)
+      : undefined;
+    const gateCtx: GateContext = {
+      registry: runtime.config?.gates ?? {},
+      env: targetChildEnvWithSelectedTvaultKeys(
+        { ...(opts.childEnv ?? runEnv), ...contextEnv },
+        opts.selectedTvaultKeys ?? [],
+      ),
+      cwd: dirname(specPath),
+      ...(configDir ? { registryCwd: configDir } : {}),
+      scope: "precondition",
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      redact: (text) => redactor.text(text),
+      onEvent: (event) => {
+        const label = `wait ${event.name}`;
+        if (event.type === "gate.started") {
+          void tracker.enter("preconditions", {
+            item: event.name,
+            ...(event.budgetMs > 0 ? { budgetMs: event.budgetMs } : {}),
+          });
+          listener.onPreconditionStart?.(label, event.budgetMs);
+        }
+        void writer.appendEvent(event).catch(() => undefined);
+        if (event.type === "gate.attempt" && !event.ok) {
+          listener.onPreconditionProgress?.(
+            label,
+            `attempt ${event.attempt}: ${event.detail}`,
+          );
+        }
+        if (event.type === "gate.passed" || event.type === "gate.failed") {
+          listener.onPreconditionFinish?.(
+            label,
+            event.type === "gate.passed" ? 0 : 1,
+            event.durationMs,
+            event.type === "gate.failed" && event.timedOut
+              ? { timedOut: true }
+              : {},
+          );
+        }
+      },
+    };
+    try {
+      assertGateRefs(preconditionGates, gateCtx);
+    } catch (error) {
+      if (!(error instanceof GateReferenceError)) throw error;
+      return finishEarly({
+        name: "wait",
+        message: `preconditions.wait: ${error.message}`,
+        durationMs: 0,
+        timedOut: false,
+      });
+    }
+    for (const ref of preconditionGates) {
+      const result = await waitForGate(ref, gateCtx);
+      if (result.ok) continue;
+      return finishEarly({
+        ...(result.cancelled ? { phase: "cancelled" as const } : {}),
+        name: `wait ${result.name}`,
+        message: result.cancelled
+          ? `${RUN_CANCELLED_MESSAGE} while waiting for gate "${result.name}"`
+          : gateFailureMessage(result),
+        durationMs: result.durationMs,
+        timedOut: result.timedOut === true,
+      });
+    }
+  }
 
   // Execute spec preconditions (setup/reset shell commands) BEFORE any browser
   // interaction. Until v1.48 the schema accepted `preconditions.commands` but
@@ -366,6 +1152,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     const preEnv: NodeJS.ProcessEnv = targetChildEnvWithSelectedTvaultKeys(
       {
         ...(opts.childEnv ?? runEnv),
+        ...contextEnv,
         ...Object.fromEntries(
           Object.entries(spec.preconditions?.env ?? {}).map(([k, v]) => [
             k,
@@ -377,7 +1164,33 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     );
     for (const [index, command] of preconditionCommands.entries()) {
       const label = command.name ?? `precondition[${index}]`;
+      // Cancelled between preconditions: the rest never start.
+      if (cancelled()) {
+        return finishEarly({
+          phase: "cancelled",
+          name: label,
+          message: `${RUN_CANCELLED_MESSAGE} before precondition "${label}" started`,
+          durationMs: 0,
+          timedOut: false,
+        });
+      }
       const cwd = command.cwd ? resolve(specDir, command.cwd) : specDir;
+      const timeoutMs = command.timeoutMs ?? 120_000;
+      await tracker.enter("preconditions", {
+        item: label,
+        budgetMs: timeoutMs,
+      });
+      // Live log of the command's combined output, redacted line by line.
+      const logPath = `logs/precondition-${logIndex(index + 1)}-${logSlug(label)}.log`;
+      const preconditionLog = openRunLog(writer, redactor, logPath);
+      lifecycle.logs.add(preconditionLog);
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "log.opened",
+        kind: "precondition",
+        name: label,
+        path: logPath,
+      });
       const startedAtMs = Date.now();
       // precondition.run is a post-mortem event: a long quiesce poll used to
       // leave events.ndjson silent for its whole budget, indistinguishable
@@ -386,86 +1199,210 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ts: new Date(startedAtMs).toISOString(),
         type: "precondition.started",
         name: label,
-        timeoutMs: command.timeoutMs ?? 120_000,
+        timeoutMs,
+        index: index + 1,
+        total: preconditionCommands.length,
+        logPath,
       });
-      opts.listener?.onPreconditionStart?.(label, command.timeoutMs ?? 120_000);
-      const timeoutMs = command.timeoutMs ?? 120_000;
-      const subprocess = execa(command.run, {
-        shell: true,
-        cwd,
-        env: preEnv,
-        reject: false,
-        // The process-tree watchdog owns the exact deadline. Execa is a
-        // slightly-later fallback if Cairn's event loop cannot run it.
-        timeout: timeoutMs + 2_000,
-        all: true,
-      });
-      const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs);
+      listener.onPreconditionStart?.(label, timeoutMs);
+      // Lines the command appends to $CAIRN_PROGRESS_FILE become
+      // precondition.progress events while it runs.
+      const progressFile = progressFiles.create(
+        `precondition-${logIndex(index + 1)}`,
+      );
+      const progressTail = progressFile
+        ? new ProgressTail(progressFile, {
+            onMessage: (message) => {
+              void writer
+                .appendEvent({
+                  ts: new Date().toISOString(),
+                  type: "precondition.progress",
+                  name: label,
+                  message,
+                })
+                .catch(() => undefined);
+              listener.onPreconditionProgress?.(label, redactor.text(message));
+            },
+          }).start()
+        : undefined;
+      if (progressTail) lifecycle.tails.add(progressTail);
+      // The deadline and a cancel hard-kill the command's process tree (a
+      // shell's children too). The shell's exit settles the command: a
+      // background process it left holding stdout (`cmd &`) cannot stretch
+      // the deadline. preEnv is the whole env — nothing of this process's
+      // env (publisher/TinyVault credentials) is merged in. The command
+      // keeps this process's terminal (no own process group).
       const result = await (async () => {
         try {
-          return await subprocess;
+          return await runBoundedCommand("/bin/sh", ["-c", command.run], {
+            cwd,
+            env: progressFile
+              ? { ...preEnv, [CAIRN_PROGRESS_FILE_ENV]: progressFile }
+              : preEnv,
+            timeoutMs,
+            onOutput: (chunk) => preconditionLog.write(chunk),
+            ...(opts.signal ? { signal: opts.signal } : {}),
+          });
         } finally {
-          watchdog.cancel();
+          progressTail?.stop();
+          if (progressTail) lifecycle.tails.delete(progressTail);
+          preconditionLog.close();
+          lifecycle.logs.delete(preconditionLog);
         }
       })();
-      const timedOut = watchdog.timedOut || result.timedOut;
-      const output = String(result.all ?? "");
+      const killedByCancel = result.cancelled;
+      const timedOut = result.timedOut;
+      // Redact the whole output before cutting it: a secret that straddles
+      // the cut would otherwise survive as a partial literal no redactor
+      // recognizes.
+      const output = redactor.text(String(result.all ?? ""));
       const durationMs = Date.now() - startedAtMs;
+      // Keep the TAIL: the end of a failing setup command (the error, the
+      // last poll line) is what explains it; the head is usually banner noise.
+      const outputTail = tailText(output, PRECONDITION_OUTPUT_TAIL_CHARS);
       await writer.appendEvent({
         ts: new Date().toISOString(),
         type: "precondition.run",
         name: label,
-        exitCode: result.exitCode,
+        ...(typeof result.exitCode === "number"
+          ? { exitCode: result.exitCode }
+          : {}),
         durationMs,
         timedOut,
-        ...(result.signal ? { signal: result.signal } : {}),
-        output: output.slice(0, 4000),
+        ...(result.exitSignal ? { signal: result.exitSignal } : {}),
+        output: outputTail,
+        ...(outputTail.length < output.length ? { outputTruncated: true } : {}),
+        logPath,
       });
-      opts.listener?.onPreconditionFinish?.(
-        label,
-        result.exitCode,
-        durationMs,
-        {
-          timedOut,
-          ...(result.signal ? { signal: result.signal } : {}),
-        },
-      );
+      listener.onPreconditionFinish?.(label, result.exitCode, durationMs, {
+        timedOut: timedOut && !killedByCancel,
+        ...(result.exitSignal ? { signal: result.exitSignal } : {}),
+      });
+      if (killedByCancel) {
+        return finishEarly({
+          phase: "cancelled",
+          name: label,
+          message: `${RUN_CANCELLED_MESSAGE}: precondition "${label}" was killed after ${durationMs}ms`,
+          durationMs,
+          timedOut: false,
+          ...(result.exitSignal ? { signal: result.exitSignal } : {}),
+        });
+      }
       if (result.exitCode !== 0) {
         const message = timedOut
           ? `Precondition "${label}" timed out after ${durationMs}ms${
-              result.signal ? ` (${result.signal})` : ""
+              result.exitSignal ? ` (${result.exitSignal})` : ""
             }`
-          : `Precondition "${label}" failed (exit ${result.exitCode}): ${output.slice(0, 500)}`;
-        const failureResult = await finalizePreconditionFailure({
-          writer,
-          redactor,
-          spec,
-          specPath,
-          runId,
-          runDir,
-          environment: env,
-          backend: backendName,
-          coldStart,
-          labels: opts.labels,
-          startedAt,
+          : result.spawnError
+            ? `Precondition "${label}" could not start: ${redactor.text(result.spawnError)}`
+            : `Precondition "${label}" failed (${
+                result.exitCode === undefined && result.exitSignal
+                  ? `killed by ${result.exitSignal}`
+                  : `exit ${result.exitCode}`
+              }): ${tailText(output.trimEnd(), 500)}`;
+        return finishEarly({
           name: label,
           durationMs,
           timedOut,
-          signal: result.signal,
+          ...(result.exitSignal ? { signal: result.exitSignal } : {}),
           message,
-          listener: opts.listener,
-          ...(opts.captureServicesArtifacts
-            ? { captureServicesArtifacts: opts.captureServicesArtifacts }
-            : {}),
         });
-        await applyRunRetention({
-          retention: runtime.config?.retention,
-          artifactRoot,
-          writer,
-          opts,
-        });
-        return failureResult;
       }
+    }
+  }
+
+  // F3b: ensure the spec's fixtures (needs first), then their `.reset`s —
+  // after the preconditions (guards run first) and before any browser call.
+  // A failure settles the run like a failed precondition (phase fixture);
+  // what was ensured before it is still torn down.
+  if (fixtures) {
+    const fixturesStartedAt = Date.now();
+    try {
+      try {
+        await fixtures.setup(spec.fixtures ?? []);
+      } finally {
+        // Secret outputs and login tokens (a failed setup's too): the live
+        // run redactor and every later one scrub them.
+        registerSecretValues(fixtures.secretValues());
+      }
+      // Every ${fixtures.<name>.<key>} the spec splices must have a value
+      // (a dry-run may have none): never send a literal placeholder on.
+      const unresolved = unresolvedFixtureReferences(
+        fixtureReferenceText(),
+        fixtures.outputs(),
+      );
+      if (unresolved.length > 0) {
+        const first = unresolved[0]!;
+        const entry = fixtures
+          .runLedger()
+          .entries.find((candidate) => candidate.name === first.name);
+        throw new FixtureSetupError(
+          first.name,
+          "ensure",
+          `${first.reference} has no value after the fixtures were set up${
+            entry?.reason ? ` (fixture ${first.name}: ${entry.reason})` : ""
+          }${
+            unresolved.length > 1
+              ? `; also unresolved: ${unresolved
+                  .slice(1)
+                  .map((ref) => ref.reference)
+                  .join(", ")}`
+              : ""
+          }`,
+        );
+      }
+    } catch (error) {
+      const failed =
+        error instanceof FixtureSetupError
+          ? error
+          : new FixtureSetupError(
+              "fixtures",
+              "ensure",
+              (error as Error).message,
+            );
+      const cancelledNow = failed.cancelled || cancelled();
+      return finishEarly({
+        phase: cancelledNow ? "cancelled" : "fixture",
+        name: failed.fixture,
+        message: cancelledNow
+          ? `${RUN_CANCELLED_MESSAGE} during fixture "${failed.fixture}"`
+          : failed.message,
+        durationMs: Math.max(failed.durationMs, Date.now() - fixturesStartedAt),
+        timedOut: failed.timedOut,
+      });
+    }
+  }
+
+  // A session.resume checkpoint that cannot be used (missing, expired, or
+  // captured for another origin) fails the run HERE: after the preconditions,
+  // so a precondition may create or refresh the state file it resumes (a
+  // scope sidecar that no longer matches the state file is ignored), and
+  // before any backend call or browser start.
+  let resumePath: string | undefined;
+  if (spec.session?.resume) {
+    const check = await (
+      opts.checkpointStore ?? new CheckpointStore()
+    ).checkResume(
+      spec.session.resume,
+      runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {},
+    );
+    resumePath = check.path;
+    if (check.problem) {
+      const failed = await recordSessionResumeFailure(
+        writer,
+        spec.session.resume,
+        check.problem.message,
+        0,
+      );
+      return finishEarly({
+        phase: "session",
+        name: spec.session.resume,
+        step: SESSION_RESUME_STEP,
+        steps: [failed],
+        message: check.problem.message,
+        durationMs: 0,
+        timedOut: false,
+      });
     }
   }
 
@@ -540,12 +1477,31 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     await safe(() => opts.backend.clearBrowserState());
   }
 
-  // Restore checkpoint if spec asks for it. The `resume` field accepts either
-  // a literal path or a name registered with `cairn checkpoint capture-from-session`.
-  if (spec.session?.resume) {
-    const store = new CheckpointStore();
-    const resolvedResume = store.resolveResume(spec.session.resume);
-    await safe(() => opts.backend.loadState(resolvedResume));
+  // Restore the checkpoint (scope already validated above). The `resume`
+  // field accepts a literal path or a name registered with `cairn login` /
+  // `cairn checkpoint capture-from-session`. A failed load is a failed
+  // `session.resume` step, never swallowed: the steps would otherwise run
+  // signed out and fail somewhere misleading.
+  let resumeFailed: StepResult | undefined;
+  if (spec.session?.resume && resumePath) {
+    const resumeStartedAt = Date.now();
+    let loadError: string | undefined;
+    try {
+      const loaded = await opts.backend.loadState(resumePath);
+      if (!loaded.ok) {
+        loadError = loaded.stderr.trim() || `exit ${loaded.exitCode}`;
+      }
+    } catch (e) {
+      loadError = (e as Error).message;
+    }
+    if (loadError !== undefined) {
+      resumeFailed = await recordSessionResumeFailure(
+        writer,
+        spec.session.resume,
+        `could not restore checkpoint "${spec.session.resume}": ${loadError}`,
+        Date.now() - resumeStartedAt,
+      );
+    }
   }
 
   // Apply the viewport before any step runs. Spec-level wins over the
@@ -574,12 +1530,12 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     });
   }
 
-  const stepResults: StepResult[] = [];
+  const stepResults: StepResult[] = resumeFailed ? [resumeFailed] : [];
   let lastSuccessfulStep: Step | undefined;
   let latestScreenshot: string | undefined;
   let latestSnapshot: string | undefined;
   let latestDiagnostics: string | undefined;
-  let didError = false;
+  let didError = resumeFailed !== undefined;
   const downloads: Record<string, string> = {};
   const transforms: Record<string, string> = {};
   /** request-step artifact paths by assign name (run-relative). */
@@ -590,6 +1546,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   const evals: Record<string, string> = {};
   /** Captured eval-step return values for ${evals.<name>.…} substitution. */
   const evalValues: Record<string, unknown> = {};
+  /**
+   * F16: `${captures.<name>.…}` values — capture steps, then verifier
+   * `assign`s during outcome evaluation (the outcome ctx shares this map).
+   */
+  const captureValues: Record<string, unknown> = {};
+  // F3a: teardown splices the same maps (the step loop owns them).
+  splice.responses = responses;
+  splice.evals = evalValues;
   const namedArtifacts: Record<string, ArtifactRef> = {};
   const diagnostics: string[] = [];
 
@@ -635,16 +1599,38 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     }
   };
   maybeStartSampler();
-  for (let i = 0; i < (resolved.steps ?? []).length; i++) {
+  // F13: relative paths of a step resolve against the file that declares it.
+  const stepFileScope = (index: number): StepFileScope =>
+    stepFileScopeAt(
+      { path: specPath, origins, actionsByName },
+      index,
+      (key, message) =>
+        reportDeprecation(key, message, { runLog, listener: opts.listener }),
+    );
+  const totalSteps = (resolved.steps ?? []).length;
+  if (totalSteps > 0) await tracker.enter("steps");
+  for (let i = 0; i < totalSteps; i++) {
+    // No session (failed resume) or a cancel: the remaining steps never run.
+    if (resumeFailed || cancelled()) break;
     const step = resolved.steps![i]!;
     const stepId = step.id ?? `step_${i + 1}`;
     const stepStart = Date.now();
+    const fileScope = stepFileScope(i);
+    const described =
+      "run" in step
+        ? { kind: "run", label: runStepLabel(step) }
+        : describeStep(step);
+    tracker.setItem(stepId);
     await writer.appendEvent({
       ts: new Date().toISOString(),
       type: "step.started",
       stepId,
+      index: i + 1,
+      total: totalSteps,
+      kind: described.kind,
+      label: described.label,
     });
-    opts.listener?.onStepStart?.(i, step, stepId);
+    listener.onStepStart?.(i, step, stepId);
 
     // Optional when: predicate — skip the step if the page doesn't match.
     if ("when" in step && step.when) {
@@ -660,7 +1646,14 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           durationMs,
           error: `when: ${(e as Error).message}`,
         });
-        opts.listener?.onStepFinish?.(
+        await writer.appendEvent({
+          ts: new Date().toISOString(),
+          type: "step.failed",
+          stepId,
+          durationMs,
+          error: `when: ${(e as Error).message}`,
+        });
+        listener.onStepFinish?.(
           i,
           stepId,
           "failed",
@@ -680,13 +1673,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           skipped: true,
           when: step.when,
         });
-        opts.listener?.onStepFinish?.(
-          i,
-          stepId,
-          "skipped",
-          durationMs,
-          undefined,
-        );
+        listener.onStepFinish?.(i, stepId, "skipped", durationMs, undefined);
         continue;
       }
     }
@@ -696,16 +1683,41 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // eval return values (${evals.<name>.…}) into any string field of the
     // step before it runs — the hybrid-flow hook ("fetch token via API, fill
     // it into the UI" / "read store value, fill it into the form").
+    // F3b: ${fixtures.<name>.<key>} from the spec's fixtures.
+    const withFixtures = fixtures
+      ? deepMapStrings(step, (s) =>
+          resolveFixturePlaceholders(s, fixtures.outputs()),
+        )
+      : step;
+    // F16: `expect` / `capture` resolve their own references (typed whole
+    // references, unknown names reported instead of spliced as ""), so the
+    // text splices below skip them.
+    const resolvesOwnRefs = "expect" in step || "capture" in step;
     const substituted =
-      Object.keys(responses).length > 0 || Object.keys(evalValues).length > 0
-        ? deepMapStrings(step, (s) =>
+      !resolvesOwnRefs &&
+      (Object.keys(responses).length > 0 || Object.keys(evalValues).length > 0)
+        ? deepMapStrings(withFixtures, (s) =>
             resolveEvalPlaceholders(
               resolveResponsePlaceholders(s, responses),
               evalValues,
             ),
           )
-        : step;
-    let stepToRun = resolveOpenStep(substituted, {
+        : withFixtures;
+    // F3a: ${runs.<assign>.…} from earlier run steps.
+    const withRuns =
+      !resolvesOwnRefs && Object.keys(runValues).length > 0
+        ? deepMapStrings(substituted, (s) =>
+            resolveRunPlaceholders(s, runValues),
+          )
+        : substituted;
+    // F16: ${captures.<assign>.…} from earlier capture steps.
+    const withCaptures =
+      !resolvesOwnRefs && Object.keys(captureValues).length > 0
+        ? deepMapStrings(withRuns, (s) =>
+            resolveCapturePlaceholders(s, captureValues),
+          )
+        : withRuns;
+    let stepToRun = resolveOpenStep(withCaptures, {
       baseUrl: runtime.baseUrl,
       artifacts: namedArtifacts,
     });
@@ -737,7 +1749,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           ...stepToRun.upload,
           path: resolveUploadPath(
             stepToRun.upload.path,
-            dirname(specPath),
+            fileScope,
             runDir,
             namedArtifacts,
           ),
@@ -748,8 +1760,31 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
     let stepResolved: ResolvedElement | undefined;
+    let stepScreenshot: string | undefined;
+    // Best-known page URL after the step, only where it is free (no extra
+    // backend round-trip): the diagnostics capture of a failed step, or the
+    // navigation target of an open step that passed.
+    let stepUrl: string | undefined;
     try {
-      if ("request" in stepToRun) {
+      if ("run" in stepToRun) {
+        // F3a: a host process with a process-tree deadline; a cancel kills it.
+        const ran = await executeRunStep({
+          step: stepToRun,
+          fileScope,
+          childEnv: runStepChildEnv,
+          contextEnv,
+          ...(opts.selectedTvaultKeys !== undefined
+            ? { selectedTvaultKeys: opts.selectedTvaultKeys }
+            : {}),
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        });
+        if (!ran.ok) {
+          stepStatus = "failed";
+          stepError = ran.error ?? "run step failed";
+        } else if (ran.assign) {
+          runValues[ran.assign] = ran.value;
+        }
+      } else if ("request" in stepToRun) {
         const requested = await runRequestStep({
           step: stepToRun,
           backend: opts.backend,
@@ -785,6 +1820,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           step: stepToRun,
           writer,
           specDir: dirname(specPath),
+          fileScope,
+          ...(opts.signal ? { signal: opts.signal } : {}),
           artifacts: namedArtifacts,
           vars: resolvedVars,
           childEnv: opts.childEnv ?? runEnv,
@@ -816,6 +1853,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           step: stepToRun as EvalStep,
           backend: opts.backend,
           specDir: dirname(specPath),
+          fileScope,
           writer,
         });
         if (!ev.ok) {
@@ -838,6 +1876,78 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
             path: relativePath,
             assign: ev.assign,
           });
+        }
+      } else if ("expect" in stepToRun || "capture" in stepToRun) {
+        // F16: typed mid-flow assertion (evidence like an outcome) or a
+        // structured value for ${captures.*}; both read the page through
+        // backend.evaluate, `expect.request` through the request transport.
+        const checkDeps = {
+          backend: opts.backend,
+          scope: {
+            artifacts: namedArtifacts,
+            responses,
+            evals: evalValues,
+            captures: captureValues,
+            runOutputs: runValues,
+            ...(fixtures ? { fixtureOutputs: fixtures.outputs() } : {}),
+            runStartedAt: startedAt,
+          },
+          ...(runtime.browser?.testIdAttribute
+            ? { testIdAttribute: runtime.browser.testIdAttribute }
+            : {}),
+          waitScale,
+          ...(opts.signal ? { signal: opts.signal } : {}),
+          request: async (call: {
+            method: string;
+            url: string;
+            headers?: Record<string, string>;
+            body?: unknown;
+          }) => {
+            const sent = await runRequestStep({
+              step: {
+                request: {
+                  method: call.method as RequestStep["request"]["method"],
+                  url: call.url,
+                  ...(call.headers ? { headers: call.headers } : {}),
+                  ...(call.body !== undefined ? { body: call.body } : {}),
+                },
+              },
+              backend: opts.backend,
+              requestIndex: i + 1,
+              baseUrl: runtime.baseUrl,
+            });
+            return sent.ok
+              ? {
+                  ok: true as const,
+                  response: {
+                    status: sent.response.status,
+                    body: sent.response.body,
+                    url: sent.response.url,
+                  },
+                }
+              : { ok: false as const, error: sent.error };
+          },
+        };
+        const checked =
+          "expect" in stepToRun
+            ? await executeExpectStep({
+                step: stepToRun as ExpectStep,
+                stepId,
+                index: i + 1,
+                writer,
+                deps: checkDeps,
+              })
+            : await executeCaptureStep({
+                step: stepToRun as CaptureStep,
+                writer,
+                deps: checkDeps,
+                captures: captureValues,
+                registerSecrets: registerSecretValues,
+              });
+        stepArtifacts.push(...checked.artifacts);
+        if (!checked.ok) {
+          stepStatus = "failed";
+          stepError = checked.error;
         }
       } else if ("monitor" in stepToRun) {
         const mon = await runMonitorStep({
@@ -953,8 +2063,11 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     // and just adds wall time without yielding useful evidence. Skip the
     // post-failure capture phase and record a single artifact noting the
     // short-circuit. The close() call further down escalates to a daemon
-    // kill for the same reason.
-    if (opts.backend.isWedged?.()) {
+    // kill for the same reason. A cancelled run captures nothing: its
+    // browser was killed on purpose.
+    if (cancelled()) {
+      // No post-step capture after a cancel.
+    } else if (opts.backend.isWedged?.()) {
       const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
       await writer.writeJson(
         rel,
@@ -1013,6 +2126,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           }));
         if (shot && shot.ok) {
           latestScreenshot = rel;
+          stepScreenshot = rel;
           stepArtifacts.push(rel);
           await writer.appendEvent({
             ts: new Date().toISOString(),
@@ -1055,10 +2169,13 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           // Screenshots are best-effort evidence, never part of the contract.
           // A capture timeout is recorded as a warning + missing-artifact note
           // (the diagnostic above, with action:"failed" on the event) but must
-          // NOT fail the step or spec. A timeout does set the backend's wedged
-          // flag (see AgentBrowserAdapter); that flag only skips further
-          // OPTIONAL captures (console/network/trace/video). A genuinely wedged
-          // page fails naturally on its next real interaction.
+          // NOT fail the step or spec. A capture timeout marks the backend
+          // wedged only when the backend had to stop its browser over it
+          // (agent-browser: the capture still blocked its daemon after a 20s
+          // drain; Playwright: any capture timeout); the flag then skips
+          // diagnostics and further OPTIONAL captures
+          // (console/network/trace/video). A genuinely wedged page fails
+          // naturally on its next real interaction.
         }
       }
       if (stepStatus !== "passed" && !opts.backend.isWedged?.()) {
@@ -1068,6 +2185,9 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
           step,
           stepError,
         );
+        // The diagnostics eval already read location.href: reuse it for the
+        // step event instead of paying another backend round-trip.
+        stepUrl = diagnosticsUrl(captured);
         await writer.writeJson(rel, captured, "diagnostic");
         latestDiagnostics = rel;
         diagnostics.push(rel);
@@ -1091,15 +2211,28 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       ...(stepResolved ? { resolved: stepResolved } : {}),
     });
 
-    await writer.appendEvent({
-      ts: new Date().toISOString(),
-      type: stepStatus === "passed" ? "step.finished" : "step.failed",
+    if (stepStatus === "passed" && "open" in stepToRun) {
+      stepUrl = openPath(stepToRun);
+    }
+    const stepEndTs = new Date().toISOString();
+    const stepEnd = {
       stepId,
       durationMs,
-      ...(stepError ? { error: stepError } : {}),
       ...(stepResolved ? { resolved: stepResolved } : {}),
-    });
-    opts.listener?.onStepFinish?.(i, stepId, stepStatus, durationMs, stepError);
+      ...(stepUrl ? { url: withoutQuery(stepUrl) } : {}),
+      ...(stepScreenshot ? { screenshot: stepScreenshot } : {}),
+    };
+    await writer.appendEvent(
+      stepStatus === "passed"
+        ? { ts: stepEndTs, type: "step.finished", ...stepEnd }
+        : {
+            ts: stepEndTs,
+            type: "step.failed",
+            ...stepEnd,
+            ...(stepError ? { error: stepError } : {}),
+          },
+    );
+    listener.onStepFinish?.(i, stepId, stepStatus, durationMs, stepError);
 
     if (stepStatus === "passed") {
       lastSuccessfulStep = step;
@@ -1115,7 +2248,8 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // wedged daemon and turn one bounded failure into several more timeouts.
   // Outcome evaluation is NOT gated on this — the contract always runs (see
   // the evaluateOutcomes call below).
-  const backendWedgedAfterSteps = opts.backend.isWedged?.() === true;
+  const backendWedgedAfterSteps =
+    opts.backend.isWedged?.() === true || cancelled();
 
   // Stop the process sampler (if it ever started) and reduce its samples into
   // diagnostics/process.{json,md}. Zero-cost when monitoring was disabled or
@@ -1188,16 +2322,31 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     "network",
   );
 
-  // Stop trace recording and save to traces/<backend>-trace.zip.
-  const traceRelPath = `traces/${backendName}-trace.zip`;
+  // Stop trace recording: Playwright → traces/playwright-trace.zip (Trace
+  // Viewer), agent-browser → traces/agent-browser-trace.json (Chrome
+  // trace-event JSON for Perfetto). A failed stop, an empty file or one over
+  // traceMaxBytes is dropped with an artifact.trace event, never a failure.
+  const { path: traceRelPath, format: traceFormat } =
+    tracePathForBackend(backendName);
   let tracePath: string | undefined;
-  if (!backendWedgedAfterSteps && policy.trace !== "never") {
+  if (
+    !backendWedgedAfterSteps &&
+    policy.trace !== "never" &&
+    opts.backend.stopTrace
+  ) {
     const traceResult = await safe(async () =>
       opts.backend.stopTrace?.(await writer.preparePath(traceRelPath, "trace")),
     );
-    if (traceResult?.ok) {
-      tracePath = traceRelPath;
-    }
+    tracePath = await safe(() =>
+      checkStoppedTrace({
+        writer,
+        relativePath: traceRelPath,
+        format: traceFormat,
+        stopped: traceResult,
+        maxBytes:
+          spec.artifacts?.capture?.traceMaxBytes ?? DEFAULT_TRACE_MAX_BYTES,
+      }),
+    );
   }
 
   // The video is finalized after outcome evaluation. Playwright cannot save a
@@ -1209,7 +2358,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // Evaluate outcomes first so we know whether the run failed before
   // deciding whether to auto-cut video clips.
   const failedStep = stepResults.find((s) => s.status === "failed")?.id;
-  const ctx: VerifierContext = {
+  const ctx: ScriptVerifierContext = {
     lastSuccessfulStep: lastSuccessfulStep?.id,
     ...(failedStep ? { failedStep } : {}),
     latestScreenshot,
@@ -1234,8 +2383,35 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       ? { selectedTvaultKeys: opts.selectedTvaultKeys }
       : {}),
     ...(processMetricsSummary ? { processMetrics: processMetricsSummary } : {}),
+    // A node script verifier's process tree is killed on cancel.
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    // F4/F16: the environment's datasources; ${captures.*} (capture steps,
+    // then verifier assigns), ${runs.*} and ${run.startedAt} for verifiers.
+    datasources: resolveEnvironmentDatasources(
+      runtime.config?.datasources,
+      runtime.config?.environments[env]?.datasources,
+    ),
+    envName: env,
+    captures: captureValues,
+    runOutputs: runValues,
+    runStartedAt: startedAt,
+    // SDK `ctx.run`: this run's identity, so a verifier can scope its
+    // queries to the records the run created (token) or its cohort (labels).
+    runInfo: {
+      id: runId,
+      token: runToken,
+      startedAt,
+      ...(opts.labels && Object.keys(opts.labels).length > 0
+        ? { labels: opts.labels }
+        : {}),
+    },
+    // F3b: ${fixtures.<name>.<key>} for verifiers.
+    ...(fixtures ? { fixtureOutputs: fixtures.outputs() } : {}),
+    ...(runtime.browser?.testIdAttribute
+      ? { testIdAttribute: runtime.browser.testIdAttribute }
+      : {}),
   };
-  opts.listener?.onOutcomesStart?.(resolved.outcomes.length);
+  listener.onOutcomesStart?.(resolved.outcomes.length);
   // Outcomes are the contract and are ALWAYS evaluated, even when the backend
   // marked itself wedged after a screenshot/child timeout. The verifiers carry
   // their own bounded deadlines, so a genuinely unresponsive page fails each
@@ -1245,17 +2421,163 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // captures above (console/network/trace/video).
   // Listener calls ride the evaluation loop itself: a long verifier poll used
   // to buffer EVERY outcome line until the whole set finished, so two 5-min
-  // polls meant ten silent minutes and then all verdicts at once.
-  const evaluated = await evaluateOutcomes(
-    resolved.outcomes,
-    opts.backend,
-    ctx,
-    {
-      onStart: (outcome) => opts.listener?.onOutcomeStart?.(outcome),
-      onFinish: (outcome, evaluation) =>
-        opts.listener?.onOutcomeFinish?.(outcome, evaluation),
+  // polls meant ten silent minutes and then all verdicts at once. The
+  // outcome.started / outcome.<status> events ride the same hooks so
+  // events.ndjson is live too. The hooks are synchronous; ArtifactWriter
+  // serializes appends, so the un-awaited writes keep their order.
+  if (resolved.outcomes.length > 0) await tracker.enter("outcomes");
+  const outcomeStartedAt = new Map<string, number>();
+  // Node script verifiers run as child processes: their stdout/stderr go to
+  // logs/outcome-<id>.log and lines they report through ctx.progress()
+  // (CAIRN_PROGRESS_FILE) become outcome.progress events while they run.
+  let scriptRun: { log: LiveLog; tail?: ProgressTail } | undefined;
+  const endScriptRun = (): void => {
+    if (!scriptRun) return;
+    scriptRun.tail?.stop();
+    if (scriptRun.tail) lifecycle.tails.delete(scriptRun.tail);
+    scriptRun.log.close();
+    lifecycle.logs.delete(scriptRun.log);
+    scriptRun = undefined;
+    delete ctx.scriptRun;
+  };
+  const outcomeHooks: {
+    onStart(outcome: Outcome): void;
+    onFinish(outcome: Outcome, evaluation: VerifierEvaluation): void;
+  } = {
+    onStart: (outcome) => {
+      const timeoutMs = verifierTimeoutMs(outcome.verify);
+      outcomeStartedAt.set(outcome.id, Date.now());
+      tracker.setItem(outcome.id, timeoutMs);
+      void writer
+        .appendEvent({
+          ts: new Date().toISOString(),
+          type: "outcome.started",
+          outcomeId: outcome.id,
+          kind: verifierKind(outcome.verify),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        })
+        .catch(() => undefined);
+      if (
+        isScriptVerifier(outcome.verify) &&
+        outcome.verify.script.runtime === "node"
+      ) {
+        const logPath = `logs/outcome-${logSlug(outcome.id)}.log`;
+        const outcomeLog = openRunLog(writer, redactor, logPath);
+        lifecycle.logs.add(outcomeLog);
+        void writer
+          .appendEvent({
+            ts: new Date().toISOString(),
+            type: "log.opened",
+            kind: "outcome",
+            name: outcome.id,
+            path: logPath,
+          })
+          .catch(() => undefined);
+        const progressFile = progressFiles.create(`outcome-${outcome.id}`);
+        const tail = progressFile
+          ? new ProgressTail(progressFile, {
+              onMessage: (message) => {
+                void writer
+                  .appendEvent({
+                    ts: new Date().toISOString(),
+                    type: "outcome.progress",
+                    outcomeId: outcome.id,
+                    message,
+                  })
+                  .catch(() => undefined);
+                listener.onOutcomeProgress?.(outcome, redactor.text(message));
+              },
+            }).start()
+          : undefined;
+        if (tail) lifecycle.tails.add(tail);
+        scriptRun = { log: outcomeLog, ...(tail ? { tail } : {}) };
+        ctx.scriptRun = {
+          onOutputLine: (_stream, line) => outcomeLog.writeLine(line),
+          ...(progressFile ? { progressFile } : {}),
+        };
+      }
+      listener.onOutcomeStart?.(outcome);
     },
-  );
+    onFinish: (outcome, evaluation) => {
+      // Drain the progress file first so the last message precedes the verdict.
+      endScriptRun();
+      const started = outcomeStartedAt.get(outcome.id);
+      void writer
+        .appendEvent({
+          ts: new Date().toISOString(),
+          type: evaluation.skipped
+            ? "outcome.skipped"
+            : evaluation.passed
+              ? "outcome.passed"
+              : "outcome.failed",
+          outcomeId: outcome.id,
+          ...(started !== undefined
+            ? { durationMs: Math.max(0, Date.now() - started) }
+            : {}),
+          // F5: how long a polled verifier waited and how often it looked.
+          ...(evaluation.attempts !== undefined
+            ? { attempts: evaluation.attempts }
+            : {}),
+          ...(evaluation.polledMs !== undefined
+            ? { polledMs: Math.max(0, Math.round(evaluation.polledMs)) }
+            : {}),
+        })
+        .catch(() => undefined);
+      listener.onOutcomeFinish?.(outcome, evaluation);
+    },
+  };
+  // F5: a polling verifier narrates its attempts as outcome.progress.
+  const onOutcomeProgress = (outcome: Outcome, message: string): void => {
+    void writer
+      .appendEvent({
+        ts: new Date().toISOString(),
+        type: "outcome.progress",
+        outcomeId: outcome.id,
+        message,
+      })
+      .catch(() => undefined);
+    listener.onOutcomeProgress?.(outcome, redactor.text(message));
+  };
+  // One outcome at a time so a cancel can stop between them and abandon the
+  // one in flight (a node script's process tree is killed through ctx.signal;
+  // a late result of an abandoned verifier is ignored). Remaining outcomes
+  // are reported skipped.
+  const evaluated: EvaluatedOutcome[] = [];
+  for (const outcome of resolved.outcomes) {
+    if (cancelled()) {
+      const evaluation = cancelledEvaluation();
+      outcomeHooks.onFinish(outcome, evaluation);
+      evaluated.push({ outcome, evaluation });
+      continue;
+    }
+    let abandoned = false;
+    const settled = await raceAbort(
+      evaluateOutcomes([outcome], opts.backend, ctx, {
+        onStart: (o) => {
+          if (!abandoned) outcomeHooks.onStart(o);
+        },
+        onFinish: (o, e) => {
+          if (!abandoned) outcomeHooks.onFinish(o, e);
+        },
+        onProgress: (o, message) => {
+          if (!abandoned) onOutcomeProgress(o, message);
+        },
+      }),
+      opts.signal,
+    );
+    if (settled === ABORTED) {
+      abandoned = true;
+      const evaluation = cancelledEvaluation();
+      outcomeHooks.onFinish(outcome, evaluation);
+      evaluated.push({ outcome, evaluation });
+      continue;
+    }
+    evaluated.push(...settled);
+  }
+  endScriptRun();
+  // A cancel that landed before every verdict was in: the run is errored
+  // (failure.phase "cancelled"), whatever the partial verdicts say.
+  const cancelledBeforeVerdict = cancelled();
 
   const outcomeResults: OutcomeResult[] = [];
   for (const { outcome, evaluation } of evaluated) {
@@ -1272,27 +2594,37 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
         ? { evidenceRaw: `outcomes/${outcome.id}.raw.json` }
         : {}),
     });
-    await writer.appendEvent({
-      ts: new Date().toISOString(),
-      type:
-        outcomeStatus === "skipped"
-          ? "outcome.skipped"
-          : evaluation.passed
-            ? "outcome.passed"
-            : "outcome.failed",
-      outcomeId: outcome.id,
-    });
   }
+
+  // F3a: the spec teardown runs after the outcomes, while the browser is
+  // still up and before the verdict is written; it sees the would-be status
+  // (CAIRN_RUN_STATUS). Only `failRun: true` lets it change a passed run.
+  const verdictBeforeTeardown: TeardownRunStatus =
+    didError || cancelledBeforeVerdict
+      ? "errored"
+      : stepResults.some((s) => s.status === "failed") ||
+          outcomeResults.some((o) => o.status === "failed")
+        ? "failed"
+        : "passed";
+  const teardownResult = await runSpecTeardown(verdictBeforeTeardown);
+  // F3b: the run's fixtures are torn down after the spec teardown (newest
+  // first); a failed fixture teardown is reported, never changes the status.
+  await settleFixtures(verdictBeforeTeardown);
+  const teardownFailure =
+    teardown.failRun && verdictBeforeTeardown === "passed"
+      ? teardownResult?.failed[0]
+      : undefined;
 
   const endedAt = new Date().toISOString();
   const durationMs = Date.parse(endedAt) - Date.parse(startedAt);
   const stepFailed = stepResults.some((s) => s.status === "failed");
   const outcomeFailed = outcomeResults.some((o) => o.status === "failed");
-  const status: RunResult["status"] = didError
-    ? "errored"
-    : stepFailed || outcomeFailed
-      ? "failed"
-      : "passed";
+  const status: RunResult["status"] =
+    didError || cancelledBeforeVerdict || teardownFailure
+      ? "errored"
+      : stepFailed || outcomeFailed
+        ? "failed"
+        : "passed";
   const exitCode: ExitCode =
     status === "errored" ? 2 : status === "failed" ? 1 : 0;
 
@@ -1312,6 +2644,17 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       (o) => o.status === "passed",
     ).length;
     summary = `${passedOutcomes}/${outcomeResults.length} outcomes passed`;
+  } else if (failedStepResult?.id === SESSION_RESUME_STEP) {
+    // The checkpoint could not be restored: an environment problem, not
+    // locator drift (no brief, no heal hint).
+    const message = failedStepResult.error ?? "session.resume failed";
+    failure = {
+      phase: "session",
+      ...(spec.session?.resume ? { name: spec.session.resume } : {}),
+      step: SESSION_RESUME_STEP,
+      message,
+    };
+    summary = `errored at step '${SESSION_RESUME_STEP}': ${message}`;
   } else if (failedStepResult) {
     const stepMsg =
       failedStepResult.error ?? `step '${failedStepResult.id}' failed`;
@@ -1360,8 +2703,26 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       message: `outcome '${failedOutcome.id}' failed: ${detail}`,
     };
     summary = `outcome '${failedOutcome.id}' failed`;
+  } else if (teardownFailure) {
+    // F3a `teardown: {failRun: true}`: a failed cleanup errors a passed run.
+    failure = {
+      phase: "teardown",
+      name: teardownFailure.stepId,
+      message: `teardown step '${teardownFailure.stepId}' failed: ${teardownFailure.error}`,
+    };
+    summary = `errored in teardown '${teardownFailure.stepId}': ${teardownFailure.error}`;
   } else {
     summary = status;
+  }
+  if (cancelledBeforeVerdict) {
+    failure = {
+      phase: "cancelled",
+      ...(failure?.step ? { step: failure.step } : {}),
+      message: RUN_CANCELLED_MESSAGE,
+    };
+    summary = `cancelled: ${RUN_CANCELLED_MESSAGE}${
+      failedStepResult ? ` (at step '${failedStepResult.id}')` : ""
+    }`;
   }
 
   // Now that every verifier has finished with the page, finalize the browser
@@ -1382,10 +2743,30 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   }
 
   // Honor the trace capture policy: with the default "on-failure", a passing
-  // run deletes its trace zip (they're the bulk of artifact disk usage).
+  // run deletes its trace (they're the bulk of artifact disk usage).
   if (tracePath && status === "passed" && policy.trace !== "always") {
     await safe(() => writer.remove(traceRelPath));
     tracePath = undefined;
+  }
+  // A kept trace is sanitized in place (best effort: credential headers,
+  // cookies, storage state, password-field values, sensitive params and
+  // registered secrets → [redacted]) and marked in the manifest: `sanitized`
+  // (stashable on opt-in, never published), or `secret-bearing` when it
+  // could not be rewritten (stash/publish gate).
+  if (tracePath) {
+    await safe(() =>
+      sanitizeKeptTrace({
+        writer,
+        relativePath: traceRelPath,
+        format: traceFormat,
+        redactor,
+        sensitiveNames: [
+          ...(spec.redaction?.headers ?? []),
+          ...(spec.redaction?.storageKeys ?? []),
+          ...(spec.redaction?.queryParams ?? []),
+        ],
+      }),
+    );
   }
 
   // Same policy applies to video: a passing run with `on-failure` deletes
@@ -1534,6 +2915,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
     backend: backendName as RunResult["backend"],
     coldStart,
     ...(labels ? { labels } : {}),
+    ...(opts.invocation ? { invocation: opts.invocation } : {}),
     status,
     summary,
     ...(failure ? { failure } : {}),
@@ -1575,17 +2957,26 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
       }),
     ),
   );
-  await writer.appendEvent({
-    ts: endedAt,
-    type:
-      status === "passed"
-        ? "run.passed"
-        : status === "failed"
-          ? "run.failed"
-          : "run.errored",
-    runId,
-    durationMs,
-  });
+  // The run settles here. Stop heartbeats before the final event so nothing
+  // is appended after run.* or after the manifest checksums events.ndjson.
+  tracker.stop();
+  await writer.appendEvent(
+    status === "passed"
+      ? { ts: endedAt, type: "run.passed", runId, durationMs }
+      : status === "failed"
+        ? { ts: endedAt, type: "run.failed", runId, durationMs }
+        : {
+            ts: endedAt,
+            type: "run.errored",
+            runId,
+            durationMs,
+            ...(failure?.phase ? { phase: failure.phase } : {}),
+            ...(failure?.phase && failure.name ? { name: failure.name } : {}),
+          },
+  );
+  // run.log is complete before the manifest checksums it.
+  narration.onRunEnd?.(publicResult);
+  runLog.close();
   await writer.writeManifest(artifacts.manifest);
   opts.listener?.onRunEnd?.(publicResult);
 
@@ -1595,6 +2986,7 @@ export async function runSpec(opts: RunOptions): Promise<RunResult> {
   // retention.enabled: false disables pruning entirely.
   await applyRunRetention({
     retention: runtime.config?.retention,
+    stash: runtime.config?.stash,
     artifactRoot,
     writer,
     opts,
@@ -1681,12 +3073,37 @@ async function writeServicesArtifacts(input: {
   }
 }
 
+/**
+ * Reason code + one-line, path-free message of an archive/publish failure
+ * for `artifact.*` events.
+ */
+function transferFailure(error: unknown): {
+  reason: ReturnType<typeof evidenceFailureReason>;
+  message: string;
+} {
+  return {
+    reason: evidenceFailureReason(error),
+    message: pathFreeMessage(
+      error instanceof Error ? error.message : String(error),
+    ),
+  };
+}
+
+/**
+ * Auto-prune after a run. Archive/publish outcomes of the pruned runs are
+ * recorded on THIS run's events (`artifact.stash` action `archive`,
+ * `artifact.publish`, `artifact.retention` warnings for runs retained because
+ * archiving failed, and an error event when the prune itself throws) — a
+ * retention failure never fails the run that just completed.
+ */
 async function applyRunRetention(input: {
   retention: RetentionConfig | undefined;
+  /** Config `stash` block: the archive evidence gate and TTL. */
+  stash?: StashConfig | undefined;
   artifactRoot: string;
   writer: ArtifactWriter;
   opts: RunOptions;
-}): Promise<void> {
+}): Promise<PruneResult | undefined> {
   const { retention, artifactRoot, writer, opts } = input;
   const keepRuns =
     retention?.enabled === false
@@ -1695,7 +3112,7 @@ async function applyRunRetention(input: {
           retention?.keepRuns ?? DEFAULT_KEEP_RUNS,
           opts.minKeepRuns ?? 0,
         );
-  if (keepRuns === undefined) return;
+  if (keepRuns === undefined) return undefined;
 
   const requiresArchive = retention?.archiveToStash === true;
   const requiresPublication = retention?.publish?.enabled === true;
@@ -1714,12 +3131,14 @@ async function applyRunRetention(input: {
         ? "retention.publish.enabled is true but no publication adapter was provided; pruning was skipped"
         : "retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped",
     });
-    return;
+    return undefined;
   }
 
+  const record = (event: RunEvent): Promise<unknown> =>
+    safe(() => writer.appendEvent(event));
   // Archive pruned runs to fcheap before deletion when configured. The
   // archive callback is injected via opts so the core runner doesn't depend
-  // on the stash (fcheap) CLI module.
+  // on the stash (fcheap) CLI module. Throwing keeps the run on disk.
   const onArchive =
     (requiresArchive || requiresPublication) &&
     (opts.onArchiveRun || opts.onPublishRun)
@@ -1728,25 +3147,120 @@ async function applyRunRetention(input: {
             ...(retention?.archiveTags ?? []),
             "retention-archived",
           ];
-          if (requiresArchive) await opts.onArchiveRun!(dir, rid, tags);
+          if (requiresArchive) {
+            try {
+              const saved = await opts.onArchiveRun!(dir, rid, tags, {
+                ...(input.stash?.include
+                  ? { include: input.stash.include }
+                  : {}),
+                ...(input.stash?.unsafeIncludeRawTraces
+                  ? { unsafeIncludeRawTraces: true }
+                  : {}),
+                ...(input.stash?.ttl ? { ttl: input.stash.ttl } : {}),
+              });
+              await record({
+                ts: new Date().toISOString(),
+                type: "artifact.stash",
+                action: "archive",
+                runId: rid,
+                status: saved?.status ?? "saved",
+                ...(saved?.stashId ? { stashId: saved.stashId } : {}),
+                ...(saved?.excluded?.length
+                  ? { excluded: saved.excluded }
+                  : {}),
+                ...(saved?.ttl ? { ttl: saved.ttl } : {}),
+                ...(saved?.expiresAt ? { expiresAt: saved.expiresAt } : {}),
+                tags: saved?.tags ?? tags,
+              });
+            } catch (error) {
+              await record({
+                ts: new Date().toISOString(),
+                type: "artifact.stash",
+                action: "archive",
+                runId: rid,
+                status: "error",
+                ...transferFailure(error),
+              });
+              throw error;
+            }
+          }
           if (requiresPublication) {
-            await opts.onPublishRun!(
-              dir,
-              rid,
-              tags,
-              retention?.publish?.retentionDays ?? 7,
-            );
+            try {
+              const published = await opts.onPublishRun!(
+                dir,
+                rid,
+                tags,
+                retention?.publish?.retentionDays ?? 7,
+                retention?.publish?.include
+                  ? { include: retention.publish.include }
+                  : {},
+              );
+              await record({
+                ts: new Date().toISOString(),
+                type: "artifact.publish",
+                runId: rid,
+                status: "published",
+                ...(published?.artifactRef
+                  ? { artifactRef: published.artifactRef }
+                  : {}),
+                ...(published?.webUrl ? { webUrl: published.webUrl } : {}),
+                ...(published?.excluded?.length
+                  ? { excluded: published.excluded }
+                  : {}),
+              });
+            } catch (error) {
+              await record({
+                ts: new Date().toISOString(),
+                type: "artifact.publish",
+                runId: rid,
+                status: "error",
+                ...transferFailure(error),
+              });
+              throw error;
+            }
           }
         }
       : undefined;
   const keepFailedRuns = retention?.keepFailedRuns ?? DEFAULT_KEEP_FAILED_RUNS;
-  await safe(() =>
-    pruneRuns(artifactRoot, {
+  let pruned: PruneResult;
+  try {
+    pruned = await pruneRuns(artifactRoot, {
       keepRuns,
       keepFailedRuns,
       ...(onArchive ? { onArchive } : {}),
-    }),
-  );
+    });
+  } catch (error) {
+    await record({
+      ts: new Date().toISOString(),
+      type: "artifact.retention",
+      action: "error",
+      warning: `retention prune failed: ${transferFailure(error).message}`,
+    });
+    return undefined;
+  }
+  for (const archiveFailure of pruned.archiveFailures) {
+    await record({
+      ts: new Date().toISOString(),
+      type: "artifact.retention",
+      action: "warning",
+      runId: archiveFailure.runId,
+      reason: archiveFailure.reason ?? "unknown",
+      warning: `archiving ${archiveFailure.runId} failed (${pathFreeMessage(archiveFailure.error)}); the run was retained on disk`,
+    });
+  }
+  if (
+    onArchive &&
+    (pruned.removed.length > 0 || pruned.archiveFailures.length > 0)
+  ) {
+    await record({
+      ts: new Date().toISOString(),
+      type: "artifact.retention",
+      action: "summary",
+      removed: pruned.removed.length,
+      archiveFailures: pruned.archiveFailures.length,
+    });
+  }
+  return pruned;
 }
 
 interface PreconditionFailureInput {
@@ -1760,6 +3274,7 @@ interface PreconditionFailureInput {
   backend: string;
   coldStart: boolean;
   labels?: Record<string, string>;
+  invocation?: RunInvocationRef;
   startedAt: string;
   name: string;
   durationMs: number;
@@ -1767,7 +3282,109 @@ interface PreconditionFailureInput {
   signal?: string;
   message: string;
   listener?: ProgressListener;
+  /** Runs after the final event and before the manifest (run.log end line). */
+  beforeManifest?: (result: RunResult) => void;
   captureServicesArtifacts?: RunOptions["captureServicesArtifacts"];
+  /**
+   * Pre-browser phase that stopped the run (default `precondition`):
+   * `session` (the session.resume checkpoint cannot be used) or
+   * `cancelled` (the invocation was cancelled during preconditions).
+   */
+  phase?: "precondition" | "session" | "cancelled" | "fixture";
+  /** Synthetic step id of a session failure (`session.resume`). */
+  step?: string;
+  /** Step results to report (the failed `session.resume` step). */
+  steps?: StepResult[];
+}
+
+/** Marker {@link raceAbort} resolves with when the signal aborted first. */
+const ABORTED: unique symbol = Symbol("aborted");
+
+/**
+ * Settle with `promise`, or with {@link ABORTED} as soon as `signal` aborts.
+ * The abandoned promise keeps running; its rejection is swallowed.
+ */
+function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof ABORTED> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.resolve(ABORTED);
+  }
+  return new Promise<T | typeof ABORTED>((resolveRace, rejectRace) => {
+    const onAbort = (): void => {
+      promise.catch(() => undefined);
+      resolveRace(ABORTED);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolveRace(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectRace(error);
+      },
+    );
+  });
+}
+
+/** The verdict of an outcome a cancel skipped (or abandoned mid-check). */
+function cancelledEvaluation(): VerifierEvaluation {
+  return {
+    passed: false,
+    skipped: true,
+    expected: "the outcome to be evaluated",
+    actual: "skipped: the invocation was cancelled",
+  };
+}
+
+/** Synthetic step id of a `session.resume` that could not be restored. */
+export const SESSION_RESUME_STEP = "session.resume";
+
+/**
+ * The failed `session.resume` step: step.started + step.failed events (so
+ * live viewers show it like any step) and its StepResult.
+ */
+async function recordSessionResumeFailure(
+  writer: ArtifactWriter,
+  checkpoint: string,
+  error: string,
+  durationMs: number,
+): Promise<StepResult> {
+  const ts = new Date().toISOString();
+  await writer.appendEvent({
+    ts,
+    type: "step.started",
+    stepId: SESSION_RESUME_STEP,
+    kind: "session",
+    label: `resume ${checkpoint}`,
+  });
+  await writer.appendEvent({
+    ts: new Date().toISOString(),
+    type: "step.failed",
+    stepId: SESSION_RESUME_STEP,
+    durationMs,
+    error,
+  });
+  return { id: SESSION_RESUME_STEP, status: "failed", durationMs, error };
+}
+
+/** Summary line of a run stopped before its browser steps. */
+function earlyFailureSummary(input: PreconditionFailureInput): string {
+  switch (input.phase ?? "precondition") {
+    case "session":
+      return `errored at step '${input.step ?? "session.resume"}': ${input.message}`;
+    case "cancelled":
+      return `cancelled in precondition '${input.name}': ${input.message}`;
+    case "fixture":
+      return `errored in fixture '${input.name}': ${input.message}`;
+    default:
+      return `errored in precondition '${input.name}': ${input.message}`;
+  }
 }
 
 /**
@@ -1815,11 +3432,13 @@ async function finalizePreconditionFailure(
     backend: input.backend as RunResult["backend"],
     coldStart: input.coldStart,
     ...(labels ? { labels } : {}),
+    ...(input.invocation ? { invocation: input.invocation } : {}),
     status: "errored",
-    summary: `errored in precondition '${input.name}': ${input.message}`,
+    summary: earlyFailureSummary(input),
     failure: {
-      phase: "precondition",
+      phase: input.phase ?? "precondition",
       name: input.name,
+      ...(input.step ? { step: input.step } : {}),
       message: input.message,
       durationMs: input.durationMs,
       timedOut: input.timedOut,
@@ -1829,7 +3448,7 @@ async function finalizePreconditionFailure(
     endedAt,
     durationMs,
     outcomes: [],
-    steps: [],
+    steps: input.steps ?? [],
     artifacts,
     exitCode: 2,
   };
@@ -1839,7 +3458,7 @@ async function finalizePreconditionFailure(
     ts: endedAt,
     type: "run.errored",
     runId: input.runId,
-    phase: "precondition",
+    phase: input.phase ?? "precondition",
     name: input.name,
     durationMs,
     timedOut: input.timedOut,
@@ -1848,6 +3467,7 @@ async function finalizePreconditionFailure(
   await input.writer.writeRun(publicResult);
   await input.writer.writeOutcomesIndex(publicResult);
   await input.writer.writeAgentContext(input.spec, publicResult);
+  input.beforeManifest?.(publicResult);
   await input.writer.writeManifest(artifacts.manifest);
   input.listener?.onRunEnd?.(publicResult);
   return publicResult;
@@ -1884,6 +3504,62 @@ function isTruthyEnv(value: string | undefined): boolean {
   return value !== undefined && value !== "" && value !== "0";
 }
 
+const RUN_LOG_PATH = "run.log";
+
+/** Phase item / narration label of a fixture verb (`fixture ensure kit`). */
+function fixturePhaseLabel(verb: string, name: string): string {
+  return `fixture ${verb} ${name}`;
+}
+
+/**
+ * Open a live, line-redacted log inside the run directory and register it so
+ * the artifact manifest lists it with the `log` kind.
+ */
+function openRunLog(
+  writer: ArtifactWriter,
+  redactor: ArtifactRedactor,
+  relativePath: string,
+): LiveLog {
+  const log = new LiveLog(writer.resolve(relativePath), {
+    redact: (line) => redactor.text(line),
+  });
+  // Every line goes through the run redactor: say so explicitly rather than
+  // relying on the kind (a renamed kind must not turn it secret-bearing).
+  writer.registerExisting(
+    relativePath,
+    relativePath === RUN_LOG_PATH ? "run-log" : "log",
+    "redacted",
+  );
+  return log;
+}
+
+/** The declared budget of an outcome verifier, when it has one. */
+function verifierTimeoutMs(verify: Verifier): number | undefined {
+  for (const config of Object.values(verify)) {
+    if (
+      config !== null &&
+      typeof config === "object" &&
+      "timeoutMs" in config &&
+      typeof config.timeoutMs === "number"
+    ) {
+      return config.timeoutMs;
+    }
+  }
+  return undefined;
+}
+
+/** `location.href` from a captureDiagnostics() payload, when it has one. */
+function diagnosticsUrl(captured: unknown): string | undefined {
+  if (captured === null || typeof captured !== "object") return undefined;
+  const url = "url" in captured ? captured.url : undefined;
+  return typeof url === "string" && url.length > 0 ? url : undefined;
+}
+
+/** The last `max` characters of `text` (the whole text when shorter). */
+function tailText(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(text.length - max);
+}
+
 function pad(n: number): string {
   return n.toString().padStart(3, "0");
 }
@@ -1910,7 +3586,7 @@ function artifactNameFromPath(path: string): string {
 
 function resolveUploadPath(
   path: string,
-  specDir: string,
+  scope: StepFileScope,
   runDir: string,
   artifacts: Record<string, ArtifactRef>,
 ): string {
@@ -1920,16 +3596,37 @@ function resolveUploadPath(
   if (usedRelativeArtifact && !isAbsolute(resolved)) {
     return resolve(runDir, resolved);
   }
-  // Bare relative paths resolve against the spec's directory, matching how
+  // Bare relative paths resolve against the directory of the file that
+  // declares the step (the spec, or an imported action), matching how
   // `transform.file` / `eval.file` / script-verifier `file:` resolve — so an
   // upload of a repo fixture is independent of the process cwd.
-  if (!isAbsolute(resolved)) {
-    return resolve(specDir, resolved);
-  }
-  return resolved;
+  return resolveStepFile(resolved, scope, "upload.path");
 }
 
-function generateRunToken(): string {
+/** Deprecations already reported to a listener (once per process). */
+const reportedDeprecations = new Set<string>();
+
+/**
+ * Record a deprecation in this run's run.log (every run) and hand it to the
+ * caller's listener the first time this process sees it (the CLI/MCP narrate
+ * it as a warning).
+ */
+function reportDeprecation(
+  key: string,
+  message: string,
+  sinks: { runLog: LiveLog; listener: ProgressListener | undefined },
+): void {
+  sinks.runLog.write(`warning: ${message}\n`);
+  if (reportedDeprecations.has(key)) return;
+  reportedDeprecations.add(key);
+  sinks.listener?.onWarning?.(message);
+}
+
+/**
+ * Per-run token for `${run.token}` / `CAIRN_RUN_TOKEN`. Exported so the CLI
+ * can mint it before `runSpec` and hand the same value to `--after` hooks.
+ */
+export function generateRunToken(): string {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -2217,10 +3914,14 @@ async function runTransformStep(opts: {
   step: TransformStep;
   writer: ArtifactWriter;
   specDir: string;
+  /** Where the step's relative paths resolve (an action's own directory). */
+  fileScope?: StepFileScope;
   artifacts: Record<string, ArtifactRef>;
   vars?: Record<string, string | number | boolean>;
   childEnv?: Record<string, string | undefined>;
   selectedTvaultKeys?: Iterable<string>;
+  /** Kills the transform's process tree on abort. */
+  signal?: AbortSignal;
 }): Promise<
   | {
       ok: true;
@@ -2234,19 +3935,24 @@ async function runTransformStep(opts: {
   const relativePath = transformRelativePath(target.saveAs);
   const absolutePath = await opts.writer.preparePath(relativePath, "transform");
 
-  const file = isAbsolute(target.file)
-    ? target.file
-    : resolve(opts.specDir, target.file);
-  const input = resolveRuntimeFilePath(target.input, {
-    artifacts: opts.artifacts,
-    runDir: opts.writer.runDir,
-    specDir: opts.specDir,
-  });
+  const scope = opts.fileScope ?? specFileScope(opts.specDir);
+  const file = resolveStepFile(target.file, scope, "transform.file");
+  // A plain relative input is a fixture the step declares; artifact
+  // placeholders resolve against the run directory as before.
+  const input =
+    /\$\{artifacts\./.test(target.input) || isAbsolute(target.input)
+      ? resolveRuntimeFilePath(target.input, {
+          artifacts: opts.artifacts,
+          runDir: opts.writer.runDir,
+          specDir: opts.specDir,
+        })
+      : resolveStepFile(target.input, scope, "transform.input");
 
   const result = await runNodeScript({
     file,
     cwd: opts.specDir,
     entryNames: ["transform"],
+    ...(opts.signal ? { signal: opts.signal } : {}),
     ...(opts.childEnv !== undefined ? { env: opts.childEnv } : {}),
     ...(opts.selectedTvaultKeys !== undefined
       ? { selectedTvaultKeys: opts.selectedTvaultKeys }
@@ -2304,19 +4010,6 @@ async function runTransformStep(opts: {
  * (after redaction) and made available for `${evals.<name>.…}` interpolation.
  */
 
-/** Resolve a host fixture path: absolute, cwd, then specDir. */
-export function resolveEvalHostFile(filePath: string, specDir: string): string {
-  const candidates = isAbsolute(filePath)
-    ? [filePath]
-    : [resolve(process.cwd(), filePath), resolve(specDir, filePath)];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(
-    `host file not found: ${filePath} (cwd=${process.cwd()} specDir=${specDir})`,
-  );
-}
-
 /**
  * Turn eval args.filePath / args.fixtureFiles into in-page base64 so the
  * browser never fetches `/cairn-fixtures/…`.
@@ -2324,10 +4017,13 @@ export function resolveEvalHostFile(filePath: string, specDir: string): string {
 export function loadEvalHostFiles(
   args: Record<string, unknown>,
   specDir: string,
+  /** Host path resolver (default: absolute → cwd → specDir). */
+  resolveHostFile: (raw: string, field: string) => string = (raw) =>
+    resolveEvalHostFile(raw, specDir),
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
   if (typeof args.filePath === "string" && args.filePath.length > 0) {
-    const absolute = resolveEvalHostFile(args.filePath, specDir);
+    const absolute = resolveHostFile(args.filePath, "eval.args.filePath");
     out.bytesBase64 = readFileSync(absolute).toString("base64");
     out.filePath = absolute;
   }
@@ -2345,7 +4041,7 @@ export function loadEvalHostFiles(
         throw new Error(`fixtureFiles.${name} must be a host path`);
       }
       fixtureBytes[name] = readFileSync(
-        resolveEvalHostFile(raw, specDir),
+        resolveHostFile(raw, `eval.args.fixtureFiles.${name}`),
       ).toString("base64");
     }
     out.fixtureBytes = fixtureBytes;
@@ -2358,6 +4054,8 @@ async function runEvalStep(opts: {
   step: EvalStep;
   backend: BrowserBackend;
   specDir: string;
+  /** Where the step's relative paths resolve (an action's own directory). */
+  fileScope?: StepFileScope;
   writer: ArtifactWriter;
 }): Promise<
   { ok: true; assign?: string; value: unknown } | { ok: false; error: string }
@@ -2369,9 +4067,11 @@ async function runEvalStep(opts: {
     if (target.js) {
       source = target.js;
     } else {
-      const file = isAbsolute(target.file!)
-        ? target.file!
-        : resolve(opts.specDir, target.file!);
+      const file = resolveStepFile(
+        target.file!,
+        opts.fileScope ?? specFileScope(opts.specDir),
+        "eval.file",
+      );
       const { readFile } = await import("node:fs/promises");
       source = await readFile(file, "utf8");
     }
@@ -2388,7 +4088,12 @@ async function runEvalStep(opts: {
   // app's public/ directory (CDP path upload is ACCESS_DENIED).
   let pageArgs: Record<string, unknown>;
   try {
-    pageArgs = loadEvalHostFiles(target.args ?? {}, opts.specDir);
+    const scope = opts.fileScope ?? specFileScope(opts.specDir);
+    pageArgs = loadEvalHostFiles(
+      target.args ?? {},
+      opts.specDir,
+      (raw, field) => resolveScopedEvalHostFile(raw, scope, field),
+    );
   } catch (e) {
     return {
       ok: false,
@@ -2776,6 +4481,26 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
       action: step.monitor.action,
       type: step.monitor.type,
     };
+  if ("run" in step) {
+    return typeof step.run === "string"
+      ? { kind: "run", shell: "(inline)" }
+      : {
+          kind: "run",
+          ...(step.run.node ? { node: step.run.node } : { shell: "(inline)" }),
+          assign: step.run.assign,
+        };
+  }
+  if ("expect" in step) {
+    return "request" in step.expect
+      ? {
+          kind: "expect",
+          request: `${step.expect.request.method} ${step.expect.request.url}`,
+        }
+      : { kind: "expect", locator: expectLocator(step.expect) };
+  }
+  if ("capture" in step) {
+    return { kind: "capture", assign: step.capture.assign };
+  }
   return {
     kind: "use",
     action: typeof step.use === "string" ? step.use : step.use.action,

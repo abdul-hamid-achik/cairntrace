@@ -15,11 +15,34 @@ describe("buildDocs", () => {
     expect(doc.relatedTopics).toContain("brief");
   });
 
-  it("exposes all 18 docs topics including discovery, export, and brief", () => {
-    expect(DOC_TOPICS).toHaveLength(18);
+  it("exposes all 21 docs topics including discovery, export, brief, catalog, fixtures and author-flow", () => {
+    expect(DOC_TOPICS).toHaveLength(21);
+    expect(DOC_TOPICS).toContain("fixtures");
     expect(DOC_TOPICS).toContain("discovery");
     expect(DOC_TOPICS).toContain("export");
     expect(DOC_TOPICS).toContain("brief");
+    expect(DOC_TOPICS).toContain("catalog");
+    expect(DOC_TOPICS).toContain("author-flow");
+  });
+
+  it("author-flow topic carries the recipe the MCP prompt uses", () => {
+    const doc = buildDocs("author-flow");
+    expect(() => DocsResultSchema.parse(doc)).not.toThrow();
+    const text = JSON.stringify(doc);
+    for (const tool of [
+      "cairn_catalog",
+      "cairn_discover_open",
+      "cairn_discover_export",
+      "cairn_spec_finish",
+      "cairn_spec_promote",
+      "cairn spec lint",
+      "cairn init agent-kit",
+    ]) {
+      expect(text).toContain(tool);
+    }
+    expect(doc.relatedTopics).toEqual(
+      expect.arrayContaining(["discovery", "catalog", "authoring"]),
+    );
   });
 
   it("steps topic documents the `type` step", () => {
@@ -110,6 +133,18 @@ describe("buildDocs", () => {
     expect(() => ConfigSchema.parse(parseYaml(yaml!))).not.toThrow();
   });
 
+  it("keeps the fixtures topic examples valid", () => {
+    const doc = buildDocs("fixtures");
+    const config = doc.examples.find((e) =>
+      e.title.startsWith("fixtures registry"),
+    );
+    const spec = doc.examples.find(
+      (e) => e.title === "a spec that uses fixtures",
+    );
+    expect(() => ConfigSchema.parse(parseYaml(config!.code))).not.toThrow();
+    expect(() => SpecSchema.parse(parseYaml(spec!.code))).not.toThrow();
+  });
+
   it("keeps complete authoring spec examples valid", () => {
     for (const title of ["minimal spec shape", "config-backed spec"]) {
       const example = buildDocs("authoring").examples.find(
@@ -139,7 +174,8 @@ describe("buildDocs", () => {
       expect(blocks.length, file).toBeGreaterThan(0);
       for (const [, yaml] of blocks) {
         expect(
-          () => ConfigSchema.parse(parseYaml(yaml!)),
+          // Same YAML options loadConfig uses (merge keys enabled).
+          () => ConfigSchema.parse(parseYaml(yaml!, { merge: true })),
           `${file} config block`,
         ).not.toThrow();
       }

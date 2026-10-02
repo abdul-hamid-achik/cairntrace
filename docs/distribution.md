@@ -50,7 +50,7 @@ What does NOT get distributed:
 ```bash
 git clone https://github.com/abdul-hamid-achik/cairntrace
 cd cairntrace
-git checkout v2.10.0
+git checkout v3.0.0
 bun install
 ./bin/cairn --version
 ```
@@ -93,7 +93,7 @@ SemVer tags are the release record. The pre-1.0 series used `0.x.y`; post-1.0 us
 
 An agent harness (Claude Code, Codex, OpenCode, …) should:
 
-- Pin to a specific tag (`v2.10.0`), npm version, or Homebrew formula in any setup script.
+- Pin to a specific tag (`v3.0.0`), npm version, or Homebrew formula in any setup script.
 - Verify the version with `./bin/cairn version` after install.
 - Run `cairn_explain` (or `cairn explain --format json`) once on first contact to get the current CLI surface.
 - Re-pin only on a deliberate upgrade.

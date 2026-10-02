@@ -1,0 +1,20 @@
+{"ts":"2026-10-01T09:00:00.000Z","type":"run.started","runId":"2026-10-01T09-00-00-000Z_orders_flow_aabbcc","spec":"orders_flow","invocation":{"id":"2026-10-01T08-59-50-000Z_4242_abc123","index":3,"total":7,"dir":"_invocations/2026-10-01T08-59-50-000Z_4242_abc123"}}
+{"ts":"2026-10-01T09:00:00.005Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"2026-10-01T09:00:00.020Z","type":"phase.changed","phase":"preconditions","item":"quiesce","budgetMs":1500000,"deadline":"2026-10-01T09:25:00.020Z"}
+{"ts":"2026-10-01T09:00:00.030Z","type":"log.opened","kind":"precondition","name":"quiesce","path":"logs/precondition-01-quiesce.log"}
+{"ts":"2026-10-01T09:00:00.040Z","type":"precondition.started","name":"quiesce","timeoutMs":1500000,"index":1,"total":1,"logPath":"logs/precondition-01-quiesce.log"}
+{"ts":"2026-10-01T09:00:15.040Z","type":"run.heartbeat","phase":"preconditions","item":"quiesce","elapsedMs":15000,"budgetMs":1500000,"pid":4242}
+{"ts":"2026-10-01T09:00:20.000Z","type":"precondition.progress","name":"quiesce","message":"47/120 tasks terminal"}
+{"ts":"2026-10-01T09:04:12.040Z","type":"precondition.run","name":"quiesce","exitCode":0,"durationMs":252000,"timedOut":false,"output":"...\n120/120 tasks terminal\n","logPath":"logs/precondition-01-quiesce.log"}
+{"ts":"2026-10-01T09:04:12.100Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-01T09:04:12.110Z","type":"step.started","stepId":"open_orders","index":1,"total":2,"kind":"open","label":"open /orders"}
+{"ts":"2026-10-01T09:04:13.000Z","type":"step.finished","stepId":"open_orders","durationMs":890,"url":"http://localhost:8787/orders","screenshot":"screenshots/001_open_orders.png"}
+{"ts":"2026-10-01T09:04:13.100Z","type":"step.started","stepId":"save_order","index":2,"total":2,"kind":"click","label":"click role=button \"Save\""}
+{"ts":"2026-10-01T09:04:18.200Z","type":"step.failed","stepId":"save_order","durationMs":5100,"error":"locator not found: role=button name=\"Save\"","url":"http://localhost:8787/orders/new","screenshot":"screenshots/002_save_order.png"}
+{"ts":"2026-10-01T09:04:18.300Z","type":"phase.changed","phase":"outcomes"}
+{"ts":"2026-10-01T09:04:18.310Z","type":"outcome.started","outcomeId":"order_persisted","kind":"script","timeoutMs":30000}
+{"ts":"2026-10-01T09:04:18.320Z","type":"log.opened","kind":"outcome","name":"order_persisted","path":"logs/outcome-order_persisted.log"}
+{"ts":"2026-10-01T09:04:20.000Z","type":"outcome.progress","outcomeId":"order_persisted","message":"polling orders table (1/10)"}
+{"ts":"2026-10-01T09:04:48.400Z","type":"outcome.failed","outcomeId":"order_persisted","durationMs":30090}
+{"ts":"2026-10-01T09:04:48.450Z","type":"run.failed","runId":"2026-10-01T09-00-00-000Z_orders_flow_aabbcc","durationMs":288450}
+{"ts":"2026-10-01T09:04:52.000Z","type":"artifact.stash","action":"auto-stash","receipt":"stash-receipt.json","stashId":"stash_91d0e2","status":"saved_with_failures","postSaveFailureCount":1}

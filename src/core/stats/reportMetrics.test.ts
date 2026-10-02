@@ -18,7 +18,8 @@ async function writeRun(
   report: unknown,
   extra: Record<string, unknown> = {},
 ): Promise<string> {
-  const dir = join(root, name);
+  // A run-directory name the stats scan accepts (RUN_DIR_PATTERN).
+  const dir = join(root, `2026-07-17T00-00-00-000Z_${name}_0a1b2c`);
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "run.json"),

@@ -28,10 +28,12 @@ export const SafeStashIdSchema = z
   );
 
 /**
- * Post-finalization receipt written only after an automatic file.cheap save
- * produced a durable stash ID. It intentionally excludes source/target paths,
- * tags, stderr, and failure messages: those values are not needed to resolve
- * the stash and can contain local paths or secrets.
+ * Post-finalization receipt written only after a file.cheap save of the run
+ * (auto-stash, `cairn stash save`, `pin --stash`, investigate, `clip
+ * --stash`) produced a durable stash ID. It carries the tags, TTL and the
+ * gate's `excluded` list, and intentionally excludes source/target paths,
+ * stderr, and failure messages: those values are not needed to resolve the
+ * stash and can contain local paths or secrets.
  */
 export const StashReceiptSchema = z
   .object({
@@ -41,7 +43,48 @@ export const StashReceiptSchema = z
     status: z.enum(["saved", "saved_with_failures"]),
     postSaveFailureCount: z.number().int().nonnegative(),
     recordedAt: z.string().datetime({ offset: true }),
+    /**
+     * auto-stash (cairn run) or manual (cairn stash save / cairn pin --stash /
+     * cairn investigate / cairn audit --connect / cairn clip --stash).
+     */
+    action: z.enum(["auto-stash", "manual"]).optional(),
+    /** file.cheap content hash of the saved copy. */
+    contentHash: z.string().min(1).max(200).optional(),
+    fileCount: z.number().int().nonnegative().optional(),
+    sizeBytes: z.number().int().nonnegative().optional(),
+    ttl: z.string().optional(),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+    tags: z.array(z.string()).optional(),
+    /** Relative paths/dirs the evidence gate left out (`traces/`). */
+    excluded: z.array(z.string()).optional(),
+    /** Secret-scanner findings file.cheap reported (custom.secrets_found). */
+    secretsFound: z.number().int().nonnegative().optional(),
   })
   .strict();
 
 export type StashReceipt = z.infer<typeof StashReceiptSchema>;
+
+/**
+ * `publish-receipt.json`: the verified remote copy of a run. Written by
+ * `cairn publish` (and MCP `cairn_publish`); it never contains signed URLs,
+ * credentials or local paths.
+ */
+export const PublishReceiptSchema = z
+  .object({
+    version: z.literal(1),
+    artifactRef: z.record(z.string(), z.unknown()),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    sizeBytes: z.number().int().nonnegative(),
+    publishedAt: z.string().datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+    webUrl: z.string().url().optional(),
+    /** Relative paths/dirs the evidence gate left out of the package. */
+    excluded: z.array(z.string()).optional(),
+    /** Why no RunIndexV1 sidecar was sent (absent when it was). */
+    runIndexSkipped: z
+      .enum(["unsupported", "too-large", "build-failed"])
+      .optional(),
+  })
+  .strict();
+
+export type PublishReceipt = z.infer<typeof PublishReceiptSchema>;

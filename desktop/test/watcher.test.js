@@ -94,6 +94,7 @@ describe("createRunWatcher", () => {
     assert.equal(finished[0][1].status, "passed");
     assert.equal(finished[0][1].summary, "all outcomes passed");
     assert.equal(finished[0][1].runDir, dir);
+    assert.equal(finished[0][1].refusal, null, "no refusal on a passed run");
     assert.deepEqual(snapshots.at(-1), [], "finished runs leave the snapshot");
     // tracking is cleaned up: a later tick does not re-finish or re-report
     watcher.tick();
@@ -325,3 +326,238 @@ async function waitFor(predicate, timeoutMs) {
   }
   assert.fail(`condition not met within ${timeoutMs}ms`);
 }
+
+describe("createRunWatcher — linger, liveness, invocations", () => {
+  it("keeps tailing a finished run for the linger window (late stash event)", () => {
+    const root = tempDir("cairn-watch-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    let clock = Date.now();
+    /** @type {any[]} */
+    const events = [];
+    let finishedCount = 0;
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      lingerMs: 10_000,
+      now: () => clock,
+      onEvents: (_runId, batch) => events.push(...batch),
+      onFinished: () => {
+        finishedCount += 1;
+      },
+    });
+    watcher.tick();
+    finishRun(dir);
+    watcher.tick();
+    assert.equal(finishedCount, 1);
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ type: "artifact.stash", action: "auto-stash", stashId: "stash_1", status: "saved" })}\n`,
+    );
+    clock += 4_000;
+    watcher.tick();
+    assert.ok(events.some((event) => event.type === "artifact.stash"));
+    assert.equal(finishedCount, 1, "finish is reported once");
+    // Past the window nothing more is read.
+    clock += 20_000;
+    watcher.tick();
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ type: "artifact.retention", action: "warning", warning: "late" })}\n`,
+    );
+    watcher.tick();
+    assert.ok(!events.some((event) => event.type === "artifact.retention"));
+  });
+
+  it("keeps draining past the linger window while the run's process lives (slow auto-stash)", () => {
+    const root = tempDir("cairn-watch-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "run.heartbeat", phase: "steps", pid: 42424 })}\n`,
+    );
+    let clock = Date.now();
+    let alive = true;
+    /** @type {any[]} */
+    const events = [];
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      lingerMs: 10_000,
+      lingerCapMs: 120_000,
+      now: () => clock,
+      pidAlive: (pid) => (pid === 42424 ? alive : null),
+      onEvents: (_runId, batch) => events.push(...batch),
+    });
+    watcher.tick();
+    finishRun(dir);
+    watcher.tick();
+    // 30s later the upload is still going: past lingerMs, but the pid lives.
+    clock += 30_000;
+    watcher.tick();
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ type: "artifact.stash", action: "auto-stash", stashId: "stash_slow", status: "saved" })}\n`,
+    );
+    // The process exits right after appending: one final drain still reads it.
+    alive = false;
+    clock += 2_000;
+    watcher.tick();
+    assert.ok(
+      events.some((event) => event.stashId === "stash_slow"),
+      "late stash event read after the linger window",
+    );
+    // Then the tail is released.
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ type: "artifact.retention", action: "warning", warning: "after exit" })}\n`,
+    );
+    clock += 2_000;
+    watcher.tick();
+    assert.ok(!events.some((event) => event.warning === "after exit"));
+  });
+
+  it("stops lingering at the cap even if the pid still answers (pid reuse)", () => {
+    const root = tempDir("cairn-watch-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ ts: new Date().toISOString(), type: "run.heartbeat", phase: "steps", pid: 42425 })}\n`,
+    );
+    let clock = Date.now();
+    /** @type {any[]} */
+    const events = [];
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      lingerMs: 10_000,
+      lingerCapMs: 60_000,
+      now: () => clock,
+      pidAlive: () => true,
+      onEvents: (_runId, batch) => events.push(...batch),
+    });
+    watcher.tick();
+    finishRun(dir);
+    watcher.tick();
+    clock += 61_000;
+    watcher.tick();
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ type: "artifact.retention", action: "warning", warning: "past cap" })}\n`,
+    );
+    clock += 2_000;
+    watcher.tick();
+    assert.ok(!events.some((event) => event.warning === "past cap"));
+  });
+
+  it("snapshots carry liveness (dead pid stops a run counting as running)", () => {
+    const root = tempDir("cairn-watch-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    fs.appendFileSync(
+      path.join(dir, "events.ndjson"),
+      `${JSON.stringify({ ts: new Date(Date.now() - 120_000).toISOString(), type: "run.heartbeat", phase: "steps", pid: 31337 })}\n`,
+    );
+    // events.ndjson was just written, so mtime keeps it detected …
+    /** @type {any[]} */
+    let snapshot = [];
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      pidAlive: () => false,
+      onSnapshot: (runs) => {
+        snapshot = runs;
+      },
+    });
+    watcher.tick();
+    // … but the stale heartbeat + dead pid say it is not running.
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0].liveness.state, "dead");
+  });
+
+  it("tails running invocation journals and reports them", () => {
+    const root = tempDir("cairn-watch-");
+    const id = "2026-10-01T08-59-50-000Z_4242_abc123";
+    const journalDir = path.join(root, "_invocations", id);
+    fs.mkdirSync(journalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(journalDir, "invocation.json"),
+      JSON.stringify({
+        version: 1,
+        invocationId: id,
+        pid: 4242,
+        status: "running",
+        planned: [{ index: 1, spec: "a.yml" }],
+        runs: [],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(journalDir, "events.ndjson"),
+      fs
+        .readFileSync(
+          path.join(__dirname, "fixtures", "invocation-events.ndjson"),
+          "utf8",
+        )
+        .split("\n")
+        .slice(0, 4)
+        .join("\n") + "\n",
+    );
+    /** @type {any[]} */
+    let listed = [];
+    /** @type {any[]} */
+    const streamed = [];
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      pidAlive: () => true,
+      onInvocations: (list) => {
+        listed = list;
+      },
+      onInvocationEvents: (invocationId, batch) =>
+        streamed.push(...batch.map((event) => [invocationId, event.type])),
+    });
+    watcher.tick();
+    assert.deepEqual(
+      listed.map((entry) => entry.invocationId),
+      [id],
+    );
+    assert.deepEqual(
+      streamed.map((entry) => entry[1]),
+      [
+        "invocation.started",
+        "phase.changed",
+        "log.opened",
+        "services.docker.start",
+      ],
+    );
+    watcher.tick();
+    assert.equal(streamed.length, 4, "no re-delivery");
+  });
+});
+
+describe("createRunWatcher — refused runs", () => {
+  it("reports why the environment policy refused an external run", () => {
+    const root = tempDir("cairn-watch-refused-");
+    const dir = makeRunningRun(root, LIVE_RUN);
+    /** @type {Array<Record<string, any>>} */
+    const finished = [];
+    const watcher = createRunWatcher({
+      runsRoot: root,
+      lingerMs: 0,
+      onFinished: (_runId, info) => finished.push(info),
+    });
+    watcher.tick();
+    fs.writeFileSync(
+      path.join(dir, "run.json"),
+      JSON.stringify({
+        status: "refused",
+        summary: "refused by environment policy",
+        refusal: { reason: "mutations denied", env: "staging" },
+      }),
+      "utf8",
+    );
+    watcher.tick();
+    watcher.stop();
+    assert.equal(finished.length, 1);
+    assert.equal(finished[0].status, "refused");
+    assert.deepEqual(finished[0].refusal, {
+      reason: "mutations denied",
+      env: "staging",
+      requires: null,
+      requiresText: null,
+    });
+  });
+});

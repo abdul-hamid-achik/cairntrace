@@ -1,0 +1,80 @@
+# Platform async job — queue a restock through the API and wait for it.
+#
+# Demonstrates: a readiness gate in `preconditions.wait`, an exec fixture from
+# the config registry (`fixtures: [demo_product]`, created before the browser
+# starts and deleted after the run), `expect` and `capture` steps mid-flow,
+# an `expect.request` check, an `http` verifier on a datasource polled until
+# the job is done and stays done (`poll.stableMs`), `network` body matching,
+# and the `value` verifier on a captured table.
+version: 1
+name: restock_job
+intent: a restock queued for a product raises its stock once the background job completes
+environment: local
+imports:
+  - ../../actions/login_demo_app.yml
+preconditions:
+  wait: demo_api_ready
+fixtures:
+  - demo_product
+outcomes:
+  - id: row_before_restock
+    description: the catalog row showed the fixture's starting stock before the job ran
+    verify:
+      value:
+        actual: "${captures.productRow}"
+        expect:
+          rowCount: 1
+          "rows[0].SKU": "${fixtures.demo_product.sku}"
+          "rows[0].Stock": "5"
+  - id: restock_request_sent
+    description: the browser session queued exactly one restock of 5 units for the product
+    verify:
+      network:
+        method: POST
+        urlContains: /api/restock
+        status: { equals: 202 }
+        body:
+          json: { sku: "${fixtures.demo_product.sku}", quantity: 5 }
+        count: 1
+  - id: job_completes
+    description: the restock job reaches done and stays done
+    verify:
+      http:
+        source: demo_api
+        url: "/api/restock/${requests.restock.body.id}"
+        expect:
+          json: { status: done, quantity: 5 }
+      poll: { timeoutMs: 15000, everyMs: 250, stableMs: 750 }
+  - id: stock_raised
+    description: the API reports the restocked stock for the product
+    verify:
+      http:
+        source: demo_api
+        url: "/api/products?sku=${fixtures.demo_product.sku}"
+        expect:
+          json: { total: 1, "products[0].stock": 10 }
+steps:
+  - id: sign_in
+    use: login_demo_app
+  - id: open_product
+    open: "/products.html?sku=${fixtures.demo_product.sku}"
+  - id: product_row_visible
+    expect: { by: selector, selector: "[data-testid=product-row]", count: 1 }
+  - id: capture_row
+    capture: { assign: productRow, table: { by: role, role: table, name: Products } }
+  - id: queue_restock
+    request:
+      method: POST
+      url: /api/restock
+      headers:
+        content-type: application/json
+      body: |
+        { "sku": "${fixtures.demo_product.sku}", "quantity": 5 }
+      expectStatus: 202
+      assign: restock
+  - id: job_accepted
+    expect:
+      request:
+        url: "/api/restock/${requests.restock.body.id}"
+        json: { sku: "${fixtures.demo_product.sku}", quantity: 5 }
+contractHash: sha256:7eedfdd0882c2c95571c98792161d29180f1d0aaca3ffd51530e03640c781afa

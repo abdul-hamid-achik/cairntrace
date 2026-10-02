@@ -7,9 +7,17 @@
  * `Studio.api.call`, which is the only place that knows about the envelope.
  */
 (function bootState() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h } = Studio;
   const fmt = Studio.fmt;
+  /** The shared event describer/reducer (lib/events.js, loaded as a script). */
+  const Events = /** @type {any} */ (globalThis).CairnEvents;
+  Studio.events = Events;
+
+  /** Per-record event buffer bound (the model keeps the rolled-up state). */
+  const MAX_EVENTS = 6000;
+  const MAX_LOGS = 3000;
 
   /** @type {Map<string, Set<Function>>} */
   const listeners = new Map();
@@ -72,7 +80,16 @@
     runsError: null,
     runsLoading: false,
     specNames: [],
-    filters: { status: "", spec: "", search: "", limit: 150 },
+    /** label keys/values discovered from run.json files */
+    labels: [],
+    filters: {
+      status: "",
+      spec: "",
+      search: "",
+      labels: [],
+      limit: 150,
+      groupByInvocation: false,
+    },
     selectedRun: null,
     runDetail: null,
     specs: [],
@@ -86,6 +103,12 @@
     liveOrder: [],
     /** runId → externally started run record (watcher-detected) */
     detected: new Map(),
+    /** invocationId → { journal, model, … } from the watcher */
+    invocations: new Map(),
+    /** project lock status (launch safety) */
+    locks: null,
+    /** `cairn --version` for the resolved / PATH / repo binaries */
+    versions: null,
     view: "runs",
     viewParams: {},
   };
@@ -182,6 +205,85 @@
   }
 
   /**
+   * Promise-based one-line text prompt on the same <dialog>: resolves the
+   * trimmed text ("" when left empty) on confirm, null on Cancel/Escape.
+   * @param {{ title: string, body?: string, placeholder?: string, confirmLabel?: string, maxLength?: number }} options
+   * @returns {Promise<string | null>}
+   */
+  function promptText(options) {
+    return new Promise((resolve) => {
+      const dialog =
+        /** @type {HTMLDialogElement} */ (document.getElementById("modal"));
+      if (!dialog || typeof dialog.showModal !== "function") {
+        const answer = globalThis.prompt?.(options.title, "");
+        resolve(answer === null || answer === undefined ? null : answer.trim());
+        return;
+      }
+      let settled = false;
+      const input = /** @type {HTMLInputElement} */ (
+        h("input", {
+          class: "prompt-input",
+          type: "text",
+          placeholder: options.placeholder ?? "",
+          maxlength: String(options.maxLength ?? 200),
+          ariaLabel: options.title,
+          onKeydown: (/** @type {KeyboardEvent} */ event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              finish(input.value.trim());
+            }
+          },
+        })
+      );
+      const finish = (/** @type {string | null} */ value) => {
+        if (settled) return;
+        settled = true;
+        dialog.removeEventListener("cancel", onCancel);
+        if (dialog.open) dialog.close();
+        resolve(value);
+      };
+      const onCancel = () => finish(null);
+
+      dialog.textContent = "";
+      dialog.appendChild(
+        h(
+          "div",
+          { class: "modal-body" },
+          h("h3", { text: options.title }),
+          options.body
+            ? h("p", {
+                style: { color: "var(--text-dim)", margin: "0 0 8px" },
+                text: options.body,
+              })
+            : null,
+          input,
+        ),
+      );
+      dialog.appendChild(
+        h(
+          "div",
+          { class: "modal-actions" },
+          h("button", {
+            class: "btn",
+            type: "button",
+            text: "Cancel",
+            onClick: () => finish(null),
+          }),
+          h("button", {
+            class: "btn btn-primary",
+            type: "button",
+            text: options.confirmLabel ?? "OK",
+            onClick: () => finish(input.value.trim()),
+          }),
+        ),
+      );
+      dialog.addEventListener("cancel", onCancel);
+      dialog.showModal();
+      input.focus();
+    });
+  }
+
+  /**
    * @param {string} view
    * @param {Record<string, any>} [params]
    */
@@ -223,6 +325,7 @@
           status: state.filters.status || null,
           spec: state.filters.spec || null,
           search: state.filters.search || null,
+          labels: state.filters.labels?.length ? state.filters.labels : null,
         });
         state.runs = result.runs ?? [];
         state.runsRoot = { runsRoot: result.runsRoot, source: result.source };
@@ -230,6 +333,7 @@
           ? null
           : new Error(`artifact root missing: ${result.runsRoot}`);
         state.specNames = result.specNames ?? [];
+        state.labels = result.labels ?? [];
       } catch (error) {
         state.runsError = error;
         state.runs = [];
@@ -284,6 +388,10 @@
         { specs: specPaths, overrides },
         null,
       );
+      // Re-run on the Live card repeats these (main sends run:started
+      // before it answers, so the record exists by now).
+      const record = started?.token ? state.live.get(started.token) : null;
+      if (record) record.overrides = overrides ?? null;
       setStatus(`running ${specPaths.length} spec(s)…`);
       toast(
         "Run started",
@@ -300,8 +408,56 @@
       return result;
     },
 
+    /** Lock files + launch template for the open project (launch safety). */
+    async loadLocks() {
+      try {
+        state.locks = await api.call(
+          "project:locks",
+          state.project?.dir ?? null,
+        );
+      } catch {
+        state.locks = null;
+      }
+      emit("locks", state.locks);
+      return state.locks;
+    },
+
+    /** Resolved / PATH / repo `cairn --version` (spawns, so never blocks boot). */
+    async loadVersions() {
+      try {
+        state.versions = await api.call("cairn:versions");
+      } catch {
+        state.versions = null;
+      }
+      emit("versions", state.versions);
+      return state.versions;
+    },
+
+    /** Run/ui defaults only; the main process refuses any other key. */
     async saveSettings(patch) {
       state.settings = await api.call("settings:update", patch);
+      emit("settings", state.settings);
+      return state.settings;
+    },
+
+    /**
+     * Validated in main; a binary not named `cairn…` asks for confirmation
+     * in a native dialog.
+     * @param {string | null} value
+     */
+    async setCairnBin(value) {
+      state.settings = await api.call("settings:set-cairn-bin", value);
+      emit("settings", state.settings);
+      return state.settings;
+    },
+
+    /**
+     * Validated in main; a folder typed by hand (not picked with Browse…)
+     * asks for confirmation in a native dialog.
+     * @param {string | null} value
+     */
+    async setArtifactRoot(value) {
+      state.settings = await api.call("settings:set-artifact-root", value);
       emit("settings", state.settings);
       return state.settings;
     },
@@ -317,6 +473,20 @@
    */
   function runLabel(run) {
     return run?.spec ?? run?.runId ?? "run";
+  }
+
+  /**
+   * The reference run-scoped IPC calls should use for an opened run: its
+   * absolute folder (valid for restored stashes, which live outside the
+   * artifact root) before its id (which only resolves inside the root).
+   * @param {Record<string, any> | null | undefined} detail
+   * @returns {string | null}
+   */
+  function runRefOf(detail) {
+    if (typeof detail?.runDir === "string" && detail.runDir)
+      return detail.runDir;
+    if (typeof detail?.runId === "string" && detail.runId) return detail.runId;
+    return null;
   }
 
   /**
@@ -348,43 +518,80 @@
   }
 
   /**
-   * Roll streamed events into per-step rows. Shared by app-started and
-   * detected-run records (mirrors lib/live.stepProgress; the renderer cannot
-   * require main-process modules).
+   * Live-record plumbing shared by app-started runs, detected runs, and
+   * invocation journals: every record carries the rolled-up model from
+   * lib/events.js (the same reducer the main process uses), a bounded raw
+   * event buffer for the event pane, monotonic counters so views append
+   * only what is new, and a `dirty` set of model sections the Live view
+   * repaints on its next frame.
+   * @param {Record<string, any>} record
+   * @returns {Record<string, any>}
+   */
+  function initLiveRecord(record) {
+    record.model = record.model ?? Events.createRunModel();
+    record.events = record.events ?? [];
+    record.eventTotal = record.eventTotal ?? 0;
+    record.logs = record.logs ?? [];
+    record.logTotal = record.logTotal ?? 0;
+    record.dirty = record.dirty ?? new Set(["all"]);
+    record.steps = record.model.steps;
+    return record;
+  }
+
+  /**
+   * @param {Record<string, any>} record
+   * @param {Iterable<string>} sections
+   */
+  function markDirty(record, sections) {
+    if (!record) return;
+    if (!record.dirty) record.dirty = new Set();
+    for (const section of sections) record.dirty.add(section);
+  }
+
+  /**
+   * Fold streamed events into a record's model and event buffer.
+   * @param {Record<string, any>} record
+   * @param {Array<Record<string, any>>} events
+   * @returns {Record<string, any>}
+   */
+  function applyEventsToRecord(record, events) {
+    initLiveRecord(record);
+    for (const event of events ?? []) {
+      markDirty(record, Events.applyEvent(record.model, event));
+      record.events.push(event);
+      record.eventTotal += 1;
+    }
+    if (record.events.length > MAX_EVENTS)
+      record.events.splice(0, record.events.length - MAX_EVENTS);
+    markDirty(record, ["events"]);
+    record.steps = record.model.steps;
+    return record;
+  }
+
+  /**
+   * Append cairn NDJSON log lines (stderr of an app-started run).
+   * @param {Record<string, any>} record
+   * @param {Record<string, any>} entry
+   */
+  function appendLog(record, entry) {
+    initLiveRecord(record);
+    record.logs.push(entry);
+    record.logTotal += 1;
+    if (record.logs.length > MAX_LOGS)
+      record.logs.splice(0, record.logs.length - MAX_LOGS);
+    markDirty(record, ["logs"]);
+  }
+
+  /**
+   * Kept for compatibility: the per-step rows of a record (now the model's).
    * @param {any} record
    */
   function rollupSteps(record) {
-    const steps = new Map();
-    for (const event of record.events) {
-      const stepId = typeof event?.stepId === "string" ? event.stepId : null;
-      if (!stepId) continue;
-      const row = steps.get(stepId) ?? {
-        stepId,
-        status: "running",
-        durationMs: null,
-        startedAt: null,
-      };
-      switch (String(event?.type ?? "")) {
-        case "step.started":
-          row.status = "running";
-          row.startedAt = event.ts ?? row.startedAt;
-          break;
-        case "step.finished":
-          row.status = event?.status === "failed" ? "failed" : "passed";
-          row.durationMs =
-            typeof event?.durationMs === "number"
-              ? event.durationMs
-              : row.durationMs;
-          break;
-        case "step.skipped":
-          row.status = "skipped";
-          break;
-        default:
-          break;
-      }
-      steps.set(stepId, row);
+    if (!record.model) {
+      record.model = Events.reduceEvents(record.events ?? []);
+      initLiveRecord(record);
     }
-    record.steps = [...steps.values()];
+    record.steps = record.model.steps;
     return record.steps;
   }
 
@@ -407,17 +614,17 @@
       let record = state.detected.get(run.runId);
       if (!record) {
         changed = true;
-        record = {
+        record = initLiveRecord({
           runId: run.runId,
           spec: run.spec ?? run.runId,
           runDir: run.runDir ?? null,
           startedAtMs: run.startedAtMs ?? null,
           lastActivityMs: run.lastActivityMs ?? null,
-          events: [],
-          steps: [],
+          liveness: run.liveness ?? null,
+          invocation: run.invocation ?? null,
           done: null,
           stale: false,
-        };
+        });
         state.detected.set(run.runId, record);
         continue;
       }
@@ -426,14 +633,23 @@
       record.spec = run.spec ?? record.spec;
       record.startedAtMs = run.startedAtMs ?? record.startedAtMs;
       record.lastActivityMs = run.lastActivityMs ?? record.lastActivityMs;
+      record.invocation = run.invocation ?? record.invocation;
+      const nextState = run.liveness?.state ?? null;
+      if ((record.liveness?.state ?? null) !== nextState) {
+        changed = true;
+        markDirty(record, ["status"]);
+      }
+      record.liveness = run.liveness ?? record.liveness;
       if (record.stale) {
         record.stale = false;
         changed = true;
+        markDirty(record, ["status"]);
       }
     }
     for (const record of state.detected.values()) {
       if (record.done || record.stale || seen.has(record.runId)) continue;
       record.stale = true;
+      markDirty(record, ["status"]);
       changed = true;
     }
     return changed;
@@ -451,42 +667,110 @@
     if (suppressedDetected.has(runId)) return null;
     let record = state.detected.get(runId);
     if (!record) {
-      record = {
+      record = initLiveRecord({
         runId,
         spec: runId,
         runDir: null,
         startedAtMs: null,
         lastActivityMs: Date.now(),
-        events: [],
-        steps: [],
+        liveness: null,
+        invocation: null,
         done: null,
         stale: false,
-      };
+      });
       state.detected.set(runId, record);
     }
-    record.events.push(...events);
-    if (record.events.length > 6000)
-      record.events.splice(0, record.events.length - 6000);
+    applyEventsToRecord(record, events);
+    if (record.model.invocation && !record.invocation)
+      record.invocation = record.model.invocation;
+    if (record.model.spec && record.spec === runId)
+      record.spec = record.model.spec;
     record.lastActivityMs = Date.now();
-    rollupSteps(record);
     return record;
   }
 
   /**
-   * @param {{ runId: string, runDir?: string | null, status?: string | null, summary?: string | null }} payload
+   * @param {{ runId: string, runDir?: string | null, status?: string | null, summary?: string | null, invocation?: Record<string, any> | null, refusal?: Record<string, any> | null }} payload
    * @returns {Record<string, any> | null}
    */
   function markExternalFinished(payload) {
     const record = state.detected.get(payload.runId);
     if (!record || record.done) return null;
     if (payload.runDir) record.runDir = payload.runDir;
+    if (payload.invocation && !record.invocation)
+      record.invocation = payload.invocation;
     record.done = {
       ok: payload.status === "passed",
       status: payload.status ?? "unknown",
       summary: payload.summary ?? null,
+      // status "refused": the environment policy said no (run.json refusal)
+      refusal: payload.refusal ?? null,
       at: Date.now(),
     };
+    markDirty(record, ["status", "badges"]);
     return record;
+  }
+
+  // ── invocation journals (watcher pushes) ──────────────────────────────────
+
+  /**
+   * Sync the invocation map with a watcher snapshot (journal + ETA). Records
+   * are kept with their streamed model; ones that left the snapshot are
+   * dropped unless a visible card still references them.
+   * @param {Array<Record<string, any>>} list
+   * @returns {boolean} true when the visible set changed
+   */
+  function syncInvocations(list) {
+    let changed = false;
+    const seen = new Set();
+    for (const journal of list ?? []) {
+      const id = journal?.invocationId;
+      if (!id) continue;
+      seen.add(id);
+      let record = state.invocations.get(id);
+      if (!record) {
+        record = initLiveRecord({ invocationId: id, journal });
+        state.invocations.set(id, record);
+        changed = true;
+      } else {
+        if (record.journal?.status !== journal.status) changed = true;
+        if (
+          record.journal?.current?.index !== journal.current?.index ||
+          record.journal?.eta?.etaMs !== journal.eta?.etaMs
+        )
+          markDirty(record, ["status"]);
+        record.journal = journal;
+      }
+      markDirty(record, ["journal"]);
+    }
+    for (const [id, record] of state.invocations) {
+      if (seen.has(id)) continue;
+      const referenced =
+        [...state.live.values()].some((entry) => entry.invocation?.id === id) ||
+        [...state.detected.values()].some(
+          (entry) => entry.invocation?.id === id,
+        );
+      if (!referenced && record) {
+        state.invocations.delete(id);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * @param {string} invocationId
+   * @param {Array<Record<string, any>>} events
+   * @returns {Record<string, any> | null}
+   */
+  function applyInvocationEvents(invocationId, events) {
+    if (!invocationId || !Array.isArray(events) || !events.length) return null;
+    let record = state.invocations.get(invocationId);
+    if (!record) {
+      record = initLiveRecord({ invocationId, journal: null });
+      state.invocations.set(invocationId, record);
+    }
+    return applyEventsToRecord(record, events);
   }
 
   /**
@@ -499,7 +783,10 @@
     suppressDetectedRun(runId);
   }
 
-  Object.assign(Studio, {
+  // Typed against globals.d.ts: a member missing there, or one whose
+  // signature drifted from its declaration, fails the renderer typecheck.
+  /** @type {Partial<StudioGlobal>} */
+  const published = {
     api,
     state,
     on,
@@ -509,15 +796,24 @@
     setStatus,
     setStatusRight,
     confirm,
+    promptText,
     actions,
     runLabel,
+    runRefOf,
     outcomeLabel,
     rollupSteps,
+    initLiveRecord,
+    markDirty,
+    applyEventsToRecord,
+    appendLog,
+    syncInvocations,
+    applyInvocationEvents,
     syncDetected,
     applyExternalEvents,
     markExternalFinished,
     suppressDetectedRun,
     hideDetected,
     fmt,
-  });
+  };
+  Object.assign(Studio, published);
 })();

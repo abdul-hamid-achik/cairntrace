@@ -274,7 +274,7 @@ export function createCairnNetworkEvidence(page: CairnEvidencePage, redaction: C
 const RUN_TOKEN = process.env.CAIRN_RUN_TOKEN ?? Math.random().toString(36).slice(2, 10);
 
 test("golden_late_bound", async ({ page }, testInfo) => {
-  // Derived from sequential step/outcome budgets; bounded to 30m–4h.
+  // Derived from sequential step/outcome budgets; 30m floor for durable node verifiers; 4h ceiling.
   test.setTimeout(1800000);
 
   // Node verifiers consume a self-contained, sanitized Cairn-compatible run directory.
@@ -311,10 +311,9 @@ test("golden_late_bound", async ({ page }, testInfo) => {
     }
   }
   // step: rescue_blank
-  let rescued;
   for (let evalAttempt = 0; ; evalAttempt++) {
     try {
-      rescued = await page.evaluate(async ({ source, args }) => {
+      await page.evaluate(async ({ source, args }) => {
         // Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.
         const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
         const execute = new AsyncFunction("args", source);
@@ -326,7 +325,6 @@ test("golden_late_bound", async ({ page }, testInfo) => {
       await page.waitForLoadState("networkidle", { timeout: 45000 });
     }
   }
-  // Note: later steps that splice ${evals.rescued…} are not rewritten — wire variables manually if needed.
 
   // --- outcomes (the contract) ---
   // durably_processed: node verifier proves durable processing

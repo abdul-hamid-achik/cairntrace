@@ -1,5 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 import type { BrowserBackend } from "../../adapters/browserBackend";
+import { createArtifactRedactor } from "../artifacts/redaction";
+import { withoutQuery } from "../artifacts/stepLabel";
+import { resolveSpecRuntimeContext } from "../config/runtimeContext";
+import { SessionJournal } from "../discovery/sessionJournal";
+import { parseSpec } from "../parser/parseSpec";
+import {
+  AccompanyRecorder,
+  type AccompanyDecision,
+  type StepOriginRef,
+} from "./accompanyJournal";
 import { parseSnapshot, type SnapshotElement } from "../healer/snapshotParser";
 import {
   collectLocatorInventory,
@@ -33,6 +46,22 @@ export interface AccompanyHandle {
   parked?: BriefMissPacket;
   result?: RunResult;
   lastSnapshot?: SnapshotElement[];
+  /** Session journal directory (`_sessions/<id>/`). */
+  journal?: string;
+  /** Locator decisions so far (accepted ones are in the draft copy). */
+  decisions?: AccompanyDecision[];
+  /** Draft copy with the accepted replacements (never the source spec). */
+  draftPath?: string;
+}
+
+/** Journal options of an accompany session. */
+export interface AccompanyJournalOptions {
+  origin?: "cli" | "mcp";
+  /** MCP client `name/version`. */
+  client?: string;
+  headed?: boolean;
+  /** Also write the draft copy here (must not be the source spec). */
+  draftTo?: string;
 }
 
 export interface AccompanyOpenResult {
@@ -45,6 +74,8 @@ export interface AccompanyOpenResult {
 interface InternalSession {
   handle: AccompanyHandle;
   backend: BrowserBackend;
+  journal?: SessionJournal;
+  recorder?: AccompanyRecorder;
   runPromise: Promise<RunResult>;
   aborted: boolean;
   decision?: {
@@ -54,6 +85,8 @@ interface InternalSession {
     resolve: () => void;
     promise: Promise<void>;
   };
+  /** The step the session is parked on (for the decision recorder). */
+  parkedStep?: { index: number; id: string };
 }
 
 const registry = new Map<string, InternalSession>();
@@ -108,7 +141,7 @@ export async function sweepExpiredAccompany(
     if (session.handle.status === "running") continue;
     if (now - session.handle.lastActivity > ACCOMPANY_TTL_MS) {
       expired.push(id);
-      await closeAccompany(id).catch(() => undefined);
+      await closeAccompany(id, "ttl").catch(() => undefined);
     }
   }
   return expired;
@@ -116,6 +149,7 @@ export async function sweepExpiredAccompany(
 
 export function terminateAllAccompanySync(): void {
   for (const session of registry.values()) {
+    endAccompanyJournal(session, "shutdown");
     session.aborted = true;
     session.decision?.resolve({ action: "abort" });
     session.decision = undefined;
@@ -153,7 +187,11 @@ export function locatorFromSnapshotRef(
 }
 
 export async function openAccompany(
-  opts: Omit<RunOptions, "onLocatorMiss"> & { backend: BrowserBackend },
+  opts: Omit<RunOptions, "onLocatorMiss"> & {
+    backend: BrowserBackend;
+    /** Session journal (default on); false disables it. */
+    journal?: AccompanyJournalOptions | false;
+  },
 ): Promise<{ handle: AccompanyHandle; open: AccompanyOpenResult }> {
   await sweepExpiredAccompany();
   const live = [...registry.values()].filter(
@@ -181,13 +219,41 @@ export async function openAccompany(
     aborted: false,
     gate: newGate(),
   };
+  const { journal: journalOpts, ...runOpts } = opts;
+  // Registered before any await so a concurrent open sees the slot taken.
   registry.set(id, session);
+  if (journalOpts !== false) {
+    // Best-effort: a journal that cannot be created never blocks the run
+    // (an unreadable spec still fails in runSpec, as before) — except a
+    // draftTo that names the source spec, which is refused outright.
+    try {
+      await attachJournal(session, runOpts, journalOpts ?? {});
+    } catch (error) {
+      registry.delete(id);
+      endAccompanyJournal(session, "close", (error as Error).message);
+      throw error;
+    }
+  }
 
+  const callerListener = runOpts.listener;
   session.runPromise = runSpec({
-    ...opts,
+    ...runOpts,
+    listener: {
+      ...callerListener,
+      onStepFinish: (idx, stepId, status, durationMs, error) => {
+        session.recorder?.stepFinished(idx, status, error);
+        callerListener?.onStepFinish?.(idx, stepId, status, durationMs, error);
+      },
+    },
     onLocatorMiss: async (ctx) => {
       if (session.aborted) return { action: "abort" };
       touch(session);
+      if (session.recorder) {
+        const url = await opts.backend.getUrl().catch(() => "");
+        session.recorder.park(ctx.index, ctx.error, url);
+        session.parkedStep = { index: ctx.index, id: ctx.stepId };
+        syncDecisions(session);
+      }
       const parked = await buildMissPacket(opts.backend, ctx.brief, ctx.error);
       if (parked.snapshot) {
         session.handle.lastSnapshot = parseSnapshot(parked.snapshot);
@@ -220,10 +286,132 @@ export async function openAccompany(
   try {
     await Promise.race([session.runPromise, session.gate.promise]);
   } catch (error) {
+    endAccompanyJournal(session, "close", (error as Error).message);
     await closeAccompany(id).catch(() => undefined);
     throw error;
   }
   return { handle: session.handle, open: toOpenResult(session.handle) };
+}
+
+/** Create the `kind: accompany` journal and the decision recorder. */
+async function attachJournal(
+  session: InternalSession,
+  opts: Omit<RunOptions, "onLocatorMiss">,
+  journalOpts: AccompanyJournalOptions,
+): Promise<void> {
+  const specPath = resolvePath(opts.specPath);
+  let artifactRoot = opts.artifactRoot;
+  let envName: string | undefined;
+  let configPath: string | undefined;
+  let origins = new Map<number, StepOriginRef>();
+  let startUrl = "";
+  try {
+    const runtime = await resolveSpecRuntimeContext(specPath, {
+      ...(opts.environmentOverride !== undefined
+        ? { envOverride: opts.environmentOverride }
+        : {}),
+      ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+      ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
+      ...(opts.env ? { env: opts.env } : {}),
+    });
+    artifactRoot ??= runtime.config?.artifactRoot;
+    envName = runtime.envName;
+    configPath = runtime.configPath;
+    // Only WHERE each step is declared is needed: secrets stay references.
+    const parsed = await parseSpec(specPath, {
+      ...(opts.env ? { env: opts.env } : {}),
+      vars: runtime.vars,
+      configDir: runtime.configDir,
+      ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+      runtime: { workerIndex: 0, runToken: "accompany" },
+      secretRef: (name) => `\${secrets.${name}}`,
+    });
+    origins = new Map(
+      parsed.origins.map((origin, index) => [
+        index,
+        { file: origin.filePath, stepIndex: origin.fileStepIdx },
+      ]),
+    );
+    const first = parsed.spec.steps?.find((step) => "open" in step);
+    if (first && "open" in first) {
+      startUrl = typeof first.open === "string" ? first.open : first.open.path;
+    }
+  } catch {
+    // runSpec reports an unreadable spec; the journal just has less detail.
+  }
+  const sourceText = await readFile(specPath, "utf8").catch(() => undefined);
+  const redactor = createArtifactRedactor(
+    undefined,
+    opts.env ?? process.env,
+    opts.secretValues,
+  );
+  const now = new Date(session.handle.createdAt).toISOString();
+  const journal = SessionJournal.create(
+    artifactRoot ?? join(homedir(), ".cairntrace", "runs"),
+    {
+      version: 1,
+      sessionId: session.handle.id,
+      kind: "accompany",
+      pid: process.pid,
+      origin: journalOpts.origin ?? "mcp",
+      ...(journalOpts.client ? { client: journalOpts.client } : {}),
+      startUrl: withoutQuery(redactor.text(startUrl)),
+      backend: opts.backend.name,
+      headed: journalOpts.headed === true,
+      ...(envName ? { env: envName } : {}),
+      ...(configPath ? { configPath } : {}),
+      status: "open",
+      openedAt: now,
+      lastActivityAt: now,
+      ttlMs: ACCOMPANY_TTL_MS,
+      specPath,
+      stepCount: 0,
+      actionCount: 0,
+    },
+    redactor,
+  );
+  if (!journal) return;
+  session.journal = journal;
+  session.handle.journal = journal.dir;
+  session.recorder = new AccompanyRecorder({
+    journal,
+    specPath,
+    ...(sourceText !== undefined ? { sourceText } : {}),
+    origins,
+    ...(journalOpts.draftTo !== undefined
+      ? { draftTo: journalOpts.draftTo }
+      : {}),
+  });
+  session.handle.decisions = session.recorder.decisions;
+}
+
+function syncDecisions(session: InternalSession): void {
+  const recorder = session.recorder;
+  if (!recorder) return;
+  const draftPath = recorder.draftPath;
+  if (draftPath) session.handle.draftPath = draftPath;
+  session.journal?.update({ lastActivityAt: new Date().toISOString() });
+}
+
+function endAccompanyJournal(
+  session: InternalSession,
+  reason: "ttl" | "close" | "shutdown",
+  error?: string,
+): void {
+  const journal = session.journal;
+  if (!journal || journal.snapshot.status !== "open") return;
+  const now = new Date().toISOString();
+  journal.append({
+    ts: now,
+    type: "session.closed",
+    reason,
+    ...(error ? { error: journal.redactText(error) } : {}),
+  });
+  journal.update({
+    status: reason === "ttl" ? "expired" : "closed",
+    closedAt: now,
+    lastActivityAt: now,
+  });
 }
 
 export async function chooseAccompany(
@@ -236,13 +424,22 @@ export async function chooseAccompany(
     throw new Error(`accompany session ${id} is not waiting for a locator`);
   }
   touch(session);
+  if (session.recorder && session.parkedStep) {
+    session.recorder.choose(
+      session.parkedStep.index,
+      session.parkedStep.id,
+      locator,
+      session.handle.lastSnapshot,
+    );
+  }
   session.handle.status = "running";
   session.handle.parked = undefined;
   session.gate = newGate();
-  const resolve = session.decision.resolve;
+  const resolveDecision = session.decision.resolve;
   session.decision = undefined;
-  resolve({ action: "retry", locator });
+  resolveDecision({ action: "retry", locator });
   await Promise.race([session.runPromise, session.gate.promise]);
+  syncDecisions(session);
   return toOpenResult(session.handle);
 }
 
@@ -253,10 +450,15 @@ export async function closeAllAccompany(): Promise<void> {
   }
 }
 
-export async function closeAccompany(id: string): Promise<void> {
+export async function closeAccompany(
+  id: string,
+  reason: "ttl" | "close" | "shutdown" = "close",
+): Promise<void> {
   const session = registry.get(id);
   if (!session) return;
   registry.delete(id);
+  syncDecisions(session);
+  endAccompanyJournal(session, reason);
   session.aborted = true;
   if (session.decision) {
     session.decision.resolve({ action: "abort" });

@@ -46,6 +46,8 @@ jobs:
             examples/flows/platform/24-documents-pdf.yml \
             examples/flows/platform/26-exports.yml \
             examples/flows/platform/27-api-session.yml \
+            examples/flows/platform/30-restock-job.yml \
+            examples/flows/platform/31-run-step-teardown.yml \
             --backend playwright
 
   desktop:
@@ -73,3 +75,76 @@ jobs:
         run: cd desktop && bun run typecheck
       # The boot harness (`bun run desktop:smoke`) needs a display and the
       # Electron binary; run it locally before shipping, not in CI.
+
+  export-playwright:
+    name: exported Playwright project (typecheck + run)
+    runs-on: ubuntu-latest
+    # Browser-heavy like the smoke above: serialized after `verify` instead of
+    # competing with it for the shared runner pool.
+    needs: verify
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+
+      - name: Export examples/flows as a Playwright project
+        # The generated package.json pins @playwright/test/typescript/@types/node;
+        # the repo's node_modules already provides them, so link instead of a
+        # second network install.
+        run: |
+          set -euo pipefail
+          EXPORT_DIR="$RUNNER_TEMP/cairn-playwright-export"
+          ./bin/cairn export playwright examples/flows --project --out-dir "$EXPORT_DIR" --format json > "$RUNNER_TEMP/export-report.json"
+          test -f "$EXPORT_DIR/.cairn-export.json"
+          if grep -rIliE '__CAIRN_[A-Z_]+__' "$EXPORT_DIR"; then
+            echo "late-bound sentinel leaked into the export" >&2
+            exit 1
+          fi
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$EXPORT_DIR/node_modules"
+          echo "EXPORT_DIR=$EXPORT_DIR" >> "$GITHUB_ENV"
+
+      - name: Check the export is fresh (manifest drift detection)
+        # Regenerates in memory from the manifest's recorded input and diffs it
+        # against disk: exit 0 fresh, 1 stale, 2 error.
+        run: ./bin/cairn export playwright --check "$EXPORT_DIR" --format json
+
+      - name: Typecheck the export (strict + noUnusedLocals)
+        run: cd "$EXPORT_DIR" && ./node_modules/.bin/tsc --noEmit -p . --noUnusedLocals
+
+      - name: Start the demo platform (Postgres + seeded demo app)
+        # server.ts seeds (and migrates) on start, so it must come up after
+        # Postgres is healthy.
+        run: |
+          set -euo pipefail
+          docker compose -f examples/docker-compose.yaml up -d --wait
+          nohup bun examples/demo-app/server.ts > "$RUNNER_TEMP/demo-app.log" 2>&1 &
+          for _ in $(seq 1 120); do
+            if curl -sf http://localhost:8787/api/health | grep -q '"database":"up"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/demo-app.log"
+          exit 1
+
+      - name: Run the exported suite against the demo app
+        # test.fixme tests (transform / file / xlsx coverage gaps) report as
+        # skipped.
+        run: |
+          set -euo pipefail
+          cd "$EXPORT_DIR"
+          ./node_modules/.bin/playwright test --list
+          ./node_modules/.bin/playwright test
+
+      - name: Demo app log
+        if: failure()
+        run: cat "$RUNNER_TEMP/demo-app.log" || true

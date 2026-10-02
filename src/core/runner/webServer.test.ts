@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  runShell,
   startWebServer,
   WebServerError,
   type WebServerHandle,
@@ -305,4 +306,21 @@ describe("startWebServer — failure modes", () => {
     // The server we started must have been torn down despite the setup failure.
     expect(await isUp(url)).toBe(false);
   }, 20000);
+});
+
+describe("runShell child environment", () => {
+  it("passes only the given env (no parent process.env merge)", async () => {
+    const key = "CAIRN_WEBSERVER_PARENT_ONLY_CANARY";
+    process.env[key] = "parent-value-must-not-leak";
+    try {
+      const r = await runShell(`printf '%s|%s' "$${key}" "$CHILD_ONLY"`, {
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? "", CHILD_ONLY: "given" },
+      });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toBe("|given");
+    } finally {
+      delete process.env[key];
+    }
+  });
 });

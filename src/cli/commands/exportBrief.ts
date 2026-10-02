@@ -65,6 +65,7 @@ export async function exportOneBrief(
   const parsed = await parseSpec(specPath, {
     vars: runtime.vars,
     env: safeEnv,
+    configDir: runtime.configDir,
     ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
     secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
     runtime: { runToken: "__CAIRN_RUN_TOKEN__" },

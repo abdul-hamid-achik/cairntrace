@@ -7,14 +7,19 @@
  * preload bridge, every lib module, and the first view all wired up.
  */
 (function bootApp() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h, state, actions, api, fmt, toast, setStatus, setStatusRight } =
     Studio;
 
   const NAV = [
     { id: "runs", label: "Runs", glyph: "▤" },
     { id: "specs", label: "Specs", glyph: "≡" },
+    { id: "catalog", label: "Catalog", glyph: "⊞" },
     { id: "live", label: "Live", glyph: "▶", badge: () => liveCount() },
+    { id: "invocations", label: "Invocations", glyph: "⇶" },
+    { id: "sessions", label: "Sessions", glyph: "◉" },
+    { id: "stashes", label: "Stashes", glyph: "⧉" },
     { sep: true },
     { id: "stats", label: "Cohorts", glyph: "∑" },
     { id: "docs", label: "Docs", glyph: "?" },
@@ -25,6 +30,8 @@
 
   /** @type {{ destroy?: () => void } | null} */
   let currentView = null;
+  /** Bumped by every mount, so a render that finishes late knows it lost. */
+  let mountSeq = 0;
   /** @type {Array<() => void>} */
   const unsubscribes = [];
 
@@ -33,71 +40,136 @@
     let count = 0;
     for (const record of state.live.values()) if (!record.done) count += 1;
     for (const record of state.detected.values())
-      if (!record.done && !record.stale) count += 1;
+      if (!record.done && !record.stale && record.liveness?.state !== "dead")
+        count += 1;
     return count;
+  }
+
+  /** Apply the interface settings (density, screenshot width). */
+  function applyUiSettings() {
+    const ui = state.settings?.ui ?? {};
+    document.body.classList.toggle("density-compact", ui.density === "compact");
+    const width = Number(ui.screenshotMaxWidth);
+    document.documentElement.style.setProperty(
+      "--shot-max",
+      Number.isFinite(width) && width > 0 ? `${Math.round(width)}px` : "720px",
+    );
+  }
+
+  /**
+   * The sidebar is built once and then patched in place: pushes repaint it
+   * many times a second during a run, and rebuilding it would throw away
+   * keyboard focus on a nav item.
+   * @type {{ items: Map<string, { button: HTMLElement, badge: HTMLElement }>, project: HTMLElement, projectSig: string } | null}
+   */
+  let navDom = null;
+
+  /** @param {HTMLElement} sidebar */
+  function buildNav(sidebar) {
+    Studio.clear(sidebar);
+    /** @type {Map<string, { button: HTMLElement, badge: HTMLElement }>} */
+    const items = new Map();
+    sidebar.appendChild(h("div", { class: "nav-label", text: "workspace" }));
+    for (const item of NAV) {
+      if (item.sep) {
+        sidebar.appendChild(h("div", { class: "nav-sep", role: "separator" }));
+        continue;
+      }
+      const badge = h("span", { class: "nav-badge hidden" });
+      const button = h(
+        "button",
+        {
+          class: "nav-item",
+          type: "button",
+          dataset: { view: item.id },
+          onClick: () => Studio.navigate(item.id),
+        },
+        h("span", { class: "nav-glyph", ariaHidden: "true", text: item.glyph }),
+        item.label,
+        badge,
+      );
+      items.set(item.id, { button, badge });
+      sidebar.appendChild(button);
+    }
+    const project = h("div", { class: "nav-project" });
+    sidebar.appendChild(project);
+    // Up/Down move between nav items; Tab still walks them in order.
+    Studio.rovingKeys(sidebar, {
+      items: () => /** @type {HTMLElement[]} */ ([
+        ...sidebar.querySelectorAll("button.nav-item"),
+      ]),
+    });
+    return { items, project, projectSig: "" };
   }
 
   function paintNav() {
     const sidebar = document.getElementById("sidebar");
     if (!sidebar) return;
-    Studio.clear(sidebar);
-    sidebar.appendChild(h("div", { class: "nav-label", text: "workspace" }));
+    if (!navDom || !sidebar.contains(navDom.project))
+      navDom = buildNav(sidebar);
     for (const item of NAV) {
-      if (item.sep) {
-        sidebar.appendChild(h("div", { class: "nav-sep" }));
-        continue;
-      }
+      if (item.sep) continue;
+      const entry = navDom.items.get(item.id);
+      if (!entry) continue;
+      const active =
+        state.view === item.id || (state.view === "run" && item.id === "runs");
+      entry.button.classList.toggle("active", active);
+      if (active) entry.button.setAttribute("aria-current", "page");
+      else entry.button.removeAttribute("aria-current");
       const badge = item.badge ? item.badge() : 0;
-      sidebar.appendChild(
-        h(
-          "button",
-          {
-            class: `nav-item${state.view === item.id ? " active" : ""}`,
-            type: "button",
-            onClick: () => Studio.navigate(item.id),
-          },
-          h("span", { class: "nav-glyph", text: item.glyph }),
-          item.label,
-          badge ? h("span", { class: "nav-badge", text: String(badge) }) : null,
-        ),
+      entry.badge.textContent = badge ? String(badge) : "";
+      entry.badge.classList.toggle("hidden", !badge);
+      entry.button.setAttribute(
+        "aria-label",
+        badge ? `${item.label} (${badge} in flight)` : item.label,
       );
     }
-    if (state.project?.dir) {
-      sidebar.appendChild(h("div", { class: "nav-sep" }));
-      sidebar.appendChild(h("div", { class: "nav-label", text: "project" }));
-      sidebar.appendChild(
-        h(
-          "button",
-          {
-            class: "nav-item",
-            type: "button",
-            onClick: () => Studio.emit("menu:open-project"),
-          },
-          h("span", { class: "nav-glyph", text: "⌂" }),
-          h("span", {
-            style: {
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            },
-            text: state.project.dir.split("/").pop(),
-          }),
-        ),
-      );
-      sidebar.appendChild(
-        h("div", {
-          class: "nav-label",
+    const projectSig = JSON.stringify([
+      state.project?.dir ?? null,
+      (state.project?.specs ?? []).length,
+      state.project?.config?.project ?? null,
+    ]);
+    if (projectSig === navDom.projectSig) return;
+    navDom.projectSig = projectSig;
+    const project = navDom.project;
+    Studio.clear(project);
+    if (!state.project?.dir) return;
+    project.appendChild(h("div", { class: "nav-sep", role: "separator" }));
+    project.appendChild(h("div", { class: "nav-label", text: "project" }));
+    project.appendChild(
+      h(
+        "button",
+        {
+          class: "nav-item",
+          type: "button",
+          title: `${state.project.dir}\nOpen another project…`,
+          ariaLabel: `project ${state.project.dir.split("/").pop()}: open another project`,
+          onClick: () => Studio.emit("menu:open-project"),
+        },
+        h("span", { class: "nav-glyph", ariaHidden: "true", text: "⌂" }),
+        h("span", {
           style: {
-            textTransform: "none",
-            letterSpacing: "0",
-            fontFamily: "var(--mono)",
-            fontSize: "10px",
-            wordBreak: "break-all",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           },
-          text: `${(state.project.specs ?? []).length} specs · ${state.project.config?.project ?? "no config"}`,
+          text: state.project.dir.split("/").pop(),
         }),
-      );
-    }
+      ),
+    );
+    project.appendChild(
+      h("div", {
+        class: "nav-label",
+        style: {
+          textTransform: "none",
+          letterSpacing: "0",
+          fontFamily: "var(--mono)",
+          fontSize: "10px",
+          wordBreak: "break-all",
+        },
+        text: `${(state.project.specs ?? []).length} specs · ${state.project.config?.project ?? "no config"}`,
+      }),
+    );
   }
 
   function paintTopbar() {
@@ -114,11 +186,44 @@
     }
     if (cairnStatus) {
       const cairn = state.info?.cairn;
+      const versions = state.versions;
+      const version = versions?.resolved?.version;
       cairnStatus.textContent = cairn?.command
-        ? `cairn · ${cairn.source}`
+        ? `cairn${version ? ` ${version}` : ""} · ${cairn.source}${
+            versions?.mismatch ? " ⚠" : ""
+          }`
         : "cairn not found";
-      cairnStatus.style.color = cairn?.command ? "" : "var(--bad)";
-      cairnStatus.title = cairn?.command ?? "set the binary in Settings";
+      cairnStatus.style.color = !cairn?.command
+        ? "var(--bad)"
+        : versions?.mismatch
+          ? "var(--warn)"
+          : "";
+      cairnStatus.title = cairn?.command
+        ? [
+            cairn.command,
+            versions?.path
+              ? `PATH: ${versions.path.command} (${versions.path.version ?? "?"})`
+              : null,
+            versions?.repo
+              ? `repo: ${versions.repo.command} (${versions.repo.version ?? "?"})`
+              : null,
+            versions?.warning ?? null,
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : "set the binary in Settings";
+    }
+    const lockPill = document.getElementById("lock-pill");
+    const lockLabel = document.getElementById("lock-label");
+    if (lockPill && lockLabel) {
+      const active = state.locks?.active ?? [];
+      lockPill.classList.toggle("hidden", active.length === 0);
+      lockLabel.textContent = active.length
+        ? `suite in progress${active[0].owner ? ` · ${active[0].owner}` : ""}`
+        : "";
+      lockPill.title = active
+        .map((lock) => `${lock.path}${lock.owner ? ` — ${lock.owner}` : ""}`)
+        .join("\n");
     }
     const pill = document.getElementById("active-run-pill");
     const label = document.getElementById("active-run-label");
@@ -138,6 +243,7 @@
     const root = /** @type {HTMLElement} */ (document.getElementById("view"));
     if (!root) return;
     const view = Studio.views?.[viewId] ?? Studio.views?.runs;
+    const seq = ++mountSeq;
     if (currentView?.destroy) {
       try {
         currentView.destroy();
@@ -147,15 +253,37 @@
     }
     currentView = null;
     state.view = view.id;
+    // Every mount renders into a host of its own (`display: contents`, so
+    // layout is unchanged). The next mount detaches it, so a render that
+    // finishes after the user moved on paints into a detached node, never
+    // over the view on screen.
+    const host = h("div", { class: "view-host" });
     Studio.clear(root);
+    root.appendChild(host);
     paintNav();
     setStatus(`${view.label.toLowerCase()} view`);
     try {
-      const result = await view.render(root, params);
-      currentView = result && typeof result === "object" ? result : null;
+      const result = await view.render(host, params);
+      const handle =
+        result && typeof result === "object"
+          ? /** @type {{ destroy?: () => void }} */ (result)
+          : null;
+      if (seq !== mountSeq) {
+        // The user moved on while this view was still loading: its pollers
+        // must not outlive it, and the view now on screen keeps its handle.
+        try {
+          handle?.destroy?.();
+        } catch {
+          // a view failing to clean up must not block navigation
+        }
+        return;
+      }
+      currentView = handle;
     } catch (error) {
-      Studio.clear(root);
-      root.appendChild(Studio.errorBox(error, `${view.id} view`));
+      // A late failure of a view the user already left is not news.
+      if (seq !== mountSeq) return;
+      Studio.clear(host);
+      host.appendChild(Studio.errorBox(error, `${view.id} view`));
       toast(
         `${view.label} view failed`,
         String(error?.message ?? error),
@@ -166,29 +294,39 @@
 
   // ── live run bookkeeping ──────────────────────────────────────────────────
 
-  /** Kept for the views' benefit; the rollup itself lives in state.js. */
-  const rollupSteps = (record) => Studio.rollupSteps(record);
-
   function subscribeLive() {
     unsubscribes.push(
       api.on("run:started", (payload) => {
-        state.live.set(payload.token, {
-          token: payload.token,
-          specs: payload.specs ?? [],
-          argv: payload.argv ?? [],
-          command: payload.command ?? "",
-          cwd: payload.cwd ?? "",
-          runsRoot: payload.runsRoot ?? "",
-          startedAt: Date.parse(payload.startedAt) || Date.now(),
-          runDir: null,
-          runId: null,
-          events: [],
-          steps: [],
-          logs: [],
-          done: null,
-        });
+        state.live.set(
+          payload.token,
+          Studio.initLiveRecord({
+            token: payload.token,
+            specs: payload.specs ?? [],
+            argv: payload.argv ?? [],
+            command: payload.command ?? "",
+            launcher: payload.launcher ?? "cairn",
+            cwd: payload.cwd ?? "",
+            runsRoot: payload.runsRoot ?? "",
+            startedAt: Date.parse(payload.startedAt) || Date.now(),
+            runDir: null,
+            runId: null,
+            pid: null,
+            invocation: null,
+            done: null,
+          }),
+        );
         paintNav();
         paintTopbar();
+        Studio.live?.refreshIfVisible();
+      }),
+    );
+
+    unsubscribes.push(
+      api.on("run:pid", ({ token, pid }) => {
+        const record = state.live.get(token);
+        if (!record) return;
+        record.pid = pid ?? null;
+        Studio.markDirty(record, ["status"]);
         Studio.live?.refreshIfVisible();
       }),
     );
@@ -197,9 +335,7 @@
       api.on("run:log", ({ token, entry }) => {
         const record = state.live.get(token);
         if (!record) return;
-        record.logs.push(entry);
-        if (record.logs.length > 3000)
-          record.logs.splice(0, record.logs.length - 3000);
+        Studio.appendLog(record, entry);
         setStatus(fmt.oneLine(String(entry?.msg ?? "")));
         Studio.live?.refreshIfVisible();
       }),
@@ -211,6 +347,7 @@
         if (!record) return;
         record.runDir = runDir;
         record.runId = runId;
+        Studio.markDirty(record, ["status", "screenshot", "logs"]);
         // The app's own tail claimed this run — suppress it from the
         // detected set for the whole session, so neither the remaining
         // watcher pushes nor its finish notification re-render it.
@@ -226,10 +363,9 @@
       api.on("run:events", ({ token, events }) => {
         const record = state.live.get(token);
         if (!record) return;
-        record.events.push(...events);
-        if (record.events.length > 6000)
-          record.events.splice(0, record.events.length - 6000);
-        rollupSteps(record);
+        Studio.applyEventsToRecord(record, events);
+        if (record.model.invocation && !record.invocation)
+          record.invocation = record.model.invocation;
         Studio.live?.refreshIfVisible();
       }),
     );
@@ -237,39 +373,73 @@
     unsubscribes.push(
       api.on("run:done", (payload) => {
         const record = state.live.get(payload.token);
+        // Exit 7, status "refused", or a batch whose every spec was refused:
+        // the environment policy said no before anything ran. Not a failure,
+        // so not a red toast — and no run directory: the document's
+        // `refused_…` runId names nothing on disk, so it is never adopted.
+        const refused = CairnPolicy.isRefusedOutcome(
+          payload.exitCode,
+          payload.payload,
+        );
+        // `synthetic: true`: the CLI never created this run (refused, or
+        // errored/cancelled before it started) — its runId is a placeholder.
+        const synthetic = CairnPolicy.isSyntheticResult(payload.payload);
         if (record) {
           record.done = { ...payload, at: Date.now() };
           if (payload.runDir && !record.runDir) record.runDir = payload.runDir;
-          if (payload.payload?.runId && !record.runId)
+          if (payload.payload?.runId && !record.runId && !refused && !synthetic)
             record.runId = payload.payload.runId;
+          Studio.markDirty(record, ["status", "badges"]);
         }
         const specLabel = (record?.specs ?? [])
           .map((spec) => spec.split("/").pop())
           .join(", ");
-        const ok = Boolean(payload.ok);
+        const ok = Boolean(payload.ok) && !refused;
+        const refusal = refused
+          ? CairnPolicy.documentRefusal(payload.payload)
+          : null;
+        const refusalLine = refusal ? CairnPolicy.refusalText(refusal) : null;
+        // A batch that passed with some specs refused says so.
+        const refusedCount = Number(payload.payload?.summary?.refused) || 0;
         toast(
           ok
             ? `Passed · ${specLabel}`
-            : `${payload.meaning ?? "failed"} · ${specLabel}`,
+            : refused
+              ? `Refused · ${specLabel}`
+              : `${payload.meaning ?? "failed"} · ${specLabel}`,
           ok
-            ? `${fmt.formatDuration(payload.payload?.durationMs)} · ${payload.payload?.runId ?? ""}`
+            ? `${fmt.formatDuration(
+                payload.payload?.durationMs ?? payload.payload?.totalDurationMs,
+              )}${payload.payload?.runId ? ` · ${payload.payload.runId}` : ""}${
+                refusedCount
+                  ? ` · ${refusedCount} refused by the environment policy`
+                  : ""
+              }`
             : fmt.truncate(
-                payload.payload?.summary ??
+                refusalLine ??
+                  (typeof payload.payload?.summary === "string"
+                    ? payload.payload.summary
+                    : null) ??
                   payload.error ??
                   payload.stderr ??
                   "",
                 220,
               ),
-          ok ? "ok" : "bad",
+          ok ? "ok" : refused ? "info" : "bad",
           ok ? 4200 : 9000,
         );
-        setStatus(ok ? "run passed" : `run ${payload.meaning ?? "failed"}`);
+        setStatus(
+          ok
+            ? "run passed"
+            : refused
+              ? "run refused by the environment policy"
+              : `run ${payload.meaning ?? "failed"}`,
+        );
         setStatusRight("");
         paintNav();
         paintTopbar();
         Studio.live?.refreshIfVisible();
-        if (state.view === "runs")
-          void actions.loadRuns().then(() => mount("runs", {}));
+        maybeRefreshRuns();
       }),
     );
   }
@@ -292,7 +462,7 @@
         if (!record) return;
         setStatus(
           fmt.oneLine(
-            `${record.spec} ▸ ${String(events.at(-1)?.message ?? events.at(-1)?.type ?? "")}`,
+            `${record.spec} ▸ ${Studio.events.describeEvent(events.at(-1)).label}`,
           ),
         );
         Studio.live?.refreshIfVisible();
@@ -304,21 +474,51 @@
         const record = Studio.markExternalFinished(payload);
         if (!record) return;
         const ok = Boolean(record.done.ok);
+        const refused = record.done.status === "refused";
         toast(
           ok
             ? `Passed · ${record.spec}`
             : `${record.done.status} · ${record.spec}`,
-          fmt.truncate(record.done.summary ?? "", 220),
-          ok ? "ok" : "bad",
+          fmt.truncate(
+            (refused && record.done.refusal
+              ? CairnPolicy.refusalText(record.done.refusal)
+              : null) ??
+              record.done.summary ??
+              "",
+            220,
+          ),
+          ok ? "ok" : refused ? "info" : "bad",
           ok ? 4200 : 9000,
         );
         paintNav();
         paintTopbar();
         Studio.live?.refreshIfVisible();
-        if (state.view === "runs")
-          void actions.loadRuns().then(() => mount("runs", {}));
+        maybeRefreshRuns();
       }),
     );
+
+    unsubscribes.push(
+      api.on("runs:invocations", (payload) => {
+        if (Studio.syncInvocations(payload?.invocations)) paintNav();
+        Studio.live?.refreshIfVisible();
+      }),
+    );
+
+    unsubscribes.push(
+      api.on("invocation:stream", ({ invocationId, events }) => {
+        if (Studio.applyInvocationEvents(invocationId, events))
+          Studio.live?.refreshIfVisible();
+      }),
+    );
+  }
+
+  /** Reload the Runs view after a finish, when the setting allows it. */
+  function maybeRefreshRuns() {
+    if (state.view !== "runs") return;
+    if (state.settings?.ui?.autoRefreshRuns === false) return;
+    void actions.loadRuns().then(() => {
+      if (state.view === "runs") void mount("runs", {});
+    });
   }
 
   /**
@@ -377,8 +577,19 @@
           );
           return;
         }
-        await actions.startRun([state.selectedSpec]);
-        Studio.navigate("live");
+        // The Specs view's Run path: its "run on" environment, the policy
+        // warning, the unsaved-edits question, then Live.
+        if (Studio.specsView?.runFocused) {
+          await Studio.specsView.runFocused();
+          return;
+        }
+        try {
+          await actions.startRun([state.selectedSpec]);
+          Studio.navigate("live");
+        } catch (error) {
+          // e.g. a suite lock is held (main refuses every run while it exists)
+          toast("Run failed to start", String(error?.message ?? error), "bad");
+        }
       }),
     );
 
@@ -435,6 +646,7 @@
    * @returns {Promise<{ ok: boolean, reason: string | null, checks: Record<string, unknown> }>}
    */
   async function boot() {
+    /** @type {Record<string, any>} */
     const checks = {};
     try {
       checks.bridge = Boolean(/** @type {any} */ (globalThis.cairn?.call));
@@ -449,6 +661,7 @@
       checks.cairnCommand = info?.cairn?.command ?? null;
       checks.cairnSource = info?.cairn?.source ?? null;
       checks.runsRoot = info?.runsRoot?.runsRoot ?? null;
+      checks.userData = info?.userData ?? null;
 
       await actions.loadProject(info?.settings?.activeProject ?? null);
       checks.projectDir = state.project?.dir ?? null;
@@ -460,6 +673,31 @@
 
       await actions.loadDetected();
       checks.detectedCount = state.detected.size;
+      checks.eventsModule = Boolean(Studio.events?.describeEvent);
+      checks.policyModule = Boolean(
+        /** @type {any} */ (globalThis).CairnPolicy?.evaluateRequires,
+      );
+
+      applyUiSettings();
+      unsubscribes.push(
+        Studio.on("settings", () => {
+          applyUiSettings();
+          void actions.loadLocks().then(() => paintTopbar());
+        }),
+      );
+      unsubscribes.push(Studio.on("versions", () => paintTopbar()));
+      unsubscribes.push(Studio.on("locks", () => paintTopbar()));
+      unsubscribes.push(Studio.on("project", () => void actions.loadLocks()));
+      await actions.loadLocks();
+      // Locks are files another process creates/removes: poll while
+      // configured. The version probe spawns cairn, so it never blocks boot.
+      setInterval(() => {
+        if ((state.locks?.lockFiles ?? []).length) void actions.loadLocks();
+      }, 5000);
+      void actions.loadVersions();
+      // One clock for every "3m ago" on screen (time.rel-time), so the same
+      // moment reads the same in every view and never goes stale.
+      setInterval(() => Studio.refreshRelativeTimes(), 15_000);
 
       subscribeLive();
       subscribeMenus();
@@ -478,7 +716,8 @@
       paintTopbar();
       await mount("runs", {});
       checks.viewMounted =
-        (document.getElementById("view")?.childElementCount ?? 0) > 0;
+        (document.querySelector("#view > .view-host")?.childElementCount ?? 0) >
+        0;
       checks.navItems =
         document.getElementById("sidebar")?.querySelectorAll(".nav-item")
           .length ?? 0;
@@ -495,7 +734,11 @@
         "runs",
         "run",
         "specs",
+        "catalog",
         "live",
+        "invocations",
+        "sessions",
+        "stashes",
         "stats",
         "docs",
         "doctor",
@@ -506,8 +749,13 @@
       checks.missingViews = missingViews;
 
       const ok =
-        Boolean(checks.bridge && checks.viewMounted && checks.appVersion) &&
-        missingViews.length === 0;
+        Boolean(
+          checks.bridge &&
+            checks.viewMounted &&
+            checks.appVersion &&
+            checks.eventsModule &&
+            checks.policyModule,
+        ) && missingViews.length === 0;
       return {
         ok,
         reason: ok

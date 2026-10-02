@@ -5,6 +5,39 @@ import { describe, expect, it } from "vitest";
 import { BriefDocumentSchema } from "../../core/schema/brief.v1";
 import { exportOneBrief } from "./exportBrief";
 
+/** A passed run.json for `--from-run` fixtures. */
+const runJson = (
+  runId: string,
+  runDir: string,
+  name: string,
+  path: string,
+) => ({
+  $schema: "urn:cairntrace.dev:run:v1",
+  version: "1",
+  runId,
+  runDir,
+  spec: { name, path },
+  environment: "local",
+  backend: "mock",
+  coldStart: false,
+  status: "passed",
+  summary: "ok",
+  startedAt: "2026-01-01T00:00:00.000Z",
+  endedAt: "2026-01-01T00:00:01.000Z",
+  durationMs: 1000,
+  outcomes: [],
+  steps: [
+    {
+      id: "click_open_dashboard",
+      status: "passed",
+      durationMs: 10,
+      resolved: { role: "link", name: name },
+    },
+  ],
+  artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
+  exitCode: 0,
+});
+
 describe("exportOneBrief", () => {
   it("stdout json is a valid BriefDocument", async () => {
     const { document, markdown } = await exportOneBrief(
@@ -100,41 +133,10 @@ steps:
 
   it("--from-run latest skips a newer run from another spec", async () => {
     const root = await mkdtemp(join(tmpdir(), "cairn-brief-runs-"));
-    const other = join(root, "other_run");
-    const mine = join(root, "mine_run");
+    const other = join(root, "2026-07-01T00-00-01-000Z_other_run_a1b2c3");
+    const mine = join(root, "2026-07-01T00-00-02-000Z_mine_run_a1b2c3");
     await mkdir(other);
     await mkdir(mine);
-    const runJson = (
-      runId: string,
-      runDir: string,
-      name: string,
-      path: string,
-    ) => ({
-      $schema: "urn:cairntrace.dev:run:v1",
-      version: "1",
-      runId,
-      runDir,
-      spec: { name, path },
-      environment: "local",
-      backend: "mock",
-      coldStart: false,
-      status: "passed",
-      summary: "ok",
-      startedAt: "2026-01-01T00:00:00.000Z",
-      endedAt: "2026-01-01T00:00:01.000Z",
-      durationMs: 1000,
-      outcomes: [],
-      steps: [
-        {
-          id: "click_open_dashboard",
-          status: "passed",
-          durationMs: 10,
-          resolved: { role: "link", name: name },
-        },
-      ],
-      artifacts: { agentContext: "agent_context.md", events: "events.ndjson" },
-      exitCode: 0,
-    });
     await writeFile(
       join(other, "run.json"),
       JSON.stringify(runJson("other", other, "other_spec", "/tmp/other.yml")),
@@ -146,7 +148,7 @@ steps:
           "mine",
           mine,
           "dashboard_nav",
-          "/Users/abdulachik/projects/cairntrace/examples/flows/01-dashboard-nav.yml",
+          "/home/demo/cairntrace/examples/flows/01-dashboard-nav.yml",
         ),
       ),
     );

@@ -30,12 +30,22 @@ export interface LocatorInventory {
   truncated?: boolean;
   /** The cap applied (default 100 per category). */
   limit?: number;
+  /**
+   * Attribute the test-id scan read (config `browser.testIdAttribute`,
+   * default `data-testid`). Present whenever `testids` was collected, so the
+   * agent knows what `by: testid` will match.
+   */
+  testIdAttribute?: string;
 }
 
 export interface LocatorInventoryOptions {
   roles?: boolean;
   testids?: boolean;
-  /** Attribute scanned for test ids. Default `data-testid`. */
+  /**
+   * Attribute scanned for test ids — pass the project's
+   * `browser.testIdAttribute` so the inventory matches what `by: testid`
+   * resolves at run time. Default `data-testid`.
+   */
   testIdAttribute?: string;
 }
 
@@ -64,9 +74,9 @@ export async function collectLocatorInventory(
   }
 
   if (opts.testids) {
-    const evaluated = await backend.evaluate(
-      testIdInventoryScript(opts.testIdAttribute ?? DEFAULT_TEST_ID_ATTRIBUTE),
-    );
+    const attribute = opts.testIdAttribute ?? DEFAULT_TEST_ID_ATTRIBUTE;
+    out.testIdAttribute = attribute;
+    const evaluated = await backend.evaluate(testIdInventoryScript(attribute));
     if (!evaluated.ok) {
       throw new Error(
         `testid inventory failed: ${evaluated.stderr || evaluated.stdout}`,

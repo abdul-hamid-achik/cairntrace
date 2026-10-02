@@ -5,8 +5,9 @@
  * percentiles, the optional harvested domain metric, and the baseline deltas.
  */
 (function bootStatsView() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
-  const { h, api, fmt } = Studio;
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
+  const { h, api, fmt, state } = Studio;
 
   /** @type {{ groupBy: string, metric: string, baseline: string, limit: number, includeRuns: boolean }} */
   const form = {
@@ -30,8 +31,32 @@
       ),
     );
 
+    // Offer the label keys run.json files actually carry (Runs view loads
+    // them; refresh here so a first visit is not empty).
+    const keyList = h("datalist", { id: "cohort-label-keys" });
+    const fillKeys = () => {
+      Studio.clear(keyList);
+      for (const entry of state.labels ?? [])
+        keyList.appendChild(
+          h("option", {
+            value: entry.key,
+            text: `${entry.key} (${entry.count} runs: ${entry.values.slice(0, 4).join(", ")}${
+              entry.values.length > 4 ? ", …" : ""
+            })`,
+          }),
+        );
+    };
+    fillKeys();
+    void Studio.api
+      .call("runs:labels")
+      .then((labels) => {
+        state.labels = labels ?? [];
+        fillKeys();
+      })
+      .catch(() => {});
     const groupBy = Studio.input({
       value: form.groupBy,
+      list: "cohort-label-keys",
       style: { width: "140px" },
       onInput: (e) => (form.groupBy = e.target.value),
     });
@@ -65,7 +90,7 @@
       h(
         "div",
         { class: "toolbar" },
-        h("label", { class: "field" }, "group by label key", groupBy),
+        h("label", { class: "field" }, "group by label key", groupBy, keyList),
         h(
           "label",
           { class: "field" },
@@ -170,6 +195,11 @@
       return;
     }
 
+    // Refused runs (environment policy) are not failures: their own column,
+    // shown only when a cohort has any.
+    const showRefused = groups.some(
+      (group) => typeof group.refused === "number" && group.refused > 0,
+    );
     const table = h(
       "table",
       { class: "grid" },
@@ -182,6 +212,7 @@
           h("th", { text: "pass rate" }),
           h("th", { class: "num", text: "failed" }),
           h("th", { class: "num", text: "errored" }),
+          showRefused ? h("th", { class: "num", text: "refused" }) : null,
           h("th", { class: "num", text: "dur p50" }),
           h("th", { class: "num", text: "dur p95" }),
           payload.metricName
@@ -223,6 +254,15 @@
           ),
           h("td", { class: "num", text: String(group.failed ?? 0) }),
           h("td", { class: "num", text: String(group.errored ?? 0) }),
+          showRefused
+            ? h(
+                "td",
+                { class: "num" },
+                group.refused
+                  ? Studio.tag(String(group.refused), "refused")
+                  : "0",
+              )
+            : null,
           h("td", {
             class: "num",
             text: fmt.formatDuration(group.duration?.p50),
@@ -288,7 +328,9 @@
         );
       }
       deltaTable.appendChild(deltaBody);
-      host.appendChild(
+      // append, not appendChild: appendChild takes one node and silently
+      // dropped the table that follows the title.
+      host.append(
         h("div", { class: "section-title" }, "Deltas vs baseline"),
         h(
           "div",
@@ -299,7 +341,7 @@
     }
 
     if (Array.isArray(payload.runs) && payload.runs.length) {
-      host.appendChild(
+      host.append(
         h("div", { class: "section-title" }, `Runs (${payload.runs.length})`),
         h(
           "div",

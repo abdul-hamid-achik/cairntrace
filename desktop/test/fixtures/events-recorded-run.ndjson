@@ -1,0 +1,14 @@
+{"ts":"2026-10-02T06:03:44.062Z","type":"run.started","runId":"2026-10-02T06-03-44-062Z_orders_flow_ec1d04","spec":"orders_flow","invocation":{"id":"2026-10-02T06-03-43-993Z_12486_5f0347","index":3,"total":4,"dir":"_invocations/2026-10-02T06-03-43-993Z_12486_5f0347"}}
+{"ts":"2026-10-02T06:03:44.067Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"2026-10-02T06:03:44.068Z","type":"phase.changed","phase":"preconditions","item":"seed_orders","budgetMs":120000,"deadline":"2026-10-02T06:05:44.068Z"}
+{"ts":"2026-10-02T06:03:44.068Z","type":"log.opened","kind":"precondition","name":"seed_orders","path":"logs/precondition-01-seed_orders.log"}
+{"ts":"2026-10-02T06:03:44.068Z","type":"precondition.started","name":"seed_orders","timeoutMs":120000,"index":1,"total":1,"logPath":"logs/precondition-01-seed_orders.log"}
+{"ts":"2026-10-02T06:03:44.073Z","type":"precondition.run","name":"seed_orders","exitCode":0,"durationMs":5,"timedOut":false,"output":"seeding orders\n3 rows","logPath":"logs/precondition-01-seed_orders.log"}
+{"ts":"2026-10-02T06:03:44.073Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-02T06:03:44.074Z","type":"step.started","stepId":"open_orders","index":1,"total":1,"kind":"open","label":"open https://demo.example.test/orders"}
+{"ts":"2026-10-02T06:03:44.074Z","type":"artifact.snapshot","stepId":"open_orders","path":"snapshots/001_open_orders.txt"}
+{"ts":"2026-10-02T06:03:44.074Z","type":"step.finished","stepId":"open_orders","durationMs":0,"url":"https://demo.example.test/orders"}
+{"ts":"2026-10-02T06:03:44.075Z","type":"phase.changed","phase":"outcomes"}
+{"ts":"2026-10-02T06:03:44.076Z","type":"outcome.started","outcomeId":"order_saved","kind":"text"}
+{"ts":"2026-10-02T06:03:44.076Z","type":"outcome.failed","outcomeId":"order_saved","durationMs":0}
+{"ts":"2026-10-02T06:03:44.076Z","type":"run.failed","runId":"2026-10-02T06-03-44-062Z_orders_flow_ec1d04","durationMs":14}

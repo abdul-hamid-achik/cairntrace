@@ -1,0 +1,30 @@
+{"ts":"2026-10-02T06:03:43.993Z","type":"invocation.started","invocationId":"2026-10-02T06-03-43-993Z_12486_5f0347","planned":4}
+{"ts":"2026-10-02T06:03:43.994Z","type":"log.opened","kind":"narration","name":"invocation","path":"logs/narration.log"}
+{"ts":"2026-10-02T06:03:43.996Z","type":"phase.changed","phase":"before-hooks","item":"before#1","budgetMs":600000,"deadline":"2026-10-02T06:13:43.996Z"}
+{"ts":"2026-10-02T06:03:43.997Z","type":"log.opened","kind":"hook","name":"before#1","path":"logs/hook-before-01.log"}
+{"ts":"2026-10-02T06:03:43.997Z","type":"hook.started","hook":"before","index":1,"command":"echo warming cache for $CAIRN_ITERATION","logPath":"logs/hook-before-01.log","timeoutMs":600000,"iteration":1}
+{"ts":"2026-10-02T06:03:44.005Z","type":"hook.finished","hook":"before","index":1,"exitCode":0,"durationMs":8,"outputTail":"warming cache for","iteration":1}
+{"ts":"2026-10-02T06:03:44.006Z","type":"phase.changed","phase":"steps","item":"spec 1/4 orders.yml"}
+{"ts":"2026-10-02T06:03:44.009Z","type":"phase.changed","phase":"steps","item":"spec 2/4 list.yml"}
+{"ts":"2026-10-02T06:03:44.041Z","type":"phase.changed","phase":"after-hooks","item":"after#1","budgetMs":600000,"deadline":"2026-10-02T06:13:44.041Z"}
+{"ts":"2026-10-02T06:03:44.041Z","type":"log.opened","kind":"hook","name":"after#1","path":"logs/hook-after-01-2026-10-02T06-03-44-011Z_orders_list_f26493.log"}
+{"ts":"2026-10-02T06:03:44.041Z","type":"hook.started","hook":"after","index":1,"command":"echo collecting metrics for $CAIRN_RUN_ID; exit 3","logPath":"logs/hook-after-01-2026-10-02T06-03-44-011Z_orders_list_f26493.log","timeoutMs":600000,"runId":"2026-10-02T06-03-44-011Z_orders_list_f26493","iteration":1}
+{"ts":"2026-10-02T06:03:44.043Z","type":"phase.changed","phase":"after-hooks","item":"after#1","budgetMs":600000,"deadline":"2026-10-02T06:13:44.043Z"}
+{"ts":"2026-10-02T06:03:44.043Z","type":"log.opened","kind":"hook","name":"after#1","path":"logs/hook-after-01-2026-10-02T06-03-44-012Z_orders_flow_01999e.log"}
+{"ts":"2026-10-02T06:03:44.043Z","type":"hook.started","hook":"after","index":1,"command":"echo collecting metrics for $CAIRN_RUN_ID; exit 3","logPath":"logs/hook-after-01-2026-10-02T06-03-44-012Z_orders_flow_01999e.log","timeoutMs":600000,"runId":"2026-10-02T06-03-44-012Z_orders_flow_01999e","iteration":1}
+{"ts":"2026-10-02T06:03:44.047Z","type":"hook.finished","hook":"after","index":1,"exitCode":3,"durationMs":6,"outputTail":"collecting metrics for 2026-10-02T06-03-44-011Z_orders_list_f26493","runId":"2026-10-02T06-03-44-011Z_orders_list_f26493","iteration":1}
+{"ts":"2026-10-02T06:03:44.047Z","type":"hook.finished","hook":"after","index":1,"exitCode":3,"durationMs":4,"outputTail":"collecting metrics for 2026-10-02T06-03-44-012Z_orders_flow_01999e","runId":"2026-10-02T06-03-44-012Z_orders_flow_01999e","iteration":1}
+{"ts":"2026-10-02T06:03:44.050Z","type":"phase.changed","phase":"before-hooks","item":"before#1","budgetMs":600000,"deadline":"2026-10-02T06:13:44.050Z"}
+{"ts":"2026-10-02T06:03:44.050Z","type":"hook.started","hook":"before","index":1,"command":"echo warming cache for $CAIRN_ITERATION","logPath":"logs/hook-before-01.log","timeoutMs":600000,"iteration":2}
+{"ts":"2026-10-02T06:03:44.059Z","type":"hook.finished","hook":"before","index":1,"exitCode":0,"durationMs":6,"outputTail":"warming cache for","iteration":2}
+{"ts":"2026-10-02T06:03:44.060Z","type":"phase.changed","phase":"steps","item":"spec 3/4 orders.yml"}
+{"ts":"2026-10-02T06:03:44.060Z","type":"phase.changed","phase":"steps","item":"spec 4/4 list.yml"}
+{"ts":"2026-10-02T06:03:44.097Z","type":"phase.changed","phase":"after-hooks","item":"after#1","budgetMs":600000,"deadline":"2026-10-02T06:13:44.097Z"}
+{"ts":"2026-10-02T06:03:44.097Z","type":"log.opened","kind":"hook","name":"after#1","path":"logs/hook-after-01-2026-10-02T06-03-44-062Z_orders_flow_ec1d04.log"}
+{"ts":"2026-10-02T06:03:44.097Z","type":"hook.started","hook":"after","index":1,"command":"echo collecting metrics for $CAIRN_RUN_ID; exit 3","logPath":"logs/hook-after-01-2026-10-02T06-03-44-062Z_orders_flow_ec1d04.log","timeoutMs":600000,"runId":"2026-10-02T06-03-44-062Z_orders_flow_ec1d04","iteration":2}
+{"ts":"2026-10-02T06:03:44.098Z","type":"phase.changed","phase":"after-hooks","item":"after#1","budgetMs":600000,"deadline":"2026-10-02T06:13:44.098Z"}
+{"ts":"2026-10-02T06:03:44.098Z","type":"log.opened","kind":"hook","name":"after#1","path":"logs/hook-after-01-2026-10-02T06-03-44-062Z_orders_list_5daa0b.log"}
+{"ts":"2026-10-02T06:03:44.098Z","type":"hook.started","hook":"after","index":1,"command":"echo collecting metrics for $CAIRN_RUN_ID; exit 3","logPath":"logs/hook-after-01-2026-10-02T06-03-44-062Z_orders_list_5daa0b.log","timeoutMs":600000,"runId":"2026-10-02T06-03-44-062Z_orders_list_5daa0b","iteration":2}
+{"ts":"2026-10-02T06:03:44.101Z","type":"hook.finished","hook":"after","index":1,"exitCode":3,"durationMs":4,"outputTail":"collecting metrics for 2026-10-02T06-03-44-062Z_orders_flow_ec1d04","runId":"2026-10-02T06-03-44-062Z_orders_flow_ec1d04","iteration":2}
+{"ts":"2026-10-02T06:03:44.102Z","type":"hook.finished","hook":"after","index":1,"exitCode":3,"durationMs":4,"outputTail":"collecting metrics for 2026-10-02T06-03-44-062Z_orders_list_5daa0b","runId":"2026-10-02T06-03-44-062Z_orders_list_5daa0b","iteration":2}
+{"ts":"2026-10-02T06:03:44.104Z","type":"invocation.finished","invocationId":"2026-10-02T06-03-43-993Z_12486_5f0347","status":"failed"}

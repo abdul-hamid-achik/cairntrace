@@ -83,14 +83,54 @@ export type DiscoverySuggestResult = z.infer<
 >;
 
 /** cairn_discover_export: the written spec path + verification result. */
+/** What a convention export did (`report` on cairn_discover_export). */
+const ExportConventionReportSchema = z
+  .object({
+    liftedVars: z.array(
+      z
+        .object({
+          where: z.string(),
+          var: z.string(),
+          value: z.string().optional(),
+        })
+        .strict(),
+    ),
+    reusedActions: z.array(
+      z
+        .object({
+          action: z.string(),
+          file: z.string().optional(),
+          source: z.enum(["setup", "recorded"]),
+          steps: z.tuple([z.number().int(), z.number().int()]).optional(),
+          vars: z.record(z.string(), z.string()).optional(),
+          confidence: z.number().min(0).max(1),
+          applied: z.boolean(),
+          reason: z.string().optional(),
+        })
+        .strict(),
+    ),
+    secretsPlaceholdered: z.array(
+      z.object({ where: z.string(), placeholder: z.string() }).strict(),
+    ),
+    warnings: z.array(z.string()),
+  })
+  .strict();
+
 export const DiscoveryExportResultSchema = z
   .object({
     path: z.string(),
+    /** The spec `name:` written. */
+    name: z.string().optional(),
     verifyOk: z.boolean(),
     verifyErrors: z.array(z.string()).optional(),
     warnings: z.array(z.string()).optional(),
     stepCount: z.number().int().nonnegative(),
     skippedFailed: z.number().int().nonnegative(),
+    /** Written inside the drafts dir (or a `_` folder): `cairn run <dir>` skips it. */
+    draft: z.boolean().optional(),
+    /** Convention exports: lifted vars, reused actions, placeholdered secrets. */
+    report: ExportConventionReportSchema.optional(),
+    nextActions: z.array(z.string()).optional(),
   })
   .passthrough();
 export type DiscoveryExportResult = z.infer<typeof DiscoveryExportResultSchema>;

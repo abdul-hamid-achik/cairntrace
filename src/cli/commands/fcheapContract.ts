@@ -188,9 +188,19 @@ const ArtifactRefV1Schema = z
         entrypoint: z.literal(CAIRNTRACE_PUBLISH_ENTRYPOINT),
       })
       .strict(),
+    /** Console convenience link (cloud refs only); validated below. */
+    web_url: z.string().min(1).max(2048).optional(),
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.web_url !== undefined && !isStableHttpsUrl(value.web_url)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["web_url"],
+        message:
+          "must be a stable https URL without credentials, query or fragment",
+      });
+    }
     if (
       value.uri !==
       `fcheap://cloud/vaults/private/artifacts/${value.artifact_id}`
@@ -214,6 +224,30 @@ const ArtifactRefV1Schema = z
       });
     }
   });
+
+/**
+ * file.cheap's `stableHTTPPattern` restricted to https: a host, optional
+ * port and a plain path — no userinfo, query, fragment or encoded oddities a
+ * signed URL would need.
+ */
+const STABLE_HTTPS_URL_RE =
+  /^https:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:\/[A-Za-z0-9._~!$&'()*+,;=:@/-]*)?$/;
+
+export function isStableHttpsUrl(value: string): boolean {
+  if (!STABLE_HTTPS_URL_RE.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "https:" &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.search &&
+      !parsed.hash
+    );
+  } catch {
+    return false;
+  }
+}
 
 const PublishOutputSchema = z
   .object({
@@ -255,6 +289,38 @@ export interface FcheapSaveResult {
   autoCompressionRequested?: boolean;
   autoCompressed?: boolean;
   failed?: Array<{ id: string; stage: string; error: string }>;
+  /**
+   * Save-time secret-scanner findings (`custom.secrets_found`); the scanner
+   * reports counts and rule names, never values.
+   */
+  secretsFound?: number;
+  /** Rule names that matched (`custom.secrets_rules`, comma separated). */
+  secretsRules?: string[];
+}
+
+/** Read the secret-scanner fields file.cheap stores in `custom`. */
+export function secretScanOf(custom: Record<string, string> | undefined): {
+  secretsFound?: number;
+  secretsRules?: string[];
+} {
+  const raw = custom?.secrets_found?.trim();
+  if (raw === undefined || raw === "") return {};
+  const count = /^\d+$/.test(raw)
+    ? Number(raw)
+    : raw === "true"
+      ? 1
+      : raw === "false"
+        ? 0
+        : undefined;
+  if (count === undefined) return {};
+  const rules = (custom?.secrets_rules ?? "")
+    .split(/[,\s]+/)
+    .map((rule) => rule.trim())
+    .filter((rule) => /^[A-Za-z0-9._:-]{1,80}$/.test(rule));
+  return {
+    secretsFound: count,
+    ...(rules.length > 0 ? { secretsRules: rules } : {}),
+  };
 }
 
 export interface FcheapListItem {
@@ -408,6 +474,7 @@ export function parseFcheapSaveOutput(stdout: string): FcheapSaveResult {
       stage: failure.stage,
       error: failure.error,
     })),
+    ...secretScanOf(output.custom),
   };
 }
 

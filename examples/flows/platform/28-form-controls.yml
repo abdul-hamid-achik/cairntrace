@@ -36,13 +36,13 @@ steps:
       text: Office supplies
       timeoutMs: 5000
   - id: pick_electronics
-    # Chrome's a11y tree exposes the listbox children as buttons (the explicit
-    # role="option" on <button> is not honored), so the semantic locator uses
-    # role: button here.
+    # The listbox children are <button role="option">. agent-browser's
+    # snapshot reports them as buttons while Playwright honors the explicit
+    # role="option", so no single `by: role` locator works on both backends;
+    # the option's data-value is stable and backend-neutral.
     click:
-      by: role
-      role: button
-      name: Electronics
+      by: selector
+      selector: 'button[role="option"][data-value="electronics"]'
   - id: wait_picked_echo
     wait:
       text: "Picked category: Electronics"

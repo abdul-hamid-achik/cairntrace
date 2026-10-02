@@ -13,3 +13,5 @@ export * from "./investigate.v1";
 export * from "./audit.v1";
 export * from "./stash.v1";
 export * from "./brief.v1";
+export * from "./events.v1";
+export * from "./runInvocation.v1";

@@ -83,6 +83,31 @@ one-shot, the session is stateful MCP).
 
 Sessions idle-expire after 5 minutes. Cap is 8, separate from discovery.
 
+### Decisions journal and draft copy
+
+Every accompany session is journaled like a discovery session, at
+`<artifactRoot>/_sessions/<id>/` with `kind: accompany` (Cairntrace Studio
+shows it; `cairn discover sessions` lists it):
+
+- each `cairn_accompany_choose` is an `action.performed` event
+  (`action: choose`, the locator, `ok` once the step passed with it);
+- an accepted choice is a `step.recorded` event carrying the replacement
+  step and where it is declared (the spec, or an imported action);
+- accepted replacements of the spec's own steps are applied to a **draft
+  copy** — `draft.spec.yml` in the journal, and `draftTo` when you pass
+  one (for example `flows/_drafts/login.yml`) — with authored values and
+  placeholders intact (`?token=${vars.t}`, `Bearer ${env.API_TOKEN}`); only
+  a known secret value is replaced with `[redacted]`. A snapshot `@ref`
+  choice is written as role + accessible name, never the ephemeral ref.
+
+The source spec is never written, and neither is an imported action file:
+a replacement inside an action stays a suggestion in the journal. A
+`draftTo` that names the source under another path — a symlink, a hard
+link, or a different letter case on a case-insensitive volume — is refused
+like the source path itself.
+`cairn_accompany_status` returns the decisions and the draft path. Review
+the draft's diff, run it, and promote it like any other draft.
+
 Outcomes still run through `OutcomeEvaluator`. A journey that needed
 help and still misses the contract is exit 1, not a pass.
 

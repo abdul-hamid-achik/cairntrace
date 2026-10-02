@@ -11,7 +11,7 @@ import {
   parseClipLabel,
   type ClipLabel,
 } from "../../core/clip/vidtraceClip";
-import { stashDirectory } from "./stash";
+import { loadStashConfig, stashRunDirectory } from "./stash";
 
 export interface ClipResult {
   runId: string;
@@ -133,19 +133,40 @@ export async function clipCommand(
   // Persist clips manifest for later tooling.
   await writeClipsManifest(runDir, result.clips);
 
-  // Optionally stash the run dir (now enriched with clips)
+  // Optionally stash the run dir (now enriched with clips). vidtrace
+  // already stashed the clips themselves (--stash); the run goes through the
+  // evidence gate with the config's stash.include / meta and gets a receipt.
   if (opts.stash) {
-    const stashResult = await stashDirectory(runDir, {
-      tags: [...(opts.tags ?? []), "vidtrace-clip"],
-      tool: "cairntrace",
-      source: sourceVideo,
-    });
+    const stashResult = await stashClipRun(runDir, sourceVideo, opts);
     if (stashResult?.ok && stashResult.stashId) {
       result.stashId = stashResult.stashId;
     }
   }
 
   writeResult(format, result);
+}
+
+/**
+ * `clip --stash` (CLI and MCP): stash the clipped run through the evidence
+ * gate with the project's `stash.include` / `unsafeIncludeRawTraces` /
+ * `meta`, writing a `stash-receipt.json` (action `manual`). No TTL, like
+ * `cairn stash save` without `--ttl`.
+ */
+export async function stashClipRun(
+  runDir: string,
+  sourceVideo: string,
+  opts: { tags?: string[]; config?: string; extraTags?: string[] },
+): ReturnType<typeof stashRunDirectory> {
+  const config = await loadStashConfig(opts.config);
+  return stashRunDirectory(runDir, {
+    action: "manual",
+    tags: [...(opts.tags ?? []), "vidtrace-clip", ...(opts.extraTags ?? [])],
+    tool: "cairntrace",
+    source: sourceVideo,
+    ...(config?.include ? { include: config.include } : {}),
+    ...(config?.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    meta: config?.meta !== false,
+  });
 }
 
 async function writeClipsManifest(

@@ -280,7 +280,7 @@ export async function maybeAutoAnnotate(
  * { specName, contractHash, runId, status, outcomes, failedVerifier }.
  * The contractHash lets codemap consumers invalidate stale green badges when
  * the spec's contract changes. Best-effort: codemap not installed → silently
- * skipped. (CODEMAP-INTEGRATION.md item B.)
+ * skipped.
  * ------------------------------------------------------------------------- */
 
 export interface AutoAnnotateRunResult {

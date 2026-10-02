@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import {
   ContractHashMismatchError,
   MissingTemplateVariableError,
   parseSpec,
+  resolveTemplateString,
   UnresolvedActionError,
 } from "./parseSpec";
 import { computeContractHash } from "../contractHash";
@@ -1177,5 +1178,115 @@ contractHash: sha256:${"0".repeat(64)}
         `contract changed since seal.*cairn spec verify .*tampered\\.yml.* --stamp`,
       ),
     );
+  });
+});
+
+function uploadPaths(steps: unknown[] | undefined): string[] {
+  return (steps ?? []).map(
+    (s) => (s as { upload: { path: string } }).upload.path,
+  );
+}
+
+describe("path placeholders: ${project.root} and ${config.dir}", () => {
+  async function layout(name: string, withConfig: boolean) {
+    const root = join(dir, name);
+    await mkdir(join(root, "flows"), { recursive: true });
+    await mkdir(join(root, "shared", "actions"), { recursive: true });
+    if (withConfig) {
+      await writeFile(
+        join(root, "cairntrace.config.yml"),
+        "version: 1\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\n",
+      );
+    }
+    await writeFile(
+      join(root, "shared", "actions", "attach.yml"),
+      `version: 1
+name: attach_fixture
+steps:
+  - upload: { by: selector, selector: "#file", path: "\${project.root}/fixture.csv" }
+  - upload: { by: selector, selector: "#cfg", path: "\${config.dir}/fixtures/a.csv" }
+`,
+    );
+    const specPath = join(root, "flows", "upload.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: upload_paths
+intent: path placeholders resolve per file
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+imports:
+  - ../shared/actions/attach.yml
+steps:
+  - upload: { by: selector, selector: "#spec", path: "\${project.root}/local.csv" }
+  - upload: { by: selector, selector: "#spec-cfg", path: "\${config.dir}/fixtures/b.csv" }
+  - use: attach_fixture
+`,
+    );
+    return { root, specPath };
+  }
+
+  it("resolves ${project.root} to the directory of the file being parsed (the action's dir inside an action)", async () => {
+    const { root, specPath } = await layout("placeholders-discovered", true);
+    const parsed = await parseSpec(specPath);
+    expect(uploadPaths(parsed.resolved.steps)).toEqual([
+      join(root, "flows", "local.csv"),
+      `${root}/fixtures/b.csv`,
+      join(root, "shared", "actions", "fixture.csv"),
+      `${root}/fixtures/a.csv`,
+    ]);
+    // The imported action's own parse uses its directory too.
+    const action = parsed.actionsByName.get("attach_fixture")!;
+    expect(
+      (action.action.steps[0] as { upload: { path: string } }).upload.path,
+    ).toBe(join(root, "shared", "actions", "fixture.csv"));
+  });
+
+  it("uses an explicit configDir (e.g. --config elsewhere) over discovery", async () => {
+    const { specPath } = await layout("placeholders-explicit", true);
+    const parsed = await parseSpec(specPath, { configDir: "/srv/project" });
+    expect(uploadPaths(parsed.resolved.steps)).toContain(
+      "/srv/project/fixtures/b.csv",
+    );
+    expect(uploadPaths(parsed.resolved.steps)).toContain(
+      "/srv/project/fixtures/a.csv",
+    );
+  });
+
+  it("falls back to cwd for ${config.dir} when no config exists", async () => {
+    const { root, specPath } = await layout("placeholders-no-config", false);
+    const parsed = await parseSpec(specPath, { cwd: join(root, "flows") });
+    expect(uploadPaths(parsed.resolved.steps)).toContain(
+      `${join(root, "flows")}/fixtures/b.csv`,
+    );
+  });
+});
+
+describe("resolveTemplateString", () => {
+  it("resolves vars, env defaults, baseUrl and config.dir in a free-standing string", () => {
+    expect(
+      resolveTemplateString(
+        "${baseUrl}/projects/${vars.projectId}?from=${env.CAIRN_TEST_UNSET_X:-${config.dir}}",
+        {
+          vars: { projectId: 42 },
+          baseUrl: "http://localhost:8080",
+          configDir: "/repo",
+          env: {},
+        },
+      ),
+    ).toBe("http://localhost:8080/projects/42?from=/repo");
+  });
+
+  it("throws MissingTemplateVariableError naming the label", () => {
+    expect(() =>
+      resolveTemplateString("/p/${vars.missing}", { label: "discover URL" }),
+    ).toThrow(/missing vars\.missing while parsing discover URL/);
+  });
+
+  it("returns placeholder-free strings untouched", () => {
+    expect(resolveTemplateString("/plain/path")).toBe("/plain/path");
   });
 });

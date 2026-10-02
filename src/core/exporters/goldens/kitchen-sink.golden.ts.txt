@@ -6,8 +6,8 @@
 import { expect, test } from "@playwright/test";
 
 test("golden_kitchen_sink", async ({ page }) => {
-  // Derived from sequential step/outcome budgets; bounded to 30m–4h.
-  test.setTimeout(1800000);
+  // Derived from sequential step/outcome budgets (+10% headroom, at least 1m); 4h ceiling.
+  test.setTimeout(425000);
 
   const requests: Array<{ url: string; method: string; status?: number }> = [];
   page.on("response", (r) => requests.push({ url: r.url(), method: r.request().method(), status: r.status() }));
@@ -18,7 +18,7 @@ test("golden_kitchen_sink", async ({ page }) => {
   // step: wait_text
   await expect.poll(async () => (await page.locator("body").innerText()).replace(/\s+/g, " ").trim().toLowerCase().includes("welcome"), { timeout: 5000 }).toBe(true);
   // when: text:Accept cookies
-  if (await page.evaluate(() => String(document.body?.innerText ?? "").replace(/\s+/g, " ").trim().toLowerCase().includes("accept cookies"))) {
+  if (await page.evaluate((needle) => String(document.body?.innerText ?? "").replace(/\s+/g, " ").trim().toLowerCase().includes(needle), "accept cookies")) {
     // step: maybe_dismiss
     await page.getByRole("button", { name: "Accept" }).first().click();
   }
@@ -44,13 +44,12 @@ test("golden_kitchen_sink", async ({ page }) => {
   // step: scroll_down
   await page.mouse.wheel(0, 300);
   // step: eval_probe
-  const title = await page.evaluate(async ({ source, args }) => {
+  await page.evaluate(async ({ source, args }) => {
     // Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>;
     const execute = new AsyncFunction("args", source);
     return await execute(args);
   }, { source: "return document.title;", args: {} });
-  // Note: later steps that splice ${evals.title…} are not rewritten — wire variables manually if needed.
 
   // --- outcomes (the contract) ---
   // greets: greeting is visible

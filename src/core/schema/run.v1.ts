@@ -11,6 +11,7 @@ import {
   StepStatusSchema,
 } from "./shared";
 import { BriefMissPacketSchema } from "./brief.v1";
+import { SpecRequiresSchema } from "./spec.v1";
 
 /**
  * Wire schema for `cairn run --json` (plan §13c).
@@ -62,9 +63,24 @@ export const ArtifactManifestEntrySchema = z
     bytes: z.number().int().nonnegative(),
     /** Lowercase SHA-256 digest of the artifact bytes. */
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    /**
+     * `redacted` — written by cairn through the run redactor;
+     * `safe` — browser-produced media/files with no credential structure
+     * (screenshots, videos, downloads); `sanitized` — a backend trace the
+     * best-effort trace sanitizer rewrote (stashable when `traces` is
+     * included, never published); `secret-bearing` — raw bytes that may
+     * carry credentials (an unsanitized trace, a raw monitor/heap profile,
+     * text cairn did not write itself). Stash and publish gate on it.
+     */
+    sensitivity: z
+      .enum(["redacted", "secret-bearing", "safe", "sanitized"])
+      .optional(),
   })
   .strict();
 export type ArtifactManifestEntry = z.infer<typeof ArtifactManifestEntrySchema>;
+export type ArtifactSensitivity = NonNullable<
+  ArtifactManifestEntry["sensitivity"]
+>;
 
 export const ArtifactManifestSchema = z
   .object({
@@ -114,6 +130,26 @@ export const RunSpecRefSchema = z
     contractHash: ContractHashSchema.optional(),
   })
   .strict();
+
+/**
+ * Link from a run to the `cairn run` invocation that produced it (the
+ * invocation journal at `<artifactRoot>/<dir>/invocation.json`). Optional and
+ * additive: runs started outside an invocation journal omit it.
+ */
+export const RunInvocationRefSchema = z
+  .object({
+    /** `<ISO timestamp with ':'/'.' → '-'>_<pid>_<6 hex>`. */
+    id: z.string().min(1),
+    /** Position of this run in the invocation's plan (1-based). */
+    index: z.number().int().nonnegative(),
+    /** Number of planned runs in the invocation. */
+    total: z.number().int().nonnegative(),
+    /** Journal directory relative to artifactRoot, e.g. `_invocations/<id>`. */
+    dir: RelativePathSchema,
+  })
+  .strict();
+export type RunInvocationRef = z.infer<typeof RunInvocationRefSchema>;
+
 export const RunFailureSchema = z
   .object({
     /** Execution phase that failed before/around a browser step. */
@@ -124,7 +160,7 @@ export const RunFailureSchema = z
     outcome: z.string().min(1).optional(),
     /** Step id that failed (absent when the failure is outcome-level or a crash). */
     step: z.string().min(1).optional(),
-    /** Canonical one-liner reason the run did not pass. Populated on status=failed|errored. */
+    /** Canonical one-liner reason the run did not pass. Populated on status=failed|errored|refused. */
     message: z.string().min(1),
     /** Actual elapsed time in the failed phase. */
     durationMs: z.number().int().nonnegative().optional(),
@@ -140,6 +176,56 @@ export const RunFailureSchema = z
   })
   .strict();
 export type RunFailure = z.infer<typeof RunFailureSchema>;
+
+/**
+ * Why the environment policy refused a spec (`status: "refused"`). Refused
+ * specs never start services, preconditions or a browser and have no run
+ * directory: the result carries `synthetic: true` and its `runId` / `runDir`
+ * are never-written placeholders.
+ */
+export const RunRefusalCodeSchema = z.enum([
+  /** `requires.env` does not list the resolved environment. */
+  "env-not-listed",
+  /** Listed with `optIn`, but that variable is not `1`/`true`. */
+  "opt-in-missing",
+  /** `requires.mutates: true` where `policy.mutations: deny`. */
+  "mutations-denied",
+  /** `policy.trait: protected` and the spec does not list the environment. */
+  "protected-env",
+]);
+export type RunRefusalCode = z.infer<typeof RunRefusalCodeSchema>;
+
+export const RunRefusalSchema = z
+  .object({
+    /** One-line human reason (also the run summary). */
+    reason: z.string().min(1),
+    /** The resolved environment the spec was refused in. */
+    env: z.string().min(1),
+    /** The spec's `requires:` block as authored (empty object when absent). */
+    requires: SpecRequiresSchema,
+    /** Machine-readable reason. */
+    code: RunRefusalCodeSchema.optional(),
+    /** The environment's `policy:` block, when the config defines one. */
+    policy: z
+      .object({
+        trait: z.enum(["owned", "shared", "protected"]).optional(),
+        mutations: z.enum(["allow", "deny"]).optional(),
+        description: z.string().min(1).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type RunRefusal = z.infer<typeof RunRefusalSchema>;
+
+/** `cairn pin <run>`: retention never prunes a pinned run. */
+export const RunPinSchema = z
+  .object({
+    at: IsoTimestampSchema,
+    reason: z.string().min(1).optional(),
+  })
+  .strict();
+export type RunPin = z.infer<typeof RunPinSchema>;
 
 /**
  * One actionable next step an agent can take after a non-passing run, derived
@@ -166,6 +252,24 @@ export const buildRunNextActions = (
   if (result.status === "passed") return [];
   const rerun = `cairn run ${result.spec.path} --json`;
   const f = result.failure;
+  if (result.status === "refused") {
+    return [
+      {
+        command: `cairn spec verify ${result.spec.path} --json`,
+        reason: `refused by the environment policy: ${f?.message ?? "refused"} — verify lists the environments this spec may run in; rerun with --env <one of them>`,
+        safeToAutoRun: false,
+      },
+    ];
+  }
+  if (f?.phase === "session") {
+    return [
+      {
+        command: "cairn checkpoint list --json",
+        reason: `checkpoint "${f.name ?? "unknown"}" cannot be resumed: ${f.message} — recapture it with \`cairn login ${f.name ?? "<name>"} --url <login-url> --env <env>\`, then rerun`,
+        safeToAutoRun: false,
+      },
+    ];
+  }
   if (f?.phase === "precondition") {
     return [
       {
@@ -224,6 +328,14 @@ export const RunResultSchema = z
     version: z.literal("1"),
     runId: z.string().min(1),
     runDir: AbsolutePathSchema,
+    /**
+     * `true` when cairn never created this run: `runId` and `runDir` are
+     * placeholders that name nothing on disk (a spec the environment policy
+     * refused, or one that errored or was cancelled before its run started).
+     * Do not open them; there is no run directory, artifact or log to read.
+     * Absent on every run that wrote a run directory. Additive.
+     */
+    synthetic: z.literal(true).optional(),
     spec: RunSpecRefSchema,
     environment: z.string().min(1),
     backend: BackendSchema,
@@ -235,7 +347,13 @@ export const RunResultSchema = z
      * benchmark format. Keys/values are plain strings; empty object is omitted.
      */
     labels: z.record(z.string(), z.string()).optional(),
+    /** The `cairn run` invocation this run belongs to, when journaled. */
+    invocation: RunInvocationRefSchema.optional(),
     status: RunStatusSchema,
+    /** Present on `status: "refused"`: what the environment policy refused. */
+    refusal: RunRefusalSchema.optional(),
+    /** Set by `cairn pin`; retention never prunes a pinned run. */
+    pinned: RunPinSchema.optional(),
     /**
      * Canonical one-liner describing the run outcome. Always populated by
      * `cairn run`; agents can surface it directly without opening per-step or
@@ -244,7 +362,7 @@ export const RunResultSchema = z
      */
     summary: z.string().min(1).optional(),
     /**
-     * Structured failure reason, populated on `status=failed|errored`. Holds
+     * Structured failure reason, populated on `status=failed|errored|refused`. Holds
      * the single canonical "why" — the first failed step (with its id + error)
      * or the first failed outcome (with its id) — so a consumer doesn't have
      * to scan steps[]/outcomes[] to synthesize a reason. Absent on `passed`.

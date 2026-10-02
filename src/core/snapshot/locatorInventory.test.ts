@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractRoleInventory, parseTestIdInventory } from "./locatorInventory";
+import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
+import {
+  collectLocatorInventory,
+  extractRoleInventory,
+  parseTestIdInventory,
+} from "./locatorInventory";
 
 describe("locator inventory", () => {
   it("extracts grouped role locators from agent-browser and Playwright snapshots", () => {
@@ -89,5 +94,33 @@ describe("locator inventory", () => {
         textSamples: ["Save"],
       },
     ]);
+  });
+});
+
+describe("collectLocatorInventory testIdAttribute", () => {
+  it("scans the configured attribute and reports it", async () => {
+    const backend = new MockBrowserBackend();
+    backend.enqueueEvalResult([
+      {
+        testId: "row-1",
+        tagName: "tr",
+        text: "Row",
+        selector: '[data-qa="row-1"]',
+      },
+    ]);
+    const inventory = await collectLocatorInventory(backend, {
+      testids: true,
+      testIdAttribute: "data-qa",
+    });
+    expect(backend.lastEvaluatedScript).toContain('const attr = "data-qa"');
+    expect(inventory.testIdAttribute).toBe("data-qa");
+    expect(inventory.testids?.[0]?.selector).toBe('[data-qa="row-1"]');
+  });
+
+  it("omits testIdAttribute when test ids were not collected", async () => {
+    const inventory = await collectLocatorInventory(new MockBrowserBackend(), {
+      roles: true,
+    });
+    expect(inventory.testIdAttribute).toBeUndefined();
   });
 });

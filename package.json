@@ -1,6 +1,6 @@
 {
   "name": "@thelacanians/cairntrace",
-  "version": "2.15.0",
+  "version": "3.0.0",
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
   "license": "MIT",
@@ -14,10 +14,31 @@
   "bin": {
     "cairn": "./bin/cairn"
   },
+  "exports": {
+    "./verifier": {
+      "types": "./src/sdk/verifier.d.ts",
+      "default": "./src/sdk/verifier.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "verifier": [
+        "src/sdk/verifier.d.ts"
+      ]
+    }
+  },
   "files": [
     "bin",
     "src",
+    "src/sdk/verifier.js",
+    "src/sdk/verifier.d.ts",
+    "src/sdk/workbook.js",
+    "src/sdk/workbook.d.ts",
     "!src/**/*.test.ts",
+    "!src/testing/**",
+    "!src/**/__fixtures__/**",
+    "!src/**/goldens/**",
     "AGENTS.md",
     "CLAUDE.md",
     "SECURITY.md",

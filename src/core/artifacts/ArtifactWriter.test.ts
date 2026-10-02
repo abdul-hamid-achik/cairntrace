@@ -51,7 +51,8 @@ describe("ArtifactWriter", () => {
     await writer.appendEvent({
       ts: "2026-01-01T00:00:00.000Z",
       type: "step.started",
-      detail: "secret-value",
+      stepId: "step_1",
+      label: "fill secret-value",
     });
 
     expect(
@@ -72,7 +73,8 @@ describe("ArtifactWriter", () => {
         writer.appendEvent({
           ts: "2026-01-01T00:00:00.000Z",
           type: "step.started",
-          sequence,
+          stepId: `step_${sequence}`,
+          index: sequence + 1,
         }),
       ),
     );
@@ -80,9 +82,9 @@ describe("ArtifactWriter", () => {
     const events = (await readFile(writer.resolve("events.ndjson"), "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as { sequence: number });
-    expect(events.map((event) => event.sequence)).toEqual(
-      Array.from({ length: 100 }, (_, sequence) => sequence),
+      .map((line) => JSON.parse(line) as { index: number });
+    expect(events.map((event) => event.index)).toEqual(
+      Array.from({ length: 100 }, (_, sequence) => sequence + 1),
     );
   });
 
@@ -119,6 +121,49 @@ describe("ArtifactWriter", () => {
       sha256: createHash("sha256")
         .update(new Uint8Array([0, 1, 2]))
         .digest("hex"),
+      // Raw bytes never pass the redactor, so they are never `redacted`.
+      sensitivity: "secret-bearing",
+    });
+    expect(first.artifacts[1]).toMatchObject({
+      path: "z-last.txt",
+      sensitivity: "redacted",
+    });
+  });
+
+  it("keeps marked sensitivities and kinds when a fresh writer re-manifests", async () => {
+    const writer = await tempWriter();
+    await writer.writeText("run.json", "{}\n", "run");
+    const tracePath = await writer.preparePath("traces/x-trace.zip", "trace");
+    await writeFile(tracePath, "zip bytes");
+    const shot = await writer.preparePath("screenshots/01.png", "screenshot");
+    await writeFile(shot, "png");
+    await writer.writeText("services/tmux-web.txt", "pane", "services-tmux");
+    writer.markSensitivity("traces/x-trace.zip", "redacted");
+    await writer.writeManifest();
+
+    const reopened = new ArtifactWriter(writer.runDir);
+    await reopened.writeText("stash-receipt.json", "{}\n", "stash-receipt");
+    const manifest = await reopened.writeManifest();
+    const byPath = Object.fromEntries(
+      manifest.artifacts.map((entry) => [entry.path, entry]),
+    );
+    expect(byPath["traces/x-trace.zip"]).toMatchObject({
+      kind: "trace",
+      sensitivity: "redacted",
+    });
+    expect(byPath["screenshots/01.png"]?.sensitivity).toBe("safe");
+    expect(byPath["services/tmux-web.txt"]?.kind).toBe("services-tmux");
+    expect(byPath["stash-receipt.json"]?.sensitivity).toBe("redacted");
+  });
+
+  it("infers an unmarked trace as secret-bearing", async () => {
+    const writer = await tempWriter();
+    const tracePath = await writer.preparePath("traces/raw.json", "trace");
+    await writeFile(tracePath, "{}");
+    const manifest = await writer.writeManifest();
+    expect(manifest.artifacts[0]).toMatchObject({
+      path: "traces/raw.json",
+      sensitivity: "secret-bearing",
     });
   });
 
@@ -143,6 +188,7 @@ describe("ArtifactWriter", () => {
       await writer.appendEvent({
         ts: "2026-01-01T00:00:00.000Z",
         type: "step.started",
+        stepId: "step_1",
       });
       expect((await stat(eventLog)).mode & 0o777).toBe(0o600);
       await writer.copyStream(

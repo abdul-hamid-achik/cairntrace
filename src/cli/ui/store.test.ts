@@ -232,3 +232,43 @@ describe("TuiStore", () => {
     expect(store.getSnapshot()).toBe(store.getSnapshot());
   });
 });
+
+describe("progress detail", () => {
+  it("shows the latest progress message on a running row only", () => {
+    let state = run([
+      { type: "precondition-start", id: "quiesce" },
+      { type: "precondition-progress", id: "quiesce", message: "3/9" },
+      { type: "outcome-start", id: "tasks" },
+      { type: "outcome-progress", id: "tasks", message: "47/120" },
+      { type: "outcome-progress", id: "tasks", message: "90/120" },
+    ]);
+    expect(state.preconditions[0]).toMatchObject({
+      status: "running",
+      detail: "3/9",
+    });
+    expect(state.outcomes[0]).toMatchObject({
+      status: "running",
+      detail: "90/120",
+    });
+    state = reduceTui(state, {
+      type: "outcome-finish",
+      id: "tasks",
+      status: "passed",
+      expected: "",
+      actual: "",
+    });
+    // Late progress for a settled row (or an unknown row) is ignored.
+    state = reduceTui(state, {
+      type: "outcome-progress",
+      id: "tasks",
+      message: "late",
+    });
+    state = reduceTui(state, {
+      type: "precondition-progress",
+      id: "nope",
+      message: "x",
+    });
+    expect(state.outcomes[0]?.detail).toBeUndefined();
+    expect(state.preconditions).toHaveLength(1);
+  });
+});

@@ -1,0 +1,13 @@
+{"ts":"2026-09-01T10:00:00.000Z","type":"run.started","runId":"2026-09-01T10-00-00-000Z_dashboard_nav_a1b2c3","spec":"dashboard_nav"}
+{"ts":"2026-09-01T10:00:00.050Z","type":"viewport.set","width":1440,"height":900,"ok":true}
+{"ts":"2026-09-01T10:00:00.100Z","type":"step.started","stepId":"open_home"}
+{"ts":"2026-09-01T10:00:00.900Z","type":"artifact.snapshot","stepId":"open_home","path":"snapshots/001_open_home.txt"}
+{"ts":"2026-09-01T10:00:00.950Z","type":"step.finished","stepId":"open_home","durationMs":850}
+{"ts":"2026-09-01T10:00:01.000Z","type":"step.started","stepId":"dismiss_banner"}
+{"ts":"2026-09-01T10:00:01.040Z","type":"step.finished","stepId":"dismiss_banner","durationMs":40,"skipped":true,"when":"text:Accept cookies"}
+{"ts":"2026-09-01T10:00:01.100Z","type":"step.started","stepId":"click_orders"}
+{"ts":"2026-09-01T10:00:01.600Z","type":"artifact.screenshot","stepId":"click_orders","path":"screenshots/003_click_orders.png"}
+{"ts":"2026-09-01T10:00:01.650Z","type":"step.finished","stepId":"click_orders","durationMs":550,"resolved":{"role":"link","name":"Orders","ref":"e12"}}
+{"ts":"2026-09-01T10:00:01.700Z","type":"artifact.request","stepId":"click_orders","path":"requests/orders.json","assign":"orders","status":200}
+{"ts":"2026-09-01T10:00:02.100Z","type":"outcome.passed","outcomeId":"orders_listed"}
+{"ts":"2026-09-01T10:00:02.200Z","type":"run.passed","runId":"2026-09-01T10-00-00-000Z_dashboard_nav_a1b2c3","durationMs":2200}

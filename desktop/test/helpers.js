@@ -107,7 +107,6 @@ function makeRun(runsRoot, runId, overrides = {}) {
         type: "step.finished",
         stepId: "step_1",
         durationMs: 120,
-        status: "passed",
       }),
       "",
     ].join("\n"),
@@ -140,6 +139,18 @@ function makeRun(runsRoot, runId, overrides = {}) {
     }),
   );
   return dir;
+}
+
+/**
+ * Copy an events fixture (test/fixtures/*.ndjson) into a run directory.
+ * @param {string} runDir
+ * @param {string} fixtureName
+ */
+function useEventsFixture(runDir, fixtureName) {
+  fs.copyFileSync(
+    path.join(__dirname, "fixtures", fixtureName),
+    path.join(runDir, "events.ndjson"),
+  );
 }
 
 /**
@@ -221,4 +232,11 @@ function cleanup() {
   }
 }
 
-module.exports = { tempDir, write, makeRun, makeProject, cleanup };
+module.exports = {
+  tempDir,
+  write,
+  makeRun,
+  makeProject,
+  useEventsFixture,
+  cleanup,
+};

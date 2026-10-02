@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml, parseDocument, Scalar, visit } from "yaml";
 import { computeContractHash } from "../contractHash";
 import {
@@ -19,6 +19,7 @@ import {
   isRelativeUrl,
   joinUrl,
 } from "../runner/url";
+import { findConfigFile } from "../config/loader";
 
 export interface ParseResult {
   /** Parsed spec as written on disk (with `use:` placeholders, no inlining). */
@@ -54,6 +55,13 @@ export interface LoadedAction {
   rawSource: string;
   /** `vars:` defaults declared on the action file. */
   actionDefaults: Record<string, string | number | boolean>;
+  /** Actions this action imports (its own `imports:`), by name. */
+  scope?: Map<string, LoadedAction>;
+  /**
+   * Resolved steps one spec-level `use:` of this action expands to (nested
+   * actions inlined). Set when the spec uses it directly.
+   */
+  expandedStepCount?: number;
 }
 
 export interface StepOrigin {
@@ -86,6 +94,15 @@ export interface ParseOptions {
    * never land in generated files and unresolved env stays late-bound.
    */
   secretRef?: (name: string) => string;
+  /**
+   * Directory of the resolved cairntrace.config.yml — the value of
+   * `${config.dir}`. Pass it when the config was chosen explicitly
+   * (`--config`). When omitted, and only if a file actually uses the
+   * placeholder, the config is discovered by walking up from the spec's
+   * directory (the same discovery `loadConfig` does); without any config it
+   * falls back to `cwd`.
+   */
+  configDir?: string;
 }
 
 export interface RuntimeTemplateContext {
@@ -93,12 +110,16 @@ export interface RuntimeTemplateContext {
   runToken?: string;
 }
 
+const CONFIG_DIR_PLACEHOLDER = "${config.dir}";
+
 /**
  * Load and validate a behavioral spec from disk.
  * Performs:
  *   1. YAML parse to an AST
- *   2. ${env.X} / ${vars.X} / ${secrets.X} / ${project.root} substitution into
- *      scalar nodes (so resolved values can never break the YAML)
+ *   2. ${env.X} / ${vars.X} / ${secrets.X} / ${project.root} / ${config.dir}
+ *      substitution into scalar nodes (so resolved values can never break the
+ *      YAML). `${project.root}` is the directory of the file being parsed —
+ *      inside an imported action it is the ACTION's directory.
  *   3. zod validation against SpecSchema
  *   4. recursive import resolution (only top-level imports for v0)
  *   5. inline `use:` steps from imported actions
@@ -115,6 +136,32 @@ export async function parseSpec(
   const env = opts.env ?? (process.env as Record<string, string | undefined>);
   const baseUrl = opts.baseUrl;
 
+  // `${config.dir}` costs a directory walk, so resolve it lazily and only
+  // once, for the first file that actually references it.
+  let discoveredConfigDir: Promise<string> | undefined;
+  const configDirFor = (source: string): Promise<string | undefined> => {
+    if (!source.includes(CONFIG_DIR_PLACEHOLDER)) {
+      return Promise.resolve(undefined);
+    }
+    if (opts.configDir !== undefined) return Promise.resolve(opts.configDir);
+    discoveredConfigDir ??= findConfigFile(dirname(absPath)).then((found) =>
+      found ? dirname(found) : (opts.cwd ?? process.cwd()),
+    );
+    return discoveredConfigDir;
+  };
+  const shared = (
+    source: string,
+    vars: Record<string, string | number | boolean>,
+  ): Promise<SharedSubstitution> =>
+    configDirFor(source).then((configDir) => ({
+      env,
+      vars,
+      baseUrl,
+      configDir,
+      runtime: opts.runtime,
+      ...(opts.secretRef ? { secretRef: opts.secretRef } : {}),
+    }));
+
   const rawSource = await readFile(absPath, "utf8");
   const rawDocument = parseYaml(rawSource);
   assertBatchSelectorLocators(rawDocument, absPath);
@@ -123,76 +170,142 @@ export async function parseSpec(
   const raw = loadAndParseSource(
     rawSource,
     absPath,
-    env,
-    vars,
-    baseUrl,
-    opts.runtime,
-    opts.secretRef,
+    await shared(rawSource, vars),
   );
   const spec = SpecSchema.parse(raw);
 
+  // A11: actions load recursively — an action's own `imports:` resolve
+  // against the action file. Every loaded action lands in actionsByName
+  // (heal and step-file scopes find nested ones by path); a name used by two
+  // different files is an error, and an import cycle is a parse error.
   const actionsByName = new Map<string, LoadedAction>();
-  for (const importPath of spec.imports ?? []) {
-    const resolvedImport = resolveImportPath(importPath, dirname(absPath));
-    const actionSource = await readFile(resolvedImport, "utf8");
+  const loadedByPath = new Map<string, LoadedAction>();
+  const loadAction = async (
+    actionPath: string,
+    chain: readonly string[],
+  ): Promise<LoadedAction> => {
+    if (chain.includes(actionPath)) {
+      throw new ActionImportCycleError([...chain, actionPath]);
+    }
+    const cached = loadedByPath.get(actionPath);
+    if (cached) return cached;
+    const actionSource = await readFile(actionPath, "utf8");
     const actionDocument = parseYaml(actionSource);
     const actionDefaults = extractPlainVars(actionDocument);
     const importRaw = loadAndParseSource(
       actionSource,
-      resolvedImport,
-      env,
-      { ...actionDefaults, ...vars },
-      baseUrl,
-      opts.runtime,
-      opts.secretRef,
+      actionPath,
+      await shared(actionSource, { ...actionDefaults, ...vars }),
     );
-    assertBatchSelectorLocators(importRaw, resolvedImport);
+    assertBatchSelectorLocators(importRaw, actionPath);
     const action = ReusableActionSchema.parse(importRaw);
-    actionsByName.set(action.name, {
+    const clash = actionsByName.get(action.name);
+    if (clash && clash.path !== actionPath) {
+      throw new DuplicateActionNameError(action.name, clash.path, actionPath);
+    }
+    const loaded: LoadedAction = {
       action,
-      path: resolvedImport,
+      path: actionPath,
       rawSource: actionSource,
       actionDefaults,
-    });
+      scope: new Map(),
+    };
+    loadedByPath.set(actionPath, loaded);
+    actionsByName.set(action.name, loaded);
+    for (const importPath of action.imports ?? []) {
+      const nested = await loadAction(
+        resolveImportPath(importPath, dirname(actionPath)),
+        [...chain, actionPath],
+      );
+      loaded.scope!.set(nested.action.name, nested);
+    }
+    return loaded;
+  };
+  const specScope = new Map<string, LoadedAction>();
+  for (const importPath of spec.imports ?? []) {
+    const loaded = await loadAction(
+      resolveImportPath(importPath, dirname(absPath)),
+      [absPath],
+    );
+    specScope.set(loaded.action.name, loaded);
   }
 
-  // Walk spec.steps in order; expand `use:` while tracking origins so heal
-  // can map back from `resolved.steps[N]` to (file, file-step-idx).
+  // Walk spec.steps in order; expand `use:` (recursively, through nested
+  // actions) while tracking origins so heal can map back from
+  // `resolved.steps[N]` to (file, file-step-idx) — the innermost action
+  // file for a step that came from a nested action.
   const origins: StepOrigin[] = [];
-  const specSteps = spec.steps ?? [];
-  for (let i = 0; i < specSteps.length; i++) {
-    const step = specSteps[i]!;
-    if ("use" in step) {
+  const expandSteps = async (
+    steps: readonly Step[],
+    filePath: string,
+    /** Lexical scopes, innermost first: the file's imports, then its importer's. */
+    scopes: ReadonlyArray<ReadonlyMap<string, LoadedAction>>,
+    /** What the enclosing action saw (nested actions inherit it). */
+    callScope: Record<string, string | number | boolean>,
+    /** Action files being expanded (use-cycle detection). */
+    stack: readonly string[],
+  ): Promise<void> => {
+    for (let j = 0; j < steps.length; j++) {
+      const step = steps[j]!;
+      if (!("use" in step)) {
+        origins.push({ step, filePath, fileStepIdx: j });
+        continue;
+      }
       const useStep = step as UseStep;
       const actionName = useActionName(useStep);
-      const loaded = actionsByName.get(actionName);
+      const loaded = scopes
+        .map((scope) => scope.get(actionName))
+        .find((candidate) => candidate !== undefined);
       if (!loaded) {
-        throw new UnresolvedActionError(actionName, spec.imports ?? []);
+        throw new UnresolvedActionError(
+          actionName,
+          filePath === absPath
+            ? (spec.imports ?? [])
+            : [...new Set(scopes.flatMap((scope) => [...scope.keys()]))],
+        );
       }
-      const callVars = useActionVars(useStep) ?? {};
+      if (stack.includes(loaded.path)) {
+        throw new ActionImportCycleError([...stack, loaded.path], "use");
+      }
+      // Precedence: the call's own `with:` values, then — only for names
+      // this action does not default — what its caller saw, then the spec
+      // vars, then the action's defaults. An enclosing call never silently
+      // overrides a nested action's own default; pass it explicitly
+      // (`use: { action, vars: { name: ${vars.name} } }`) to do that.
+      const inherited = Object.fromEntries(
+        Object.entries(callScope).filter(
+          ([key]) => !Object.hasOwn(loaded.actionDefaults, key),
+        ),
+      );
+      const callVars = { ...inherited, ...useActionVars(useStep) };
+      const effective = {
+        ...loaded.actionDefaults,
+        ...vars,
+        ...callVars,
+      };
       const expanded = ReusableActionSchema.parse(
         loadAndParseSource(
           loaded.rawSource,
           loaded.path,
-          env,
-          { ...loaded.actionDefaults, ...vars, ...callVars },
-          baseUrl,
-          opts.runtime,
-          opts.secretRef,
+          await shared(loaded.rawSource, effective),
         ),
       );
       assertBatchSelectorLocators(expanded, loaded.path);
-      for (let j = 0; j < expanded.steps.length; j++) {
-        origins.push({
-          step: expanded.steps[j]!,
-          filePath: loaded.path,
-          fileStepIdx: j,
-        });
+      const before = origins.length;
+      await expandSteps(
+        expanded.steps,
+        loaded.path,
+        [loaded.scope ?? new Map(), ...scopes],
+        // Nested actions inherit what this action saw (its defaults too).
+        effective,
+        [...stack, loaded.path],
+      );
+      if (filePath === absPath) {
+        loaded.expandedStepCount = origins.length - before;
       }
-    } else {
-      origins.push({ step, filePath: absPath, fileStepIdx: i });
     }
-  }
+  };
+  await expandSteps(spec.steps ?? [], absPath, [specScope], {}, []);
 
   // Prepend baseUrl to relative-path `open:` steps so specs can be portable
   // across environments without rewriting URLs by hand. This only affects
@@ -250,25 +363,73 @@ export async function parseSpec(
 export function parseReusableAction(
   rawSource: string,
   absPath: string,
+  /** Value of `${config.dir}`; the process cwd when omitted. */
   opts: {
     vars?: Record<string, string | number | boolean>;
     env?: Record<string, string | undefined>;
     baseUrl?: string;
     runtime?: RuntimeTemplateContext;
     secretRef?: (name: string) => string;
+    configDir?: string;
   } = {},
 ): ReusableAction {
-  const importRaw = loadAndParseSource(
-    rawSource,
-    absPath,
-    opts.env ?? {},
-    opts.vars ?? {},
-    opts.baseUrl,
-    opts.runtime,
-    opts.secretRef,
-  );
+  const importRaw = loadAndParseSource(rawSource, absPath, {
+    env: opts.env ?? {},
+    vars: opts.vars ?? {},
+    baseUrl: opts.baseUrl,
+    configDir: opts.configDir,
+    runtime: opts.runtime,
+    ...(opts.secretRef ? { secretRef: opts.secretRef } : {}),
+  });
   assertBatchSelectorLocators(importRaw, absPath);
   return ReusableActionSchema.parse(importRaw);
+}
+
+/**
+ * Resolve `${...}` placeholders in a single free-standing string (not a spec
+ * file) — e.g. a URL handed to `cairn discover` / `cairn_discover_open`.
+ * Same rules as spec parsing: `${vars.X}` must exist (else
+ * MissingTemplateVariableError), `${env.X:-default}`, `${baseUrl}`,
+ * `${config.dir}`; `${project.root}` is the given `cwd`.
+ *
+ * The result holds real env/secret values, so it is for navigation only.
+ * Callers that display or persist the URL keep the template (or redact the
+ * values reported through `onEnvValue`).
+ */
+export function resolveTemplateString(
+  text: string,
+  /** Label used in error messages (default "input"). */
+  /**
+   * Called for every `${env.X}` / `${secrets.X}` that resolved to a value
+   * from the environment (not to its `:-default`), with the namespace and
+   * name, so callers can redact secret values from anything they display.
+   */
+  opts: {
+    vars?: Record<string, string | number | boolean>;
+    env?: Record<string, string | undefined>;
+    baseUrl?: string;
+    configDir?: string;
+    cwd?: string;
+    label?: string;
+    onEnvValue?: (ref: {
+      ns: "env" | "secrets";
+      name: string;
+      value: string;
+    }) => void;
+  } = {},
+): string {
+  if (!text.includes("${")) return text;
+  const cwd = opts.cwd ?? process.cwd();
+  return substituteString(text, {
+    env: opts.env ?? (process.env as Record<string, string | undefined>),
+    vars: opts.vars ?? {},
+    baseUrl: opts.baseUrl,
+    configDir: opts.configDir ?? cwd,
+    runtime: undefined,
+    projectRoot: cwd,
+    filePath: opts.label ?? "input",
+    ...(opts.onEnvValue ? { onEnvValue: opts.onEnvValue } : {}),
+  });
 }
 
 export class ContractHashMismatchError extends Error {
@@ -319,6 +480,38 @@ export class UnresolvedActionError extends Error {
   }
 }
 
+/**
+ * Reusable actions import (or `use:`) each other in a cycle. `chain` is
+ * the files in order, ending with the one that closes the cycle.
+ */
+export class ActionImportCycleError extends Error {
+  constructor(
+    public readonly chain: readonly string[],
+    public readonly via: "imports" | "use" = "imports",
+  ) {
+    super(
+      `action ${via === "use" ? "use" : "import"} cycle: ${chain
+        .map((path) => basename(path))
+        .join(" → ")} (${chain.at(-1)})`,
+    );
+    this.name = "ActionImportCycleError";
+  }
+}
+
+/** Two different action files declare the same `name:`. */
+export class DuplicateActionNameError extends Error {
+  constructor(
+    public readonly actionName: string,
+    public readonly firstPath: string,
+    public readonly secondPath: string,
+  ) {
+    super(
+      `action name "${actionName}" is declared by two files: ${firstPath} and ${secondPath}; rename one`,
+    );
+    this.name = "DuplicateActionNameError";
+  }
+}
+
 export class MissingTemplateVariableError extends Error {
   constructor(
     public readonly variable: string,
@@ -346,14 +539,35 @@ function extractPlainVars(
   return out;
 }
 
+/** Substitution inputs shared by every file of one parse. */
+interface SharedSubstitution {
+  env: Record<string, string | undefined>;
+  vars: Record<string, string | number | boolean>;
+  baseUrl: string | undefined;
+  /** `${config.dir}`; undefined only when the file never references it. */
+  configDir: string | undefined;
+  runtime: RuntimeTemplateContext | undefined;
+  secretRef?: (name: string) => string;
+}
+
+/** Per-file substitution context: shared inputs + the file's own location. */
+interface SubstitutionContext extends SharedSubstitution {
+  /** `${project.root}` — the directory of the file being parsed. */
+  projectRoot: string;
+  /** File named in MissingTemplateVariableError. */
+  filePath: string;
+  /** See resolveTemplateString: reports env/secret values as they resolve. */
+  onEnvValue?: (ref: {
+    ns: "env" | "secrets";
+    name: string;
+    value: string;
+  }) => void;
+}
+
 function loadAndParseSource(
   text: string,
   absPath: string,
-  env: Record<string, string | undefined>,
-  vars: Record<string, string | number | boolean>,
-  baseUrl: string | undefined,
-  runtime: RuntimeTemplateContext | undefined,
-  secretRef?: (name: string) => string,
+  shared: SharedSubstitution,
 ): unknown {
   // Parse to an AST first, then substitute into scalar *nodes*. Because the
   // YAML library owns serialization, a resolved value containing YAML
@@ -363,21 +577,16 @@ function loadAndParseSource(
   // quoted or embedded placeholder stays a string.
   const doc = parseDocument(text);
   if (doc.errors.length > 0) throw doc.errors[0];
-  const projectRoot = dirname(absPath);
+  const ctx: SubstitutionContext = {
+    ...shared,
+    projectRoot: dirname(absPath),
+    filePath: absPath,
+  };
   visit(doc, {
     Scalar(key, node) {
       if (typeof node.value !== "string" || !node.value.includes("${")) return;
       const original = node.value;
-      const resolved = substituteString(
-        original,
-        env,
-        vars,
-        projectRoot,
-        baseUrl,
-        absPath,
-        runtime,
-        secretRef,
-      );
+      const resolved = substituteString(original, ctx);
       // Only an unquoted whole-placeholder in a *value* position re-infers its
       // YAML type (so `port: ${env.PORT}` → number); map keys and quoted or
       // embedded scalars stay strings (so `port: "${env.PORT}"` → string).
@@ -471,16 +680,7 @@ function resolveImportPath(p: string, baseDir: string): string {
  * expressions ARE resolved recursively, so nested placeholders like
  * `${env.X:-prefix-${run.token}}` and defaults containing any character work.
  */
-function substituteString(
-  text: string,
-  env: Record<string, string | undefined>,
-  vars: Record<string, string | number | boolean>,
-  projectRoot: string,
-  baseUrl: string | undefined,
-  filePath: string,
-  runtime: RuntimeTemplateContext | undefined,
-  secretRef?: (name: string) => string,
-): string {
+function substituteString(text: string, ctx: SubstitutionContext): string {
   let result = "";
   let i = 0;
   while (i < text.length) {
@@ -497,16 +697,7 @@ function substituteString(
       break;
     }
     const body = text.slice(start + 2, end);
-    result += resolvePlaceholder(
-      body,
-      env,
-      vars,
-      projectRoot,
-      baseUrl,
-      filePath,
-      runtime,
-      secretRef,
-    );
+    result += resolvePlaceholder(body, ctx);
     i = end + 1;
   }
   return result;
@@ -541,18 +732,13 @@ function findPlaceholderEnd(text: string, from: number): number {
  * Resolve a single placeholder body (the text between `${` and its `}`) to its
  * raw string value. Unknown namespaces are returned unchanged.
  */
-function resolvePlaceholder(
-  body: string,
-  env: Record<string, string | undefined>,
-  vars: Record<string, string | number | boolean>,
-  projectRoot: string,
-  baseUrl: string | undefined,
-  filePath: string,
-  runtime: RuntimeTemplateContext | undefined,
-  secretRef?: (name: string) => string,
-): string {
-  if (body === "project.root") return projectRoot;
-  if (body === "baseUrl") return baseUrl ?? "";
+function resolvePlaceholder(body: string, ctx: SubstitutionContext): string {
+  const { env, vars, runtime, secretRef } = ctx;
+  // `${file.dir}` is the documented alias of `${project.root}`: the
+  // directory of the file being parsed (an imported action's own directory).
+  if (body === "project.root" || body === "file.dir") return ctx.projectRoot;
+  if (body === "config.dir") return ctx.configDir ?? process.cwd();
+  if (body === "baseUrl") return ctx.baseUrl ?? "";
   if (body === "worker.index") return String(runtime?.workerIndex ?? 0);
   if (body === "run.token") return runtime?.runToken ?? "verify";
 
@@ -574,23 +760,17 @@ function resolvePlaceholder(
       }
       // Resolve placeholders WITHIN the default expression only — a present
       // env value is returned without recursion.
-      return substituteString(
-        defaultExpr,
-        env,
-        vars,
-        projectRoot,
-        baseUrl,
-        filePath,
-        runtime,
-        secretRef,
-      );
+      return substituteString(defaultExpr, ctx);
     }
+    ctx.onEnvValue?.({ ns, name, value: val });
     return val;
   }
 
   if (ns === "vars") {
     const v = vars[rest];
-    if (v === undefined) throw new MissingTemplateVariableError(rest, filePath);
+    if (v === undefined) {
+      throw new MissingTemplateVariableError(rest, ctx.filePath);
+    }
     return renderRuntimePlaceholders(String(v), runtime);
   }
 

@@ -47,168 +47,51 @@ function pickNewRunId(runIds, options = {}) {
   return null;
 }
 
-/**
- * Summarize an events.ndjson entry for the timeline UI.
- * @param {Record<string, any>} event
- * @returns {{ ts: string | null, type: string, stepId: string | null, label: string, tone: "ok" | "bad" | "muted" | "info" }}
- */
-function describeEvent(event) {
-  const type = String(event?.type ?? "unknown");
-  const ts = typeof event?.ts === "string" ? event.ts : null;
-  const stepId = typeof event?.stepId === "string" ? event.stepId : null;
-  switch (type) {
-    case "run.started":
-      return {
-        ts,
-        type,
-        stepId: null,
-        label: `run started (${event?.spec ?? ""})`.trim(),
-        tone: "info",
-      };
-    case "run.finished":
-      return {
-        ts,
-        type,
-        stepId: null,
-        label: `run finished: ${event?.status ?? "unknown"}`,
-        tone: event?.status === "passed" ? "ok" : "bad",
-      };
-    case "step.started":
-      return {
-        ts,
-        type,
-        stepId,
-        label: `step ${stepId ?? ""} started`.trim(),
-        tone: "info",
-      };
-    case "step.finished":
-      return {
-        ts,
-        type,
-        stepId,
-        label:
-          `step ${stepId ?? ""} finished in ${event?.durationMs ?? 0}ms`.trim(),
-        tone: event?.status === "failed" ? "bad" : "ok",
-      };
-    case "step.skipped":
-      return {
-        ts,
-        type,
-        stepId,
-        label: `step ${stepId ?? ""} skipped (when:)`.trim(),
-        tone: "muted",
-      };
-    case "outcome.evaluated":
-      return {
-        ts,
-        type,
-        stepId: null,
-        label:
-          `outcome ${event?.outcomeId ?? event?.id ?? ""}: ${event?.status ?? ""}`.trim(),
-        tone: event?.status === "passed" ? "ok" : "bad",
-      };
-    case "artifact.screenshot":
-      return {
-        ts,
-        type,
-        stepId,
-        label: `screenshot ${event?.path ?? ""}`.trim(),
-        tone: "muted",
-      };
-    case "artifact.snapshot":
-      return {
-        ts,
-        type,
-        stepId,
-        label: `snapshot ${event?.path ?? ""}`.trim(),
-        tone: "muted",
-      };
-    case "viewport.set":
-      return {
-        ts,
-        type,
-        stepId: null,
-        label: `viewport ${event?.width ?? "?"}×${event?.height ?? "?"}`,
-        tone: "muted",
-      };
-    default:
-      return { ts, type, stepId, label: type, tone: "muted" };
-  }
-}
-
-/**
- * Roll events up into per-step progress rows.
- * @param {Array<Record<string, any>>} events
- * @returns {Array<{ stepId: string, status: "running" | "passed" | "failed" | "skipped", startedAt: string | null, durationMs: number | null, artifacts: string[] }>}
- */
-function stepProgress(events) {
-  /** @type {Map<string, any>} */
-  const steps = new Map();
-  for (const event of events) {
-    const stepId = typeof event?.stepId === "string" ? event.stepId : null;
-    if (!stepId) continue;
-    const row = steps.get(stepId) ?? {
-      stepId,
-      status: "running",
-      startedAt: null,
-      durationMs: null,
-      artifacts: [],
-    };
-    switch (String(event?.type ?? "")) {
-      case "step.started":
-        row.status = "running";
-        row.startedAt = typeof event.ts === "string" ? event.ts : row.startedAt;
-        break;
-      case "step.finished":
-        row.status = event?.status === "failed" ? "failed" : "passed";
-        row.durationMs =
-          typeof event?.durationMs === "number"
-            ? event.durationMs
-            : row.durationMs;
-        break;
-      case "step.skipped":
-        row.status = "skipped";
-        break;
-      case "artifact.snapshot":
-      case "artifact.screenshot":
-        if (
-          typeof event?.path === "string" &&
-          !row.artifacts.includes(event.path)
-        )
-          row.artifacts.push(event.path);
-        break;
-      default:
-        break;
-    }
-    steps.set(stepId, row);
-  }
-  return [...steps.values()];
-}
+/** Keep tailing this long after `run.json` lands (stash/retention events). */
+const DEFAULT_LINGER_MS = 10_000;
 
 /**
  * Start polling the artifact root for a new run directory, then tail its
  * events file. Calls back on the same thread; `stop()` is idempotent.
+ *
+ * `run.json` is written before auto-stash and retention append their events,
+ * so the tail keeps draining for `lingerMs` after it appears and only then
+ * calls `onEnd`.
  *
  * @param {{
  *   runsRoot: string,
  *   specNames?: Iterable<string> | string | null,
  *   knownIds?: Iterable<string>,
  *   pollMs?: number,
+ *   lingerMs?: number,
  *   onRunDir?: (runDir: string, runId: string) => void,
  *   onEvents?: (events: Array<Record<string, any>>, runDir: string) => void,
  *   onEnd?: () => void,
  * }} options
- * @returns {{ stop: () => void, runDir: () => string | null }}
+ * @returns {{ stop: () => void, runDir: () => string | null, ended: () => boolean }}
  */
 function createLiveTail(options) {
   const pollMs = Math.max(100, options.pollMs ?? 400);
+  const lingerMs = Math.max(0, options.lingerMs ?? DEFAULT_LINGER_MS);
   const startedAtMs = Date.now();
   let stopped = false;
+  let ended = false;
+  /** @type {string | null} */
   let runId = null;
+  /** @type {string | null} */
   let runDir = null;
   let offset = 0;
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null;
-  let endedTimer = null;
+  /** @type {number | null} when run.json was first seen */
+  let finishedAt = null;
+
+  const drain = () => {
+    if (!runDir) return;
+    const result = readEventsFrom(runDir, offset);
+    offset = result.offset;
+    if (result.events.length) options.onEvents?.(result.events, runDir);
+  };
 
   const poll = () => {
     if (stopped) return;
@@ -226,20 +109,20 @@ function createLiveTail(options) {
       }
     }
     if (runDir) {
-      const result = readEventsFrom(runDir, offset);
-      offset = result.offset;
-      if (result.events.length) options.onEvents?.(result.events, runDir);
-      if (fs.existsSync(path.join(runDir, "run.json"))) {
-        // The run payload is written last; one more tick drains trailing events.
-        if (!endedTimer)
-          endedTimer = setTimeout(() => {
-            const drained = readEventsFrom(runDir, offset);
-            offset = drained.offset;
-            if (drained.events.length)
-              options.onEvents?.(drained.events, runDir);
-            options.onEnd?.();
-            stop();
-          }, pollMs);
+      drain();
+      if (finishedAt === null && fs.existsSync(path.join(runDir, "run.json")))
+        finishedAt = Date.now();
+      // At least one more poll after run.json drains trailing events; the
+      // linger window catches the stash/retention events written later.
+      if (
+        finishedAt !== null &&
+        Date.now() - finishedAt >= Math.max(pollMs, lingerMs)
+      ) {
+        drain();
+        ended = true;
+        options.onEnd?.();
+        stop();
+        return;
       }
     }
     if (!stopped) timer = setTimeout(poll, pollMs);
@@ -249,19 +132,16 @@ function createLiveTail(options) {
     if (stopped) return;
     stopped = true;
     if (timer) clearTimeout(timer);
-    if (endedTimer) clearTimeout(endedTimer);
     timer = null;
-    endedTimer = null;
   };
 
   timer = setTimeout(poll, 50);
-  return { stop, runDir: () => runDir };
+  return { stop, runDir: () => runDir, ended: () => ended };
 }
 
 module.exports = {
+  DEFAULT_LINGER_MS,
   runIdTimestampMs,
   pickNewRunId,
-  describeEvent,
-  stepProgress,
   createLiveTail,
 };

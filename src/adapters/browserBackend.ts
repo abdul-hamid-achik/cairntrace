@@ -215,8 +215,10 @@ export interface BrowserBackend {
   /* ----- tracing ----- */
   /**
    * Begin recording a trace of the run. Best-effort: backends without trace
-   * support no-op. Playwright writes a Trace Viewer-compatible .zip;
-   * agent-browser's trace also produces a .zip.
+   * support no-op. Playwright writes a Trace Viewer-compatible .zip
+   * (`traces/playwright-trace.zip`); agent-browser writes Chrome trace-event
+   * JSON (`traces/agent-browser-trace.json`, for Perfetto). See
+   * `tracePathForBackend` in core/artifacts/traceCapture.ts.
    */
   startTrace?(): Promise<void>;
   /**

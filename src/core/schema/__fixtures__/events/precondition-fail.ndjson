@@ -1,0 +1,7 @@
+{"ts":"<ts>","type":"run.started","runId":"<runId>","spec":"demo_precondition_fail"}
+{"ts":"<ts>","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"preconditions","item":"data_guard","budgetMs":30000,"deadline":"<ts>"}
+{"ts":"<ts>","type":"log.opened","kind":"precondition","name":"data_guard","path":"logs/precondition-01-data_guard.log"}
+{"ts":"<ts>","type":"precondition.started","name":"data_guard","timeoutMs":30000,"index":1,"total":1,"logPath":"logs/precondition-01-data_guard.log"}
+{"ts":"<ts>","type":"precondition.run","name":"data_guard","exitCode":3,"durationMs":0,"timedOut":false,"output":"checking fixtures\nfatal: fixture database unreachable","logPath":"logs/precondition-01-data_guard.log"}
+{"ts":"<ts>","type":"run.errored","runId":"<runId>","phase":"precondition","name":"data_guard","durationMs":0,"timedOut":false}

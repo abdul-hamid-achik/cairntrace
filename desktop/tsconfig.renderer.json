@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    // No @types/node: renderer scripts run sandboxed, without require/process.
+    // The dual-use lib scripts (format.js, events.js, policy.js) come in
+    // through the declarations in renderer/globals.d.ts.
+    "types": []
+  },
+  // The sandboxed renderer: classic <script> files that share one global
+  // namespace (window.Studio) declared in renderer/globals.d.ts, plus the
+  // preload bridge (window.cairn) and the lib scripts loaded as globals.
+  "include": ["renderer/**/*.js", "renderer/globals.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -6,6 +6,7 @@ import { emit, resolveFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { codemapProjects, codemapStatus } from "./codemap.js";
 import { resolveFcheapBinary } from "./fcheapClient.js";
+import { targetChildEnv } from "../../core/processEnv";
 
 /** Injectable codemap seam for `cairn doctor` (FEATURES item 7). */
 export interface DoctorDeps {
@@ -104,14 +105,7 @@ export async function doctorCommand(
 
   checks.push(...(await resolvePlaywrightChecks()));
 
-  const fcheap = await tryExec(resolveFcheapBinary(), ["--version"]);
-  checks.push({
-    name: "fcheap",
-    ok: fcheap.ok,
-    detail: fcheap.ok
-      ? fcheap.stdout.trim()
-      : "fcheap not on $PATH (cairn stash and --stash-on-failure will be unavailable)",
-  });
+  checks.push(...(await resolveFcheapChecks()));
 
   const vecgrep = await tryExec("vecgrep", ["version"]);
   checks.push({
@@ -455,12 +449,118 @@ export async function resolveIosChecks(
   return checks;
 }
 
+/** Minimum fcheap whose `save` accepts `--meta` (run identity in the manifest). */
+export const FCHEAP_META_VERSION = "0.36.0";
+
+export interface FcheapCheckDeps {
+  exec(bin: string, args: string[]): Promise<{ ok: boolean; stdout: string }>;
+  env: NodeJS.ProcessEnv;
+}
+
+/**
+ * file.cheap readiness without secrets: the CLI version (and whether its
+ * `save --meta` / `publish --run-index` are available), the console session
+ * (`fcheap auth status`, informational: only `fcheap pull` needs it), and
+ * publisher readiness — whether FILECHEAP_ARTIFACT_SERVICE_URL and
+ * FILECHEAP_INGEST_TOKEN are set (never their values). Only a half-configured
+ * publisher or a missing binary is a failing check.
+ */
+export async function resolveFcheapChecks(
+  deps: FcheapCheckDeps = {
+    exec: (bin, args) => tryExec(bin, args, 10_000),
+    env: process.env,
+  },
+): Promise<DoctorCheck[]> {
+  const bin = resolveFcheapBinary(deps.env);
+  const version = await deps.exec(bin, ["--version"]);
+  if (!version.ok) {
+    return [
+      {
+        name: "fcheap",
+        ok: false,
+        detail:
+          "fcheap not on $PATH (cairn stash, --stash-on-failure and cairn publish will be unavailable)",
+      },
+    ];
+  }
+  const [saveHelp, publishHelp, auth] = await Promise.all([
+    deps.exec(bin, ["save", "--help"]),
+    deps.exec(bin, ["publish", "--help"]),
+    deps.exec(bin, ["auth", "status", "--json"]),
+  ]);
+  const meta = saveHelp.ok && /(^|\s)--meta\b/m.test(saveHelp.stdout);
+  const runIndex =
+    publishHelp.ok && /(^|\s)--run-index\b/m.test(publishHelp.stdout);
+  const versionText = (version.stdout.trim().split("\n")[0] ?? "").slice(
+    0,
+    120,
+  );
+  const checks: DoctorCheck[] = [
+    {
+      name: "fcheap",
+      ok: true,
+      detail: `${versionText}${
+        meta
+          ? ""
+          : ` — save --meta unsupported (needs ${FCHEAP_META_VERSION}+): stashes carry no run identity`
+      }${
+        runIndex
+          ? ""
+          : " — publish --run-index unsupported: the console will not list published runs"
+      }`,
+    },
+    {
+      name: "fcheap-auth",
+      ok: true,
+      detail: auth.ok
+        ? "console session: signed in"
+        : "console session: not signed in or expired (fcheap auth login; only fcheap pull from the console needs it)",
+    },
+  ];
+  const hasUrl = Boolean(deps.env.FILECHEAP_ARTIFACT_SERVICE_URL?.trim());
+  const hasToken = Boolean(deps.env.FILECHEAP_INGEST_TOKEN?.trim());
+  checks.push(
+    hasUrl && hasToken
+      ? {
+          name: "fcheap-publisher",
+          ok: true,
+          detail:
+            "ready: FILECHEAP_ARTIFACT_SERVICE_URL and FILECHEAP_INGEST_TOKEN are set (cairn publish / retention.publish)",
+        }
+      : hasUrl || hasToken
+        ? {
+            name: "fcheap-publisher",
+            ok: false,
+            detail: `half configured: ${
+              hasUrl
+                ? "FILECHEAP_INGEST_TOKEN"
+                : "FILECHEAP_ARTIFACT_SERVICE_URL"
+            } is not set, so cairn publish and retention.publish will fail`,
+          }
+        : {
+            name: "fcheap-publisher",
+            ok: true,
+            detail:
+              "not configured (only cairn publish / retention.publish need FILECHEAP_ARTIFACT_SERVICE_URL + FILECHEAP_INGEST_TOKEN)",
+          },
+  );
+  return checks;
+}
+
 async function tryExec(
   bin: string,
   args: string[],
+  timeoutMs?: number,
 ): Promise<{ ok: boolean; stdout: string }> {
   try {
-    const r = await execa(bin, args, { reject: false });
+    // Version/help probes need no credentials: same filtered environment as
+    // every other project child (no publisher token, no TinyVault controls).
+    const r = await execa(bin, args, {
+      reject: false,
+      ...(timeoutMs ? { timeout: timeoutMs } : {}),
+      env: targetChildEnv(process.env),
+      extendEnv: false,
+    });
     return {
       ok: r.exitCode === 0,
       stdout: typeof r.stdout === "string" ? r.stdout : "",

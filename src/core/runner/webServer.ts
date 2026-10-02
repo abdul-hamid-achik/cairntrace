@@ -1,10 +1,20 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { closeSync, createWriteStream, openSync } from "node:fs";
+import { mkdir, open, unlink } from "node:fs/promises";
+import { constants as osConstants, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { execa } from "execa";
 import type { WebServerConfig } from "../schema/config.v1";
+import type { GateEvent } from "../schema/events.v1";
 import { targetChildEnv } from "../processEnv";
+import {
+  gateFailureMessage,
+  waitForGate,
+  type GateContext,
+} from "../gates/evaluate";
+import { probeHttp } from "../gates/probes";
+import { gatesRegistryFor } from "../gates/registry";
+import { gateRefList, type GateNode, type GateRef } from "../gates/schema";
 
 /**
  * `webServer` lifecycle for the whole `cairn run` invocation: build → boot →
@@ -38,6 +48,18 @@ export interface StartWebServerContext {
    * so a SIGINT/SIGTERM during a slow boot can't orphan the spawned server.
    */
   onSpawn?: (terminateSync: () => void) => void;
+  /** The config's `gates:` registry (named references in `ready`). */
+  gates?: Readonly<Record<string, GateNode>>;
+  /** gate.* events of the `ready` gates (the invocation journal writes them). */
+  onGateEvent?: (event: GateEvent) => void;
+  /**
+   * Warnings that must reach the user even in non-interactive runs (a
+   * readiness URL stuck on a status only the old any-answer rule accepted).
+   * Default: `log`, else one `cairn: warning:` stderr line.
+   */
+  warn?: (message: string) => void;
+  /** Stops `ready` gate waits (a cancelled invocation). */
+  signal?: AbortSignal;
 }
 
 export interface WebServerHandle {
@@ -91,14 +113,45 @@ export async function startWebServer(
       ? cfg.cwd
       : resolve(ctx.configDir, cfg.cwd)
     : ctx.configDir;
-  const env = targetChildEnv({ ...process.env, ...cfg.env });
+  // The inherited env is filtered; keys the config sets in `webServer.env`
+  // pass as written (the author chose them, e.g. a non-default TVAULT_DIR).
+  const env = { ...targetChildEnv(process.env), ...cfg.env };
+
+  const anyResponse = cfg.anyResponse === true;
+  const readyRefs = gateRefList(cfg.ready);
+  const readyTimeoutMs = cfg.readyTimeoutMs ?? DEFAULT_READY_MS;
+  // The lifecycle narration (leveled, NDJSON under --log-format json) when
+  // there is no dedicated warning sink; a raw stderr line only without both.
+  const warn =
+    ctx.warn ??
+    ctx.log ??
+    ((message: string) => process.stderr.write(`cairn: warning: ${message}\n`));
 
   // Reuse / conflict check: is something already answering the readiness URL?
+  // (Any answer means the port is taken; readiness itself needs 2xx/3xx.)
   if (effectiveUrl && (await probeOnce(effectiveUrl))) {
     if (reuse) {
       ctx.log?.(
         `web server: reusing the server already answering ${effectiveUrl}`,
       );
+      // A reused server must be READY too (2xx/3xx unless anyResponse, then
+      // the `ready` gates) within readyTimeoutMs — not merely listening.
+      const deadline = Date.now() + readyTimeoutMs;
+      let last = await probeReady(effectiveUrl, { anyResponse });
+      while (!last.ready && Date.now() < deadline) {
+        if (last.status !== undefined) {
+          warnLegacyReadiness(effectiveUrl, last.status, warn);
+        }
+        await sleep(POLL_MS);
+        last = await probeReady(effectiveUrl, { anyResponse });
+      }
+      if (!last.ready) {
+        throw new WebServerError(
+          `the reused server at ${effectiveUrl} did not become ready within ${readyTimeoutMs}ms (last: ${last.detail})` +
+            readinessHint(last.status, anyResponse),
+        );
+      }
+      await waitReadyGates(readyRefs, ctx, deadline - Date.now());
       return reusedHandle();
     }
     throw new WebServerError(
@@ -167,8 +220,8 @@ export async function startWebServer(
     }
   };
 
-  const readyTimeoutMs = cfg.readyTimeoutMs ?? DEFAULT_READY_MS;
   const deadline = Date.now() + readyTimeoutMs;
+  let lastProbe: ReadyProbe | undefined;
   try {
     for (;;) {
       // Fail fast: a server that crashes on boot shouldn't poll until timeout.
@@ -180,18 +233,27 @@ export async function startWebServer(
       // Ready when every configured signal is satisfied (url probe AND/OR text).
       let ready = true;
       if (cfg.waitForText) ready = textFound;
-      if (effectiveUrl && ready) ready = await probeOnce(effectiveUrl);
+      if (effectiveUrl && ready) {
+        lastProbe = await probeReady(effectiveUrl, { anyResponse });
+        ready = lastProbe.ready;
+        if (!ready && lastProbe.status !== undefined) {
+          warnLegacyReadiness(effectiveUrl, lastProbe.status, warn);
+        }
+      }
       if (ready) break;
       if (Date.now() >= deadline) {
         throw new WebServerError(
           `web server did not become ready within ${readyTimeoutMs}ms ` +
             `(probed ${effectiveUrl ?? "—"}${
-              cfg.waitForText ? `, waiting for "${cfg.waitForText}"` : ""
-            })`,
+              lastProbe ? ` — last: ${lastProbe.detail}` : ""
+            }${cfg.waitForText ? `, waiting for "${cfg.waitForText}"` : ""})` +
+            readinessHint(lastProbe?.status, anyResponse),
         );
       }
       await sleep(POLL_MS);
     }
+    // Then the `ready` gates, with what is left of readyTimeoutMs.
+    await waitReadyGates(readyRefs, ctx, deadline - Date.now());
   } catch (e) {
     // Async context: await the real teardown so a node-fallback child is reaped
     // (a zombie would defeat the sync poll). The signal path uses stopProcSync.
@@ -280,7 +342,16 @@ export async function runShell(
       stderr: r.stderr.toString(),
     };
   }
-  const r = await execa(command, { cwd, env, shell: true, reject: false });
+  // extendEnv: false — `env` is already the filtered child env; execa's
+  // default would merge the parent process.env (fcheap/tvault credentials)
+  // back in. Bun.$().env() and the node spawn path already replace it.
+  const r = await execa(command, {
+    cwd,
+    env,
+    extendEnv: false,
+    shell: true,
+    reject: false,
+  });
   return {
     exitCode: r.exitCode ?? 0,
     stdout: typeof r.stdout === "string" ? r.stdout : "",
@@ -288,7 +359,225 @@ export async function runShell(
   };
 }
 
-/** Runtime-agnostic readiness probe: ANY HTTP response = up. */
+/**
+ * Run a shell command to completion in its own process group, for commands
+ * that must outlive a signal aimed at cairn (a services teardown that sinks
+ * billable compute):
+ *
+ * - `detached`: the command leads its own process group (and session, so it
+ *   has no controlling terminal), so a terminal Ctrl-C, Studio's Stop or a
+ *   harness's group SIGTERM does not kill it halfway.
+ * - Output goes to a private temp file, not a pipe: a command still running
+ *   when cairn exits must not die of SIGPIPE on its next write. stdout and
+ *   stderr are interleaved in `stdout`; `stderr` is empty. Only the last
+ *   `maxOutputBytes` are kept.
+ * - `onStart` gets the pid (= process group id) and the output file, so a
+ *   signal handler can tell a command that is still running from one that is
+ *   gone. The file is removed once the command exits.
+ *
+ * `env` replaces process.env (pass the filtered target env).
+ */
+export async function runShellDetached(
+  command: string,
+  { cwd, env }: SpawnOpts,
+  onStart?: (started: { pid: number | undefined; outputFile: string }) => void,
+  maxOutputBytes = 1024 * 1024,
+): Promise<ShellResult & { signal: string | null }> {
+  const outputFile = join(
+    tmpdir(),
+    `cairn-shell-${process.pid}-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2, 8)}.log`,
+  );
+  const fd = openSync(outputFile, "w", 0o600);
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(command, {
+      cwd,
+      env,
+      shell: true,
+      detached: true,
+      stdio: ["ignore", fd, fd],
+    });
+  } catch (error) {
+    closeSync(fd);
+    await unlink(outputFile).catch(() => undefined);
+    throw error;
+  }
+  // The child holds its own copy of the descriptor.
+  closeSync(fd);
+  onStart?.({ pid: child.pid, outputFile });
+  const settled = await new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    error?: Error;
+  }>((resolveExit) => {
+    // `on`, not `once`: a late 'error' must never become an uncaught one.
+    child.on("error", (error) =>
+      resolveExit({ code: null, signal: null, error }),
+    );
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+  const output = await readFileTail(outputFile, maxOutputBytes);
+  await unlink(outputFile).catch(() => undefined);
+  if (settled.error) throw settled.error;
+  const signalNumber = settled.signal
+    ? osConstants.signals[settled.signal]
+    : undefined;
+  return {
+    exitCode:
+      settled.code ?? (signalNumber !== undefined ? 128 + signalNumber : -1),
+    signal: settled.signal,
+    stdout: output.endsWith("\n") ? output.slice(0, -1) : output,
+    stderr: "",
+  };
+}
+
+/** The last `maxBytes` of a file as UTF-8 (empty when it is unreadable). */
+async function readFileTail(file: string, maxBytes: number): Promise<string> {
+  try {
+    const handle = await open(file, "r");
+    try {
+      const { size } = await handle.stat();
+      const length = Math.min(size, maxBytes);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, size - length);
+      const text = buffer.toString("utf8");
+      return size > maxBytes
+        ? `[… ${size - maxBytes} earlier bytes omitted]\n${text}`
+        : text;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
+export interface ReadyProbe {
+  ready: boolean;
+  /** The HTTP status, when the URL answered at all. */
+  status?: number;
+  /** e.g. `GET http://localhost:3000/ → 503 (want 2xx|3xx)`. */
+  detail: string;
+}
+
+/**
+ * Readiness probe of `webServer.url` (or the environment `baseUrl` it falls
+ * back to) and tmux `readyOn.url`: a 2xx or 3xx answer (redirects are not
+ * followed). `anyResponse: true` accepts any answer — the old rule, when a
+ * 503 counted as ready.
+ */
+export async function probeReady(
+  url: string,
+  opts: { anyResponse?: boolean } = {},
+): Promise<ReadyProbe> {
+  const r = await probeHttp(
+    url,
+    PROBE_TIMEOUT_MS,
+    opts.anyResponse ? { anyResponse: true } : {},
+  );
+  return {
+    ready: r.ok,
+    ...(r.status !== undefined ? { status: r.status } : {}),
+    detail: r.detail,
+  };
+}
+
+/** A readiness URL stuck this long on one non-ready status gets a warning. */
+const LEGACY_WARN_AFTER_MS = 10_000;
+/** A gap this long between answers starts a new streak (a later wait). */
+const LEGACY_STREAK_GAP_MS = 5_000;
+
+const warnedReadinessUrls = new Set<string>();
+const legacyStreaks = new Map<
+  string,
+  { status: number; since: number; last: number }
+>();
+
+/**
+ * Called with every non-ready HTTP answer of a readiness URL. Warns once
+ * per URL per process when the URL has kept answering the same status for
+ * {@link LEGACY_WARN_AFTER_MS} — a status the old any-answer rule accepted.
+ * A dev server that answers 503 while it warms up and then 200 never
+ * warns; a URL stuck on 401 or 503 learns why long before the timeout
+ * (whose error names the last status and `anyResponse` anyway).
+ */
+export function warnLegacyReadiness(
+  url: string,
+  status: number,
+  warn: (message: string) => void,
+  opts: { afterMs?: number; now?: number } = {},
+): void {
+  if (warnedReadinessUrls.has(url)) return;
+  const now = opts.now ?? Date.now();
+  let streak = legacyStreaks.get(url);
+  if (
+    !streak ||
+    streak.status !== status ||
+    now - streak.last > LEGACY_STREAK_GAP_MS
+  ) {
+    streak = { status, since: now, last: now };
+    legacyStreaks.set(url, streak);
+  }
+  streak.last = now;
+  const stuckMs = now - streak.since;
+  if (stuckMs < (opts.afterMs ?? LEGACY_WARN_AFTER_MS)) return;
+  warnedReadinessUrls.add(url);
+  legacyStreaks.delete(url);
+  warn(
+    `readiness: ${url} has answered ${status} for ${Math.round(stuckMs / 1000)}s; readiness needs a 2xx/3xx answer (any answer used to count) — point the readiness url at a route that answers 2xx/3xx once the app is up, or set anyResponse: true to accept ${status}`,
+  );
+}
+
+/** Error suffix naming the rule when the URL answered with a non-ready status. */
+export function readinessHint(
+  status: number | undefined,
+  anyResponse: boolean,
+): string {
+  if (status === undefined || anyResponse) return "";
+  return ` — readiness needs a 2xx/3xx answer; set anyResponse: true to accept ${status}`;
+}
+
+/** Wait the `webServer.ready` gates in order; throws WebServerError. */
+async function waitReadyGates(
+  refs: readonly GateRef[],
+  ctx: StartWebServerContext,
+  remainingMs: number,
+): Promise<void> {
+  if (refs.length === 0) return;
+  const gateCtx: GateContext = {
+    registry: await gatesRegistryFor(ctx),
+    env: targetChildEnv(process.env),
+    cwd: ctx.configDir,
+    scope: "webServer",
+    // A gate without its own timeout gets what is left of readyTimeoutMs.
+    defaultTimeoutMs: Math.max(1, remainingMs),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+    ...(ctx.onGateEvent ? { onEvent: ctx.onGateEvent } : {}),
+  };
+  for (const ref of refs) {
+    let result;
+    try {
+      result = await waitForGate(ref, gateCtx);
+    } catch (error) {
+      throw new WebServerError(`webServer.ready: ${(error as Error).message}`);
+    }
+    if (!result.ok) {
+      throw new WebServerError(
+        `webServer.ready: ${gateFailureMessage(result)}`,
+      );
+    }
+    ctx.log?.(
+      `web server: gate ${result.name} ready after ${result.attempts} attempt(s)`,
+    );
+  }
+}
+
+/**
+ * "Something answers here" probe: ANY HTTP response counts. The port
+ * conflict / reuse check uses it; readiness needs {@link probeReady}.
+ */
 export async function probeOnce(url: string): Promise<boolean> {
   try {
     const res = await fetch(url, {

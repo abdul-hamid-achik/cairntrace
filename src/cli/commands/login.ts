@@ -1,9 +1,17 @@
 import { confirm, isCancel, S_BAR, S_INFO, S_SUCCESS } from "@clack/prompts";
 import { AgentBrowserAdapter } from "../../adapters/agent-browser/AgentBrowserAdapter";
 import { CheckpointStore } from "../../core/checkpoint/CheckpointStore";
+import { urlOrigin } from "../../core/checkpoint/meta";
+import { UnknownEnvironmentError } from "../../core/config/runtimeContext";
 import { ansiColors as c, clackLine } from "../progress";
+import {
+  type CheckpointScope,
+  type CheckpointScopeOptions,
+  checkpointMetaFor,
+  resolveCheckpointScope,
+} from "./checkpoint/scope";
 
-export interface LoginOptions {
+export interface LoginOptions extends CheckpointScopeOptions {
   url?: string;
   waitFor?: string;
   timeout?: string;
@@ -19,7 +27,9 @@ export interface LoginOptions {
  *   cairn login my-app --url ... --wait-for url:/dashboard
  *
  * Opens a headed browser, lets the user authenticate manually, then captures
- * the resulting state into `~/.cairntrace/checkpoints/<name>.json`.
+ * the resulting state into `~/.cairntrace/checkpoints/<name>.json` and its
+ * scope (baseUrl, env, createdAt, optional ttl) into `<name>.meta.json`:
+ * a spec that resumes it is refused on another origin or after the ttl.
  *
  * Without `--wait-for`, prompts the user to press ENTER once they're done.
  */
@@ -36,11 +46,14 @@ export async function loginCommand(
 
   const store = new CheckpointStore();
   let outPath: string;
+  let scope: CheckpointScope;
   try {
     outPath = store.pathFor(name);
+    // Validate --ttl / --env before opening a browser.
+    scope = await resolveCheckpointScope(opts);
   } catch (e) {
     process.stderr.write(`cairn login: ${(e as Error).message}\n`);
-    process.exit(2);
+    process.exit(e instanceof UnknownEnvironmentError ? e.exitCode : 2);
   }
   await store.ensureRoot();
 
@@ -121,12 +134,30 @@ export async function loginCommand(
     process.exit(2);
   }
 
+  // Scope: the environment's baseUrl (--env), else the origin where the
+  // authenticated session ENDED (an off-origin identity provider's --url is
+  // only where the login started); --url only when the page URL is unknown.
+  const finalUrl = scope.envBaseUrl
+    ? undefined
+    : await adapter.getUrl().catch(() => undefined);
+  const meta = checkpointMetaFor(name, scope, {
+    pageUrl: finalUrl && urlOrigin(finalUrl) ? finalUrl : opts.url,
+    capturedBy: "login",
+  });
+  await store.writeMeta(outPath, meta);
+
   // Best-effort close — the user might keep the session alive.
   await adapter.close().catch(() => undefined);
 
   clackLine(
     `${c.green}${S_SUCCESS}${c.reset}`,
     `Saved checkpoint ${c.bold}${name}${c.reset} → ${outPath}`,
+  );
+  clackLine(
+    `${c.dim}${S_BAR}${c.reset}`,
+    `${c.dim}Scope:${c.reset} ${meta.baseUrl ?? "(no baseUrl)"}${
+      meta.env ? ` env ${meta.env}` : ""
+    }${meta.expiresAt ? `, expires ${meta.expiresAt}` : ""}`,
   );
   clackLine(
     `${c.dim}${S_BAR}${c.reset}`,

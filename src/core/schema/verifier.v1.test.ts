@@ -31,10 +31,31 @@ describe("ScriptVerifierSchema fixtures (1.13.0)", () => {
     expect(result.success).toBe(true);
   });
 
-  it("still rejects object/array fixture values as genuine errors", () => {
+  it("accepts structured (list/map) fixtures and keeps their nested types (2.16)", () => {
+    const result = ScriptVerifierSchema.safeParse({
+      script: {
+        file: "v.ts",
+        fixtures: {
+          owners: ["a", "b"],
+          expected: { count: 3, strict: true, tags: ["x"], note: null },
+          flag: true,
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.script.fixtures).toEqual({
+        owners: ["a", "b"],
+        expected: { count: 3, strict: true, tags: ["x"], note: null },
+        flag: "true",
+      });
+    }
+  });
+
+  it("still rejects a null top-level fixture value", () => {
     expect(
       VerifierSchema.safeParse({
-        script: { file: "v.ts", fixtures: { bad: { nested: 1 } } },
+        script: { file: "v.ts", fixtures: { bad: null } },
       }).success,
     ).toBe(false);
   });

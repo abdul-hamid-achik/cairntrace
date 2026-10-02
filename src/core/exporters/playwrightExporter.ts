@@ -30,13 +30,38 @@ import type {
   WhenObject,
 } from "../schema/spec.v1";
 import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
-import { formatWhen } from "../runner/conditions";
-import { readFileSync } from "node:fs";
-import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
+// F4/F5/F16 export coverage: datasource/value/table verifiers, poll, expect/capture.
+import type { ExpectStep } from "../schema/spec.v1";
+import type { ValueMatcher } from "../schema/verifier.v1";
 import {
-  bodyTextContainsExpression,
-  normalizeTextForMatching,
-} from "../textMatching";
+  isHttpVerifier,
+  isMongoVerifier,
+  isTableVerifier,
+  isTemporalVerifier,
+  isValueVerifier,
+  verifierPoll,
+} from "../schema/verifier.v1";
+import { expectLocator } from "../runner/verifiers/expect";
+import { describeMatcher } from "../runner/verifiers/matchers";
+import { type ExportEnvTarget, renderRequiresEnvGuard } from "./requiresGuard";
+import { formatWhen } from "../runner/conditions";
+import {
+  type ParsedStepOrigins,
+  resolveStepFile,
+  stepFileScopeAt,
+} from "../runner/stepFiles";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
+import { specFixtureRefParts } from "../fixtures/schema";
+import { gateRefList } from "../gates/schema";
 import {
   blank,
   block,
@@ -50,15 +75,30 @@ import {
   type Stmt,
 } from "./codegen";
 import {
+  assertNoLateBoundLeak,
+  collectRuntimeRefKeys,
+  emitEscapedRegexSource,
+  emitNormalizedText,
   emitStr,
   emitValue,
-  hasRefSentinel,
+  hasSecretSentinel,
+  humanizeSentinels,
   newRefUsage,
   parseTemplateValue,
+  runtimeRefKey,
+  toIdent,
   type RefUsage,
+  type RuntimeRefSource,
 } from "./templateValue";
-import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
-import type { PlaywrightLibModule } from "./playwrightRuntime";
+import {
+  isDocumentaryPrecondition,
+  playwrightTestTimeoutBudget,
+  timeoutBudgetComment,
+} from "./playwrightTimeout";
+import {
+  renderSpliceHelperLines,
+  type PlaywrightLibModule,
+} from "./playwrightRuntime";
 
 export type ExportLang = "ts" | "js";
 
@@ -75,14 +115,64 @@ export interface ExportPlaywrightOptions {
   testTitle?: string;
   /** Emit TypeScript (default) or plain JavaScript. */
   lang?: ExportLang;
+  /**
+   * The parse origins of `spec.steps` (`parseSpec` result): relative
+   * `eval.file` / `upload.path` of a step that came from an imported action
+   * then resolve against the action's directory, exactly like the runner
+   * (spec-relative fallback included). Without it they resolve against the
+   * spec's directory.
+   */
+  stepOrigins?: ParsedStepOrigins;
+  /**
+   * The environment whose baseUrl the export baked in: the requires guard
+   * is tied to it, and a policy refusal there is reported as an `envPolicy`
+   * risk (the test always skips).
+   */
+  envTarget?: ExportEnvTarget;
 }
 
 export interface ExportCoverageSkip {
   kind: "step" | "outcome" | "when";
   id?: string;
   reason: string;
-  /** Soft skips (snapshots, traces) do not mark the generated test as fixme. */
+  /**
+   * Soft skips (snapshots, monitors, documentary notes) only lose
+   * diagnostics and never mark the generated test `test.fixme`.
+   */
   soft?: boolean;
+}
+
+/**
+ * Kinds of hazards that still COMPILE but may make the exported test behave
+ * differently from `cairn run`:
+ *  - envBaked: `${env.X}` / `${env.X:-default}` resolved to a literal at export;
+ *  - absolutePath: a machine-local absolute path in generated code;
+ *  - requiredInfra: preconditions that need docker / mongosh / tmux / … ;
+ *  - requiredSetup: preconditions a single-file export does not run;
+ *  - unresolvedSplice: a `${requests|evals|artifacts.…}` splice with no binding;
+ *  - literalSplice: a runtime ref in an outcome field the runner never
+ *    splices (compared as literal text by both `cairn run` and the export);
+ *  - evalRatio: share of steps that are opaque in-page `eval` JavaScript;
+ *  - secretInBrowser: a secret spliced into page-evaluated source/arguments;
+ *  - envPolicy: the environment the export baked in is one where the
+ *    environment policy refuses the spec, so the test always skips.
+ */
+export type ExportSemanticRiskKind =
+  | "envBaked"
+  | "absolutePath"
+  | "requiredInfra"
+  | "requiredSetup"
+  | "unresolvedSplice"
+  | "literalSplice"
+  | "evalRatio"
+  | "secretInBrowser"
+  | "envPolicy";
+
+export interface ExportSemanticRisk {
+  kind: ExportSemanticRiskKind;
+  /** Step/outcome id (or "preconditions") the risk is attached to. */
+  id?: string;
+  detail: string;
 }
 
 export interface ExportCoverage {
@@ -90,7 +180,14 @@ export interface ExportCoverage {
   stepsExported: number;
   outcomesTotal: number;
   outcomesExported: number;
+  /** Every skip, hard and soft (kept for backward compatibility). */
   skips: ExportCoverageSkip[];
+  /** The soft subset of `skips`: lost diagnostics only (snapshot, monitor). */
+  diagnosticSkips: ExportCoverageSkip[];
+  /** Exported-but-different hazards; see ExportSemanticRiskKind. */
+  semanticRisks: ExportSemanticRisk[];
+  /** True when a hard skip makes the generated test `test.fixme`. */
+  fixme: boolean;
 }
 
 export interface ExportPlaywrightResult {
@@ -103,6 +200,33 @@ export interface ExportPlaywrightResult {
   preconditions: string[];
 }
 
+export function newCoverage(stepsTotal = 0, outcomesTotal = 0): ExportCoverage {
+  return {
+    stepsTotal,
+    stepsExported: 0,
+    outcomesTotal,
+    outcomesExported: 0,
+    skips: [],
+    diagnosticSkips: [],
+    semanticRisks: [],
+    fixme: false,
+  };
+}
+
+/** Recompute the derived coverage fields (diagnosticSkips, fixme, deduped risks). */
+export function finalizeCoverage(coverage: ExportCoverage): ExportCoverage {
+  coverage.diagnosticSkips = coverage.skips.filter((entry) => entry.soft);
+  coverage.fixme = coverage.skips.some((entry) => !entry.soft);
+  const seen = new Set<string>();
+  coverage.semanticRisks = coverage.semanticRisks.filter((entry) => {
+    const key = `${entry.kind}\u0000${entry.id ?? ""}\u0000${entry.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return coverage;
+}
+
 /**
  * Generate a @playwright/test source file from a Cairntrace spec.
  *
@@ -111,12 +235,15 @@ export interface ExportPlaywrightResult {
  *    they decide WHAT code exists, never how it is indented or quoted;
  *  - emitStr()/emitValue() (templateValue.ts) own string quoting and turn
  *    late-bound sentinels (`${secrets.X}`, unset `${env.X}`, `${run.token}`)
- *    into `process.env.X` / RUN_TOKEN splices at the exact emission site;
+ *    into `process.env.X` / RUN_TOKEN splices at the exact emission site, and
+ *    `${requests|evals|artifacts.…}` into reads of earlier step bindings;
  *  - print() (codegen.ts) owns indentation and line joining.
  *
  * Steps map to Playwright actions; outcomes map to expect() assertions.
  * Listener-based outcomes (network / noFailedRequests / console) install
  * collectors at the top of the test before any actions, then assert at the end.
+ * A generated file that still carries a late-bound sentinel is refused
+ * (LateBoundLeakError) instead of returned.
  *
  * Output is meant to live in a separate Playwright project; this function
  * doesn't write files — the CLI does. Spec must have `use:` already expanded
@@ -129,20 +256,17 @@ export function exportPlaywright(
   const lang: ExportLang = opts.lang ?? "ts";
   const title = opts.testTitle ?? spec.name;
   const steps = spec.steps ?? [];
-  const coverage: ExportCoverage = {
-    stepsTotal: steps.length,
-    stepsExported: 0,
-    outcomesTotal: spec.outcomes.length,
-    outcomesExported: 0,
-    skips: [],
-  };
+  const coverage = newCoverage(steps.length, spec.outcomes.length);
   const ctx: EmitCtx = {
     lang,
     coverage,
     usage: newRefUsage(),
     ...(opts.sourcePath ? { specDir: dirname(resolve(opts.sourcePath)) } : {}),
+    ...(opts.stepOrigins ? { stepOrigins: opts.stepOrigins } : {}),
     ...(opts.outPath ? { outDir: dirname(resolve(opts.outPath)) } : {}),
     postconditionCounter: 0,
+    referencedRefs: referencedRuntimeRefs(spec),
+    produced: new Map(),
   };
   const timeoutBudget = playwrightTestTimeoutBudget(spec);
   const needsNodeVerifierEvidence =
@@ -151,13 +275,14 @@ export function exportPlaywright(
     ctx.nodeVerifierRunDir = "cairnRunDir";
     ctx.nodeVerifierEvidence = "cairnNetworkEvidence";
   }
+  if (specNeedsNetworkListener(spec)) ctx.networkRecorder = "requests";
 
   // ----- test body (rendered FIRST so ctx.usage knows every late-bound ref
   // before the header is assembled) -----
   const body: Stmt[] = [];
 
   body.push(
-    comment(`Derived from sequential step/outcome budgets; bounded to 30m–4h.`),
+    comment(timeoutBudgetComment(timeoutBudget)),
     ...(timeoutBudget.capped
       ? [
           comment(
@@ -171,14 +296,17 @@ export function exportPlaywright(
   const evidenceInsertAt = body.length;
 
   body.push(...renderOutcomeEvidenceSetup(spec, lang));
+  const bindingsInsertAt = body.length;
 
   if (steps.length > 0) {
     body.push(comment(`--- steps ---`));
-    for (const step of steps) {
+    steps.forEach((step, index) => {
+      ctx.stepIndex = index;
       const rendered = renderStep(step, spec.settleMs, ctx);
       if (rendered.exported) coverage.stepsExported += 1;
       body.push(...rendered.stmts);
-    }
+    });
+    delete ctx.stepIndex;
     body.push(blank);
   }
 
@@ -190,6 +318,7 @@ export function exportPlaywright(
     body.push(...rendered.stmts, blank);
   }
 
+  body.splice(bindingsInsertAt, 0, ...renderBindingDeclarations(ctx));
   if (needsNodeVerifierEvidence) {
     body.splice(
       evidenceInsertAt,
@@ -219,18 +348,33 @@ export function exportPlaywright(
     comment(`Lang: ${lang}`),
   );
 
-  const preCommands = spec.preconditions?.commands ?? [];
+  const preCommands = (spec.preconditions?.commands ?? []).map((c) =>
+    typeof c === "string" ? { run: c } : c,
+  );
+  const executablePreconditions = preCommands.filter(
+    (c) => !isDocumentaryPrecondition(c.run),
+  );
   const preconditionLines: string[] = [];
   if (preCommands.length > 0) {
     // Preconditions run OUTSIDE the browser (shell/mongo resets, pipeline
-    // gates) and have no Playwright equivalent — surface them so a CI wrapper
-    // (globalSetup or a shell step) can run them before the test.
-    skip(
-      ctx,
-      "step",
-      `${preCommands.length} precondition command(s) not exported — run them before the test`,
-      "preconditions",
-    );
+    // gates) and have no Playwright equivalent here — surface them so a CI
+    // wrapper (globalSetup or a shell step) can run them before the test.
+    // `--project` runs them in each file's beforeAll instead.
+    if (executablePreconditions.length > 0) {
+      skip(
+        ctx,
+        "step",
+        `${executablePreconditions.length} precondition command(s) not exported — run them before the test`,
+        "preconditions",
+        true,
+      );
+      addRisk(
+        ctx,
+        "requiredSetup",
+        `${executablePreconditions.length} precondition command(s) must run before this test (single-file export does not execute them; use --project to run them in beforeAll)`,
+        "preconditions",
+      );
+    }
     file.push(
       comment(``),
       comment(
@@ -238,19 +382,44 @@ export function exportPlaywright(
       ),
     );
     for (const c of preCommands) {
-      const cmd = typeof c === "string" ? c : c.run;
-      const name = typeof c === "string" ? undefined : c.name;
-      const line = `${name ? `[${name}] ` : ""}${oneLine(cmd).slice(0, 160)}`;
+      const line = humanizeSentinels(
+        `${c.name ? `[${c.name}] ` : ""}${oneLine(c.run).slice(0, 160)}`,
+      );
       preconditionLines.push(line);
       file.push(comment(`  ${line}`));
     }
   }
+  addSpecRisks(
+    spec,
+    ctx,
+    opts.sourcePath ? { sourceText: readSourceText(opts.sourcePath) } : {},
+  );
 
-  file.push(blank, raw(`import { expect, test } from "@playwright/test";`));
+  const usesExpect = usesExpectCall(print(body));
+  file.push(
+    blank,
+    raw(
+      `import { ${usesExpect ? "expect, " : ""}test } from "@playwright/test";`,
+    ),
+  );
   if (needsNodeVerifierEvidence) {
     file.push(
       blank,
       verbatim(renderNodeVerifierEvidenceRuntime(lang).trimEnd().split("\n")),
+    );
+  }
+  if (ctx.usage.splice || ctx.usage.unresolvedHelper) {
+    file.push(
+      blank,
+      verbatim(
+        renderSpliceHelperLines(lang, {
+          splice: ctx.usage.splice,
+          unresolved: ctx.usage.unresolvedHelper,
+        })
+          .join("\n")
+          .trimEnd()
+          .split("\n"),
+      ),
     );
   }
   if (ctx.usage.runToken) {
@@ -263,10 +432,20 @@ export function exportPlaywright(
       ),
     );
   }
+  finalizeCoverage(coverage);
+  const testKw = coverage.fixme ? "test.fixme" : "test";
+  // requires → a run-time CAIRN_ENV guard, tied to the baked environment.
+  const requiresGuard = renderRequiresEnvGuard(spec.requires, opts.envTarget);
+  if (requiresGuard.lines.length > 0) {
+    file.push(blank, verbatim(requiresGuard.lines));
+  }
+  if (requiresGuard.refusedReason) {
+    addRisk(ctx, "envPolicy", requiresGuard.refusedReason, "requires");
+  }
   file.push(
     blank,
     block(
-      `test(${JSON.stringify(title)}, async ({ page }${
+      `${testKw}(${JSON.stringify(title)}, async ({ page }${
         needsNodeVerifierEvidence ? ", testInfo" : ""
       }) => {`,
       body,
@@ -274,13 +453,249 @@ export function exportPlaywright(
     ),
   );
 
+  const source = `${print(file)}\n`;
+  addGeneratedSourceRisks(coverage, source);
+  finalizeCoverage(coverage);
+  assertNoLateBoundLeak(
+    source,
+    opts.outPath ?? `${spec.name}${exportExtension(lang)}`,
+    spec.name,
+  );
+
   return {
-    source: `${print(file)}\n`,
+    source,
     lang,
     coverage,
     requiredEnv: envNames,
     preconditions: preconditionLines,
   };
+}
+
+/**
+ * True when generated CODE calls `expect`. Every emitted assertion starts a
+ * statement (`expect(…)`, `await expect(…)`, `await expect.poll(…)`), so
+ * only statement starts count: an outcome described "as we expect." (a
+ * comment) or a string containing "expect(" must not import an unused
+ * `expect` (TS6133 under `noUnusedLocals`).
+ */
+export function usesExpectCall(source: string): boolean {
+  return source
+    .split("\n")
+    .some((line) => /^(?:return\s+)?(?:await\s+)?expect[.(]/.test(line.trim()));
+}
+
+/** True when a network / noFailedRequests outcome needs the response listener. */
+export function specNeedsNetworkListener(spec: Spec): boolean {
+  return spec.outcomes.some(
+    (outcome) =>
+      isNetworkVerifier(outcome.verify) ||
+      isNoFailedRequestsVerifier(outcome.verify),
+  );
+}
+
+function readSourceText(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/* ----- semantic risks ----- */
+
+const INFRA_COMMAND_RE =
+  /\b(docker(?:-compose)?|podman|mongosh|mongo|psql|mysql|redis-cli|tmux|kubectl|helm|temporal|tctl|aws|gcloud|az)\b/g;
+
+const ENV_REF_RE = /\$\{env\.([A-Za-z_][A-Za-z0-9_]*)(:-[^}]*)?\}/g;
+
+/**
+ * Spec-level hazards that compile fine but diverge from `cairn run`:
+ * infra the preconditions need, env values baked at export time (needs the
+ * raw source text), and the share of opaque eval steps.
+ */
+export function addSpecRisks(
+  spec: Spec,
+  ctx: EmitCtx,
+  opts: { sourceText?: string; extraSourceTexts?: string[] } = {},
+): void {
+  for (const text of [opts.sourceText, ...(opts.extraSourceTexts ?? [])]) {
+    if (text) addEnvBakedRisks(text, ctx);
+  }
+  for (const c of spec.preconditions?.commands ?? []) {
+    const run = typeof c === "string" ? c : c.run;
+    if (isDocumentaryPrecondition(run)) continue;
+    const tools = [
+      ...new Set([...run.matchAll(INFRA_COMMAND_RE)].map((m) => m[1]!)),
+    ];
+    if (tools.length > 0) {
+      addRisk(
+        ctx,
+        "requiredInfra",
+        `precondition ${
+          typeof c === "string" || !c.name
+            ? JSON.stringify(oneLine(run).slice(0, 80))
+            : c.name
+        } needs ${tools.join(", ")} on the machine running the exported suite`,
+        "preconditions",
+      );
+    }
+  }
+  // Run-time setup the export does not reproduce: config fixtures (their
+  // ${fixtures.…} outputs would stay literal → hard skip), the spec teardown
+  // (cleanup only runs under `cairn run`) and preconditions.wait gates.
+  const fixtureNames = [
+    ...new Set(
+      (spec.fixtures ?? []).map((ref) => specFixtureRefParts(ref).name),
+    ),
+  ];
+  if (fixtureNames.length > 0) {
+    skip(
+      ctx,
+      "step",
+      `fixtures not exported (${fixtureNames.join(", ")}): the export does not ensure them, so \${fixtures.…} outputs stay literal — verify with cairn run`,
+      "fixtures",
+    );
+    addRisk(
+      ctx,
+      "requiredSetup",
+      `fixtures ${fixtureNames.join(", ")} must exist before this test (\`cairn fixtures ensure <name>\`); the export neither ensures nor tears them down`,
+      "fixtures",
+    );
+  }
+  const teardown = Array.isArray(spec.teardown)
+    ? spec.teardown
+    : (spec.teardown?.steps ?? []);
+  if (teardown.length > 0) {
+    skip(
+      ctx,
+      "step",
+      `teardown not exported (${teardown.length} item(s)): its cleanup only runs under cairn run`,
+      "teardown",
+      true,
+    );
+    addRisk(
+      ctx,
+      "requiredSetup",
+      `the spec teardown (${teardown.length} item(s)) is not exported: what it cleans up under cairn run is left behind by the exported test`,
+      "teardown",
+    );
+  }
+  const gateNames = gateRefList(spec.preconditions?.wait).map((ref) =>
+    typeof ref === "string" ? ref : (ref.name ?? "inline gate"),
+  );
+  if (gateNames.length > 0) {
+    skip(
+      ctx,
+      "step",
+      `preconditions.wait not exported (${gateNames.join(", ")}): wait for readiness before the suite (\`cairn wait <gate>\`)`,
+      "preconditions",
+      true,
+    );
+    addRisk(
+      ctx,
+      "requiredSetup",
+      `readiness gate(s) ${gateNames.join(", ")} must pass before this test (\`cairn wait\`); the export does not wait on them`,
+      "preconditions",
+    );
+  }
+  const steps = spec.steps ?? [];
+  const evalSteps = steps.filter((step) => "eval" in step).length;
+  if (evalSteps > 0) {
+    const ratio = evalSteps / steps.length;
+    addRisk(
+      ctx,
+      "evalRatio",
+      `${evalSteps}/${steps.length} step(s) (${Math.round(ratio * 100)}%) are eval — opaque page JavaScript that needs bypassCSP and cannot be reviewed as Playwright actions`,
+    );
+  }
+}
+
+function addEnvBakedRisks(text: string, ctx: EmitCtx): void {
+  for (const m of text.matchAll(ENV_REF_RE)) {
+    const name = m[1]!;
+    const hasDefault = m[2] !== undefined;
+    const value = process.env[name];
+    if (value !== undefined && value !== "") {
+      addRisk(
+        ctx,
+        "envBaked",
+        `\${env.${name}} was set while exporting and its value is inlined as a literal; the exported test will not read ${name} at run time`,
+      );
+    } else if (hasDefault) {
+      addRisk(
+        ctx,
+        "envBaked",
+        `\${env.${name}:-…} default was baked at export time; setting ${name} when running the exported test has no effect`,
+      );
+    }
+  }
+}
+
+const ABSOLUTE_PATH_LITERAL_RE =
+  /["'`]((?:\/(?:Users|home|root|Volumes|private|var\/folders|mnt|opt|srv)\/|[A-Za-z]:\\\\)[^"'`]*)["'`]/;
+
+/**
+ * Generated statements that take a FILE-SYSTEM path: upload inputs, module
+ * imports, node verifier `specDir`, precondition `cwd`. URL routes such as
+ * `page.goto("/home/feed")` share the same prefixes but are not paths.
+ */
+const FILE_PATH_SINK_RE =
+  /\.setInputFiles\(|\bimport\(|\bspecDir:|\bcwd:|\bcairnProjectPath\(/;
+
+/**
+ * Generated-code scan: machine-local absolute paths in executable file-path
+ * sinks make an export non-relocatable. Comments are documentation and URL
+ * arguments are routes, so both are ignored.
+ */
+export function addGeneratedSourceRisks(
+  coverage: ExportCoverage,
+  source: string,
+): void {
+  for (const line of source.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
+    if (!FILE_PATH_SINK_RE.test(line)) continue;
+    const m = ABSOLUTE_PATH_LITERAL_RE.exec(line);
+    // A specific risk (e.g. an upload that was not copied) already names it.
+    if (
+      m &&
+      !coverage.semanticRisks.some(
+        (risk) => risk.kind === "absolutePath" && risk.detail.includes(m[1]!),
+      )
+    ) {
+      coverage.semanticRisks.push({
+        kind: "absolutePath",
+        detail: `generated code references the machine-local path ${m[1]}`,
+      });
+    }
+  }
+}
+
+export function addRisk(
+  ctx: EmitCtx,
+  kind: ExportSemanticRisk["kind"],
+  detail: string,
+  id?: string,
+): void {
+  ctx.coverage.semanticRisks.push({
+    kind,
+    ...(id !== undefined ? { id } : {}),
+    detail,
+  });
+}
+
+/** Hoisted `let` declarations for the runtime bindings a scope produced. */
+export function renderBindingDeclarations(ctx: EmitCtx): Stmt[] {
+  const produced = [...(ctx.produced ?? new Map<string, string>()).values()];
+  if (produced.length === 0) return [];
+  const type = ctx.lang === "ts" ? ": unknown" : "";
+  return [
+    comment(
+      `Values captured by request/eval/download \`assign:\` for later \${…} splices.`,
+    ),
+    ...produced.map((ident) => raw(`let ${ident}${type};`)),
+    blank,
+  ];
 }
 
 export function hasNodeFileVerifier(spec: Spec): boolean {
@@ -681,10 +1096,17 @@ export function renderNodeVerifierEvidenceRuntime(lang: ExportLang): string {
 export interface EmitCtx {
   lang: ExportLang;
   coverage: ExportCoverage;
-  /** Late-bound reference collector (env names, run token). */
+  /** Late-bound reference collector (env names, run token, splice bindings). */
   usage: RefUsage;
   /** Absolute dir of the source spec — used to resolve script.file verifiers. */
   specDir?: string;
+  /** Parse origins of the rendered steps (F13 action-relative step files). */
+  stepOrigins?: ParsedStepOrigins;
+  /**
+   * Source expression for the `specDir` passed to node verifiers. Project
+   * mode emits a project-root-relative expression instead of a baked path.
+   */
+  specDirExpr?: string;
   /** Absolute dir of the generated file — verifier imports emit relative to it. */
   outDir?: string;
   /**
@@ -704,11 +1126,38 @@ export interface EmitCtx {
   /** Absolute eval.file paths to copy into `evals/` (project mode). */
   evalFiles?: Set<string>;
   /**
+   * Project mode: upload fixtures copied into the export, keyed by absolute
+   * source path → path relative to the export root (`fixtures/<name>`).
+   */
+  fixtureFiles?: Map<string, string>;
+  /**
+   * Real path that bounds fixture copies: only regular, non-symlink files
+   * inside it (and at most MAX_FIXTURE_BYTES) are copied into the export.
+   */
+  fixtureRoot?: string;
+  /**
    * `--project` mode: import shared helpers from this prefix (`../lib`)
    * instead of inlining fill-retry / click.until / verifier interop.
    */
   libImportPrefix?: string;
   usedLib?: Set<PlaywrightLibModule>;
+  /** Exact helper names imported from lib/ (only used imports are emitted). */
+  usedLibNames?: Set<string>;
+  /** True when emitted code calls `test.info()` (action modules import `test`). */
+  usesTestInfo?: boolean;
+  /**
+   * Runtime refs (`requests:x`, `evals:y`, `artifacts:z`) referenced anywhere
+   * in the unit; a producing step binds its value only when it is referenced.
+   */
+  referencedRefs?: Set<string>;
+  /** Bind every produced value (action modules return them to callers). */
+  bindAllProduced?: boolean;
+  /** Bindings produced in this scope: key → hoisted identifier. */
+  produced?: Map<string, string>;
+  /** Listener-backed network evidence array name (request steps push into it). */
+  networkRecorder?: string;
+  /** 0-based index of the step being rendered (default `request_<n>` names). */
+  stepIndex?: number;
 }
 
 export function newEmitCtx(
@@ -717,22 +1166,24 @@ export function newEmitCtx(
 ): EmitCtx {
   return {
     lang,
-    coverage: {
-      stepsTotal: 0,
-      stepsExported: 0,
-      outcomesTotal: 0,
-      outcomesExported: 0,
-      skips: [],
-    },
+    coverage: newCoverage(),
     usage: newRefUsage(),
     postconditionCounter: 0,
     usedLib: new Set(),
+    usedLibNames: new Set(),
+    produced: new Map(),
     ...init,
   };
 }
 
-function markLib(ctx: EmitCtx, name: PlaywrightLibModule): void {
+function markLib(
+  ctx: EmitCtx,
+  name: PlaywrightLibModule,
+  ...helpers: string[]
+): void {
   (ctx.usedLib ?? (ctx.usedLib = new Set())).add(name);
+  const names = ctx.usedLibNames ?? (ctx.usedLibNames = new Set());
+  for (const helper of helpers) names.add(helper);
 }
 
 interface Rendered {
@@ -772,6 +1223,44 @@ function skipStmt(
   return { stmts: [comment(note)], exported: false };
 }
 
+/** Bind a produced value only when something references it (or always in actions). */
+function wantsBinding(ctx: EmitCtx, key: string): boolean {
+  return Boolean(ctx.bindAllProduced || ctx.referencedRefs?.has(key));
+}
+
+/** Reserve (or reuse) the hoisted identifier for a produced runtime binding. */
+function declareBinding(ctx: EmitCtx, key: string, preferred: string): string {
+  const produced = ctx.produced ?? (ctx.produced = new Map());
+  const existing = produced.get(key);
+  if (existing) return existing;
+  const taken = new Set(produced.values());
+  let ident = preferred;
+  for (let n = 2; taken.has(ident); n++) ident = `${preferred}${n}`;
+  produced.set(key, ident);
+  return ident;
+}
+
+/** Make a produced binding visible to later splices in this scope. */
+function publishBinding(ctx: EmitCtx, key: string, ident: string): void {
+  ctx.usage.bindings.set(key, ident);
+}
+
+/** Inline parse of a body string the way the runner stores captured bodies. */
+function parseJsonOrText(expr: string, ctx: EmitCtx): string {
+  const asUnknown = ctx.lang === "ts" ? " as unknown" : "";
+  return `((text) => { if (text === null || text === undefined) return null; try { return JSON.parse(text)${asUnknown}; } catch { return text; } })(${expr})`;
+}
+
+/** Same default artifact name the runner derives from a download's saveAs. */
+export function artifactNameFromPath(path: string): string {
+  const rawName = basename(path)
+    .replace(/\.[^.]+$/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return /^[a-z]/.test(rawName) ? rawName : `artifact_${rawName || "download"}`;
+}
+
 /* ----- step rendering ----- */
 
 export function renderStep(
@@ -779,7 +1268,11 @@ export function renderStep(
   specSettleMs: number | undefined,
   ctx: EmitCtx,
 ): Rendered {
+  const unresolvedBefore = ctx.usage.unresolvedLog.length;
   const whenWrap = "when" in step && step.when ? step.when : undefined;
+  // The predicate runs BEFORE the step, so it is rendered first: it must not
+  // see a binding the step itself produces.
+  const when = whenWrap ? renderWhenCondition(whenWrap, ctx) : undefined;
   const postcondition = step.postcondition?.network;
   const action = postcondition ? withoutPostcondition(step) : step;
   const body = renderStepBody(
@@ -795,10 +1288,39 @@ export function renderStep(
     ? [comment(`step: ${oneLine(step.id)}`), ...guardedBody.stmts]
     : guardedBody.stmts;
 
-  const rendered = !whenWrap
+  const rendered = !when
     ? { stmts, exported: guardedBody.exported }
-    : wrapWhen(whenWrap, stmts, guardedBody.exported, ctx, step.id);
+    : wrapWhen(when, stmts, guardedBody.exported, ctx, step.id);
+  recordUnresolvedSplices(ctx, unresolvedBefore, "step", step.id);
   return wrapTestStep(step, rendered, ctx);
+}
+
+/**
+ * A `${requests|evals|artifacts.…}` splice emitted without a binding throws at
+ * run time; record it as a HARD skip (the test becomes test.fixme) and as a
+ * semantic risk so coverage can never claim 100% for it.
+ */
+function recordUnresolvedSplices(
+  ctx: EmitCtx,
+  before: number,
+  kind: ExportCoverageSkip["kind"],
+  id: string | undefined,
+): void {
+  const refs = [...new Set(ctx.usage.unresolvedLog.slice(before))];
+  for (const ref of refs) {
+    skip(
+      ctx,
+      kind,
+      `unresolved splice \${${ref}} — its producing step is not exported in this scope`,
+      id,
+    );
+    addRisk(
+      ctx,
+      "unresolvedSplice",
+      `\${${ref}} has no binding in the exported code (cairnUnresolvedSplice throws if the test runs)`,
+      id,
+    );
+  }
 }
 
 function wrapTestStep(step: Step, rendered: Rendered, ctx: EmitCtx): Rendered {
@@ -818,26 +1340,28 @@ function wrapTestStep(step: Step, rendered: Rendered, ctx: EmitCtx): Rendered {
   };
 }
 
-function wrapWhen(
+interface WhenCondition {
+  serialized: string;
+  /** Undefined when the predicate has no Playwright translation. */
+  condition?: string;
+}
+
+/**
+ * Text predicates pass their (normalized) needle as a page.evaluate ARGUMENT:
+ * the browser function cannot see Node-side variables, and normalizing at
+ * export time would lowercase late-bound sentinels into the source.
+ */
+function textPredicate(needle: string, negated: boolean, ctx: EmitCtx): string {
+  const needleExpr = emitNormalizedText(needle, false, ctx.usage);
+  const call = `await page.evaluate((needle) => String(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().toLowerCase().includes(needle), ${needleExpr})`;
+  return negated ? `!(${call})` : call;
+}
+
+function renderWhenCondition(
   when: string | WhenObject,
-  body: Stmt[],
-  exported: boolean,
   ctx: EmitCtx,
-  stepId?: string,
-): Rendered {
+): WhenCondition {
   const serialized = formatWhen(when);
-  const fallthrough = (): Rendered => {
-    skip(ctx, "when", `unrecognized when predicate: ${serialized}`, stepId);
-    return {
-      stmts: [
-        comment(
-          `when: ${oneLine(serialized)} — not translated; step always runs`,
-        ),
-        ...body,
-      ],
-      exported,
-    };
-  };
   const str = (s: string) => emitStr(s, ctx.usage);
   let condition: string | undefined;
   if (typeof when !== "string") {
@@ -848,9 +1372,9 @@ function wrapWhen(
     } else if (when.urlMatches !== undefined) {
       condition = `new RegExp(${str(when.urlMatches)}).test(page.url())`;
     } else if (when.text !== undefined) {
-      condition = `await page.evaluate(() => ${bodyTextContainsExpression(when.text, false)})`;
+      condition = textPredicate(when.text, false, ctx);
     } else if (when.notText !== undefined) {
-      condition = `await page.evaluate(() => !(${bodyTextContainsExpression(when.notText, false)}))`;
+      condition = textPredicate(when.notText, true, ctx);
     } else if (when.selector !== undefined) {
       condition = when.hasText
         ? `await page.locator(${str(when.selector)}).filter({ hasText: ${str(when.hasText)} }).count() > 0`
@@ -858,36 +1382,58 @@ function wrapWhen(
     } else if (when.notSelector !== undefined) {
       condition = `(await page.locator(${str(when.notSelector)}).count()) === 0`;
     }
-  } else {
-    const colon = serialized.indexOf(":");
-    if (colon < 0) return fallthrough();
-    const kind = serialized.slice(0, colon);
-    const arg = serialized.slice(colon + 1);
-    switch (kind) {
-      case "urlContains":
-        condition = `page.url().includes(${str(arg)})`;
-        break;
-      case "urlNotContains":
-        condition = `!page.url().includes(${str(arg)})`;
-        break;
-      case "urlMatches":
-        condition = `new RegExp(${str(arg)}).test(page.url())`;
-        break;
-      case "text":
-        condition = `await page.evaluate(() => ${bodyTextContainsExpression(arg, false)})`;
-        break;
-      case "notText":
-        condition = `await page.evaluate(() => !(${bodyTextContainsExpression(arg, false)}))`;
-        break;
-      case "selector":
-        condition = `await page.locator(${str(arg)}).count() > 0`;
-        break;
-      case "notSelector":
-        condition = `(await page.locator(${str(arg)}).count()) === 0`;
-        break;
-    }
+    return { serialized, ...(condition ? { condition } : {}) };
   }
-  if (!condition) return fallthrough();
+  const colon = serialized.indexOf(":");
+  if (colon < 0) return { serialized };
+  const kind = serialized.slice(0, colon);
+  const arg = serialized.slice(colon + 1);
+  switch (kind) {
+    case "urlContains":
+      condition = `page.url().includes(${str(arg)})`;
+      break;
+    case "urlNotContains":
+      condition = `!page.url().includes(${str(arg)})`;
+      break;
+    case "urlMatches":
+      condition = `new RegExp(${str(arg)}).test(page.url())`;
+      break;
+    case "text":
+      condition = textPredicate(arg, false, ctx);
+      break;
+    case "notText":
+      condition = textPredicate(arg, true, ctx);
+      break;
+    case "selector":
+      condition = `await page.locator(${str(arg)}).count() > 0`;
+      break;
+    case "notSelector":
+      condition = `(await page.locator(${str(arg)}).count()) === 0`;
+      break;
+  }
+  return { serialized, ...(condition ? { condition } : {}) };
+}
+
+function wrapWhen(
+  when: WhenCondition,
+  body: Stmt[],
+  exported: boolean,
+  ctx: EmitCtx,
+  stepId?: string,
+): Rendered {
+  const { serialized, condition } = when;
+  if (!condition) {
+    skip(ctx, "when", `unrecognized when predicate: ${serialized}`, stepId);
+    return {
+      stmts: [
+        comment(
+          `when: ${oneLine(serialized)} — not translated; step always runs`,
+        ),
+        ...body,
+      ],
+      exported,
+    };
+  }
   return {
     stmts: [comment(`when: ${oneLine(serialized)}`), iff(condition, body)],
     exported,
@@ -905,6 +1451,28 @@ function renderNetworkPostconditionAction(
   const promise = `networkPostconditionResponse${counter}`;
   const predicate = renderNetworkPostconditionPredicate(postcondition, ctx);
   const timeout = postcondition.timeoutMs ?? 30_000;
+  const key = postcondition.assign
+    ? runtimeRefKey("requests", postcondition.assign)
+    : undefined;
+  const bindIdent =
+    key && wantsBinding(ctx, key)
+      ? declareBinding(
+          ctx,
+          key,
+          `cairnRequests_${toIdent(postcondition.assign!)}`,
+        )
+      : undefined;
+  const settle: Stmt[] = bindIdent
+    ? [
+        raw(`const ${promise}Matched = await ${promise};`),
+        // Same envelope the runner records for a matched postcondition:
+        // the REQUEST body (post data) is what `${requests.<assign>.body…}` reads.
+        raw(
+          `${bindIdent} = { url: ${promise}Matched.url(), method: ${promise}Matched.request().method(), status: ${promise}Matched.status(), ok: ${promise}Matched.status() >= 200 && ${promise}Matched.status() < 400, headers: {}, body: ${parseJsonOrText(`${promise}Matched.request().postData()`, ctx)} };`,
+        ),
+      ]
+    : [raw(`await ${promise};`)];
+  if (key && bindIdent) publishBinding(ctx, key, bindIdent);
   return {
     exported: true,
     stmts: [
@@ -913,7 +1481,7 @@ function renderNetworkPostconditionAction(
       ),
       raw(`void ${promise}.catch(() => undefined);`),
       ...body.stmts,
-      raw(`await ${promise};`),
+      ...settle,
     ],
   };
 }
@@ -1022,31 +1590,23 @@ function renderStepBody(
   if ("upload" in step) {
     const { path, ...loc } = step.upload;
     return one(
-      raw(`await ${locator(loc as Locator, ctx)}.setInputFiles(${str(path)});`),
+      raw(
+        `await ${locator(loc as Locator, ctx)}.setInputFiles(${uploadPathExpr(path, ctx)});`,
+      ),
     );
   }
   if ("download" in step) {
-    const { saveAs, assign: _assign, timeoutMs, ...loc } = step.download;
-    const timeout = timeoutMs ?? 30_000;
-    return {
-      stmts: [
-        raw(`const download = await Promise.all([`),
-        raw(`  page.waitForEvent("download", { timeout: ${timeout} }),`),
-        raw(`  ${locator(loc as Locator, ctx)}.click(),`),
-        raw(`]).then(([download]) => download);`),
-        raw(`await download.saveAs(${str(saveAs)});`),
-      ],
-      exported: true,
-    };
+    return renderDownloadStep(step, ctx);
   }
   if ("transform" in step) {
+    // A transform produces the artifact later steps upload/verify; without
+    // it the test cannot be faithful, so this is a HARD skip (test.fixme).
     return skipStmt(
       ctx,
       "step",
       `transform step not exportable (${step.transform.file})`,
       `transform step skipped — Cairntrace runs ${JSON.stringify(step.transform.file)} in Node`,
       step.id,
-      true,
     );
   }
   if ("request" in step) {
@@ -1068,16 +1628,20 @@ function renderStepBody(
     const timeout = "timeoutMs" in w ? (w.timeoutMs ?? 30_000) : 30_000;
     if ("text" in w || "notText" in w) {
       const expected = "text" in w;
-      const needle = normalizeTextForMatching(
+      // Normalize only literal needles at export time; late-bound needles
+      // (action vars, run token, splices) are normalized at run time so a
+      // sentinel can never be lowercased into the generated source.
+      const needle = emitNormalizedText(
         expected ? w.text : w.notText,
         w.caseSensitive ?? false,
+        ctx.usage,
       );
       const text =
         '(await page.locator("body").innerText()).replace(/\\s+/g, " ").trim()' +
         (w.caseSensitive ? "" : ".toLowerCase()");
       return one(
         raw(
-          `await expect.poll(async () => ${text}.includes(${str(needle)}), { timeout: ${timeout} }).toBe(${expected});`,
+          `await expect.poll(async () => ${text}.includes(${needle}), { timeout: ${timeout} }).toBe(${expected});`,
         ),
       );
     }
@@ -1162,6 +1726,37 @@ function renderStepBody(
       true,
     );
   }
+  if ("expect" in step) return renderExpectStep(step, ctx);
+  if ("run" in step) {
+    // The command text stays out of the generated code and the report: its
+    // substituted placeholders may hold secrets (as in run-step events).
+    const target =
+      typeof step.run === "string"
+        ? "shell command"
+        : step.run.node !== undefined
+          ? `node ${basename(step.run.node)}`
+          : "shell command";
+    return skipStmt(
+      ctx,
+      "step",
+      `run step not exported (${target}): host commands run only under cairn run${
+        typeof step.run !== "string" && step.run.assign
+          ? `; later \${runs.${step.run.assign}…} references stay literal`
+          : ""
+      }`,
+      `run step (${target}) skipped — a host command; run it with cairn run`,
+      step.id,
+    );
+  }
+  if ("capture" in step) {
+    return skipStmt(
+      ctx,
+      "step",
+      `capture step not exportable (${step.capture.assign}): later \${captures.${step.capture.assign}…} references stay literal`,
+      `capture ${oneLine(step.capture.assign)} skipped — Cairntrace stores the value for \${captures.…}; no Playwright equivalent is generated`,
+      step.id,
+    );
+  }
   if ("monitor" in step) {
     return skipStmt(
       ctx,
@@ -1201,8 +1796,8 @@ function renderVerifiedInput(
   ctx?: EmitCtx,
 ): Rendered {
   if (ctx?.libImportPrefix) {
-    markLib(ctx, "hydration");
     const helper = action === "fill" ? "verifiedFill" : "verifiedType";
+    markLib(ctx, "hydration", helper);
     const extra =
       action === "type" && typeOptions
         ? `, ${typeOptions.replace(/^, /, "")}`
@@ -1251,7 +1846,7 @@ function renderClickUntilStep(
   const until = step.click.until!;
   const timeoutMs = until.timeoutMs ?? 30_000;
   if (ctx.libImportPrefix) {
-    markLib(ctx, "clickUntil");
+    markLib(ctx, "clickUntil", "clickUntil");
     const fields = [`timeoutMs: ${timeoutMs}`];
     if (settleMs !== undefined && settleMs > 0) {
       fields.push(`settleMs: ${settleMs}`);
@@ -1365,7 +1960,7 @@ function renderEvalStep(
         exported: false,
       };
     }
-    const abs = isAbsolute(e.file) ? e.file : resolve(ctx.specDir, e.file);
+    const abs = stepFilePath(e.file, ctx, "eval.file");
     try {
       js = readFileSync(abs, "utf8");
       ctx.evalFiles?.add(abs);
@@ -1386,27 +1981,39 @@ function renderEvalStep(
       };
     }
   }
-  if (hasRefSentinel(js)) {
-    // Secrets can't reach the browser context (`process.env` doesn't exist
-    // there) — refuse loudly instead of emitting a broken sentinel.
-    skip(
+  if (
+    hasSecretSentinel(js) ||
+    hasSecretSentinel(JSON.stringify(e.args ?? {}))
+  ) {
+    // The source/args are assembled in NODE (template literal) and handed to
+    // the page as data, exactly like the runner substitutes them — but the
+    // secret value then lives in page memory and Playwright traces.
+    addRisk(
       ctx,
-      "step",
-      "eval source references a secret/run-token — not representable in-browser",
+      "secretInBrowser",
+      `eval passes a secret into page-evaluated source/args; Playwright traces record evaluate arguments`,
       step.id,
     );
   }
   const argsJson = emitValue(e.args ?? {}, ctx.usage);
-  const sourceExpr = emitEvalSource(js, ctx.usage);
-  const varName = e.assign ? safeIdent(e.assign) : undefined;
+  // Late-bound parts (run token, action vars, secrets, splices) are spliced
+  // into the source string in Node before it is sent to the page.
+  const sourceExpr = emitStr(js, ctx.usage);
+  const key = e.assign ? runtimeRefKey("evals", e.assign) : undefined;
+  const bindIdent =
+    key && wantsBinding(ctx, key)
+      ? declareBinding(ctx, key, `cairnEvals_${toIdent(e.assign!)}`)
+      : undefined;
 
   const asyncFunctionType =
     ctx.lang === "ts"
       ? ` as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>`
       : "";
-  const evalCall = (prefix: string): Stmt[] => [
+  const evalCall = (): Stmt[] => [
     block(
-      `${prefix}await page.evaluate(async ({ source, args }) => {`,
+      `${
+        bindIdent ? `${bindIdent} = { value: ` : ""
+      }await page.evaluate(async ({ source, args }) => {`,
       [
         comment(
           `Cairn eval.js is JavaScript input, so keep it outside the generated TypeScript AST.`,
@@ -1417,7 +2024,9 @@ function renderEvalStep(
         raw(`const execute = new AsyncFunction("args", source);`),
         raw(`return await execute(args);`),
       ],
-      `}, { source: ${sourceExpr}, args: ${argsJson} });`,
+      `}, { source: ${sourceExpr}, args: ${argsJson} })${
+        bindIdent ? " }" : ""
+      };`,
     ),
   ];
 
@@ -1428,33 +2037,21 @@ function renderEvalStep(
     // (up to 4 contexts): a hot dev server can navigate/reload more than once
     // (HMR recompile) while the rescue eval is in flight.
     stmts = [
-      ...(varName ? [raw(`let ${varName};`)] : []),
       block(`for (let evalAttempt = 0; ; evalAttempt++) {`, [
-        tryCatch(
-          [...evalCall(varName ? `${varName} = ` : ""), raw(`break;`)],
-          "err",
-          [
-            raw(
-              `if (evalAttempt >= 3 || !String(err).includes("Execution context was destroyed")) throw err;`,
-            ),
-            raw(
-              `await page.waitForLoadState("networkidle", { timeout: 45000 });`,
-            ),
-          ],
-        ),
+        tryCatch([...evalCall(), raw(`break;`)], "err", [
+          raw(
+            `if (evalAttempt >= 3 || !String(err).includes("Execution context was destroyed")) throw err;`,
+          ),
+          raw(
+            `await page.waitForLoadState("networkidle", { timeout: 45000 });`,
+          ),
+        ]),
       ]),
     ];
   } else {
-    stmts = evalCall(varName ? `const ${varName} = ` : "");
+    stmts = evalCall();
   }
-
-  if (e.assign) {
-    stmts.push(
-      comment(
-        `Note: later steps that splice \${evals.${e.assign}…} are not rewritten — wire variables manually if needed.`,
-      ),
-    );
-  }
+  if (key && bindIdent) publishBinding(ctx, key, bindIdent);
   return { stmts, exported: true };
 }
 
@@ -1505,8 +2102,25 @@ function renderRequestStep(
   if (r.body !== undefined) {
     opts.push(`data: ${emitValue(r.body, ctx.usage)}`);
   }
-  const varName = r.assign ? safeIdent(r.assign) : "_res";
-  const evidenceTimestamp = `${varName}CairnRequestTimestamp`;
+  const urlExpr = str(r.url);
+  // The runner names an unassigned response `request_<step number>`.
+  const assignName =
+    r.assign ??
+    (ctx.stepIndex !== undefined ? `request_${ctx.stepIndex + 1}` : undefined);
+  const key = assignName ? runtimeRefKey("requests", assignName) : undefined;
+  const bindIdent =
+    key && wantsBinding(ctx, key)
+      ? declareBinding(ctx, key, `cairnRequests_${toIdent(assignName!)}`)
+      : undefined;
+  const needsLocal =
+    r.expectStatus !== undefined ||
+    ctx.nodeVerifierEvidence !== undefined ||
+    ctx.networkRecorder !== undefined ||
+    bindIdent !== undefined;
+  // A reserved, block-scoped local: never derived from `assign:`, which could
+  // shadow `requests` (network evidence), `page`, or `consoleErrors`.
+  const varName = "cairnResponse";
+  const evidenceTimestamp = "cairnResponseTimestamp";
   const stmts: Stmt[] = [
     comment(
       `request step (${r.assign ?? "unnamed"}) — page.request shares browser context cookies`,
@@ -1517,9 +2131,20 @@ function renderRequestStep(
   }
   stmts.push(
     raw(
-      `const ${varName} = await page.request.fetch(${str(r.url)}, { ${opts.join(", ")} });`,
+      `${
+        needsLocal ? `const ${varName} = ` : ""
+      }await page.request.fetch(${urlExpr}, { ${opts.join(", ")} });`,
     ),
   );
+  if (ctx.networkRecorder) {
+    // `cairn run` records request-step calls in its network evidence, so
+    // network/noFailedRequests outcomes see them; page listeners do not.
+    stmts.push(
+      raw(
+        `${ctx.networkRecorder}.push({ url: ${varName}.url(), method: ${JSON.stringify(method)}, status: ${varName}.status() });`,
+      ),
+    );
+  }
   if (ctx.nodeVerifierEvidence) {
     const contentType = Object.entries(headers).find(
       ([name]) => name.toLowerCase() === "content-type",
@@ -1542,6 +2167,14 @@ function renderRequestStep(
       ),
     );
   }
+  if (bindIdent) {
+    // Same envelope the runner stores for `${requests.<name>.…}`.
+    stmts.push(
+      raw(
+        `${bindIdent} = { url: ${varName}.url(), method: ${JSON.stringify(method)}, status: ${varName}.status(), ok: ${varName}.status() >= 200 && ${varName}.status() < 400, headers: ${varName}.headers(), body: ${parseJsonOrText(`await ${varName}.text()`, ctx)} };`,
+      ),
+    );
+  }
   if (r.expectStatus !== undefined) {
     if (Array.isArray(r.expectStatus)) {
       stmts.push(
@@ -1553,14 +2186,176 @@ function renderRequestStep(
       stmts.push(raw(`expect(${varName}.status()).toBe(${r.expectStatus});`));
     }
   }
-  if (r.assign) {
+  if (key && bindIdent) publishBinding(ctx, key, bindIdent);
+  // Block-scoped so repeated request steps never redeclare their locals.
+  return { stmts: [braces(stmts)], exported: true };
+}
+
+function renderDownloadStep(
+  step: Extract<Step, { download: unknown }>,
+  ctx: EmitCtx,
+): Rendered {
+  const { saveAs, assign, timeoutMs, ...loc } = step.download;
+  const timeout = timeoutMs ?? 30_000;
+  const literal = parseTemplateValue(saveAs).every((p) => p.kind === "lit");
+  // Mirror the runner: downloads land in <runDir>/downloads/<basename>; the
+  // exported run dir is Playwright's per-test `cairn-run` output folder.
+  const fileNameExpr = literal
+    ? JSON.stringify(basename(saveAs))
+    : `(String(${emitStr(saveAs, ctx.usage)}).split(/[\\\\/]/).pop() || "download")`;
+  const name = assign ?? (literal ? artifactNameFromPath(saveAs) : undefined);
+  const key = name ? runtimeRefKey("artifacts", name) : undefined;
+  const bindIdent =
+    key && wantsBinding(ctx, key)
+      ? declareBinding(ctx, key, `cairnArtifacts_${toIdent(name!)}`)
+      : undefined;
+  ctx.usesTestInfo = true;
+  const stmts: Stmt[] = [
+    raw(`const download = await Promise.all([`),
+    raw(`  page.waitForEvent("download", { timeout: ${timeout} }),`),
+    raw(`  ${locator(loc as Locator, ctx)}.click(),`),
+    raw(`]).then(([download]) => download);`),
+    raw(
+      `const downloadPath = test.info().outputPath("cairn-run", "downloads", ${fileNameExpr});`,
+    ),
+    raw(`await download.saveAs(downloadPath);`),
+  ];
+  if (bindIdent) {
+    const relativePath = literal
+      ? JSON.stringify(`downloads/${basename(saveAs)}`)
+      : `"downloads/" + ${fileNameExpr}`;
     stmts.push(
-      comment(
-        `Response body: await ${varName}.json() or .text() — \${requests.${r.assign}.*} placeholders are not auto-rewritten below.`,
+      raw(
+        `${bindIdent} = { path: downloadPath, relativePath: ${relativePath} };`,
       ),
     );
   }
-  return { stmts, exported: true };
+  if (key && bindIdent) publishBinding(ctx, key, bindIdent);
+  return { stmts: [braces(stmts)], exported: true };
+}
+
+/**
+ * A relative file path declared by the step being rendered, resolved like
+ * the runner (F13): against the declaring file's directory — the imported
+ * action's for a step that came from one, with the deprecated spec-relative
+ * fallback — else against the spec's directory.
+ */
+function stepFilePath(file: string, ctx: EmitCtx, field: string): string {
+  if (isAbsolute(file)) return file;
+  if (ctx.stepOrigins && ctx.stepIndex !== undefined) {
+    return resolveStepFile(
+      file,
+      stepFileScopeAt(ctx.stepOrigins, ctx.stepIndex),
+      field,
+    );
+  }
+  return resolve(ctx.specDir ?? process.cwd(), file);
+}
+
+/**
+ * Upload paths: artifact splices read earlier download bindings; a literal
+ * path is resolved like the runner (relative to the file that declares the
+ * step: the spec, or the imported action). Project mode
+ * copies the file into `<export>/fixtures/` so the suite is relocatable;
+ * single-file mode emits the resolved absolute path (reported as a risk).
+ */
+function uploadPathExpr(path: string, ctx: EmitCtx): string {
+  const parts = parseTemplateValue(path);
+  if (!parts.every((p) => p.kind === "lit")) {
+    const relativeArtifact = parts.some(
+      (p) =>
+        p.kind === "runtime" &&
+        p.source === "artifacts" &&
+        p.path[0] === "relativePath",
+    );
+    if (relativeArtifact) {
+      ctx.usesTestInfo = true;
+      return `test.info().outputPath("cairn-run", ${emitStr(path, ctx.usage)})`;
+    }
+    return emitStr(path, ctx.usage);
+  }
+  const abs = isAbsolute(path)
+    ? path
+    : ctx.specDir
+      ? stepFilePath(path, ctx, "upload.path")
+      : undefined;
+  if (!abs) return JSON.stringify(path);
+  if (ctx.fixtureFiles) {
+    const blocker = fixtureCopyBlocker(abs, ctx.fixtureRoot);
+    if (blocker === undefined) {
+      const rel = registerFixture(ctx.fixtureFiles, abs);
+      markLib(ctx, "fixtures", "cairnFixturePath");
+      return `cairnFixturePath(${JSON.stringify(rel.slice("fixtures/".length))})`;
+    }
+    addRisk(
+      ctx,
+      "absolutePath",
+      `upload file ${abs} was not copied into fixtures/ (${blocker}); the test reads the machine-local path`,
+    );
+  }
+  return JSON.stringify(abs);
+}
+
+/** Largest upload file copied into an export's `fixtures/`. */
+export const MAX_FIXTURE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Why an upload file may NOT be copied into the export, or undefined when it
+ * may. Exports are usually committed, so copies are bounded like verifier
+ * copies: a regular non-symlink file inside the project root, size-capped —
+ * never a personal document elsewhere on the machine.
+ */
+function fixtureCopyBlocker(
+  abs: string,
+  root: string | undefined,
+): string | undefined {
+  if (!root) return "no project root bounds fixture copies";
+  let stats;
+  try {
+    stats = lstatSync(abs);
+  } catch {
+    return "file not found at export time";
+  }
+  if (stats.isSymbolicLink()) return "it is a symlink";
+  if (!stats.isFile()) return "it is not a regular file";
+  if (stats.size > MAX_FIXTURE_BYTES) {
+    return `it is larger than ${MAX_FIXTURE_BYTES} bytes`;
+  }
+  let real: string;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    return "its real path cannot be resolved";
+  }
+  const rel = relative(root, real);
+  if (
+    rel === "" ||
+    rel === ".." ||
+    rel.startsWith(`..${sep}`) ||
+    isAbsolute(rel)
+  ) {
+    return "it is outside the project root";
+  }
+  return undefined;
+}
+
+/** Reserve `fixtures/<name>` for a source file (parent-prefixed on collision). */
+export function registerFixture(
+  fixtures: Map<string, string>,
+  absSource: string,
+): string {
+  const existing = fixtures.get(absSource);
+  if (existing) return existing;
+  const taken = new Set(fixtures.values());
+  let rel = `fixtures/${basename(absSource)}`;
+  if (taken.has(rel)) {
+    rel = `fixtures/${basename(dirname(absSource))}-${basename(absSource)}`;
+  }
+  for (let n = 2; taken.has(rel); n++) {
+    rel = `fixtures/${n}-${basename(absSource)}`;
+  }
+  fixtures.set(absSource, rel);
+  return rel;
 }
 
 function locator(loc: Locator, ctx: EmitCtx): string {
@@ -1617,7 +2412,69 @@ function locatorFromRoot(root: string, loc: Locator, ctx: EmitCtx): string {
 
 /* ----- outcome rendering ----- */
 
+/** Outcome fields `cairn run` never splices (see withSpliceSources). */
+const NO_SPLICE: ReadonlySet<RuntimeRefSource> = new Set();
+const ALL_SPLICE: ReadonlySet<RuntimeRefSource> = new Set([
+  "requests",
+  "evals",
+  "artifacts",
+]);
+/** httpJson.url: the runner resolves artifacts and requests, not evals. */
+const HTTP_JSON_URL_SPLICE: ReadonlySet<RuntimeRefSource> = new Set([
+  "requests",
+  "artifacts",
+]);
+
+/** Emit with a narrowed set of runtime sources the runner splices here. */
+function withSpliceSources<T>(
+  ctx: EmitCtx,
+  sources: ReadonlySet<RuntimeRefSource>,
+  render: () => T,
+): T {
+  const previous = ctx.usage.spliceSources;
+  ctx.usage.spliceSources = sources;
+  try {
+    return render();
+  } finally {
+    if (previous) ctx.usage.spliceSources = previous;
+    else delete ctx.usage.spliceSources;
+  }
+}
+
+/**
+ * Outcomes splice runtime refs only where `cairn run` does: script
+ * `fixtures` and the `httpJson.url`. Everywhere else (text/url/count/network
+ * needles, httpJson matchers) the runner compares the raw `${…}` text, so the
+ * export keeps it literal too and reports a `literalSplice` risk.
+ */
 export function renderOutcome(outcome: Outcome, ctx: EmitCtx): Rendered {
+  const unresolvedBefore = ctx.usage.unresolvedLog.length;
+  const literalBefore = ctx.usage.literalLog.length;
+  const rendered = withSpliceSources(ctx, NO_SPLICE, () =>
+    renderOutcomeBody(outcome, ctx),
+  );
+  if (rendered.exported && verifierPoll(outcome.verify) !== undefined) {
+    skip(
+      ctx,
+      "outcome",
+      "poll not exported: the generated check runs once (Playwright locator assertions still auto-retry)",
+      outcome.id,
+      true,
+    );
+  }
+  recordUnresolvedSplices(ctx, unresolvedBefore, "outcome", outcome.id);
+  for (const ref of new Set(ctx.usage.literalLog.slice(literalBefore))) {
+    addRisk(
+      ctx,
+      "literalSplice",
+      `\${${ref}} is compared as literal text: \`cairn run\` does not splice runtime refs into this outcome field, and the export matches that`,
+      outcome.id,
+    );
+  }
+  return rendered;
+}
+
+function renderOutcomeBody(outcome: Outcome, ctx: EmitCtx): Rendered {
   const v = outcome.verify;
   if (isTextVerifier(v))
     return {
@@ -1633,8 +2490,27 @@ export function renderOutcome(outcome: Outcome, ctx: EmitCtx): Rendered {
     return { stmts: renderUrlOutcome(v.url, ctx), exported: true };
   if (isCountVerifier(v))
     return { stmts: renderCountOutcome(v, ctx), exported: true };
-  if (isNetworkVerifier(v))
+  if (isNetworkVerifier(v)) {
+    if (v.network.body !== undefined || v.network.count !== undefined) {
+      return skipStmt(
+        ctx,
+        "outcome",
+        "network body/count matching not exported (the generated request log keeps no request bodies)",
+        `network ${oneLine(v.network.urlContains)} with body/count skipped — verify with cairn run`,
+        outcome.id,
+      );
+    }
+    if (v.network.assign !== undefined) {
+      skip(
+        ctx,
+        "outcome",
+        `network.assign ${v.network.assign} not exported: later \${network.${v.network.assign}…} references stay literal`,
+        outcome.id,
+        true,
+      );
+    }
     return { stmts: renderNetworkOutcome(v, ctx), exported: true };
+  }
   if (isNoFailedRequestsVerifier(v))
     return { stmts: renderNoFailedRequestsOutcome(v, ctx), exported: true };
   if (isConsoleVerifier(v))
@@ -1648,6 +2524,10 @@ export function renderOutcome(outcome: Outcome, ctx: EmitCtx): Rendered {
     };
   if (isScriptVerifier(v)) return renderScriptOutcome(v, outcome.id, ctx);
   if (isHttpJsonVerifier(v)) return renderHttpJsonOutcome(v, outcome.id, ctx);
+  const dataSkip = dataVerifierSkipReason(v);
+  if (dataSkip) {
+    return skipStmt(ctx, "outcome", dataSkip, oneLine(dataSkip), outcome.id);
+  }
   return skipStmt(
     ctx,
     "outcome",
@@ -1703,14 +2583,14 @@ function renderUrlOutcome(m: UrlMatcher, ctx: EmitCtx): Stmt[] {
   if (m.startsWith !== undefined) {
     return [
       raw(
-        `await expect(page).toHaveURL(new RegExp(${JSON.stringify("^" + escapeRegex(m.startsWith))}));`,
+        `await expect(page).toHaveURL(new RegExp(${emitEscapedRegexSource("^", m.startsWith, "", ctx.usage)}));`,
       ),
     ];
   }
   if (m.endsWith !== undefined) {
     return [
       raw(
-        `await expect(page).toHaveURL(new RegExp(${JSON.stringify(escapeRegex(m.endsWith) + "$")}));`,
+        `await expect(page).toHaveURL(new RegExp(${emitEscapedRegexSource("", m.endsWith, "$", ctx.usage)}));`,
       ),
     ];
   }
@@ -1769,11 +2649,11 @@ function renderNetworkOutcome(v: NetworkVerifier, ctx: EmitCtx): Stmt[] {
   if (n.method) conds.push(`r.method === ${JSON.stringify(n.method)}`);
   conds.push(`r.url.includes(${str(n.urlContains)})`);
   const s = n.status;
-  if (s.equals !== undefined) conds.push(`r.status === ${s.equals}`);
-  else if (s.below !== undefined) conds.push(`(r.status ?? 0) < ${s.below}`);
-  else if (s.atLeast !== undefined)
+  if (s?.equals !== undefined) conds.push(`r.status === ${s.equals}`);
+  else if (s?.below !== undefined) conds.push(`(r.status ?? 0) < ${s.below}`);
+  else if (s?.atLeast !== undefined)
     conds.push(`(r.status ?? 0) >= ${s.atLeast}`);
-  else if (s.in !== undefined)
+  else if (s?.in !== undefined)
     conds.push(`[${s.in.join(", ")}].includes(r.status ?? -1)`);
   return [
     raw(`expect(requests.some((r) => ${conds.join(" && ")})).toBe(true);`),
@@ -1839,7 +2719,7 @@ function renderScriptOutcome(
             `await ${ctx.nodeVerifierEvidence}.persist(${ctx.nodeVerifierRunDir});`,
           ),
           ...(ctx.libImportPrefix
-            ? (markLib(ctx, "verifier"),
+            ? (markLib(ctx, "verifier", "loadCairnVerifier"),
               [
                 raw(
                   `const verify = await loadCairnVerifier(await import(${JSON.stringify(importPath)}));`,
@@ -1891,12 +2771,16 @@ function renderScriptOutcome(
             `const res = await verify({`,
             [
               raw(
-                `fixtures: ${emitValue(v.script.fixtures ?? {}, ctx.usage)},`,
+                `fixtures: ${withSpliceSources(ctx, ALL_SPLICE, () =>
+                  emitValue(v.script.fixtures ?? {}, ctx.usage),
+                )},`,
               ),
               raw(`artifacts: {},`),
               raw(`vars: {},`),
               raw(`runDir: ${ctx.nodeVerifierRunDir},`),
-              raw(`specDir: ${JSON.stringify(ctx.specDir)},`),
+              raw(
+                `specDir: ${ctx.specDirExpr ?? JSON.stringify(ctx.specDir)},`,
+              ),
             ],
             `});`,
           ),
@@ -1969,15 +2853,11 @@ function renderBrowserScriptOutcome(
               `return await execute(scriptContext.fixtures, scriptContext.artifacts, scriptContext.vars, scriptContext.run);`,
             ),
           ],
-          `}, { source: ${JSON.stringify(source)}, scriptContext: ${emitValue(
-            {
-              fixtures: v.script.fixtures ?? {},
-              artifacts: {},
-              vars: {},
-              run: { failedStep: null, lastSuccessfulStep: null },
-            },
-            ctx.usage,
-          )} })${resultType};`,
+          `}, { source: ${emitStr(source, ctx.usage, { runtimeRefs: false })}, scriptContext: { "fixtures": ${withSpliceSources(
+            ctx,
+            ALL_SPLICE,
+            () => emitValue(v.script.fixtures ?? {}, ctx.usage),
+          )}, "artifacts": {}, "vars": {}, "run": { "failedStep": null, "lastSuccessfulStep": null } } })${resultType};`,
         ),
         raw(`expect(result.ok).toBe(true);`),
       ]),
@@ -2034,9 +2914,15 @@ function renderHttpJsonOutcome(
   const str = (s: string) => emitStr(s, ctx.usage);
   const h = v.httpJson;
   // Best-effort GET + simple equals/contains on a dotted jsonPath.
-  const pathExpr = `String(${JSON.stringify(h.jsonPath ?? "$")}).replace(/^\\$\\.?/, "").split(".").filter(Boolean).reduce((o, k) => (o == null ? o : o[k]), body)`;
+  const pathExpr = `String(${str(h.jsonPath ?? "$")}).replace(/^\\$\\.?/, "").split(".").filter(Boolean).reduce((o, k) => (o == null ? o : o[k]), body)`;
   const body: Stmt[] = [
-    raw(`const res = await page.request.get(${str(h.url)});`),
+    raw(
+      `const res = await page.request.get(${withSpliceSources(
+        ctx,
+        HTTP_JSON_URL_SPLICE,
+        () => str(h.url),
+      )});`,
+    ),
     raw(`expect(res.ok()).toBeTruthy();`),
     raw(`const body = await res.json();`),
     raw(`const val = ${pathExpr};`),
@@ -2071,6 +2957,314 @@ function renderHttpJsonOutcome(
   return { stmts: [braces(body)], exported: true };
 }
 
+/**
+ * Datasource / value / table verifiers read things a generated Playwright
+ * test cannot reach (config datasources, Cairntrace runtime values, the
+ * runner's table reader): a hard skip with the reason, never a silent drop.
+ */
+function dataVerifierSkipReason(v: Verifier): string | undefined {
+  if (isMongoVerifier(v)) {
+    return `mongo verifier not exported: it queries config datasource "${v.mongo.source}"; verify it with cairn run`;
+  }
+  if (isTemporalVerifier(v)) {
+    return `temporal verifier not exported: it reads config datasource "${v.temporal.source}"; verify it with cairn run`;
+  }
+  if (isHttpVerifier(v)) {
+    return `http verifier not exported: it calls ${
+      v.http.source ? `config datasource "${v.http.source}"` : "a service URL"
+    } from Node; verify it with cairn run`;
+  }
+  if (isValueVerifier(v)) {
+    return "value verifier not exported: it reads Cairntrace runtime values (evals, requests, captures, fixtures); verify it with cairn run";
+  }
+  if (isTableVerifier(v)) {
+    return "table verifier not exported: the rendered-table reader is Cairntrace's; verify it with cairn run";
+  }
+  return undefined;
+}
+
+/**
+ * The runtime's match pool for an `expect` locator (count / hidden): semantic
+ * names match WHOLE-name, whitespace-normalized and case-insensitive
+ * (`exact: true`: case-sensitive), and semantic locators count visible
+ * matches only (`visibleOnly`); CSS / testid count DOM matches. Plain
+ * `getByText("x")` would match substrings and hidden elements.
+ */
+function expectPoolLocator(
+  loc: Locator,
+  ctx: EmitCtx,
+  visibleOnly: boolean,
+): string {
+  const str = (s: string) => emitStr(s, ctx.usage);
+  const name = (text: string): string =>
+    "exact" in loc && loc.exact ? str(text) : wholeNameRegex(text, ctx);
+  const exactOpt = "exact" in loc && loc.exact ? ", { exact: true }" : "";
+  let base: string;
+  switch (loc.by) {
+    case "role": {
+      const opts: string[] = [];
+      if (loc.name) opts.push(`name: ${name(loc.name)}`);
+      if (loc.exact && loc.name) opts.push("exact: true");
+      if (loc.visible === false) opts.push("includeHidden: true");
+      base = `page.getByRole(${JSON.stringify(loc.role)}${
+        opts.length > 0 ? `, { ${opts.join(", ")} }` : ""
+      })`;
+      break;
+    }
+    case "label":
+      base = `page.getByLabel(${name(loc.name)}${exactOpt})`;
+      break;
+    case "text":
+      base = `page.getByText(${name(loc.text)}${exactOpt})`;
+      break;
+    default:
+      base = locatorFromRoot("page", loc, ctx);
+  }
+  const hasText = "hasText" in loc ? loc.hasText : undefined;
+  const semantic = loc.by === "role" || loc.by === "label" || loc.by === "text";
+  const visibleFilter =
+    visibleOnly && semantic && !("visible" in loc && loc.visible === false)
+      ? ".filter({ visible: true })"
+      : "";
+  return `${base}${
+    hasText ? `.filter({ hasText: ${str(hasText)} })` : ""
+  }${visibleFilter}`;
+}
+
+/** `new RegExp("^\\s*word\\s+word\\s*$", "i")` — whole-name, any whitespace. */
+function wholeNameRegex(text: string, ctx: EmitCtx): string {
+  const words = text
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  const pieces = words.map((word) =>
+    emitEscapedRegexSource("", word, "", ctx.usage),
+  );
+  const literal = pieces.every((piece) => {
+    try {
+      return typeof JSON.parse(piece) === "string";
+    } catch {
+      return false;
+    }
+  });
+  const source = literal
+    ? JSON.stringify(
+        `^\\s*${pieces.map((piece) => JSON.parse(piece) as string).join("\\s+")}\\s*$`,
+      )
+    : [
+        JSON.stringify("^\\s*"),
+        pieces.join(` + ${JSON.stringify("\\s+")} + `),
+        JSON.stringify("\\s*$"),
+      ].join(" + ");
+  return `new RegExp(${source}, "i")`;
+}
+
+/**
+ * A count matcher as a JS predicate over `n` (the match count), with the
+ * runtime's semantics; undefined when a key can never hold for a number
+ * (contains, all/each, a non-numeric equals) — those are skipped loudly.
+ */
+function countPredicate(
+  matcher: ValueMatcher,
+  ctx: EmitCtx,
+): string | undefined {
+  if (typeof matcher === "number") return `n === ${matcher}`;
+  if (matcher === null || typeof matcher !== "object") return undefined;
+  const m = matcher;
+  const parts: string[] = [];
+  if (Object.hasOwn(m, "equals")) {
+    if (typeof m.equals !== "number") return undefined;
+    parts.push(`n === ${m.equals}`);
+  }
+  if (Object.hasOwn(m, "contains") || m.all !== undefined) return undefined;
+  if (m.each !== undefined) return undefined;
+  if (m.exists === false) parts.push("false");
+  if (m.empty === true) parts.push("false");
+  if (m.oneOf !== undefined) {
+    parts.push(`${JSON.stringify(m.oneOf)}.includes(n)`);
+  }
+  if (m.matches !== undefined) {
+    parts.push(
+      `new RegExp(${emitStr(m.matches, ctx.usage)}${
+        m.ignoreCase ? ', "i"' : ""
+      }).test(String(n))`,
+    );
+  }
+  if (m.atLeast !== undefined) parts.push(`n >= ${m.atLeast}`);
+  if (m.atMost !== undefined) parts.push(`n <= ${m.atMost}`);
+  return parts.length > 0 ? parts.join(" && ") : "true";
+}
+
+/**
+ * `expect` step → Playwright web-first assertions (auto-retrying within the
+ * step's timeoutMs). An assertion that cannot be rendered (`expect.request`,
+ * `count` with `near`, a count matcher that never holds for a number) is a
+ * HARD skip with a comment in the generated test — never a silent drop.
+ */
+function renderExpectStep(step: ExpectStep, ctx: EmitCtx): Rendered {
+  const e = step.expect;
+  if ("request" in e) {
+    return skipStmt(
+      ctx,
+      "step",
+      `expect.request not exported (${e.request.method} ${e.request.url}): Cairntrace sends it through the browser-session request transport`,
+      `expect request ${oneLine(e.request.url)} skipped — verify with cairn run`,
+      step.id,
+    );
+  }
+  const str = (s: string) => emitStr(s, ctx.usage);
+  const loc = expectLocator(e) as Locator;
+  const timeout = e.timeoutMs ?? 5000;
+  const target = locator(loc, ctx);
+  const near = "near" in loc ? loc.near : undefined;
+  const stmts: Stmt[] = [];
+  const skipped: string[] = [];
+  const opts = `{ timeout: ${timeout} }`;
+  if (e.visible === true || e.hidden === false) {
+    stmts.push(raw(`await expect(${target}).toBeVisible(${opts});`));
+  }
+  if (e.hidden === true || e.visible === false) {
+    if (near) {
+      stmts.push(raw(`await expect(${target}).toBeHidden(${opts});`));
+    } else {
+      stmts.push(
+        raw(
+          `await expect(${expectPoolLocator(loc, ctx, false)}.filter({ visible: true })).toHaveCount(0, ${opts});`,
+        ),
+      );
+    }
+  }
+  if (e.count !== undefined) {
+    const c = e.count;
+    const pool = near ? undefined : expectPoolLocator(loc, ctx, true);
+    const numericKeys =
+      c !== null &&
+      typeof c === "object" &&
+      Object.keys(c).length > 0 &&
+      Object.keys(c).every((key) =>
+        ["equals", "atLeast", "atMost"].includes(key),
+      ) &&
+      Object.values(c).every((value) => typeof value === "number");
+    const predicate = countPredicate(c, ctx);
+    if (!pool) {
+      skipped.push(`count ${describeMatcher(c)} with near`);
+    } else if (typeof c === "number") {
+      stmts.push(raw(`await expect(${pool}).toHaveCount(${c}, ${opts});`));
+    } else if (numericKeys) {
+      const m = c as { equals?: number; atLeast?: number; atMost?: number };
+      const poll = `await expect.poll(async () => ${pool}.count(), ${opts})`;
+      if (m.equals !== undefined) stmts.push(raw(`${poll}.toBe(${m.equals});`));
+      if (m.atLeast !== undefined) {
+        stmts.push(raw(`${poll}.toBeGreaterThanOrEqual(${m.atLeast});`));
+      }
+      if (m.atMost !== undefined) {
+        stmts.push(raw(`${poll}.toBeLessThanOrEqual(${m.atMost});`));
+      }
+    } else if (predicate !== undefined) {
+      const message = JSON.stringify(
+        humanizeSentinels(`count ${describeMatcher(c)}`),
+      );
+      stmts.push(
+        raw(
+          `await expect.poll(async () => { const n = await ${pool}.count(); return ${predicate}; }, { message: ${message}, timeout: ${timeout} }).toBe(true);`,
+        ),
+      );
+    } else {
+      skipped.push(`count ${describeMatcher(c)} (never holds for a number)`);
+    }
+  }
+  // `by: text` keeps `text` as its locator, never as an assertion.
+  const textAssertion = e.by === "text" ? undefined : e.text;
+  if (textAssertion !== undefined) {
+    const m =
+      typeof textAssertion === "string"
+        ? { equals: textAssertion }
+        : textAssertion;
+    const textOpts = `{ ignoreCase: ${!("caseSensitive" in m && m.caseSensitive === true)}, useInnerText: true, timeout: ${timeout} }`;
+    if (m.equals !== undefined) {
+      stmts.push(
+        raw(
+          `await expect(${target}).toHaveText(${str(m.equals)}, ${textOpts});`,
+        ),
+      );
+    } else if (m.contains !== undefined) {
+      stmts.push(
+        raw(
+          `await expect(${target}).toContainText(${str(m.contains)}, ${textOpts});`,
+        ),
+      );
+    } else if (m.matches !== undefined) {
+      stmts.push(
+        raw(
+          `await expect(${target}).toHaveText(new RegExp(${str(m.matches)}), ${opts});`,
+        ),
+      );
+    }
+  }
+  if (e.value !== undefined) {
+    const m = typeof e.value === "string" ? { equals: e.value } : e.value;
+    const expected =
+      m.equals !== undefined
+        ? str(m.equals)
+        : m.contains !== undefined
+          ? `new RegExp(${emitEscapedRegexSource("", m.contains, "", ctx.usage)})`
+          : `new RegExp(${str(m.matches!)})`;
+    stmts.push(
+      raw(`await expect(${target}).toHaveValue(${expected}, ${opts});`),
+    );
+  }
+  if (e.attribute !== undefined) {
+    const a = e.attribute;
+    if (a.exists !== undefined) {
+      stmts.push(
+        raw(
+          `await expect(${target})${
+            a.exists ? "" : ".not"
+          }.toHaveAttribute(${str(a.name)}, ${opts});`,
+        ),
+      );
+    } else {
+      const expected =
+        a.equals !== undefined
+          ? str(a.equals)
+          : a.contains !== undefined
+            ? `new RegExp(${emitEscapedRegexSource("", a.contains, "", ctx.usage)})`
+            : `new RegExp(${str(a.matches!)})`;
+      stmts.push(
+        raw(
+          `await expect(${target}).toHaveAttribute(${str(a.name)}, ${expected}, ${opts});`,
+        ),
+      );
+    }
+  }
+  if (e.enabled !== undefined) {
+    stmts.push(
+      raw(
+        `await expect(${target}).${
+          e.enabled ? "toBeEnabled" : "toBeDisabled"
+        }(${opts});`,
+      ),
+    );
+  }
+  const exported = stmts.length > 0;
+  if (skipped.length > 0) {
+    // A dropped mid-flow assertion would let the export pass where
+    // `cairn run` fails: hard skip (test.fixme) and say so in the code.
+    skip(
+      ctx,
+      "step",
+      `expect ${skipped.join(", ")} not exported — verify with cairn run`,
+      step.id,
+    );
+    stmts.push(
+      comment(
+        `expect ${humanizeSentinels(skipped.join(", "))} not exported — verify with cairn run`,
+      ),
+    );
+  }
+  return { stmts, exported };
+}
+
 /** Emit a ./-prefixed POSIX relative path for a dynamic import. */
 function toRelativeImport(fromDir: string, absTarget: string): string {
   const rel = relative(fromDir, absTarget).replaceAll("\\", "/");
@@ -2078,14 +3272,6 @@ function toRelativeImport(fromDir: string, absTarget: string): string {
 }
 
 /* ----- helpers ----- */
-
-function emitEvalSource(js: string, usage: RefUsage): string {
-  const parts = parseTemplateValue(js);
-  if (parts.some((part) => part.kind === "env" || part.kind === "runToken")) {
-    return JSON.stringify(js);
-  }
-  return emitStr(js, usage);
-}
 
 function one(stmt: Stmt): Rendered {
   return { stmts: [stmt], exported: true };
@@ -2095,13 +3281,8 @@ export function oneLine(s: string): string {
   return s.replaceAll(/\s+/g, " ").trim();
 }
 
-function escapeRegex(s: string): string {
-  return s.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 export function safeIdent(name: string): string {
-  const cleaned = name.replaceAll(/[^A-Za-z0-9_$]/g, "_");
-  return /^[A-Za-z_$]/.test(cleaned) ? cleaned : `_${cleaned}`;
+  return toIdent(name);
 }
 
 /** Used by tests + the CLI to know whether a verifier type is exportable. */
@@ -2122,4 +3303,44 @@ export function isExportable(v: Verifier): boolean {
 /** Extension for the generated Playwright file. */
 export function exportExtension(lang: ExportLang): string {
   return lang === "js" ? ".spec.js" : ".spec.ts";
+}
+
+/**
+ * Runtime refs a spec will actually splice in exported code: steps plus the
+ * outcomes the exporter renders (skipped verifier kinds never read bindings,
+ * and binding for them would leave unused locals).
+ */
+/** Step kinds the exporter always renders as a skip comment. */
+function isNeverExportedStep(step: Step): boolean {
+  return (
+    ("expect" in step && "request" in step.expect) ||
+    "capture" in step ||
+    "run" in step ||
+    "monitor" in step ||
+    "snapshot" in step
+  );
+}
+
+export function referencedRuntimeRefs(spec: Spec): Set<string> {
+  // Steps the export always skips never read a binding: counting their refs
+  // would declare a binding nothing reads (noUnusedLocals fails the export).
+  const keys = collectRuntimeRefKeys(
+    (spec.steps ?? []).filter((step) => !isNeverExportedStep(step)),
+  );
+  for (const outcome of spec.outcomes) {
+    const v = outcome.verify;
+    if (isScriptVerifier(v)) {
+      // Inline `runtime: node` scripts are skipped, so never read bindings.
+      if (v.script.runtime !== "node" || v.script.file !== undefined) {
+        collectRuntimeRefKeys(v.script.fixtures ?? {}, keys);
+      }
+    } else if (isHttpJsonVerifier(v)) {
+      for (const key of collectRuntimeRefKeys(v.httpJson.url)) {
+        if (HTTP_JSON_URL_SPLICE.has(key.split(":")[0] as RuntimeRefSource)) {
+          keys.add(key);
+        }
+      }
+    }
+  }
+  return keys;
 }

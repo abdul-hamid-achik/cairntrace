@@ -1,4 +1,5 @@
 import type { ArtifactRedactor } from "./ArtifactWriter";
+import { isWithheldFromTargetChildren } from "../processEnv";
 import type { RedactionConfig } from "../schema/spec.v1";
 
 const SENSITIVE_KEY_RE =
@@ -45,6 +46,8 @@ const DEFAULT_REDACTION_RULES: RedactionRules = {
  * registers the values here so every later redactor scrubs them.
  */
 const registeredSecretValues = new Set<string>();
+/** Bumped whenever {@link registeredSecretValues} changes. */
+let registeredSecretValuesVersion = 0;
 
 /**
  * Register secret values (e.g. all values pulled from a vault) so that every
@@ -52,12 +55,16 @@ const registeredSecretValues = new Set<string>();
  */
 export function registerSecretValues(values: Iterable<string>): void {
   for (const value of values) {
-    if (value) registeredSecretValues.add(value);
+    if (value && !registeredSecretValues.has(value)) {
+      registeredSecretValues.add(value);
+      registeredSecretValuesVersion++;
+    }
   }
 }
 
 /** Clear the registered-secret-value set. Intended for test isolation. */
 export function clearRegisteredSecretValues(): void {
+  if (registeredSecretValues.size > 0) registeredSecretValuesVersion++;
   registeredSecretValues.clear();
 }
 
@@ -72,6 +79,33 @@ export function createArtifactRedactor(
     value: <T>(input: T): T => redactUnknown(input, literalSecrets, rules) as T,
     text: (input: string): string =>
       redactStringWithRules(input, literalSecrets, rules),
+  };
+}
+
+/**
+ * A redactor for a long-lived sink (an invocation journal) that must also
+ * scrub values registered AFTER it was created (each run registers its spec's
+ * `redaction.values` when it starts). The underlying redactor is rebuilt only
+ * when the registered set changes, not on every line.
+ */
+export function createLiveArtifactRedactor(
+  config: RedactionConfig | undefined,
+  env: Record<string, string | undefined> = process.env,
+  knownSecretValues: Iterable<string> = [],
+): ArtifactRedactor {
+  const known = [...knownSecretValues];
+  let version = -1;
+  let current: ArtifactRedactor | undefined;
+  const get = (): ArtifactRedactor => {
+    if (!current || version !== registeredSecretValuesVersion) {
+      current = createArtifactRedactor(config, env, known);
+      version = registeredSecretValuesVersion;
+    }
+    return current;
+  };
+  return {
+    value: <T>(input: T): T => get().value(input),
+    text: (input: string): string => get().text(input),
   };
 }
 
@@ -97,6 +131,21 @@ function redactStringWithRules(
   return output;
 }
 
+/**
+ * A bare `${secrets.X}` / `${env.X}` / `${vars.X}` placeholder names a
+ * value without holding it, so a sensitive key keeps it (a journaled
+ * `fill: { by: label, name: Password, value: ${secrets.PW} }` stays
+ * exportable). A `:-default` could hold a literal: that is redacted.
+ */
+const BARE_PLACEHOLDER_RE =
+  /^\$\{(?:secrets|env|vars)\.[A-Za-z_][A-Za-z0-9_]*\}$/;
+
+function redactedUnlessPlaceholder(value: unknown): unknown {
+  return typeof value === "string" && BARE_PLACEHOLDER_RE.test(value)
+    ? value
+    : "[redacted]";
+}
+
 function redactUnknown(
   input: unknown,
   literalSecrets: readonly string[],
@@ -117,12 +166,12 @@ function redactUnknown(
     );
   for (const [key, value] of Object.entries(input)) {
     if (namedValueIsSensitive && key === "value") {
-      output[key] = "[redacted]";
+      output[key] = redactedUnlessPlaceholder(value);
     } else if (
       SENSITIVE_KEY_RE.test(key) ||
       rules.structuredKeyNames.has(normalizeConfiguredName(key))
     ) {
-      output[key] = "[redacted]";
+      output[key] = redactedUnlessPlaceholder(value);
     } else if (
       STRUCTURED_POST_DATA_KEY_RE.test(key) &&
       typeof value === "string"
@@ -280,8 +329,28 @@ function collectLiteralSecrets(
   for (const value of registeredSecretValues) addSecret(values, value);
   for (const value of knownSecretValues) addSecret(values, value);
 
+  // Backstop: credentials that targetChildEnv withholds from project children
+  // (the file.cheap ingest token, TinyVault client tokens) are missing from
+  // the filtered env most callers pass in. Should one still reach a child and
+  // come back in its output, scrub it anyway.
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      value &&
+      isWithheldFromTargetChildren(key) &&
+      SENSITIVE_KEY_RE.test(key)
+    ) {
+      addSecret(values, value);
+    }
+  }
+
   return [...values].toSorted((a, b) => b.length - a.length);
 }
+
+/**
+ * Lines of a multi-line secret shorter than this are not registered on their
+ * own (a lone `}` or `-----` would redact half of every log).
+ */
+const MIN_SECRET_LINE_CHARS = 8;
 
 function addSecret(values: Set<string>, value: string): void {
   const trimmed = value.trim();
@@ -289,4 +358,14 @@ function addSecret(values: Set<string>, value: string): void {
   // values such as a PIN, CVV, or one-time code. Over-redaction is safer than
   // silently persisting a caller-declared secret.
   if (trimmed.length > 0) values.add(trimmed);
+  // Live logs redact one line at a time, so a multi-line secret (a PEM key, a
+  // JSON service-account blob) never matches whole there. Register each
+  // substantial line as well; whole-text redaction still replaces the full
+  // value first because literals are applied longest first.
+  if (/[\r\n]/.test(trimmed)) {
+    for (const line of trimmed.split(/\r?\n|\r/)) {
+      const part = line.trim();
+      if (part.length >= MIN_SECRET_LINE_CHARS) values.add(part);
+    }
+  }
 }

@@ -247,3 +247,294 @@ describe("inspectProjectDir", () => {
     assert.equal(info.hasPackageJson, false);
   });
 });
+
+describe("spec discovery hygiene", () => {
+  /** A project whose runs/exports hold copies that must never list as specs. */
+  function noisyProject() {
+    const root = makeProject();
+    const spec = "steps:\n  - open: /\nintent: copy\n";
+    write(
+      root,
+      "runs/2026-09-01T10-00-00-000Z_checkout_aaaaaa/spec.resolved.yml",
+      spec,
+    );
+    write(root, "runs/2026-09-01T10-00-00-000Z_checkout_aaaaaa/run.yaml", spec);
+    write(root, "exports/checkout.yml", spec);
+    write(root, "playwright-export/checkout.yml", spec);
+    write(root, "reports/checkout.yml", spec);
+    write(
+      root,
+      "flows/2026-09-01T10-00-00-000Z_checkout_bbbbbb/spec.yml",
+      spec,
+    );
+    write(root, "flows/nested/spec.resolved.yml", spec);
+    write(root, "custom-artifacts/2026/copy.yml", spec);
+    return root;
+  }
+
+  it("skips runs/, exports, reports, run-dir copies, and resolved/run YAMLs", () => {
+    const root = noisyProject();
+    const found = specs.findSpecFiles(root).map((file) => file.rel);
+    assert.ok(found.includes(path.join("flows", "checkout.yml")));
+    for (const rel of found) {
+      assert.ok(!rel.startsWith("runs"), rel);
+      assert.ok(!rel.startsWith("exports"), rel);
+      assert.ok(!rel.startsWith("playwright-export"), rel);
+      assert.ok(!rel.startsWith("reports"), rel);
+      assert.ok(!rel.endsWith("spec.resolved.yml"), rel);
+      assert.ok(!rel.includes("_checkout_bbbbbb"), rel);
+      assert.ok(!rel.endsWith("cairntrace.config.yml"), rel);
+    }
+  });
+
+  it("lists authored specs in feature folders named exports/reports/runs", () => {
+    const root = makeProject();
+    const spec = "steps:\n  - open: /\nintent: authored\n";
+    write(root, "flows/exports/exports-flow.yml", spec);
+    write(root, "flows/reports/reports-flow.yml", spec);
+    write(root, "flows/runs/runs-flow.yml", spec);
+    write(root, "flows/billing/billing-flow.yml", spec);
+    // Output-shaped folders deeper in the tree are still skipped.
+    write(
+      root,
+      "suites/runs/2026-09-01T10-00-00-000Z_copy_cccccc/spec.resolved.yml",
+      spec,
+    );
+    write(root, "suites/runs/loose-copy.yml", spec);
+    write(root, "suites/exports/.cairn-export.json", "{}");
+    write(root, "suites/exports/exported.yml", spec);
+    write(root, "suites/reports/_invocations/inv_1/invocation.json", "{}");
+    write(root, "suites/reports/report-copy.yml", spec);
+    const expected = [
+      path.join("flows", "billing", "billing-flow.yml"),
+      path.join("flows", "exports", "exports-flow.yml"),
+      path.join("flows", "reports", "reports-flow.yml"),
+      path.join("flows", "runs", "runs-flow.yml"),
+    ];
+    const found = specs.findSpecFiles(root).map((file) => file.rel);
+    for (const rel of expected) assert.ok(found.includes(rel), rel);
+    assert.ok(!found.some((rel) => rel.startsWith("suites")), found.join());
+  });
+
+  it("never lists a session journal's draft, and lists drafts folders", () => {
+    const root = makeProject();
+    const spec = "steps:\n  - open: /\nintent: draft\n";
+    // A session journal in a stray artifact root: its draft is a working copy.
+    write(root, "artifacts/_sessions/abc123def/draft.spec.yml", spec);
+    write(root, "suites/reports/_sessions/abc123def/draft.spec.yml", spec);
+    write(root, "suites/reports/report-copy.yml", spec);
+    // An authored drafts folder (`authoring.draftsDir`) is the author's.
+    write(root, "flows/_drafts/profile_website.yml", spec);
+    const found = specs.findSpecFiles(root).map((file) => file.rel);
+    assert.ok(
+      found.includes(path.join("flows", "_drafts", "profile_website.yml")),
+      found.join(),
+    );
+    assert.ok(!found.some((rel) => rel.includes("_sessions")), found.join());
+    assert.ok(!found.some((rel) => rel.startsWith("suites")), found.join());
+  });
+
+  it("skips runs/exports/reports at the project root even without markers", async () => {
+    const root = makeProject();
+    const spec = "steps:\n  - open: /\nintent: copy\n";
+    write(root, "exports/plain.yml", spec);
+    write(root, "flows/exports/kept.yml", spec);
+    const scanned = (await specs.scanSpecs(root)).map((file) => file.rel);
+    assert.ok(scanned.includes(path.join("flows", "exports", "kept.yml")));
+    assert.ok(!scanned.some((rel) => rel.startsWith("exports")));
+  });
+
+  it("skips the resolved artifact root wherever it lives", () => {
+    const root = noisyProject();
+    const withRoot = specs
+      .findSpecFiles(root, {
+        excludeDirs: [path.join(root, "custom-artifacts")],
+      })
+      .map((file) => file.rel);
+    assert.ok(!withRoot.some((rel) => rel.startsWith("custom-artifacts")));
+    const without = specs.findSpecFiles(root).map((file) => file.rel);
+    assert.ok(without.some((rel) => rel.startsWith("custom-artifacts")));
+  });
+
+  it("scanSpecs (async) matches findSpecFiles and caches summaries by mtime", async () => {
+    const root = noisyProject();
+    const cache = new Map();
+    const scanned = await specs.scanSpecs(root, { cache });
+    assert.deepEqual(
+      scanned.map((file) => file.rel).toSorted(),
+      specs
+        .findSpecFiles(root)
+        .map((file) => file.rel)
+        .toSorted(),
+    );
+    const checkout = scanned.find(
+      (file) => file.rel === path.join("flows", "checkout.yml"),
+    );
+    assert.equal(checkout.summary.name, "checkout");
+    assert.ok(cache.size > 0);
+    // A cached entry is reused as-is (proved by poisoning it).
+    const key = checkout.path;
+    cache.set(key, { ...cache.get(key), summary: { name: "from-cache" } });
+    const again = await specs.scanSpecs(root, { cache });
+    assert.equal(
+      again.find((file) => file.path === key).summary.name,
+      "from-cache",
+    );
+  });
+});
+
+describe("artifactRoot resolution like the CLI", () => {
+  it("resolves a relative config artifactRoot against the project (cairn's cwd)", () => {
+    assert.deepEqual(
+      specs.resolveRunsRoot({
+        configArtifactRoot: "runs",
+        baseDir: "/work/demo",
+        home: "/home/u",
+      }),
+      { runsRoot: path.resolve("/work/demo/runs"), source: "config" },
+    );
+  });
+
+  it("substitutes ${env.X} / ${env.X:-default} like the CLI loader", () => {
+    assert.equal(
+      specs.substituteConfigEnv("artifactRoot: ${env.RUNS_DIR:-runs}", {}),
+      "artifactRoot: runs",
+    );
+    assert.equal(
+      specs.substituteConfigEnv("artifactRoot: ${env.RUNS_DIR:-runs}", {
+        RUNS_DIR: "/data/runs",
+      }),
+      "artifactRoot: /data/runs",
+    );
+    assert.equal(specs.substituteConfigEnv("x: ${env.MISSING}", {}), "x: ");
+  });
+
+  it("substitutes ${config.dir} with the config file's directory, like the CLI", () => {
+    const root = tempDir("cairn-cfgdir-");
+    // A directory name with YAML-significant characters must not break it.
+    const dir = path.join(root, "team #1: demo");
+    const configPath = write(
+      dir,
+      "cairntrace.config.yml",
+      "version: 1\nartifactRoot: ${config.dir}/runs\n",
+    );
+    const config = specs.readProjectConfig(configPath);
+    assert.equal(config.parseError, null);
+    assert.equal(config.artifactRoot, `${dir}/runs`);
+    assert.deepEqual(
+      specs.resolveRunsRoot({
+        configArtifactRoot: config.artifactRoot,
+        baseDir: "/elsewhere",
+        home: "/home/u",
+      }),
+      { runsRoot: path.join(dir, "runs"), source: "config" },
+    );
+    // Env substitution and merge keys still apply.
+    assert.deepEqual(
+      specs.parseConfigText(
+        "base: &b\n  x: 1\nenvironments:\n  local:\n    <<: *b\n    dir: ${config.dir}\n    name: ${env.NAME:-n}\n",
+        "/work/demo/cairntrace.config.yml",
+        {},
+      ).environments.local,
+      { x: 1, dir: "/work/demo", name: "n" },
+    );
+  });
+});
+
+describe("summarizeSpecText when:", () => {
+  it("keeps string and object when: predicates as text", () => {
+    const summary = specs.summarizeSpecText(
+      [
+        "intent: demo",
+        "steps:",
+        "  - id: a",
+        "    click: { role: button, name: Accept }",
+        "    when: 'text:Accept cookies'",
+        "  - id: b",
+        "    click: { role: button, name: Close }",
+        "    when: { selector: '.banner', hasText: Close }",
+        "",
+      ].join("\n"),
+      "/p/demo.yml",
+    );
+    assert.deepEqual(
+      summary.steps.map((step) => step.when),
+      ["text:Accept cookies", "selector: .banner, hasText: Close"],
+    );
+  });
+});
+
+describe("environment policy and requires (contract 2b)", () => {
+  it("reads each environment's policy block from the config", () => {
+    const root = tempDir("cairn-policy-");
+    const file = write(
+      root,
+      "cairntrace.config.yml",
+      [
+        "defaultEnvironment: local",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:8787",
+        "    policy: { trait: owned, mutations: allow }",
+        "  staging:",
+        "    baseUrl: https://staging.example.com",
+        "    policy:",
+        "      trait: shared",
+        "      mutations: deny",
+        "      description: shared with the QA team",
+        "  prod:",
+        "    baseUrl: https://example.com",
+        "    policy: { trait: protected, mutations: deny }",
+        "  sandbox:",
+        "    baseUrl: http://localhost:9000",
+        "",
+      ].join("\n"),
+    );
+    const config = specs.readProjectConfig(file);
+    const byName = Object.fromEntries(
+      config.environments.map((env) => [env.name, env.policy]),
+    );
+    assert.deepEqual(byName.local, {
+      trait: "owned",
+      mutations: "allow",
+      description: null,
+    });
+    assert.deepEqual(byName.staging, {
+      trait: "shared",
+      mutations: "deny",
+      description: "shared with the QA team",
+    });
+    assert.equal(byName.prod?.trait, "protected");
+    assert.equal(byName.sandbox, null);
+  });
+
+  it("summarizes a spec's requires block (env list with opt-ins, mutates)", () => {
+    const summary = specs.summarizeSpecText(
+      [
+        "name: reset_orders",
+        "intent: reset orders",
+        "requires:",
+        "  env:",
+        "    - local",
+        "    - staging: { optIn: ALLOW_STAGING_RESET }",
+        "  mutates: true",
+        "outcomes: []",
+        "steps:",
+        "  - open: /",
+        "",
+      ].join("\n"),
+      "reset.yml",
+    );
+    assert.deepEqual(summary.requires, {
+      env: [
+        { name: "local", optIn: null },
+        { name: "staging", optIn: "ALLOW_STAGING_RESET" },
+      ],
+      mutates: true,
+    });
+    assert.equal(
+      specs.summarizeSpecText("intent: x\nsteps: []\n", "x.yml").requires,
+      null,
+    );
+  });
+});

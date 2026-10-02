@@ -175,6 +175,7 @@ function money(cents: number): string {
 
 async function renderProducts(url: URL): Promise<Response> {
   const category = url.searchParams.get("category");
+  const sku = url.searchParams.get("sku");
   const flash = url.searchParams.get("created");
   let rows: Array<typeof products.$inferSelect>;
   try {
@@ -182,7 +183,9 @@ async function renderProducts(url: URL): Promise<Response> {
   } catch {
     return dbUnavailable();
   }
-  const filtered = category ? rows.filter((row) => row.category === category) : rows;
+  const filtered = rows.filter(
+    (row) => (!category || row.category === category) && (!sku || row.sku === sku),
+  );
   const chips = ["all", ...CATEGORIES]
     .map(
       (c) =>
@@ -441,6 +444,106 @@ async function handleLogin(req: Request): Promise<Response> {
   });
 }
 
+// --- restock jobs (in memory): queued → running → done -------------------------
+// A restock is accepted at once (202) and applied a moment later, like any
+// background job: specs wait for it with a polled `http` verifier.
+interface RestockJob {
+  id: string;
+  sku: string;
+  quantity: number;
+  status: "queued" | "running" | "done" | "failed";
+  createdAt: string;
+}
+const restockJobs = new Map<string, RestockJob>();
+let restockSeq = 0;
+
+async function apiCreateProduct(req: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "invalid_json" }, { status: 400 });
+  }
+  const sku = String(body.sku ?? "").trim();
+  const name = String(body.name ?? "").trim();
+  const category = String(body.category ?? "");
+  const price = Number(body.price);
+  const stock = Number(body.stock);
+  if (name.length < 2 || !sku || !CATEGORIES.includes(category as (typeof CATEGORIES)[number])) {
+    return Response.json({ error: "name, sku and a valid category are required" }, { status: 422 });
+  }
+  if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) {
+    return Response.json({ error: "price and stock must be non-negative numbers" }, { status: 422 });
+  }
+  try {
+    const [row] = await getDb()
+      .insert(products)
+      .values({ sku, name, category, priceCents: Math.round(price * 100), stock })
+      .returning();
+    return Response.json({ product: row }, { status: 201 });
+  } catch (error) {
+    if (errorText(error).includes("products_sku_unique")) {
+      return Response.json({ error: `sku already exists: ${sku}` }, { status: 409 });
+    }
+    return Response.json({ error: "database unavailable" }, { status: 503 });
+  }
+}
+
+async function apiDeleteProduct(sku: string): Promise<Response> {
+  try {
+    const deleted = await getDb().delete(products).where(eq(products.sku, sku)).returning();
+    return Response.json({ deleted: deleted.length });
+  } catch {
+    return Response.json({ error: "database unavailable" }, { status: 503 });
+  }
+}
+
+async function apiQueueRestock(req: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "invalid_json" }, { status: 400 });
+  }
+  const sku = String(body.sku ?? "").trim();
+  const quantity = Number(body.quantity);
+  if (!sku || !Number.isInteger(quantity) || quantity < 1) {
+    return Response.json({ error: "sku and a positive integer quantity are required" }, { status: 422 });
+  }
+  try {
+    const [row] = await getDb().select().from(products).where(eq(products.sku, sku)).limit(1);
+    if (!row) return Response.json({ error: `unknown sku: ${sku}` }, { status: 404 });
+  } catch {
+    return Response.json({ error: "database unavailable" }, { status: 503 });
+  }
+  const job: RestockJob = {
+    id: `restock-${++restockSeq}`,
+    sku,
+    quantity,
+    status: "queued",
+    createdAt: new Date().toISOString(),
+  };
+  restockJobs.set(job.id, job);
+  setTimeout(() => {
+    job.status = "running";
+  }, 400);
+  setTimeout(async () => {
+    try {
+      const db = getDb();
+      const [row] = await db.select().from(products).where(eq(products.sku, sku)).limit(1);
+      if (!row) throw new Error("product disappeared");
+      await db
+        .update(products)
+        .set({ stock: row.stock + quantity })
+        .where(eq(products.sku, sku));
+      job.status = "done";
+    } catch {
+      job.status = "failed";
+    }
+  }, 1200);
+  return Response.json(job, { status: 202 });
+}
+
 async function apiStats(): Promise<Response> {
   try {
     const db = getDb();
@@ -450,7 +553,7 @@ async function apiStats(): Promise<Response> {
     return Response.json({
       products: allProducts.length,
       electronics: allProducts.filter((row) => row.category === "electronics").length,
-      categories: [...new Set(allProducts.map((row) => row.category))].sort(),
+      categories: [...new Set(allProducts.map((row) => row.category))].toSorted(),
       documents: allDocuments.length,
       users: allUsers.length,
     });
@@ -515,15 +618,42 @@ const server = Bun.serve({
     if (path === "/api/login" && req.method === "POST") {
       return handleLogin(req);
     }
+    if (path === "/api/products" && req.method === "POST") {
+      if (!(await currentUser(req))) {
+        return Response.json({ error: "unauthenticated" }, { status: 401 });
+      }
+      return apiCreateProduct(req);
+    }
+    const productMatch = path.match(/^\/api\/products\/([^/]+)$/);
+    if (productMatch && req.method === "DELETE") {
+      if (!(await currentUser(req))) {
+        return Response.json({ error: "unauthenticated" }, { status: 401 });
+      }
+      return apiDeleteProduct(decodeURIComponent(productMatch[1]!));
+    }
     if (path === "/api/products") {
       try {
         const category = url.searchParams.get("category");
+        const sku = url.searchParams.get("sku");
         const rows = await getDb().select().from(products).orderBy(products.sku);
-        const filtered = category ? rows.filter((row) => row.category === category) : rows;
+        const filtered = rows.filter(
+          (row) => (!category || row.category === category) && (!sku || row.sku === sku),
+        );
         return Response.json({ products: filtered, total: filtered.length });
       } catch {
         return Response.json({ error: "database unavailable" }, { status: 503 });
       }
+    }
+    if (path === "/api/restock" && req.method === "POST") {
+      if (!(await currentUser(req))) {
+        return Response.json({ error: "unauthenticated" }, { status: 401 });
+      }
+      return apiQueueRestock(req);
+    }
+    const restockMatch = path.match(/^\/api\/restock\/([^/]+)$/);
+    if (restockMatch && req.method === "GET") {
+      const job = restockJobs.get(decodeURIComponent(restockMatch[1]!));
+      return job ? Response.json(job) : Response.json({ error: "not_found" }, { status: 404 });
     }
 
     // --- platform exports ---------------------------------------------------
@@ -650,6 +780,7 @@ console.log(`Cairntrace demo platform at http://localhost:${server.port}/`);
 console.log(`  Static smoke pages:  /  /dashboard.html  /api.html  /import.html  /table-actions.html`);
 console.log(`  Platform pages:      /products.html  /products/new.html  /documents.html  /login.html`);
 console.log(`  API:                 /api/health  /api/stats  /api/products  /api/session  POST /api/login`);
+console.log(`                       POST|DELETE /api/products  POST /api/restock  /api/restock/<id>`);
 console.log(`  Exports:             /export/products.csv  /export/products.xlsx`);
 
 function makeTemplateWorkbook(): Buffer {

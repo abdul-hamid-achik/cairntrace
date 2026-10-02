@@ -19,6 +19,11 @@ import { basename, join, resolve } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
+import { writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { selectRunEvidence } from "../../core/artifacts/evidenceSelection";
+import { EvidenceTransferError } from "../../core/artifacts/retention";
+import type { EvidenceCategory } from "../../core/schema/config.v1";
 import { ArtifactManifestSchema } from "../../core/schema/run.v1";
 import { fcheapPublisherEnv } from "../../core/processEnv";
 import { CAIRN_VERSION } from "../version";
@@ -28,7 +33,12 @@ import {
   CAIRNTRACE_PUBLISH_NATIVE_SCHEMA,
   parseFcheapPublishOutput,
 } from "./fcheapContract";
-import { runFcheap } from "./fcheapClient";
+import {
+  classifyFcheapFailure,
+  fcheapSupportsPublishRunIndex,
+  runFcheap,
+} from "./fcheapClient";
+import { buildRunIndex, RUN_INDEX_MAX_BYTES } from "./publishRunIndex";
 
 /**
  * The file.cheap publisher quota assigned to the `cairntrace` producer.
@@ -67,15 +77,42 @@ export class PublicationArchiveError extends Error {
  * temporary tar.gz. The local run may be pruned only after the strict receipt
  * matches those exact archive bytes and producer metadata.
  */
-export async function publishRunDirectory(
-  runDir: string,
-  runId: string,
-  opts: { env?: NodeJS.ProcessEnv; retentionDays?: number } = {},
-): Promise<{
+export interface PublishRunResult {
   artifactRef: Record<string, unknown>;
   sha256: string;
   sizeBytes: number;
-}> {
+  publishedAt: string;
+  /** publishedAt + retentionDays (the remote copy's deletion time). */
+  expiresAt: string;
+  /** Console link from the receipt's validated `web_url`, when present. */
+  webUrl?: string;
+  /** Run-relative paths/dirs the evidence gate left out of the package. */
+  excluded: string[];
+  /** Whether a RunIndexV1 sidecar was sent (`--run-index`). */
+  runIndex: boolean;
+  /** Why no sidecar was sent (omitted when sent or not requested). */
+  runIndexSkipped?: RunIndexSkipReason;
+}
+
+/**
+ * `unsupported`: fcheap has no `publish --run-index`; `too-large`: the index
+ * does not fit 12 KiB even without evidence/outcomes; `build-failed`: the run
+ * metadata could not be read.
+ */
+export type RunIndexSkipReason = "unsupported" | "too-large" | "build-failed";
+
+export async function publishRunDirectory(
+  runDir: string,
+  runId: string,
+  /** Evidence categories (default [text, screenshots]). */
+  /** Send a RunIndexV1 sidecar when fcheap supports it (default true). */
+  opts: {
+    env?: NodeJS.ProcessEnv;
+    retentionDays?: number;
+    include?: readonly EvidenceCategory[];
+    runIndex?: boolean;
+  } = {},
+): Promise<PublishRunResult> {
   assertPortableNativeId(runId);
   const retentionDays = opts.retentionDays ?? DEFAULT_REMOTE_RETENTION_DAYS;
   if (
@@ -88,8 +125,37 @@ export async function publishRunDirectory(
     );
   }
   await validateCompletedManifest(runDir);
-  const archive = await createRunArchive(runDir);
+  // Secret-bearing members (an unsanitized trace) are never published, and
+  // traces/videos/downloads only when `include` opts into them.
+  const selection = await selectRunEvidence(runDir, {
+    purpose: "publish",
+    ...(opts.include ? { include: opts.include } : {}),
+  });
+  const env = fcheapPublisherEnv(opts.env ?? process.env);
+  const archive = await createRunArchive(runDir, {
+    files: new Set(selection.files),
+  }).catch((error: unknown) => {
+    throw error instanceof PublicationArchiveError &&
+      /limit|exceeds/.test(error.message)
+      ? new EvidenceTransferError(error.message, "too-large")
+      : error;
+  });
   try {
+    const sidecar =
+      opts.runIndex === false
+        ? undefined
+        : (await fcheapSupportsPublishRunIndex(env))
+          ? await writeRunIndexSidecar(
+              archive.path,
+              runDir,
+              runId,
+              selection.files,
+            )
+          : ({ skipped: "unsupported" } as const);
+    const runIndexPath =
+      sidecar && "path" in sidecar ? sidecar.path : undefined;
+    const runIndexSkipped =
+      sidecar && "skipped" in sidecar ? sidecar.skipped : undefined;
     const result = await runFcheap(
       [
         "publish",
@@ -110,18 +176,21 @@ export async function publishRunDirectory(
         runId,
         "--entrypoint",
         CAIRNTRACE_PUBLISH_ENTRYPOINT,
+        ...(runIndexPath ? ["--run-index", runIndexPath] : []),
       ],
       {
         json: true,
         timeoutMs: 120_000,
-        env: fcheapPublisherEnv(opts.env ?? process.env),
+        env,
       },
     );
     if (!result.ok) {
       // fcheap stderr is deliberately not surfaced: a broken implementation
       // must not make a signed URL or credential part of Cairntrace output.
-      throw new Error(
+      // It is only classified into a fixed reason code.
+      throw new EvidenceTransferError(
         `fcheap publish failed with exit ${result.exitCode}; local run retained`,
+        classifyFcheapFailure(result),
       );
     }
     const receipt = parseFcheapPublishOutput(result.stdout);
@@ -146,13 +215,47 @@ export async function publishRunDirectory(
         "fcheap publish receipt does not match the requested Cairntrace producer metadata",
       );
     }
+    const webUrl = receipt.artifactRef.web_url;
     return {
       artifactRef: receipt.artifactRef,
       sha256: receipt.sha256,
       sizeBytes: receipt.sizeBytes,
+      publishedAt: receipt.publishedAt,
+      expiresAt: new Date(
+        Date.parse(receipt.publishedAt) + retentionDays * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      ...(webUrl ? { webUrl } : {}),
+      excluded: selection.excluded,
+      runIndex: runIndexPath !== undefined,
+      ...(runIndexSkipped ? { runIndexSkipped } : {}),
     };
   } finally {
     await archive.cleanup();
+  }
+}
+
+/**
+ * Write the RunIndexV1 sidecar next to the private archive. An index that
+ * cannot be built within the 12 KiB contract is skipped with a reason: the
+ * archive is still published (the console then shows an ordinary bundle).
+ */
+async function writeRunIndexSidecar(
+  archivePath: string,
+  runDir: string,
+  runId: string,
+  files: readonly string[],
+): Promise<{ path: string } | { skipped: RunIndexSkipReason }> {
+  try {
+    const index = await buildRunIndex(runDir, runId, files);
+    const body = JSON.stringify(index);
+    if (Buffer.byteLength(body, "utf8") > RUN_INDEX_MAX_BYTES) {
+      return { skipped: "too-large" };
+    }
+    const path = join(dirname(archivePath), "run-index.json");
+    await writeFile(path, body, { mode: 0o600, flag: "wx" });
+    return { path };
+  } catch {
+    return { skipped: "build-failed" };
   }
 }
 
@@ -164,9 +267,13 @@ export async function publishRunDirectory(
  */
 export async function createRunArchive(
   runDir: string,
+  /** Only these run-relative files (and their directories) are packaged. */
+  opts: {
+    files?: ReadonlySet<string>;
+  } = {},
 ): Promise<PackagedRunArchive> {
   const root = resolve(runDir);
-  const entries = await snapshotRunDirectory(root);
+  const entries = await snapshotRunDirectory(root, opts.files);
   const tempDir = await mkdtemp(join(tmpdir(), "cairntrace-publish-"));
   await chmod(tempDir, 0o700);
   const archivePath = join(tempDir, `${safeArchiveStem(root)}.tar.gz`);
@@ -199,7 +306,7 @@ export async function createRunArchive(
     if (compressedBytes <= 0) {
       throw new PublicationArchiveError("run archive is empty");
     }
-    const after = await snapshotRunDirectory(root);
+    const after = await snapshotRunDirectory(root, opts.files);
     if (!sameSnapshot(entries, after)) {
       throw new PublicationArchiveError(
         "run directory changed while its publication archive was being created",
@@ -250,7 +357,10 @@ async function validateCompletedManifest(runDir: string): Promise<void> {
   }
 }
 
-async function snapshotRunDirectory(root: string): Promise<SnapshotEntry[]> {
+async function snapshotRunDirectory(
+  root: string,
+  files?: ReadonlySet<string>,
+): Promise<SnapshotEntry[]> {
   const rootInfo = await lstat(root, { bigint: true });
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
     throw new PublicationArchiveError(
@@ -286,6 +396,8 @@ async function snapshotRunDirectory(root: string): Promise<SnapshotEntry[]> {
         });
         await visit(absolutePath, relativePath);
       } else if (info.isFile()) {
+        // Members the evidence gate excluded are not packaged (or counted).
+        if (files && !files.has(relativePath)) continue;
         sourceBytes += Number(info.size);
         if (sourceBytes > MAX_PUBLISH_SOURCE_BYTES) {
           throw new PublicationArchiveError(
@@ -311,7 +423,16 @@ async function snapshotRunDirectory(root: string): Promise<SnapshotEntry[]> {
     }
   };
   await visit(root, "");
-  return entries;
+  if (!files) return entries;
+  // Keep only directories that still hold a packaged file.
+  const packaged = entries.filter((entry) => entry.kind === "file");
+  return entries.filter(
+    (entry) =>
+      entry.kind === "file" ||
+      packaged.some((file) =>
+        file.relativePath.startsWith(`${entry.relativePath}/`),
+      ),
+  );
 }
 
 async function* tarChunks(

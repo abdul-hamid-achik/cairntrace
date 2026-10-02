@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { findConfigFile, loadConfig } from "./loader";
+import { findConfigFile, loadConfig, parseConfigText } from "./loader";
 
 let dir: string;
 
@@ -381,5 +381,142 @@ environments:
     } finally {
       delete process.env["CAIRN_TEST_PORT"];
     }
+  });
+});
+
+describe("loadConfig YAML merge keys and ${config.dir}", () => {
+  it("expands `<<: *anchor` so environments can share a vars map", async () => {
+    const projectRoot = join(dir, "merge-keys");
+    await mkdir(projectRoot, { recursive: true });
+    const configPath = join(projectRoot, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars: &shared
+      tenant: demo
+      retries: 3
+      region: us
+  staging:
+    baseUrl: https://staging.example.com
+    vars:
+      <<: *shared
+      region: eu
+`,
+    );
+    const loaded = await loadConfig(join(projectRoot, "spec.yml"));
+    expect(loaded?.config.environments["staging"]?.vars).toEqual({
+      tenant: "demo",
+      retries: 3,
+      region: "eu",
+    });
+    expect(loaded?.config.environments["local"]?.vars).toEqual({
+      tenant: "demo",
+      retries: 3,
+      region: "us",
+    });
+  });
+
+  it("substitutes ${config.dir} with the config file's directory", async () => {
+    const projectRoot = join(dir, "config-dir-subst");
+    await mkdir(projectRoot, { recursive: true });
+    const configPath = join(projectRoot, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars:
+      fixtures: "\${config.dir}/fixtures"
+      fallback: "\${env.CAIRN_TEST_UNSET_FIXTURES:-\${config.dir}/default}"
+`,
+    );
+    const loaded = await loadConfig(
+      join(projectRoot, "flows", "x.yml"),
+      configPath,
+      {
+        env: {},
+      },
+    );
+    expect(loaded?.config.environments["local"]?.vars).toEqual({
+      fixtures: `${projectRoot}/fixtures`,
+      fallback: `${projectRoot}/default`,
+    });
+  });
+
+  it("parseConfigText keeps `$&`-style directory names literal", () => {
+    const raw = parseConfigText(
+      "version: 1\nenvironments: {}\nartifactRoot: ${config.dir}/runs\n",
+      { configPath: "/tmp/odd$&dir/cairntrace.config.yml" },
+    ) as { artifactRoot: string };
+    expect(raw.artifactRoot).toBe("/tmp/odd$&dir/runs");
+  });
+
+  it("keeps a directory with YAML-significant characters intact in every scalar style", () => {
+    // Regression: ${config.dir} used to be pasted into the raw TEXT, so an
+    // unquoted path with " #" was cut at the comment and a quote/backslash
+    // broke the double-quoted form the docs recommend.
+    const odd = `/tmp/my #proj: "q" \\back`;
+    const raw = parseConfigText(
+      [
+        "version: 1",
+        "environments:",
+        "  local:",
+        "    vars:",
+        "      plain: ${config.dir}/fixtures",
+        '      quoted: "${config.dir}/fixtures"',
+        "      single: '${config.dir}/fixtures'",
+        "      flow: { inner: ${config.dir}/x }",
+        "artifactRoot: ${config.dir}",
+        "",
+      ].join("\n"),
+      { configPath: `${odd}/cairntrace.config.yml`, env: {} },
+    ) as {
+      artifactRoot: string;
+      environments: { local: { vars: Record<string, unknown> } };
+    };
+    expect(raw.artifactRoot).toBe(odd);
+    expect(raw.environments.local.vars).toEqual({
+      plain: `${odd}/fixtures`,
+      quoted: `${odd}/fixtures`,
+      single: `${odd}/fixtures`,
+      flow: { inner: `${odd}/x` },
+    });
+  });
+
+  it("does not expand ${config.dir} that arrives inside an env value", () => {
+    const raw = parseConfigText(
+      "version: 1\nenvironments: {}\nartifactRoot: ${env.ROOT}\n",
+      {
+        configPath: "/proj/cairntrace.config.yml",
+        env: { ROOT: "${config.dir}/runs" },
+      },
+    ) as { artifactRoot: string };
+    expect(raw.artifactRoot).toBe("${config.dir}/runs");
+  });
+
+  it("applies ${config.dir} inside a merged anchor", () => {
+    const raw = parseConfigText(
+      [
+        "version: 1",
+        "environments:",
+        "  local:",
+        "    vars: &shared",
+        '      fixtures: "${config.dir}/fixtures"',
+        "  staging:",
+        "    vars:",
+        "      <<: *shared",
+        "      region: eu",
+        "",
+      ].join("\n"),
+      { configPath: "/proj/cairntrace.config.yml", env: {} },
+    ) as { environments: Record<string, { vars: Record<string, unknown> }> };
+    expect(raw.environments["staging"]?.vars).toEqual({
+      fixtures: "/proj/fixtures",
+      region: "eu",
+    });
   });
 });

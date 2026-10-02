@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
+import { buildCheckpointMeta } from "../core/checkpoint/meta";
 import { AuditResultSchema } from "../core/schema/audit.v1";
 import { DocsResultSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
@@ -83,6 +85,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_accompany_status",
       "cairn_annotate",
       "cairn_audit",
+      "cairn_catalog",
       "cairn_checkpoint_capture",
       "cairn_checkpoint_delete",
       "cairn_checkpoint_list",
@@ -96,7 +99,10 @@ describe("Cairntrace MCP server", () => {
       "cairn_discover_inventory",
       "cairn_discover_list",
       "cairn_discover_navigate",
+      "cairn_discover_network",
       "cairn_discover_open",
+      "cairn_discover_remove_step",
+      "cairn_discover_resume",
       "cairn_discover_snapshot",
       "cairn_discover_suggest",
       "cairn_docs",
@@ -104,12 +110,28 @@ describe("Cairntrace MCP server", () => {
       "cairn_explain",
       "cairn_export_brief",
       "cairn_export_playwright",
+      "cairn_fixtures_ensure",
+      "cairn_fixtures_list",
+      "cairn_fixtures_reset",
+      "cairn_fixtures_status",
+      "cairn_fixtures_sweep",
+      "cairn_fixtures_teardown",
       "cairn_investigate",
+      "cairn_logs",
+      "cairn_pin",
+      "cairn_publish",
       "cairn_run",
+      "cairn_run_cancel",
+      "cairn_run_status",
       "cairn_secrets_status",
+      "cairn_services_down",
       "cairn_services_status",
+      "cairn_services_up",
       "cairn_snapshot",
+      "cairn_spec_finish",
       "cairn_spec_heal",
+      "cairn_spec_lint",
+      "cairn_spec_promote",
       "cairn_spec_scaffold",
       "cairn_spec_verify",
       "cairn_stash_info",
@@ -117,6 +139,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_stash_restore",
       "cairn_stash_save",
       "cairn_stash_search",
+      "cairn_wait",
     ]);
     const investigateSchema = list.tools.find(
       (tool) => tool.name === "cairn_investigate",
@@ -468,7 +491,7 @@ steps:
       join(tmpdir(), "cairntrace-mcp-fcheap-contract-"),
     );
     const runsRoot = join(fixtureRoot, "runs");
-    const runId = "checkout-2026-07-23T130000Z";
+    const runId = "2026-07-23T13-00-00-000Z_checkout_a1b2c3";
     const runDir = join(runsRoot, runId);
     const fakeBin = join(fixtureRoot, "bin");
     await mkdir(runDir, { recursive: true });
@@ -521,7 +544,7 @@ exit 2
       join(tmpdir(), "cairntrace-mcp-fcheap-partial-save-"),
     );
     const runsRoot = join(fixtureRoot, "runs");
-    const runId = "audit-2026-07-24T010203Z";
+    const runId = "2026-07-24T01-02-03-000Z_audit_a1b2c3";
     const runDir = join(runsRoot, runId);
     const fakeFcheap = join(fixtureRoot, "fcheap");
     await mkdir(runDir, { recursive: true });
@@ -582,7 +605,7 @@ exit 2
       join(tmpdir(), "cairntrace-mcp-fcheap-invalid-receipt-"),
     );
     const runsRoot = join(fixtureRoot, "runs");
-    const runDir = join(runsRoot, "checkout-2026-07-23T140000Z");
+    const runDir = join(runsRoot, "2026-07-23T14-00-00-000Z_checkout_a1b2c3");
     const fakeBin = join(fixtureRoot, "bin");
     await mkdir(runDir, { recursive: true });
     await mkdir(fakeBin, { recursive: true });
@@ -955,7 +978,40 @@ exit 2
       await c.close();
       await rm(fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
+
+  it("cairn_audit refuses to start config services without --allow-services", async () => {
+    const fixtureRoot = await mkdtemp(
+      join(tmpdir(), "cairntrace-mcp-audit-svc-gate-"),
+    );
+    const log = join(fixtureRoot, "services.log");
+    const spec = join(fixtureRoot, "home.yml");
+    await writeFile(
+      spec,
+      "version: 1\nname: gate_home\nintent: Home opens.\ncoldStart: guest\nsteps:\n  - open: https://demo.example.test/home\noutcomes:\n  - id: home\n    description: home is open\n    verify: { url: { matches: /home } }\n",
+    );
+    await writeFile(
+      join(fixtureRoot, "cairntrace.config.yml"),
+      `version: 1\nproject: gate\nenvironments:\n  local: {}\nservices:\n  docker:\n    command: 'echo start >> "${log}"'\n    reuseExisting: false\n  teardown:\n    - 'echo teardown >> "${log}"'\n`,
+    );
+    const c = await connectInMemory();
+    try {
+      const result = await c.callTool({
+        name: "cairn_audit",
+        arguments: { specPath: spec, artifactRoot: join(fixtureRoot, "runs") },
+      });
+      expect(result.isError).toBe(true);
+      const structured = AuditResultSchema.parse(result.structuredContent);
+      expect(structured.exitCode).toBe(4);
+      expect(structured.runId).toBeUndefined();
+      expect(structured.error).toContain("does not boot services");
+      expect(structured.error).toContain("--allow-services");
+      await expect(readTextFile(log, "utf8")).rejects.toThrow();
+    } finally {
+      await c.close();
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("cairn_audit maps setup errors to structured MCP errors", async () => {
     const fixtureRoot = await mkdtemp(
@@ -998,7 +1054,7 @@ exit 2
       await c.close();
       await rm(fixtureRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("cairn_explain includes annotate and secrets commands", async () => {
     const c = await connectInMemory();
@@ -1136,6 +1192,58 @@ describe("Cairntrace MCP discovery tools", () => {
       DiscoveryOpenResultSchema.safeParse(r.structuredContent).success,
     ).toBe(true);
     await c.close();
+  });
+
+  it("cairn_checkpoint_list / _show report health and scope like the CLI", async () => {
+    const store = new CheckpointStore();
+    await store.ensureRoot();
+    const name = `mcp-scope-${process.pid}`;
+    const statePath = store.pathFor(name);
+    await writeFile(statePath, JSON.stringify({ cookies: [], origins: [] }));
+    await store.writeMeta(
+      statePath,
+      buildCheckpointMeta({
+        name,
+        baseUrl: "https://app.example.test",
+        env: "staging",
+        ttl: "12h",
+        capturedBy: "discovery",
+      }),
+    );
+    const c = await connectInMemory();
+    try {
+      const list = await c.callTool({
+        name: "cairn_checkpoint_list",
+        arguments: {},
+      });
+      const rows = (
+        list.structuredContent as {
+          checkpoints: Array<Record<string, unknown>>;
+        }
+      ).checkpoints;
+      expect(rows.find((row) => row.name === name)).toMatchObject({
+        health: "ok",
+        env: "staging",
+        baseUrl: "https://app.example.test",
+        ttl: "12h",
+      });
+      expect(JSON.stringify(list.content)).toContain(`${name} — ok`);
+
+      // Another tool rewrote the state: the sidecar is stale and ignored.
+      await writeFile(statePath, JSON.stringify({ cookies: [1], origins: [] }));
+      const show = await c.callTool({
+        name: "cairn_checkpoint_show",
+        arguments: { name },
+      });
+      expect(show.structuredContent).toMatchObject({
+        name,
+        health: "unscoped",
+        staleMeta: true,
+      });
+    } finally {
+      await store.delete(name);
+      await c.close();
+    }
   });
 
   it("cairn_checkpoint_capture refuses a mock session and a missing session", async () => {

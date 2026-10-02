@@ -5,6 +5,7 @@
  * desktop app silently does something other than what its UI claims.
  */
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { after, describe, it } = require("node:test");
@@ -138,6 +139,57 @@ describe("other argv builders", () => {
     assert.equal(argv[argv.length - 1], "json");
   });
 
+  it("builds spec heal with the same env, config and vars as Run", () => {
+    assert.deepEqual(
+      cli.buildHealArgv({
+        spec: "/p/a.yml",
+        env: "staging",
+        config: "/p/cairntrace.config.yml",
+        vars: ["tenant=acme", " ", "region=eu"],
+      }),
+      [
+        "spec",
+        "heal",
+        "/p/a.yml",
+        "--env",
+        "staging",
+        "--config",
+        "/p/cairntrace.config.yml",
+        "--var",
+        "tenant=acme",
+        "--var",
+        "region=eu",
+        "--format",
+        "json",
+      ],
+    );
+  });
+
+  it("builds clean with --keep (not --keep-runs) or --all", () => {
+    assert.deepEqual(cli.buildCleanArgv({ artifactRoot: "/r", keepRuns: 2 }), [
+      "clean",
+      "--artifact-root",
+      "/r",
+      "--format",
+      "json",
+      "--keep",
+      "2",
+    ]);
+    assert.deepEqual(
+      cli
+        .buildCleanArgv({ artifactRoot: "/r", all: true, keepRuns: 2 })
+        .slice(-1),
+      ["--all"],
+    );
+    // No count: the config's retention decides.
+    assert.equal(
+      cli
+        .buildCleanArgv({ artifactRoot: "/r", keepRuns: 0 })
+        .some((arg) => arg.startsWith("--keep")),
+      false,
+    );
+  });
+
   it("builds stats and diff argv", () => {
     assert.deepEqual(
       cli.buildStatsArgv({
@@ -180,6 +232,135 @@ describe("other argv builders", () => {
   it("rejects a stats argv without a group-by key", () => {
     assert.throws(() => cli.buildStatsArgv({ groupBy: "" }), /group/);
   });
+});
+
+describe("argv builders ↔ the real CLI", () => {
+  // Every flag Studio sends must be one the command registers, or the CLI
+  // exits 1 with "unknown option" (Prune once sent --keep-runs). Compare each
+  // builder, with every option set, against the repo's own `--help` (plus
+  // the program's global options).
+  const BIN = path.join(__dirname, "..", "..", "bin", "cairn");
+  const bun = cli.which("bun");
+  /** @type {Set<string> | undefined} */
+  let globalFlags;
+
+  /** @param {string[]} command */
+  function registeredFlags(command) {
+    const result = spawnSync(
+      /** @type {string} */ (bun),
+      [BIN, ...command, "--help"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, NO_COLOR: "1", CAIRN_LOG_LEVEL: "silent" },
+        timeout: 30_000,
+      },
+    );
+    const flags = new Set();
+    for (const line of String(result.stdout ?? "").split("\n")) {
+      const match = /^ {2}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*)/.exec(line);
+      if (match) flags.add(match[1]);
+    }
+    return flags;
+  }
+
+  const cases = [
+    {
+      command: ["run"],
+      argv: cli.buildRunArgv({
+        specs: ["/p/a.yml"],
+        env: "e",
+        backend: "playwright",
+        provider: "p",
+        device: "d",
+        config: "/p/c.yml",
+        artifactRoot: "/r",
+        headed: true,
+        coldStart: true,
+        mock: true,
+        monitor: true,
+        parallel: 2,
+        noWebServer: true,
+        noServices: true,
+        stashOnFailure: true,
+        junit: "/r/j.xml",
+        vars: ["a=1"],
+        labels: ["k=v"],
+        tags: ["t"],
+        logLevel: "debug",
+      }),
+    },
+    {
+      command: ["spec", "verify"],
+      argv: cli.buildVerifyArgv({
+        spec: "/p/a.yml",
+        config: "/p/c.yml",
+        env: "e",
+        stamp: true,
+        vars: ["a=1"],
+      }),
+    },
+    {
+      command: ["spec", "heal"],
+      argv: cli.buildHealArgv({
+        spec: "/p/a.yml",
+        env: "e",
+        backend: "playwright",
+        config: "/p/c.yml",
+        vars: ["a=1"],
+        mock: true,
+        headed: true,
+        apply: true,
+        verify: true,
+      }),
+    },
+    {
+      command: ["clean"],
+      argv: cli.buildCleanArgv({ artifactRoot: "/r", keepRuns: 2 }),
+    },
+    {
+      command: ["clean"],
+      argv: cli.buildCleanArgv({ artifactRoot: "/r", all: true }),
+    },
+    {
+      command: ["stats"],
+      argv: cli.buildStatsArgv({
+        groupBy: "g",
+        metric: "m",
+        baseline: "b",
+        limit: 5,
+        includeRuns: true,
+        artifactRoot: "/r",
+        config: "/p/c.yml",
+        labels: ["k=v"],
+      }),
+    },
+    {
+      command: ["diff"],
+      argv: cli.buildDiffArgv({
+        a: "latest",
+        b: "previous",
+        artifactRoot: "/r",
+        config: "/p/c.yml",
+      }),
+    },
+  ];
+
+  for (const { command, argv } of cases) {
+    it(`cairn ${command.join(" ")} registers every flag Studio sends`, (t) => {
+      if (!bun || !fs.existsSync(BIN)) {
+        t.skip("needs bun and the repo's bin/cairn");
+        return;
+      }
+      const registered = registeredFlags(command);
+      assert.ok(registered.size > 0, `no options parsed for ${command}`);
+      // Global options (--log-level, --log-format, …) live on the program.
+      globalFlags ??= registeredFlags([]);
+      for (const flag of globalFlags) registered.add(flag);
+      const sent = argv.filter((arg) => arg.startsWith("--"));
+      const unknown = sent.filter((flag) => !registered.has(flag));
+      assert.deepEqual(unknown, [], `${command.join(" ")} rejects these`);
+    });
+  }
 });
 
 describe("createLineDecoder", () => {
@@ -248,6 +429,7 @@ describe("describeExitCode", () => {
     assert.equal(cli.describeExitCode(4), "lint failure");
     assert.equal(cli.describeExitCode(5), "heal made no progress");
     assert.equal(cli.describeExitCode(6), "contract-hash mismatch");
+    assert.equal(cli.describeExitCode(7), "refused by environment policy");
     assert.equal(cli.describeExitCode(null), "terminated by signal");
     assert.equal(cli.describeExitCode(9), "exit 9");
   });
@@ -404,5 +586,33 @@ describe("execCairn", () => {
         }),
       /not|exist|ENOENT/i,
     );
+  });
+});
+
+describe("version + spawn hooks", () => {
+  it("parses the semver out of --version output", () => {
+    assert.equal(cli.parseVersionOutput("2.15.0\n"), "2.15.0");
+    assert.equal(
+      cli.parseVersionOutput("cairn v2.16.0-rc.1 (bun 1.3)"),
+      "2.16.0-rc.1",
+    );
+    assert.equal(cli.parseVersionOutput("no version"), null);
+  });
+
+  it("reports the spawned pid through onSpawn", async () => {
+    const dir = tempDir("cairn-pid-");
+    const bin = write(dir, "fake", ["#!/bin/sh", "echo '{}'"].join("\n"));
+    fs.chmodSync(bin, 0o755);
+    /** @type {Array<number | undefined>} */
+    const pids = [];
+    const result = await cli.execCairn({
+      command: bin,
+      argv: [],
+      timeoutMs: 15_000,
+      onSpawn: (pid) => pids.push(pid),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(pids.length, 1);
+    assert.ok(Number.isInteger(pids[0]) && pids[0] > 0);
   });
 });

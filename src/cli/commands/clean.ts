@@ -7,14 +7,16 @@ import {
 import { emit, resolveFormat } from "../format";
 import { log, reconfigureWithConfig } from "../logger";
 import { resolveArtifactRootContext } from "../runRefs";
-import { stashDirectory } from "./stash";
-import { publishRunDirectory } from "./publish";
+import type { RetentionConfig, StashConfig } from "../../core/schema/config.v1";
+import { makeArchiveRun, publishRun } from "../invocation/postRun";
 
 const cleanLog = log.scope("clean");
 
 export interface CleanOptions {
   keep?: string;
   all?: boolean;
+  /** Also prune pinned runs (`cairn pin`), which retention otherwise keeps. */
+  includePinned?: boolean;
   artifactRoot?: string;
   config?: string;
   format?: string;
@@ -49,13 +51,8 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
   let artifactRoot: string;
   let keepRunsFromConfig: number | undefined;
   let keepFailedRunsFromConfig: number | undefined;
-  let retention:
-    | {
-        archiveToStash?: boolean;
-        archiveTags?: string[];
-        publish?: { enabled?: boolean; retentionDays?: number };
-      }
-    | undefined;
+  let retention: RetentionConfig | undefined;
+  let stash: StashConfig | undefined;
   try {
     const resolved = await resolveArtifactRootContext(opts);
     artifactRoot = resolved.artifactRoot;
@@ -63,6 +60,7 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     keepFailedRunsFromConfig =
       resolved.loaded?.config.retention?.keepFailedRuns;
     retention = resolved.loaded?.config.retention;
+    stash = resolved.loaded?.config.stash;
     // Apply the config `logging` block as a project default (flags/env win).
     reconfigureWithConfig(resolved.loaded?.config?.logging);
   } catch (e) {
@@ -89,6 +87,9 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     ? 0
     : (keepFailedRunsFromConfig ?? DEFAULT_KEEP_FAILED_RUNS);
 
+  // The same evidence-gated adapters `cairn run` uses: archives honor
+  // stash.include/ttl, publications retention.publish.include.
+  const archiveRun = makeArchiveRun((message) => cleanLog.warn(message));
   const onArchive =
     retention?.archiveToStash === true || retention?.publish?.enabled === true
       ? async (runDir: string, runId: string) => {
@@ -97,17 +98,24 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
             "retention-archived",
           ];
           if (retention?.archiveToStash) {
-            const r = await stashDirectory(runDir, {
-              tool: "cairntrace",
-              tags,
+            await archiveRun(runDir, runId, tags, {
+              ...(stash?.include ? { include: stash.include } : {}),
+              ...(stash?.unsafeIncludeRawTraces
+                ? { unsafeIncludeRawTraces: true }
+                : {}),
+              ...(stash?.ttl ? { ttl: stash.ttl } : {}),
             });
-            if (!r.ok)
-              throw new Error(`fcheap archive failed: ${r.error ?? "unknown"}`);
           }
           if (retention?.publish?.enabled) {
-            await publishRunDirectory(runDir, runId, {
-              retentionDays: retention.publish.retentionDays ?? 7,
-            });
+            await publishRun(
+              runDir,
+              runId,
+              tags,
+              retention.publish.retentionDays ?? 7,
+              retention.publish.include
+                ? { include: retention.publish.include }
+                : {},
+            );
           }
         }
       : undefined;
@@ -115,6 +123,7 @@ export async function cleanCommand(opts: CleanOptions): Promise<void> {
     keepRuns,
     keepFailedRuns,
     ...(onArchive ? { onArchive } : {}),
+    ...(opts.includePinned ? { includePinned: true } : {}),
   });
   const report: CleanReport = {
     ...pruned,
@@ -145,6 +154,12 @@ function toMarkdown(r: CleanReport): string {
     if (r.removed.length > 20) {
       lines.push(`  …and ${r.removed.length - 20} more`);
     }
+  }
+  if (r.pinned?.length) {
+    lines.push(
+      "",
+      `Pinned (kept; --include-pinned prunes them): ${r.pinned.length}`,
+    );
   }
   if (r.archiveFailures.length > 0) {
     lines.push("", "Archive failures (retained on disk):");

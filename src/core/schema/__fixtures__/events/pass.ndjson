@@ -1,0 +1,25 @@
+{"ts":"2026-01-01T00:00:00.000Z","type":"services.docker.start","message":"docker: starting"}
+{"ts":"2026-01-01T00:00:01.000Z","type":"services.docker.ready","message":"docker: ready","data":{"reused":false}}
+{"ts":"<ts>","type":"run.started","runId":"<runId>","spec":"demo_save_profile"}
+{"ts":"<ts>","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"preconditions","item":"seed_check","budgetMs":30000,"deadline":"<ts>"}
+{"ts":"<ts>","type":"log.opened","kind":"precondition","name":"seed_check","path":"logs/precondition-01-seed_check.log"}
+{"ts":"<ts>","type":"precondition.started","name":"seed_check","timeoutMs":30000,"index":1,"total":1,"logPath":"logs/precondition-01-seed_check.log"}
+{"ts":"<ts>","type":"precondition.run","name":"seed_check","exitCode":0,"durationMs":0,"timedOut":false,"output":"ready","logPath":"logs/precondition-01-seed_check.log"}
+{"ts":"<ts>","type":"viewport.set","width":1280,"height":720,"ok":true}
+{"ts":"<ts>","type":"phase.changed","phase":"steps"}
+{"ts":"<ts>","type":"step.started","stepId":"open_profile","index":1,"total":3,"kind":"open","label":"open https://demo.example.test/profile"}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"open_profile","path":"snapshots/001_open_profile.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"open_profile","durationMs":0,"url":"https://demo.example.test/profile"}
+{"ts":"<ts>","type":"step.started","stepId":"step_2","index":2,"total":3,"kind":"fill","label":"fill label \"Email\""}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"step_2","path":"snapshots/002_step_2.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"step_2","durationMs":0}
+{"ts":"<ts>","type":"step.started","stepId":"step_3","index":3,"total":3,"kind":"click","label":"click role=button \"Save\""}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"step_3","path":"snapshots/003_step_3.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"step_3","durationMs":0}
+{"ts":"<ts>","type":"phase.changed","phase":"outcomes"}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"on_profile","kind":"url"}
+{"ts":"<ts>","type":"outcome.passed","outcomeId":"on_profile","durationMs":0}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"saved_banner","kind":"text"}
+{"ts":"<ts>","type":"outcome.passed","outcomeId":"saved_banner","durationMs":0}
+{"ts":"<ts>","type":"run.passed","runId":"<runId>","durationMs":0}

@@ -74,7 +74,10 @@ function testCasesForRun(r: RunResult): JUnitCase[] {
       name: "run",
       status: r.status === "passed" ? "passed" : "errored",
       ...(r.status !== "passed"
-        ? { message: failedStep?.error ?? `run ${r.status}` }
+        ? {
+            message:
+              failedStep?.error ?? r.failure?.message ?? `run ${r.status}`,
+          }
         : {}),
     },
   ];

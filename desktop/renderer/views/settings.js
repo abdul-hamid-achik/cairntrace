@@ -3,7 +3,8 @@
  * every Run button in the app applies.
  */
 (function bootSettingsView() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h, state, api, fmt, toast } = Studio;
 
   const BACKENDS = [
@@ -51,7 +52,13 @@
                 danger: true,
               });
               if (!proceed) return;
-              await api.call("settings:reset");
+              try {
+                // Main asks again, natively, if a suite lock is held.
+                await api.call("settings:reset");
+              } catch (error) {
+                toast("Not reset", String(error?.message ?? error), "bad");
+                return;
+              }
               await Studio.actions.loadInfo();
               await Studio.actions.loadProject();
               toast("Settings reset", null, "ok");
@@ -116,9 +123,14 @@
             type: "button",
             text: "Save path",
             onClick: async () => {
-              await Studio.actions.saveSettings({
-                cairnBin: cairnInput.value.trim() || null,
-              });
+              try {
+                await Studio.actions.setCairnBin(
+                  cairnInput.value.trim() || null,
+                );
+              } catch (error) {
+                toast("Not saved", String(error?.message ?? error), "bad");
+                return;
+              }
               await Studio.actions.loadInfo();
               toast("Saved", "cairn binary override updated", "ok", 2200);
               void render(root);
@@ -171,9 +183,14 @@
               type: "button",
               text: "Save",
               onClick: async () => {
-                await Studio.actions.saveSettings({
-                  artifactRoot: rootInput.value.trim() || null,
-                });
+                try {
+                  await Studio.actions.setArtifactRoot(
+                    rootInput.value.trim() || null,
+                  );
+                } catch (error) {
+                  toast("Not saved", String(error?.message ?? error), "bad");
+                  return;
+                }
                 await Studio.actions.loadInfo();
                 await Studio.actions.loadRuns();
                 toast("Saved", "artifact root updated", "ok", 2200);
@@ -220,23 +237,29 @@
     ];
 
     const saveRunDefaults = async () => {
-      await Studio.actions.saveSettings({
-        run: {
-          ...run,
-          env: envSelect.value || null,
-          backend: backendSelect.value || null,
-          logLevel: levelSelect.value || "info",
-          parallel: Number(parallelInput.value) || 1,
-          labels: splitPairs(labelsInput.value),
-          vars: splitPairs(varsInput.value),
-          headed: toggleState.headed,
-          coldStart: toggleState.coldStart,
-          monitor: toggleState.monitor,
-          noWebServer: toggleState.noWebServer,
-          noServices: toggleState.noServices,
-          stashOnFailure: toggleState.stashOnFailure,
-        },
-      });
+      try {
+        await Studio.actions.saveSettings({
+          run: {
+            ...run,
+            env: envSelect.value || null,
+            backend: backendSelect.value || null,
+            logLevel: levelSelect.value || "info",
+            parallel: Number(parallelInput.value) || 1,
+            labels: splitPairs(labelsInput.value),
+            vars: splitPairs(varsInput.value),
+            headed: toggleState.headed,
+            coldStart: toggleState.coldStart,
+            monitor: toggleState.monitor,
+            noWebServer: toggleState.noWebServer,
+            noServices: toggleState.noServices,
+            stashOnFailure: toggleState.stashOnFailure,
+          },
+        });
+      } catch (error) {
+        // e.g. a label or var that starts with "-" (it would read as a flag)
+        toast("Not saved", String(error?.message ?? error), "bad");
+        return;
+      }
       toast("Run defaults saved", null, "ok", 2200);
     };
 
@@ -324,6 +347,81 @@
       ),
     );
 
+    // ── launch safety (per project) ─────────────────────────────────────────
+    if (project?.dir) root.appendChild(await launchPanel(project.dir, root));
+
+    // ── interface ───────────────────────────────────────────────────────────
+    const ui = settings.ui ?? {};
+    const densitySelect = Studio.select(
+      [
+        ["comfortable", "comfortable"],
+        ["compact", "compact"],
+      ],
+      { value: ui.density ?? "comfortable" },
+    );
+    const shotInput = Studio.input({
+      type: "number",
+      value: String(ui.screenshotMaxWidth ?? 720),
+      style: { width: "90px" },
+    });
+    const pollInput = Studio.input({
+      type: "number",
+      value: String(ui.livePollMs ?? 400),
+      style: { width: "90px" },
+    });
+    let autoRefresh = ui.autoRefreshRuns !== false;
+    root.appendChild(
+      h(
+        "div",
+        { style: { marginTop: "14px" } },
+        Studio.panel("interface", [
+          h(
+            "div",
+            { class: "toolbar" },
+            h("label", { class: "field" }, "density", densitySelect),
+            h(
+              "label",
+              { class: "field" },
+              "screenshot max width (px)",
+              shotInput,
+            ),
+            h("label", { class: "field" }, "live tail poll (ms)", pollInput),
+            Studio.checkbox(
+              "refresh Runs when a run finishes",
+              autoRefresh,
+              (value) => (autoRefresh = value),
+            ),
+            h("div", { class: "spacer" }),
+            h("button", {
+              class: "btn btn-primary",
+              type: "button",
+              text: "Save interface",
+              onClick: async () => {
+                await Studio.actions.saveSettings({
+                  ui: {
+                    density:
+                      densitySelect.value === "compact"
+                        ? "compact"
+                        : "comfortable",
+                    screenshotMaxWidth: Math.max(
+                      160,
+                      Math.min(4000, Number(shotInput.value) || 720),
+                    ),
+                    livePollMs: Math.max(
+                      150,
+                      Math.min(5000, Number(pollInput.value) || 400),
+                    ),
+                    autoRefreshRuns: autoRefresh,
+                  },
+                });
+                toast("Interface saved", null, "ok", 2200);
+              },
+            }),
+          ),
+        ]),
+      ),
+    );
+
     // ── projects ────────────────────────────────────────────────────────────
     const projects = settings.projects ?? [];
     root.appendChild(
@@ -353,11 +451,12 @@
                         text: entry.name ?? entry.path,
                       }),
                       h("span", { class: "cell-dim", text: entry.path }),
-                      h("span", {
-                        class: "cell-dim",
-                        style: { marginLeft: "auto" },
-                        text: `${entry.openedCount ?? 1}× · ${fmt.relativeTime(entry.lastOpenedAt)}`,
-                      }),
+                      h(
+                        "span",
+                        { class: "cell-dim", style: { marginLeft: "auto" } },
+                        `${entry.openedCount ?? 1}× · `,
+                        Studio.relTime(entry.lastOpenedAt),
+                      ),
                       h("button", {
                         class: "btn btn-sm",
                         type: "button",
@@ -417,6 +516,142 @@
           }),
         ]),
       ),
+    );
+  }
+
+  /**
+   * Per-project launch template + lock files.
+   * @param {string} projectDir
+   * @param {HTMLElement} root
+   */
+  async function launchPanel(projectDir, root) {
+    let status = null;
+    try {
+      status = await api.call("project:locks", projectDir);
+    } catch {
+      // shown as empty settings
+    }
+    const templateInput = Studio.input({
+      value: status?.launchTemplate ?? "",
+      placeholder:
+        "blank = spawn cairn run directly · e.g. task run FLOW={spec} ENV={env} -- {cairnArgs}",
+      style: { width: "100%" },
+    });
+    const locksInput = /** @type {HTMLTextAreaElement} */ (
+      h("textarea", {
+        class: "editor small-editor",
+        spellcheck: "false",
+        placeholder:
+          "one lock file or directory per line, relative to the project (e.g. runs/.suite.lock)",
+        value: (status?.lockFiles ?? []).join("\n"),
+      })
+    );
+    const preview = h("pre", { class: "code tight hidden" });
+    const showPreview = async () => {
+      const template = templateInput.value.trim();
+      if (!template) {
+        preview.classList.add("hidden");
+        return;
+      }
+      try {
+        const built = await api.call(
+          "launch:preview",
+          { template },
+          projectDir,
+        );
+        preview.textContent = [built.command, ...(built.args ?? [])].join(" ");
+        preview.classList.remove("hidden");
+      } catch (error) {
+        preview.textContent = String(error?.message ?? error);
+        preview.classList.remove("hidden");
+      }
+    };
+    const lockRows = (status?.locks ?? []).map((lock) =>
+      h(
+        "div",
+        { class: "list-row" },
+        h("span", {
+          class: `dot dot-${lock.exists ? "warn" : lock.error ? "bad" : "ok"}`,
+        }),
+        h("span", { class: "mono", text: lock.path }),
+        h("span", {
+          class: "cell-dim",
+          text: lock.error
+            ? lock.error
+            : lock.exists
+              ? `held${
+                  lock.owner ? ` by ${lock.owner}` : ""
+                } · ${fmt.formatDuration(lock.ageMs)} old`
+              : "free",
+        }),
+      ),
+    );
+    return h(
+      "div",
+      { style: { marginTop: "14px" } },
+      Studio.panel(`launch safety · ${projectDir.split("/").pop()}`, [
+        h(
+          "label",
+          { class: "field", style: { width: "100%" } },
+          "launch template (placeholders: {spec} {specs} {specName} {env} {cairnArgs} {projectDir}; no shell)",
+          templateInput,
+        ),
+        preview,
+        h(
+          "label",
+          { class: "field", style: { width: "100%", marginTop: "8px" } },
+          "suite lock files — Run is disabled while any exists",
+          locksInput,
+        ),
+        lockRows.length
+          ? h(
+              "div",
+              { class: "panel", style: { marginTop: "8px" } },
+              h("div", { class: "panel-body tight" }, lockRows),
+            )
+          : null,
+        h(
+          "div",
+          { class: "toolbar", style: { marginTop: "8px" } },
+          h("button", {
+            class: "btn",
+            type: "button",
+            text: "Preview command",
+            onClick: () => void showPreview(),
+          }),
+          h("div", { class: "spacer" }),
+          h("button", {
+            class: "btn btn-primary",
+            type: "button",
+            text: "Save launch settings",
+            onClick: async () => {
+              try {
+                await api.call(
+                  "project:launch-update",
+                  {
+                    launchTemplate: templateInput.value.trim() || null,
+                    lockFiles: locksInput.value
+                      .split(/\r?\n/)
+                      .map((entry) => entry.trim())
+                      .filter(Boolean),
+                  },
+                  projectDir,
+                );
+                await Studio.actions.loadInfo();
+                await Studio.actions.loadLocks();
+                toast("Launch settings saved", null, "ok", 2200);
+                void render(root);
+              } catch (error) {
+                toast("Not saved", String(error?.message ?? error), "bad");
+              }
+            },
+          }),
+        ),
+        h("p", {
+          class: "cell-dim",
+          text: "When a template is set, every Run button spawns it (tokenized, no shell) instead of cairn run; {cairnArgs} carries Studio's run flags (--format json, --log-format json, labels, vars…). Studio still tails the artifact root, so Live works the same.",
+        }),
+      ]),
     );
   }
 

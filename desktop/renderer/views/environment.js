@@ -1,12 +1,20 @@
 /**
  * Environment view — everything that decides whether a run can succeed.
  *
- * `cairn doctor` checks, the project config cairn discovered, services and
- * checkpoint state, and the retention/clean controls for the artifact root.
+ * `cairn doctor` checks, the project config cairn discovered (with each
+ * environment's policy: trait, mutations, description, and — when the config
+ * declares services — its `services up` lock with Services up / Services
+ * down buttons that run `cairn services up|down --env`), services and
+ * checkpoint state (env / baseUrl scope, expiry, health when the CLI reports
+ * them), the config registries (datasources per environment with their kind
+ * and a redacted target, readiness gates, fixtures with the project
+ * ledger's last state), and the retention/clean controls for the artifact
+ * root.
  * When a spec fails for environmental reasons, this is the first place to look.
  */
 (function bootEnvironmentView() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h, state, api, fmt, toast } = Studio;
 
   /** @param {HTMLElement} root */
@@ -14,12 +22,18 @@
     Studio.clear(root);
     root.appendChild(Studio.loading("checking environment…"));
 
-    const [info, doctor, services, checkpoints] = await Promise.allSettled([
-      api.call("app:info"),
-      api.call("cairn:doctor"),
-      api.call("services:status"),
-      api.call("checkpoints:list"),
-    ]);
+    const registries = state.project?.config?.registries ?? null;
+    const [info, doctor, services, checkpoints, ledger] =
+      await Promise.allSettled([
+        api.call("app:info"),
+        api.call("cairn:doctor"),
+        api.call("services:status"),
+        api.call("checkpoints:list"),
+        // the fixture ledger only matters when the config declares fixtures
+        (registries?.fixtures ?? []).length
+          ? api.call("fixtures:ledger")
+          : Promise.resolve(null),
+      ]);
 
     Studio.clear(root);
     const appInfo = info.status === "fulfilled" ? info.value : null;
@@ -71,6 +85,12 @@
     else root.appendChild(Studio.errorBox(doctor.reason, "cairn doctor"));
 
     root.appendChild(projectPanel(appInfo));
+    root.appendChild(environmentsPanel());
+    const registryPanel = registriesPanel(
+      registries,
+      ledger.status === "fulfilled" ? ledger.value : null,
+    );
+    if (registryPanel) root.appendChild(registryPanel);
 
     if (services.status === "fulfilled")
       root.appendChild(servicesPanel(services.value));
@@ -188,14 +208,7 @@
       ["default environment", config?.defaultEnvironment ?? "—"],
       [
         "environments",
-        (config?.environments ?? [])
-          .map(
-            (env) =>
-              `${env.name}${env.baseUrl ? ` (${env.baseUrl})` : ""}${
-                env.disabled ? " [services off]" : ""
-              }`,
-          )
-          .join(", ") || "—",
+        (config?.environments ?? []).map((env) => env.name).join(", ") || "—",
       ],
       ["artifactRoot (config)", config?.artifactRoot ?? "—"],
       ["browser backend", config?.backend ?? "agent-browser (default)"],
@@ -284,6 +297,739 @@
     ]);
   }
 
+  /**
+   * A `services status` lock report (owner, age, staleness) in its cell.
+   * @param {HTMLElement} cell
+   * @param {Record<string, any> | null} result `services:lock`
+   */
+  function paintLock(cell, result) {
+    const report = result?.lock ?? null;
+    if (!report) {
+      const node = h("span", {
+        class: "cell-dim",
+        text: result?.ok === false ? "status failed" : "unknown",
+      });
+      node.title = fmt.truncate(String(result?.stderr ?? ""), 400);
+      cell.replaceChildren(node);
+      return;
+    }
+    if (report.state === "absent") {
+      const node = Studio.tag("no lock");
+      node.title = `no services-up lock (${report.path ?? ""}): services start and stop with each run`;
+      cell.replaceChildren(node);
+      return;
+    }
+    if (report.state === "unreadable") {
+      const node = Studio.tag("unreadable lock", "bad");
+      node.title = `${report.path ?? ""}${
+        report.reason ? `\n${report.reason}` : ""
+      }`;
+      cell.replaceChildren(node);
+      return;
+    }
+    const lock = report.lock ?? {};
+    const tag = Studio.tag(
+      report.stale ? "held · stale" : "held",
+      report.stale ? "warn" : "info",
+    );
+    tag.title = [
+      report.path,
+      lock.configPath ? `config ${lock.configPath}` : null,
+      ...(Array.isArray(report.problems) ? report.problems : []),
+      "runs on this environment need --reuse-services while it is held",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    cell.replaceChildren(
+      tag,
+      h("span", {
+        class: "cell-dim services-owner",
+        text: ` ${[lock.by, lock.pid ? `pid ${lock.pid}` : null]
+          .filter(Boolean)
+          .join(" · ")} `,
+      }),
+      lock.startedAt
+        ? Studio.relTime(lock.startedAt, { prefix: "since " })
+        : typeof report.ageSeconds === "number"
+          ? h("span", {
+              class: "cell-dim",
+              text: `${fmt.formatDuration(report.ageSeconds * 1000)} old`,
+            })
+          : "",
+    );
+  }
+
+  /**
+   * Read one environment's services-up lock into its cell; while Studio
+   * runs `services up|down` for it, its buttons stay disabled.
+   * @param {string} env
+   * @param {HTMLElement} cell
+   * @param {HTMLButtonElement[]} buttons
+   */
+  async function refreshLock(env, cell, buttons) {
+    try {
+      const result = await api.call("services:lock", { env });
+      paintLock(cell, result);
+      for (const button of buttons)
+        button.toggleAttribute("disabled", Boolean(result?.busy));
+      if (result?.busy)
+        cell.appendChild(
+          h("span", {
+            class: "cell-dim",
+            text: ` · services ${result.busy} running`,
+          }),
+        );
+    } catch (error) {
+      const node = h("span", { class: "cell-dim", text: "unknown" });
+      node.title = String(error?.message ?? error);
+      cell.replaceChildren(node);
+    }
+  }
+
+  /**
+   * The one-line summary of a `services up|down --json` result.
+   * @param {"up" | "down"} action
+   * @param {Record<string, any> | null} payload
+   * @returns {string}
+   */
+  function servicesSummary(action, payload) {
+    if (!payload) return "";
+    const parts =
+      action === "up"
+        ? Object.entries(payload.phases ?? {}).map(
+            ([phase, what]) => `${phase} ${what}`,
+          )
+        : [
+            `${(payload.teardown ?? []).length} teardown command(s)`,
+            payload.tmuxKilled ? "tmux session killed" : null,
+            payload.removedLock ? "lock removed" : null,
+          ];
+    if (typeof payload.durationMs === "number")
+      parts.push(fmt.formatDuration(payload.durationMs));
+    for (const warning of payload.warnings ?? [])
+      parts.push(`warning: ${warning}`);
+    return parts.filter(Boolean).join(" · ");
+  }
+
+  /**
+   * Run `cairn services up|down --env <env>` (main asks natively first).
+   * @param {"up" | "down"} action
+   * @param {string} env
+   * @param {HTMLElement} cell
+   * @param {HTMLButtonElement[]} buttons
+   */
+  async function runServices(action, env, cell, buttons) {
+    const button = buttons.find((entry) => entry.dataset.action === action);
+    const label = button?.textContent ?? "";
+    for (const entry of buttons) entry.toggleAttribute("disabled", true);
+    if (button)
+      button.textContent = action === "up" ? "Starting…" : "Stopping…";
+    try {
+      const result = await api.call(`services:${action}`, { env });
+      if (result?.cancelled) return;
+      toast(
+        result?.ok
+          ? `Services ${action} · ${env}`
+          : `services ${action} failed · ${env}`,
+        result?.ok
+          ? servicesSummary(action, result.payload)
+          : fmt.truncate(
+              result?.unsupported
+                ? `this cairn has no \`cairn services ${action}\` (${result.stderr ?? ""})`
+                : String(
+                    result?.error ?? result?.stderr ?? result?.meaning ?? "",
+                  ),
+              260,
+            ),
+        result?.ok ? "ok" : "bad",
+        result?.ok ? 6000 : 12000,
+      );
+    } catch (error) {
+      toast(
+        `services ${action} not started · ${env}`,
+        String(error?.message ?? error),
+        "bad",
+        9000,
+      );
+    } finally {
+      if (button) button.textContent = label;
+      for (const entry of buttons) entry.toggleAttribute("disabled", false);
+      void refreshLock(env, cell, buttons);
+    }
+  }
+
+  /**
+   * Every environment the config defines, with its policy (trait,
+   * mutations, description): what `cairn run` checks before it refuses a
+   * spec. Specs declare what they need with `requires:`. When the config
+   * declares services, each environment shows its `services up` lock
+   * (owner, age) and Services up / Services down buttons.
+   * @returns {HTMLElement}
+   */
+  function environmentsPanel() {
+    const config = state.project?.config ?? null;
+    const environments = config?.environments ?? [];
+    if (!environments.length)
+      return Studio.panel("environments & policy", [
+        h("p", {
+          class: "cell-dim",
+          style: { marginTop: 0 },
+          text: config?.path
+            ? "The config defines no environments: runs use the local fallback with no baseUrl."
+            : "No cairntrace.config.yml found for this project.",
+        }),
+      ]);
+    const servicesDeclared = Boolean(config?.hasServices);
+    const body = h("tbody");
+    for (const env of environments) {
+      const policy = env.policy ?? null;
+      const withServices = servicesDeclared && !env.disabled;
+      const lockCell = h(
+        "td",
+        { class: "services-lock", dataset: { env: env.name } },
+        withServices
+          ? h("span", { class: "cell-dim", text: "checking…" })
+          : h("span", {
+              class: "cell-dim",
+              text: env.disabled ? "services off" : "—",
+            }),
+      );
+      /** @type {HTMLButtonElement[]} */
+      const buttons = [];
+      if (withServices) {
+        for (const action of /** @type {Array<"up" | "down">} */ ([
+          "up",
+          "down",
+        ]))
+          buttons.push(
+            /** @type {HTMLButtonElement} */ (
+              h("button", {
+                class: `btn btn-sm${action === "down" ? " btn-ghost" : ""}`,
+                type: "button",
+                text: action === "up" ? "Services up" : "Services down",
+                title:
+                  action === "up"
+                    ? `cairn services up --env ${env.name}: start docker → seed → tmux and keep them running (asks first)`
+                    : `cairn services down --env ${env.name}: tear the services down and remove the lock (asks first)`,
+                ariaLabel: `services ${action} for ${env.name}`,
+                dataset: { action, env: env.name },
+                onClick: () =>
+                  void runServices(action, env.name, lockCell, buttons),
+              })
+            ),
+          );
+        void refreshLock(env.name, lockCell, buttons);
+      }
+      body.appendChild(
+        h(
+          "tr",
+          {
+            class: "env-row",
+            dataset: { env: env.name },
+            style: { cursor: "default" },
+          },
+          h(
+            "td",
+            { class: "mono" },
+            env.name,
+            env.name === config?.defaultEnvironment
+              ? h("span", { class: "cell-dim", text: " (default)" })
+              : null,
+          ),
+          h("td", { class: "cell-dim mono", text: env.baseUrl ?? "—" }),
+          h(
+            "td",
+            null,
+            policy?.trait
+              ? Studio.tag(
+                  policy.trait,
+                  policy.trait === "protected"
+                    ? "refused"
+                    : policy.trait === "shared"
+                      ? "warn"
+                      : "ok",
+                )
+              : h("span", { class: "cell-dim", text: "—" }),
+          ),
+          h(
+            "td",
+            null,
+            policy?.mutations
+              ? Studio.tag(
+                  policy.mutations === "deny"
+                    ? "mutations denied"
+                    : "mutations allowed",
+                  policy.mutations === "deny" ? "warn" : "ok",
+                )
+              : h("span", { class: "cell-dim", text: "—" }),
+          ),
+          h("td", {
+            class: "cell-summary",
+            title: policy?.description ?? "",
+            text: policy?.description ?? "",
+          }),
+          lockCell,
+          h("td", { class: "row-actions" }, buttons),
+        ),
+      );
+    }
+    return Studio.panel("environments & policy", [
+      h(
+        "table",
+        { class: "grid env-policy" },
+        h(
+          "thead",
+          h(
+            "tr",
+            h("th", { text: "environment" }),
+            h("th", { text: "baseUrl" }),
+            h("th", { text: "trait" }),
+            h("th", { text: "mutations" }),
+            h("th", { text: "description" }),
+            h("th", { text: "services lock" }),
+            h("th", { text: "" }),
+          ),
+        ),
+        body,
+      ),
+      servicesDeclared
+        ? h("p", {
+            class: "cell-dim",
+            text: "Services up starts the config services for an environment and keeps them running behind an owner lock (runs then need --reuse-services); Services down tears them down and removes the lock. Both ask first, and both are refused while a suite lock is held.",
+          })
+        : null,
+      h("p", {
+        class: "cell-dim",
+        text: "cairn run refuses a spec (status refused, exit 7) when its requires.env does not list the environment (or its opt-in variable is not 1/true), when it mutates and the environment denies mutations, or when the environment is protected and the spec does not list it. Nothing starts for a refused spec.",
+      }),
+    ]);
+  }
+
+  /**
+   * `datasources:` (per environment), `gates:` and `fixtures:` from the
+   * config, as main summarized them (redacted: references stay references,
+   * literal URIs are masked, credentials are only named by kind).
+   * @param {any} registries
+   * @param {any} ledger `fixtures:ledger` (newest state per fixture) or null
+   * @returns {HTMLElement | null}
+   */
+  function registriesPanel(registries, ledger) {
+    if (!registries) return null;
+    const topLevel = registries.datasources?.topLevel ?? [];
+    const perEnv = registries.datasources?.environments ?? [];
+    const gates = registries.gates ?? [];
+    const fixtures = registries.fixtures ?? [];
+    if (
+      !topLevel.length &&
+      !gates.length &&
+      !fixtures.length &&
+      !perEnv.some((env) => env.datasources.length)
+    )
+      return null;
+    const nodes = [];
+
+    // datasources: one row per environment × datasource (or the top level
+    // when the config has no environments)
+    const dsRows = perEnv.length
+      ? perEnv.flatMap((/** @type {any} */ env) =>
+          env.datasources.map((/** @type {any} */ ds) => ({
+            env: env.env,
+            ...ds,
+          })),
+        )
+      : topLevel.map((/** @type {any} */ ds) => ({
+          env: "(every)",
+          state: "inherited",
+          ...ds,
+        }));
+    if (dsRows.length)
+      nodes.push(
+        h(
+          "div",
+          { class: "section-title", style: { marginTop: "0" } },
+          `Datasources (${topLevel.length || dsRows.length})`,
+        ),
+        h(
+          "table",
+          { class: "grid datasources-table" },
+          h(
+            "thead",
+            h(
+              "tr",
+              [
+                "environment",
+                "datasource",
+                "kind",
+                "target",
+                "details",
+                "state",
+              ].map((label) => h("th", { text: label })),
+            ),
+          ),
+          h(
+            "tbody",
+            dsRows.map((/** @type {any} */ ds) =>
+              h(
+                "tr",
+                {
+                  class: `datasource-row ds-${ds.state}`,
+                  dataset: { env: ds.env, name: ds.name },
+                },
+                h("td", { class: "mono", text: ds.env }),
+                h("td", { class: "mono", text: ds.name }),
+                h("td", null, Studio.tag(ds.kind, ds.known ? "info" : "warn")),
+                h("td", {
+                  class: "mono cell-dim ds-target",
+                  title: ds.target ?? "",
+                  text: ds.state === "disabled" ? "—" : (ds.target ?? "—"),
+                }),
+                h("td", {
+                  class: "cell-dim",
+                  text: (ds.facts ?? [])
+                    .map(
+                      (/** @type {[string, string]} */ [k, v]) => `${k}: ${v}`,
+                    )
+                    .join(" · "),
+                }),
+                h(
+                  "td",
+                  null,
+                  Studio.tag(
+                    ds.state === "env-only" ? "this env only" : ds.state,
+                    ds.state === "disabled"
+                      ? "warn"
+                      : ds.state === "override" || ds.state === "env-only"
+                        ? "info"
+                        : "muted",
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+    if (gates.length)
+      nodes.push(
+        h(
+          "div",
+          { class: "section-title" },
+          `Readiness gates (${gates.length})`,
+        ),
+        h(
+          "table",
+          { class: "grid gates-table" },
+          h(
+            "thead",
+            h(
+              "tr",
+              ["gate", "probe", "target", "policy", "waited by"].map((label) =>
+                h("th", { text: label }),
+              ),
+            ),
+          ),
+          h(
+            "tbody",
+            gates.map((/** @type {any} */ gate) =>
+              h(
+                "tr",
+                { class: "gate-row", dataset: { name: gate.name } },
+                h(
+                  "td",
+                  { class: "mono", title: gate.description ?? "" },
+                  gate.name,
+                ),
+                h("td", null, Studio.tag(gate.probe, "info")),
+                h("td", {
+                  class: "mono cell-dim",
+                  title: [
+                    gate.target,
+                    ...(gate.facts ?? []).map(
+                      (/** @type {[string, string]} */ [k, v]) => `${k}: ${v}`,
+                    ),
+                  ]
+                    .filter(Boolean)
+                    .join("\n"),
+                  text: gate.target ?? "—",
+                }),
+                h("td", {
+                  class: "cell-dim",
+                  text:
+                    [
+                      gate.timeout ? `timeout ${gate.timeout}` : null,
+                      gate.every ? `every ${gate.every}` : null,
+                      gate.stable ? `stable ×${gate.stable}` : null,
+                      ...(gate.facts ?? []).map(
+                        (/** @type {[string, string]} */ [k, v]) => `${k} ${v}`,
+                      ),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "defaults (60s, every 1s)",
+                }),
+                h("td", {
+                  class: "cell-dim",
+                  text: gateUsers(gate).join(", ") || "—",
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+
+    if (fixtures.length) {
+      /** @type {Map<string, any[]>} live state per environment, by fixture */
+      const latest = new Map();
+      for (const entry of ledger?.entries ?? []) {
+        const list = latest.get(entry.name) ?? [];
+        list.push(entry);
+        latest.set(entry.name, list);
+      }
+      nodes.push(
+        h("div", { class: "section-title" }, `Fixtures (${fixtures.length})`),
+        h(
+          "table",
+          { class: "grid fixtures-registry" },
+          h(
+            "thead",
+            h(
+              "tr",
+              [
+                "fixture",
+                "kind",
+                "scope",
+                "verbs",
+                "ownership",
+                "outputs",
+                "live state (ledger)",
+              ].map((label) => h("th", { text: label })),
+            ),
+          ),
+          h(
+            "tbody",
+            fixtures.map((/** @type {any} */ fixture) => {
+              const states = latest.get(fixture.name) ?? [];
+              return h(
+                "tr",
+                {
+                  class: "fixture-registry-row",
+                  dataset: { name: fixture.name },
+                },
+                h(
+                  "td",
+                  { class: "mono", title: fixture.description ?? "" },
+                  fixture.name,
+                  fixture.needs?.length
+                    ? h("span", {
+                        class: "cell-dim",
+                        text: ` needs ${fixture.needs.join(", ")}`,
+                      })
+                    : null,
+                ),
+                h("td", null, Studio.tag(fixture.kind, "info")),
+                h("td", { class: "cell-dim", text: fixture.scope }),
+                h("td", {
+                  class: "cell-dim",
+                  text: fixture.verbs.join(" · ") || "—",
+                }),
+                h("td", {
+                  class: "cell-dim",
+                  text:
+                    [
+                      fixture.owner ? `owner ${fixture.owner}` : null,
+                      fixture.ttl ? `ttl ${fixture.ttl}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "—",
+                }),
+                h("td", {
+                  class: "mono cell-dim",
+                  text: fixture.outputs.length
+                    ? fixture.outputs.join(", ")
+                    : "—",
+                }),
+                h(
+                  "td",
+                  { class: "cell-dim fixture-live-state" },
+                  states.length
+                    ? states.map((/** @type {any} */ entry) =>
+                        h(
+                          "div",
+                          {
+                            class: `ledger-state ledger-${entry.state}`,
+                            title: [
+                              entry.instance
+                                ? `instance ${entry.instance}`
+                                : null,
+                              entry.fromReset
+                                ? "live by its reset (a reset-only fixture)"
+                                : null,
+                              entry.state === "released"
+                                ? "released: cairn owes it no teardown"
+                                : null,
+                              entry.lastVerb && entry.lastStatus
+                                ? `last: ${entry.lastVerb} ${entry.lastStatus}`
+                                : null,
+                              entry.lastError,
+                              entry.expiresAt
+                                ? `fresh until ${fmt.formatTimestamp(entry.expiresAt)}`
+                                : null,
+                              entry.runId ? `run ${entry.runId}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join("\n"),
+                          },
+                          Studio.tag(
+                            `${entry.env}: ${entry.state}`,
+                            entry.state === "live"
+                              ? "ok"
+                              : entry.state === "failed"
+                                ? "bad"
+                                : "muted",
+                          ),
+                          " ",
+                          entry.ensuredAt || entry.lastAt
+                            ? Studio.relTime(entry.ensuredAt ?? entry.lastAt)
+                            : null,
+                        ),
+                      )
+                    : "—",
+                ),
+              );
+            }),
+          ),
+        ),
+        ledger?.exists
+          ? h("p", {
+              class: "cell-dim",
+              text: `last state from ${ledger.path}${
+                ledger.partial ? " (newest part only)" : ""
+              }`,
+            })
+          : null,
+      );
+    }
+
+    nodes.push(
+      h("p", {
+        class: "cell-dim",
+        text: "${env.X} / ${secrets.X} values stay references (a :-default is redacted), literal URIs are masked, auth is named only by its kind, and gate commands lose the credential flags and headers Studio recognizes. Verifier evidence names a source the same way.",
+      }),
+    );
+    return Studio.panel("datasources, gates & fixtures", nodes, {
+      className: "registries-panel",
+    });
+  }
+
+  /**
+   * Who waits on a gate: config places (services, web server) and the
+   * specs whose preconditions.wait names it.
+   * @param {any} gate
+   * @returns {string[]}
+   */
+  function gateUsers(gate) {
+    const specs = (state.project?.specs ?? [])
+      .filter((/** @type {any} */ spec) =>
+        (spec?.summary?.wait ?? []).includes(gate.name),
+      )
+      .map(
+        (/** @type {any} */ spec) =>
+          spec.summary?.name ?? spec.rel ?? spec.path,
+      );
+    return [
+      ...(gate.usedBy ?? []),
+      ...specs.slice(0, 8),
+      ...(specs.length > 8 ? [`+${specs.length - 8} specs`] : []),
+    ];
+  }
+
+  /**
+   * The first non-empty string among `values`, or null.
+   * @param {...unknown} values
+   * @returns {string | null}
+   */
+  function stringOf(...values) {
+    return (
+      /** @type {string | null} */ (
+        values.find((value) => typeof value === "string" && value) ?? null
+      )
+    );
+  }
+
+  /**
+   * One checkpoint row's facts. `cairn checkpoint list --json` reports name,
+   * path, sizeBytes and modifiedAt today; the env / baseUrl scope, expiry and
+   * health are read when the CLI provides them (several spellings).
+   * @param {Record<string, any>} checkpoint
+   */
+  function checkpointFacts(checkpoint) {
+    const scope =
+      checkpoint.scope && typeof checkpoint.scope === "object"
+        ? checkpoint.scope
+        : {};
+    const expiresAt = stringOf(
+      checkpoint.expiresAt,
+      checkpoint.expiry,
+      scope.expiresAt,
+    );
+    const expired =
+      checkpoint.expired === true ||
+      (expiresAt !== null && Date.parse(expiresAt) < Date.now());
+    const rawHealth =
+      checkpoint.health && typeof checkpoint.health === "object"
+        ? checkpoint.health
+        : null;
+    let health = stringOf(
+      typeof checkpoint.health === "string" ? checkpoint.health : null,
+      rawHealth?.status,
+      checkpoint.status,
+    );
+    if (!health && typeof checkpoint.healthy === "boolean")
+      health = checkpoint.healthy ? "healthy" : "unhealthy";
+    if (expired && (!health || health === "healthy" || health === "ok"))
+      health = "expired";
+    return {
+      name: stringOf(checkpoint.name, checkpoint.id) ?? "?",
+      env: stringOf(checkpoint.env, checkpoint.environment, scope.env),
+      baseUrl: stringOf(checkpoint.baseUrl, scope.baseUrl),
+      createdAt: stringOf(
+        checkpoint.createdAt,
+        checkpoint.capturedAt,
+        checkpoint.modifiedAt,
+      ),
+      expiresAt,
+      health,
+      healthDetail:
+        stringOf(
+          rawHealth?.reason,
+          rawHealth?.detail,
+          checkpoint.healthReason,
+        ) ??
+        HEALTH_HINTS[String(health ?? "").toLowerCase()] ??
+        null,
+      ttl: stringOf(checkpoint.ttl, scope.ttl),
+      sizeBytes:
+        typeof checkpoint.sizeBytes === "number" ? checkpoint.sizeBytes : null,
+    };
+  }
+
+  /** What `cairn checkpoint list` health words mean (tooltips). */
+  const HEALTH_HINTS = {
+    ok: "scoped (env/baseUrl recorded) and not expired",
+    expired: "past its TTL: session.resume refuses it — recapture it",
+    unscoped:
+      "captured before checkpoints recorded env/baseUrl/ttl — still resumable, unchecked",
+    missing: "the state file is gone",
+  };
+
+  /** @param {string | null} health */
+  function healthTone(health) {
+    if (!health) return "muted";
+    if (/^(healthy|ok|valid|fresh)$/i.test(health)) return "ok";
+    if (/^(expired|stale)$/i.test(health)) return "warn";
+    if (/^(unscoped|unknown)$/i.test(health)) return "muted";
+    return "bad";
+  }
+
   /** @param {any} result */
   function checkpointsPanel(result) {
     const payload = result?.payload ?? null;
@@ -292,48 +1038,97 @@
       : Array.isArray(payload)
         ? payload
         : null;
+    if (!list)
+      return Studio.panel("browser-state checkpoints", [
+        h("pre", {
+          class: "code tight",
+          text: fmt.truncate(
+            result?.stdout || result?.stderr || "checkpoint list unavailable",
+            2000,
+          ),
+        }),
+      ]);
+    if (!list.length)
+      return Studio.panel("browser-state checkpoints", [
+        h("p", {
+          class: "cell-dim",
+          text: "none captured — use `cairn login <name> --url <url>` to create one for session.resume specs",
+        }),
+      ]);
+    const facts = list.map((checkpoint) =>
+      checkpointFacts(
+        checkpoint && typeof checkpoint === "object" ? checkpoint : {},
+      ),
+    );
+    const body = h("tbody");
+    for (const fact of facts)
+      body.appendChild(
+        h(
+          "tr",
+          {
+            class: "checkpoint-row",
+            dataset: { checkpoint: fact.name },
+            style: { cursor: "default" },
+          },
+          h("td", { class: "mono", text: fact.name }),
+          h("td", { class: "mono", text: fact.env ?? "—" }),
+          h("td", {
+            class: "cell-dim mono",
+            title: fact.baseUrl ?? "",
+            text: fact.baseUrl ?? "—",
+          }),
+          h(
+            "td",
+            { class: "cell-dim" },
+            fact.createdAt ? Studio.relTime(fact.createdAt) : "—",
+          ),
+          h(
+            "td",
+            { class: "cell-dim", title: fact.ttl ? `ttl ${fact.ttl}` : "" },
+            fact.expiresAt ? Studio.relTime(fact.expiresAt) : "never",
+          ),
+          h(
+            "td",
+            null,
+            fact.health
+              ? (() => {
+                  const node = Studio.tag(fact.health, healthTone(fact.health));
+                  node.title = fact.healthDetail ?? "";
+                  return node;
+                })()
+              : h("span", { class: "cell-dim", text: "—" }),
+          ),
+          h("td", {
+            class: "num",
+            text:
+              fact.sizeBytes === null ? "—" : fmt.formatBytes(fact.sizeBytes),
+          }),
+        ),
+      );
     return Studio.panel("browser-state checkpoints", [
-      list
-        ? list.length
-          ? h(
-              "div",
-              { class: "panel" },
-              h(
-                "div",
-                { class: "panel-body tight" },
-                list.map((checkpoint) =>
-                  h(
-                    "div",
-                    { class: "list-row", style: { cursor: "default" } },
-                    h("span", {
-                      class: "mono",
-                      style: { fontSize: "11.5px" },
-                      text:
-                        checkpoint.name ??
-                        checkpoint.id ??
-                        JSON.stringify(checkpoint).slice(0, 60),
-                    }),
-                    h("span", {
-                      class: "cell-dim",
-                      style: { marginLeft: "auto" },
-                      text: checkpoint.createdAt
-                        ? fmt.relativeTime(checkpoint.createdAt)
-                        : "",
-                    }),
-                  ),
-                ),
-              ),
-            )
-          : h("p", {
-              class: "cell-dim",
-              text: "none captured — use `cairn login <name> --url <url>` to create one for session.resume specs",
-            })
-        : h("pre", {
-            class: "code tight",
-            text: fmt.truncate(
-              result?.stdout || result?.stderr || "checkpoint list unavailable",
-              2000,
-            ),
+      h(
+        "table",
+        { class: "grid checkpoints" },
+        h(
+          "thead",
+          h(
+            "tr",
+            h("th", { text: "checkpoint" }),
+            h("th", { text: "env" }),
+            h("th", { text: "baseUrl" }),
+            h("th", { text: "created" }),
+            h("th", { text: "expires" }),
+            h("th", { text: "health" }),
+            h("th", { class: "num", text: "size" }),
+          ),
+        ),
+        body,
+      ),
+      facts.some((fact) => fact.env || fact.baseUrl)
+        ? null
+        : h("p", {
+            class: "cell-dim",
+            text: "This cairn reports no env/baseUrl scope for checkpoints yet; a checkpoint resumes wherever a spec names it.",
           }),
     ]);
   }
@@ -352,7 +1147,7 @@
       h("p", {
         class: "cell-dim",
         style: { marginTop: 0 },
-        text: `cairn prunes to the newest N runs per spec after every run (default 3; failed runs keep 10). Artifact root: ${info.runsRoot?.runsRoot ?? "—"}`,
+        text: `cairn prunes to the newest N runs per spec after every run (default 3; failed runs keep 10; pinned runs are never pruned). Artifact root: ${info.runsRoot?.runsRoot ?? "—"}`,
       }),
       h(
         "div",
@@ -363,9 +1158,14 @@
           type: "button",
           text: "Prune now",
           onClick: async () => {
+            const upload = pruneUploadText();
             const proceed = await Studio.confirm({
-              title: "Prune old runs?",
-              body: "Runs beyond the retention window are deleted from the artifact root. Failed runs keep their carve-out.",
+              title: upload
+                ? "Prune old runs and upload them?"
+                : "Prune old runs?",
+              body: `Runs beyond the retention window are deleted from the artifact root. Failed runs keep their carve-out, and pinned runs (cairn pin) are always kept; only cairn clean --include-pinned removes them.${
+                upload ? `\n\n${upload}` : ""
+              }`,
               confirmLabel: "Prune",
               danger: true,
             });
@@ -374,6 +1174,7 @@
               const result = await api.call("clean:runs", {
                 keepRuns: Number(keepRuns.value) || 0,
               });
+              if (result?.cancelled) return;
               toast(
                 "Prune finished",
                 result?.ok
@@ -393,15 +1194,19 @@
           type: "button",
           text: "Remove everything…",
           onClick: async () => {
+            const upload = pruneUploadText();
             const proceed = await Studio.confirm({
               title: "Delete the whole artifact root?",
-              body: "`cairn clean --all` removes every run directory, including failures. This cannot be undone.",
+              body: `\`cairn clean --all\` removes every run directory, including failures. Pinned runs are kept (only cairn clean --include-pinned removes them). This cannot be undone.${
+                upload ? `\n\n${upload}` : ""
+              }`,
               confirmLabel: "Delete all runs",
               danger: true,
             });
             if (!proceed) return;
             try {
               const result = await api.call("clean:runs", { all: true });
+              if (result?.cancelled) return;
               toast(
                 "Artifact root cleared",
                 result?.ok ? null : result?.stderr?.slice(0, 160),
@@ -415,6 +1220,33 @@
         }),
       ),
     ]);
+  }
+
+  /**
+   * What pruning uploads (the project's `retention.archiveToStash` /
+   * `retention.publish`), as one sentence for the prune dialogs, or null.
+   * Main asks again natively before an uploading clean.
+   * @returns {string | null}
+   */
+  function pruneUploadText() {
+    const retention = state.project?.config?.retention ?? null;
+    const archive = retention?.archiveToStash === true;
+    const publish = retention?.publish?.enabled === true;
+    if (!archive && !publish) return null;
+    const rawDays = retention?.publish?.retentionDays;
+    const days =
+      Number.isInteger(rawDays) && rawDays >= 1 && rawDays <= 31 ? rawDays : 7;
+    const what = [
+      archive ? "archives it to your file.cheap stash" : null,
+      publish
+        ? `publishes it to file.cheap (kept ${days} day${
+            days === 1 ? "" : "s"
+          })`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    return `Uploads: before deleting each pruned run, cairn clean ${what}, per the project's retention config. You will be asked to confirm the upload.`;
   }
 
   /**

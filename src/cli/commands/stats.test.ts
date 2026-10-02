@@ -154,7 +154,8 @@ describe("renderStatsMarkdown", () => {
   });
 });
 
-describe("cairn stats CLI", () => {
+// Spawns bin/cairn; vitest's 5s default is too tight under full-suite load.
+describe("cairn stats CLI", { timeout: 30_000 }, () => {
   it("aggregates labeled runs and prints markdown charts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cairn-stats-cli-"));
     const runs = join(dir, "runs");
@@ -167,7 +168,8 @@ describe("cairn stats CLI", () => {
       durationMs: number,
       metric?: number,
     ) {
-      const runDir = join(runs, id);
+      // A run-directory name the stats scan accepts (RUN_DIR_PATTERN).
+      const runDir = join(runs, `2026-07-17T00-00-00-000Z_${id}_0a1b2c`);
       await mkdir(join(runDir, "outcomes"), { recursive: true });
       const outcomes = metric
         ? [

@@ -1,16 +1,28 @@
 import {
+  checkServicesLive,
   dockerComposeRunning,
+  formatServicesAge,
+  probeDockerCompose,
+  readServicesLock,
+  servicesLockAgeSeconds,
   tmuxSessionExists,
   captureTmuxPane,
   resolveCwd,
 } from "../../../core/runner/services";
 import { SeedStateStore } from "../../../core/runner/seedState";
 import { loadConfig, findConfigFile } from "../../../core/config/loader";
+import { resolveProjectRuntimeContext } from "../../../core/config/runtimeContext";
+import type { GateNode } from "../../../core/gates/schema";
+import type { ServicesConfig } from "../../../core/schema/config.v1";
+import type { ServicesLockReport } from "../../../core/schema/services.v1";
 import { emit, resolveFormat } from "../../format";
+import { resolveScopedSecrets, type ScopedSecrets } from "../secrets";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 export interface ServicesStatusOptions {
   config?: string;
+  /** Environment whose effective services and owner lock are reported. */
+  env?: string;
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -23,6 +35,14 @@ export interface ServicesStatusResult {
   hasServices: boolean;
   /** Project name from config. */
   project: string;
+  /** Resolved environment (`--env`, else defaultEnvironment, else local). */
+  env?: string;
+  /**
+   * The `cairn services up` owner lock of the config (one per config file,
+   * `lock.env` names its environment): who holds it, its age, and (a lock
+   * held for this environment) whether the services it owns are actually up.
+   */
+  lock?: ServicesLockReport;
   /** Docker status. */
   docker: {
     configured: boolean;
@@ -89,17 +109,49 @@ export async function getServicesStatus(
 
   const cfg = loaded?.config;
   const project = cfg?.project ?? opts.project ?? "cairntrace";
-  const services = cfg?.services;
+  let services: ServicesConfig | undefined = cfg?.services;
   const configDir = configPath ? dirname(configPath) : process.cwd();
+
+  // The environment's effective services (per-env overrides applied), like
+  // `cairn run` / `services up` resolve them.
+  let envName: string | undefined;
+  if (loaded) {
+    try {
+      const ctx = await resolveProjectRuntimeContext({
+        configPath: loaded.path,
+        ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+      });
+      envName = ctx.envName;
+      services = ctx.services;
+    } catch (e) {
+      errors.push(`env: ${(e as Error).message}`);
+    }
+  }
 
   const result: ServicesStatusResult = {
     hasServices: !!services,
     project,
+    ...(envName !== undefined ? { env: envName } : {}),
     docker: { configured: false, running: false },
     seed: { configured: false, expired: true },
     tmux: { configured: false, sessionExists: false, windows: [] },
     errors,
   };
+
+  if (envName !== undefined && loaded) {
+    try {
+      result.lock = await servicesLockReport(
+        loaded.path,
+        envName,
+        services,
+        configDir,
+        errors,
+        cfg?.gates,
+      );
+    } catch (e) {
+      errors.push(`lock: ${(e as Error).message}`);
+    }
+  }
 
   if (!services) return result;
 
@@ -110,7 +162,17 @@ export async function getServicesStatus(
     result.docker.reuseExisting = services.docker.reuseExisting;
     try {
       const dockerCwd = resolveCwd(services.docker.cwd, configDir);
-      result.docker.running = await dockerComposeRunning(dockerCwd);
+      // The compose project the command starts (its -f/-p options and env);
+      // a bare `docker compose ps` in its cwd when that cannot be told.
+      const probe = await probeDockerCompose(
+        services.docker.command,
+        dockerCwd,
+        { ...process.env, ...services.docker.env },
+      );
+      result.docker.running =
+        probe.state === "unknown"
+          ? await dockerComposeRunning(dockerCwd)
+          : probe.state === "running";
     } catch (e) {
       errors.push(`docker: ${(e as Error).message}`);
     }
@@ -170,6 +232,67 @@ export async function getServicesStatus(
 }
 
 /**
+ * The owner lock of the config (one per config file). A lock held for this
+ * environment also gets one quick liveness look — the same check a run makes,
+ * with the environment's scoped secrets when they resolve — and reports
+ * `stale: true` with the problems when the services it owns are not up. A
+ * lock another environment holds is reported as is (`lock.env`).
+ */
+async function servicesLockReport(
+  configPath: string,
+  envName: string,
+  services: ServicesConfig | undefined,
+  configDir: string,
+  errors: string[],
+  gates?: Readonly<Record<string, GateNode>>,
+): Promise<ServicesLockReport> {
+  const state = await readServicesLock(configPath);
+  if (state.state === "absent") return { state: "absent", path: state.path };
+  if (state.state === "unreadable") {
+    return { state: "unreadable", path: state.path, reason: state.reason };
+  }
+  const report: ServicesLockReport = {
+    state: "held",
+    path: state.path,
+    lock: state.lock,
+    ageSeconds: servicesLockAgeSeconds(state.lock),
+  };
+  if (state.lock.env !== envName) return report;
+  if (!services) {
+    return {
+      ...report,
+      stale: true,
+      problems: [`no services configured for env "${envName}"`],
+    };
+  }
+  // A docker readinessCheck may need vault values, as in a run.
+  let scoped: ScopedSecrets | undefined;
+  try {
+    scoped = await resolveScopedSecrets(configPath, {
+      configPath,
+      environmentOverride: envName,
+    });
+  } catch (e) {
+    errors.push(
+      `lock: liveness checked without vault secrets (${(e as Error).message})`,
+    );
+  }
+  const liveness = await checkServicesLive(services, {
+    configDir,
+    ...(gates ? { gates } : {}),
+    ...(scoped
+      ? { env: scoped.childEnv, selectedTvaultKeys: scoped.selectedKeys }
+      : {}),
+  });
+  return {
+    ...report,
+    stale: !liveness.live,
+    ...(liveness.live ? {} : { problems: liveness.problems }),
+    ...(liveness.unchecked.length > 0 ? { unchecked: liveness.unchecked } : {}),
+  };
+}
+
+/**
  * `cairn services status` — check the current state of the services environment.
  */
 export async function servicesStatusCommand(
@@ -191,6 +314,8 @@ export async function servicesStatusCommand(
 
 function renderMarkdown(r: ServicesStatusResult): string {
   const lines: string[] = ["# Services status", "", `- project: ${r.project}`];
+  if (r.env) lines.push(`- env: ${r.env}`);
+  if (r.lock) lines.push(`- lock: ${describeLockReport(r.lock, r.env)}`);
 
   if (!r.hasServices) {
     lines.push("- no services config block found");
@@ -246,4 +371,28 @@ function renderMarkdown(r: ServicesStatusResult): string {
   }
 
   return lines.join("\n");
+}
+
+/** One markdown line for the owner lock (also the MCP text summary). */
+export function describeLockReport(
+  lock: ServicesLockReport,
+  /** The environment the status is for (a lock may hold another one). */
+  env?: string,
+): string {
+  if (lock.state === "absent") return "none";
+  if (lock.state === "unreadable") {
+    return `unreadable (${lock.reason ?? "invalid"}): ${lock.path} — \`cairn services down\` clears it`;
+  }
+  const held = lock.lock!;
+  const age = formatServicesAge(lock.ageSeconds ?? 0);
+  const owner = `held by \`cairn services up\` (${held.by}, pid ${held.pid}) since ${held.startedAt} (${age} ago)`;
+  if (env !== undefined && held.env !== env) {
+    return `${owner} for env "${held.env}" — runs of env "${env}" refuse (exit 4): environments of one config share its stack; \`cairn services status --env ${held.env}\` checks it`;
+  }
+  const unchecked = lock.unchecked?.length
+    ? ` (not checked: ${lock.unchecked.join("; ")})`
+    : "";
+  return lock.stale
+    ? `${owner} — STALE: ${(lock.problems ?? []).join("; ")}; \`cairn services down --env ${held.env}\` clears it`
+    : `${owner} — runs need --reuse-services${unchecked}`;
 }

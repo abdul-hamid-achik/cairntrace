@@ -1,0 +1,3 @@
+{"ts":"2026-10-01T10:00:00.000Z","type":"future.thing","answer":42,"label":"something new"}
+{"ts":"2026-10-01T10:00:00.000Z","type":"artifact.hologram","path":"holo/1.bin"}
+{"ts":"2026-10-01T10:00:00.000Z","type":"services.tunnel.restart","message":"tunnel re-established"}

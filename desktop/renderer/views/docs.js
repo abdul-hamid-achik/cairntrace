@@ -7,7 +7,8 @@
  * process for five minutes.
  */
 (function bootDocsView() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h, api, fmt } = Studio;
 
   const TOPICS = [
@@ -29,6 +30,8 @@
     "discovery",
     "export",
     "brief",
+    "catalog",
+    "author-flow",
   ];
 
   let mode = "topic";

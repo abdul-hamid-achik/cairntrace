@@ -238,6 +238,35 @@ For your own specs, validate and stamp the behavior contract:
 can patch drifted steps, but the contract hash prevents accidental changes to
 what the spec asserts.
 
+## Authoring with an agent
+
+Ask for a flow in a few sentences ("sign in as the supplier, change the
+profile website, save, check it persisted") and the agent follows one recipe —
+the MCP prompt `author-flow`, or `cairn docs author-flow`:
+
+1. `cairn catalog --query "…"` (MCP `cairn_catalog`) — reuse the project's
+   actions and vars instead of re-recording literals.
+2. `cairn_discover_open` with `setup: [{ use: <login action> }]`, then record
+   the journey with `cairn_discover_interact` (snapshot diffs keep it cheap;
+   each answer shows the requests the action sent). The session journal is
+   visible in Cairntrace Studio.
+3. `cairn_discover_export { into: "flows/_drafts", intent, outcomes }` writes
+   the draft the project's way: existing actions as `use:`, config values as
+   `${vars.X}`, secrets as placeholders, relative URLs, step ids, waits after
+   navigations, `postcondition.network` for observed saves.
+4. `cairn spec finish <draft> --json` — lint with fix-its, a cold-start run
+   through the `cairn run` engine, the contract stamped when green
+   (`--no-web-server` reuses a dev server you already run).
+5. The human reviews; `cairn spec promote <draft>` moves it out of the drafts
+   directory, which `cairn run <dir>` skips. It needs a green finish on a
+   real backend: a `--mock` finish never touched the app.
+
+`cairn spec lint <spec> --fix` catches what agents get wrong most (an
+unquoted `#` selector, a missing file, an echo-only cold start, a literal
+secret, an `eval` a typed step does better), and `cairn init agent-kit --write`
+adds a short section on this to your project's `AGENTS.md`. See
+[Author a spec from a request](docs/author-flow.md).
+
 ## Core Concepts
 
 **Cold-start contract**
@@ -262,7 +291,15 @@ Current step keys:
 
 `open`, `click`, `hover`, `focus`, `fill`, `type`, `select`, `upload`, `download`,
 `transform`, `request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`,
-`eval`, `monitor`.
+`eval`, `monitor`, `run`, `expect`, `capture`.
+
+`expect` asserts mid-flow (locator assertions or `expect.request`; a mismatch
+fails the step with evidence), `capture` stores a value from the page
+(`text`, `value`, `attribute` or a whole `table`) as `${captures.<name>…}`,
+and `run` executes a host command or node script with a hard deadline
+(`assign` exposes its JSON result as `${runs.<name>…}`). A spec-level
+`teardown:` list always runs after the steps and outcomes — pass, fail, error
+or cancel — so cleanup never hides in an outcome.
 
 `select` picks a native `<select>` option by option `value` or visible
 `label` (exactly one of the two). `fill` value-sets date-ish inputs
@@ -345,14 +382,47 @@ a 300 ms post-action grace and one live-element recovery attempt (including
 Outcome verifier keys:
 
 `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`,
-`xlsx`, `file`, `httpJson`, `process`, `script`.
+`table`, `value`, `mongo`, `temporal`, `http`, `xlsx`, `file`, `httpJson`,
+`process`, `script`.
 
 Use typed verifiers for normal UI, URL, network, console, count, workbook,
 on-disk checks (`file` polls a glob, e.g. a local email driver's capture
 files), backend JSON state (`httpJson` fetches with browser cookies and
 asserts a simple JSON path), and process metrics (`process` asserts on
-`--monitor` RSS/CPU budgets). Use `script` when the assertion is
-product-specific or needs browser or Node code.
+`--monitor` RSS/CPU budgets). `mongo`, `temporal` and `http` check backend
+state through named connections in the config `datasources:` block
+(credentials stay in the runner and never reach the artifacts), `table`
+reads a rendered table, and `value` asserts on anything the run already
+holds (`${captures.*}`, `${requests.*}`, `${fixtures.*}`, …). Any verifier
+takes `poll: { timeoutMs, everyMs, stableMs }` to wait for an eventual effect
+— a background job, a worker, a webhook — with a bounded attempt log as
+evidence. Use `script` (preferably a node verifier written with the verifier
+SDK, `@thelacanians/cairntrace/verifier`) only when no typed verifier fits.
+
+```yaml
+outcomes:
+  - id: job_completes
+    description: the export job reaches done and stays done
+    verify:
+      http:
+        source: api                      # datasources.api in the config
+        url: "/api/jobs/${requests.job.body.id}"
+        expect: { json: { status: done } }
+      poll: { timeoutMs: 30000, everyMs: 500, stableMs: 2000 }
+```
+
+**Test data, readiness and cleanup**
+
+- `fixtures:` in the config declares named test data once (`exec`, `mongo`
+  or `http` adapters with `ensure` / `reset` / `verify` / `teardown`, scope
+  `run`, `suite` or `seed`); a spec lists the fixtures it needs and splices
+  `${fixtures.<name>.<key>}`. `cairn fixtures list|status|ensure|teardown|sweep`
+  manages them from a shell, and shared or protected environments get a
+  dry-run unless writes are allowed.
+- `gates:` in the config names readiness probes (`http` with status/JSON/auth
+  checks, `tcp`, `command`, `all` / `any`, `stable`). A spec waits on them in
+  `preconditions.wait`; services and the webServer use them in `ready:`;
+  `cairn wait <gate|url>` checks one from a shell.
 
 Scope `text` / `notText` checks with nested `region`:
 
@@ -458,7 +528,16 @@ freshness check failed. Placeholders such as `${vars.connectionPath}` resolve
 before spec validation, so they can appear in required fields. Vars merge as
 config environment vars < top-level spec `vars:` < repeatable CLI
 `--var key=value`. Built-ins `${worker.index}` and `${run.token}` can derive
-isolated users or tenants for realtime/stateful backends.
+isolated users or tenants for realtime/stateful backends. For file paths,
+`${project.root}` is the directory of the file being parsed (inside an
+imported action, the action's directory) and `${config.dir}` is the directory
+of the resolved `cairntrace.config.yml` (an explicit `--config`, else the one
+found by walking up from the spec), so shared fixtures never need absolute
+paths. The config itself supports YAML anchors and merge keys
+(`<<: *shared`) to share blocks between environments; `cairn config validate`
+parses it exactly like a run. An `--env` the config does not define is
+an error rather than a run without baseUrl or vars; a spec's own
+`environment:` that the config lacks only warns.
 
 TinyVault secrets are resolved once into an invocation-scoped environment.
 Cairntrace requests only explicit `secrets.keys`, `secrets.required`, and keys
@@ -467,7 +546,8 @@ actions; it never exports an entire project to discover a value. They are
 available to spec substitution,
 preconditions, hooks, and the seed child process, but are never written into
 Cairntrace's global `process.env`. Target children do not inherit `TVAULT_*`
-client controls (unless that exact key is explicitly selected). The MCP
+client controls (unless that exact key is explicitly selected, or a services
+phase or the `webServer` sets it in its own config `env:`). The MCP
 `cairn_run` tool uses the same scope. `tvault.identity` is forwarded to the
 selected-key value-resolution command; `cairn secrets` lists key names through
 TinyVault metadata commands and never resolves plaintext values.
@@ -559,7 +639,8 @@ report.json
 agent_context.md
 artifact-manifest.json
 replay.json
-stash-receipt.json  # only after automatic stash
+stash-receipt.json  # only after a stash (auto, `cairn stash save`, `pin --stash`)
+publish-receipt.json  # only after `cairn publish`
 events.ndjson
 spec.resolved.yml
 outcomes/<outcome-id>.md
@@ -596,12 +677,16 @@ videos can show secrets or personal data, downloads/transforms/traces retain
 their original content. Audit adds a post-extraction redaction pass for
 vidtrace text formats, but extracted frames/images remain uninspected. Treat
 the run directory as sensitive and review producer-owned captures before
-sharing or stashing it.
+sharing or stashing it. `artifact-manifest.json` labels every file with a
+`sensitivity` (`redacted`, `safe`, `sanitized` or `secret-bearing`); stash,
+the retention archive and `cairn publish` gate on it (see Stash Integration).
 
 Disk usage is bounded by `retention.keepRuns` in the config (pruned after
-every run) and by `cairn clean [--keep N | --all]`. Traces follow the
-`artifacts.capture.trace` policy — the `on-failure` default deletes the trace
-zip when the run passes. Videos follow `artifacts.capture.video` (default
+every run) and by `cairn clean [--keep N | --all]`; `cairn pin <run>` keeps a
+run out of pruning. Traces follow the `artifacts.capture.trace` policy — the
+`on-failure` default deletes the trace when the run passes (Playwright writes
+`traces/playwright-trace.zip`, agent-browser `traces/agent-browser-trace.json`,
+a Chrome trace for Perfetto). Videos follow `artifacts.capture.video` (default
 `never`) — opt in with `always` or `on-failure` for audit-grade `.webm`
 recordings. When steps execute too quickly to audit, set
 `artifacts.video.slowMo` (delay in ms between actions) and
@@ -819,13 +904,18 @@ Common commands:
 
 | Command                                        | Purpose                                                                                                                                                                                                                                                                                                            |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cairn run <spec...>`                          | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping imported `actions/` directories and `_*.yml` / `_*.yaml` drafts. |
+| `cairn run <spec...>`                          | Run one or more specs or directories. Supports `--backend`, `--mock`, `--parallel`, `--cold-start`, `--config`, `--artifact-root`, `--var k=v`, `--junit`, and `--stamp-if-green`. Directory inputs expand `*.yml`/`*.yaml` recursively, skipping imported `actions/` directories and drafts (any folder or file starting with `_`, e.g. `flows/_drafts/`). |
 | `cairn clean`                                  | Prune old run directories (`--keep N` per spec, or `--all`; honors `--config` and `--artifact-root`).                                                                                                                                                                                                              |
-| `cairn spec verify <spec>`                     | Lint a spec and optionally stamp `contractHash` with `--stamp`.                                                                                                                                                                                                                                                    |
-| `cairn spec heal <spec>`                       | Run a spec and propose locator-drift fixes. Add `--apply` to write them.                                                                                                                                                                                                                                           |
-| `cairn snapshot <url>`                         | Open a page and print role and `data-testid` locator inventory. Relative URLs resolve through config `baseUrl`.                                                                                                                                                                                                    |
-| `cairn discover <url>`                         | Inspect a page and return the full accessibility tree + locator inventory. Supports `--roles`, `--testids`, `--env`, `--headed`, `--mock`, `--backend`, `--config`.                                                                                                                                                |
-| `cairn docs [topic]`                           | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, `discovery`, `export`, or `brief`.                                                                                |
+| `cairn spec verify <spec>`                     | Lint a spec without running it (schema, imports, cold-start, placeholder reference audit) and optionally stamp `contractHash` with `--stamp`. Honors `--config`/`--env`/`--var`; an `--env` the config does not define exits 4. |
+| `cairn spec lint <spec...>`                    | Friendly findings with fix-its before a run (unquoted `#` selectors, schema per step, missing files, echo-only cold starts, fixture keys, literal secrets, evals with typed equivalents, host paths, shell placeholders, step ids, vars per `--env a,b`). `--fix` applies only safe edits. Exit 4 on any error. |
+| `cairn spec finish <spec>`                     | Lint, then a cold-start run through the `cairn run` engine, stamping the contract when green; returns status, run dir, report and an `agent_context.md` summary. Takes `--no-web-server`, `--no-services`, `--artifact-root`, `--provider`, `--device`. |
+| `cairn spec promote <draft>`                   | Move a draft out of the drafts directory after a green real-backend `spec finish` of its exact content (`--force` overrides; a mock finish does not count), rebasing relative paths, stamping the contract, and rolling back if the copy would point at a missing file. |
+| `cairn init agent-kit`                         | Print (or `--write` into `AGENTS.md`) a short project section telling agents how to author specs here. |
+| `cairn spec heal <spec>`                       | Run a spec and propose locator-drift fixes. Add `--apply` to write them, `--verify` to keep them only if a rerun passes. `--env`/`--config`/`--var` resolve like `cairn run` (vars, `browser:` block); MCP `cairn_spec_heal` takes the same inputs. |
+| `cairn snapshot <url>`                         | Open a page and print role and test-id locator inventory (test ids scanned on `browser.testIdAttribute`). Relative URLs resolve through config `baseUrl`; config vars and `--var key=value` fill `${vars.X}` in the URL. |
+| `cairn discover [url]`                         | Inspect a page and return the full accessibility tree + locator inventory. Supports `--roles`, `--testids`, `--wait-until`, `--env`, `--var`, `--headed`, `--mock`, `--backend`, `--config`, setup flags (`--use`, `--import`, `--from-spec`/`--until-step`, `--resume`) and `--snapshot-mode`/`--max-bytes`; leaves a session journal. `cairn discover sessions` lists journals; `cairn discover export --from-session` writes a spec from one. |
+| `cairn catalog`                                | List what the project already has — actions, vars per environment, script verifiers, environments, flows, checkpoints. `--query` ranks rows by keyword; reads files only. |
+| `cairn docs [topic]`                           | Return focused docs for `overview`, `authoring`, `steps`, `verifiers`, `downloads`, `scripts`, `artifacts`, `mcp`, `backends`, `stash`, `investigate`, `clip`, `annotate`, `secrets`, `services`, `fixtures`, `discovery`, `export`, `brief`, `catalog`, or `author-flow`.                                                                                |
 | `cairn explain`                                | Return the current agent-facing command, step, verifier, and rule surface.                                                                                                                                                                                                                                         |
 | `cairn diff <runA> <runB>`                     | Compare two runs by outcomes, steps, console, and network; supports `--config` and `--artifact-root`.                                                                                                                                                                                                              |
 | `cairn checkpoint list/show/delete`            | Manage saved browser-state checkpoints.                                                                                                                                                                                                                                                                            |
@@ -845,8 +935,12 @@ Common commands:
 | `cairn annotate <symbol>`                      | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`.                                                                                                                                                                                                |
 | `cairn secrets`                                | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed).                                                                                                                                                                                         |
 | `cairn config validate`                        | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid.                                                                                                                                                                     |
-| `cairn services status`                        | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session). Supports `--config`, `--project`.                                                                                                                                                              |
-| `cairn mcp`                                    | Start the MCP server on stdio.                                                                                                                                                                                                                                                                                     |
+| `cairn services status`                        | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session) and the `services up` lock. Supports `--config`, `--env`, `--project`.                                                                                                                         |
+| `cairn services up` / `down`                   | Start the config services and leave them running under an owner lock (`cairn run --reuse-services` runs against them), or tear them down and remove the lock. Supports `--config`, `--env`. |
+| `cairn wait <gate\|url...>`                    | Wait for readiness gates in order (config `gates:` names, `http(s)://` URLs needing 2xx/3xx, `tcp://host:port`). Exit 0 ready, 1 not ready. |
+| `cairn fixtures <list\|status\|ensure\|reset\|teardown\|sweep>` | Manage the config fixtures registry from a shell: what exists per environment (the fixture ledger), ensure or reset one, tear down or sweep leftovers (`--apply`). |
+| `cairn verifier schema <file>`                 | Print a node verifier's fixtures contract, read statically from its `defineVerifier` zod schema (never executed; `--load` imports it). |
+| `cairn mcp`                                    | Start the MCP server on stdio. `--allow-hooks` accepts `cairn_run` before/after hooks; `--allow-services` lets MCP tools start config services and run their teardown.                                                                                                                                                                                                                             |
 
 Structured output is available on commands wired with format flags:
 
@@ -860,20 +954,23 @@ Structured output is available on commands wired with format flags:
 ```
 
 Commands with structured output today: `run`, `doctor`, `clean`, `explain`,
-`docs`, `snapshot`, `diff`, `import playwright`, `spec verify`, `spec heal`,
-`checkpoint list`, and `checkpoint show`.
+`docs`, `snapshot`, `diff`, `import playwright`, `spec verify`, `spec lint`,
+`spec finish`, `spec promote`, `spec heal`, `init agent-kit`, `catalog`,
+`config validate`, `wait`, `fixtures`, `verifier schema`, `checkpoint list`,
+and `checkpoint show`.
 
 Stable exit codes:
 
-| Code | Meaning                |
-| ---- | ---------------------- |
-| 0    | success                |
-| 1    | outcome failure        |
-| 2    | errored                |
-| 3    | cold-start gate        |
-| 4    | lint failure           |
-| 5    | heal made no progress  |
-| 6    | contract-hash mismatch |
+| Code | Meaning                                                                                   |
+| ---- | ----------------------------------------------------------------------------------------- |
+| 0    | success                                                                                   |
+| 1    | outcome failure                                                                           |
+| 2    | errored                                                                                   |
+| 3    | cold-start gate                                                                           |
+| 4    | lint or config error (spec lint/verify findings, unknown `--env`, a held or refused services lock, a services boot an MCP server may not do) |
+| 5    | heal made no progress                                                                     |
+| 6    | contract-hash mismatch                                                                    |
+| 7    | refused by the environment policy (nothing ran, or any refusal under `--strict-requires`) |
 
 ## MCP Integration
 
@@ -898,16 +995,43 @@ Example MCP client config:
 
 The MCP server exposes these tools:
 
-`cairn_explain`, `cairn_docs`, `cairn_doctor`, `cairn_run`, `cairn_context`,
-`cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_heal`,
+`cairn_explain`, `cairn_docs`, `cairn_doctor`, `cairn_run`, `cairn_run_status`,
+`cairn_run_cancel`, `cairn_logs`, `cairn_context`,
+`cairn_spec_scaffold`, `cairn_spec_verify`, `cairn_spec_lint`,
+`cairn_spec_finish`, `cairn_spec_promote`, `cairn_spec_heal`, `cairn_catalog`,
 `cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
-`cairn_config_validate`, `cairn_services_status`, `cairn_stash_save`,
+`cairn_checkpoint_capture`, `cairn_snapshot`, `cairn_export_playwright`,
+`cairn_export_brief`, `cairn_pin`, `cairn_publish`,
+`cairn_config_validate`, `cairn_services_status`, `cairn_services_up`,
+`cairn_services_down`, `cairn_wait`, the `cairn_fixtures_*` tools (`list`,
+`status`, `ensure`, `reset`, `teardown`, `sweep`), `cairn_stash_save`,
 `cairn_stash_list`, `cairn_stash_info`, `cairn_stash_restore`,
 `cairn_stash_search`, `cairn_investigate`, `cairn_audit`, `cairn_clip`,
-`cairn_annotate`, `cairn_secrets_status`, and the nine
-`cairn_discover_*` tools (`open`, `snapshot`, `interact`, `navigate`,
-`inventory`, `suggest`, `export`, `close`, `list`) that drive a stateful
-browser session to explore, record, and export a spec.
+`cairn_annotate`, `cairn_secrets_status`, the `cairn_accompany_*` tools
+(`open`, `choose`, `status`, `list`, `close`), and the
+`cairn_discover_*` tools (`open`, `resume`, `snapshot`, `interact`,
+`navigate`, `inventory`, `network`, `suggest`, `remove_step`, `export`,
+`close`, `list`) that drive a stateful, journaled browser session to explore,
+record, and export a spec. The `author-flow` prompt holds the recipe from a
+request to a promoted spec.
+
+`cairn_run` and `cairn run` share one engine and one options schema: every
+run flag is a `cairn_run` input under its camelCase name (`coldStart`,
+`noServices`, `stampIfGreen`, `sinceCodemap`, …), config, the `browser:`
+block, vars, secrets, services, hooks, post-run stash/investigate/annotate and
+retention adapters all apply, and the result is the `--format json` document
+(one aggregated BatchRunResult for `repeat`/`matrix`). Like `cairn run`, it
+boots the config's webServer unless you pass `noWebServer`. Config services
+(docker/seed/tmux) and their teardown start only on a server started as
+`cairn mcp --allow-services` (or `CAIRN_MCP_ALLOW_SERVICES=1`); without it a
+`cairn_run`, `cairn_spec_finish` or `cairn_audit` that would start them fails
+with exit 4 before anything starts (pass `noServices` or `reuseServices`), and
+`cairn_services_up` / `cairn_services_down` refuse. `wait: false` returns an `invocationId` at once;
+poll `cairn_run_status` and `cairn_logs` (cursor-based slices of the live
+logs) and stop it with `cairn_run_cancel`. `before`/`after` hooks over MCP
+need `cairn mcp --allow-hooks` (a gate, not a sandbox: config and spec shell
+still runs), and invocations that boot services or a webServer from the same
+config run one at a time inside the server.
 
 Agents should call `cairn_explain` once at session start, then `cairn_docs`
 for the focused topic they need.
@@ -968,8 +1092,12 @@ separate so the core stays deterministic and testable.
   are never inlined (env/RUN_TOKEN references instead); `runtime: node` file
   verifiers export via dynamic import; `--project` generates a structured
   project (`playwright.config.ts`, `global-setup.ts`, `actions/`,
-  `verifiers/`, `tests/`, `README.md`) instead of standalone spec files. MCP:
-  `cairn_export_playwright`. Docs: `cairn docs export`.
+  `verifiers/`, `fixtures/`, `tests/`, `README.md`) instead of standalone spec
+  files. `--project`, `--into` and `--out-dir` exports write a
+  `.cairn-export.json` manifest; `cairn export playwright --check <dir>`
+  regenerates in memory and exits 1 when the committed export drifted from
+  its specs. MCP: `cairn_export_playwright` (same code path). Docs:
+  `cairn docs export`.
 - **Journey brief:** `cairn export brief <spec> [--from-run latest]` compiles
   operator instructions (what to fill, what to look for) when locators will
   not replay. MCP `cairn_export_brief` plus live try-then-ask

@@ -42,7 +42,20 @@ steps:
   - use: dismiss-banner
 ```
 
-`use:` invokes the imported snippet by name within the spec's `steps:`. Snippets themselves can `import:` and `use:` other snippets — the import graph is a DAG, not a tree.
+`use:` invokes the imported snippet by name within the spec's `steps:`. An action file can declare its own `imports:` — paths relative to the action file — and `use:` them, so `login_as_supplier` reuses `login_base` instead of copying its steps:
+
+```yaml
+# actions/roles/login_as_supplier.yml
+version: 1
+name: login_as_supplier
+imports:
+  - ../shared/login_base.yml
+steps:
+  - use: { action: login_base, vars: { user: supplier@demo.test } }
+  - click: { by: role, role: button, name: Supplier view }
+```
+
+An action's `use:` resolves against its own imports first, then against its importer's. Vars reach a nested action in this order: the inner call's own `vars` win; then — only for names the nested action does not default — the values its caller saw; then the spec's vars; then the nested action's defaults. An enclosing call never silently overrides a nested action's own default: pass it on explicitly (`use: { action: fill_form, vars: { name: "${vars.name}" } }`) when that is what you want. The import graph must be a DAG: an import cycle, or a `use:` cycle reached through the importer's scope, is a parse error, and two files that declare the same action `name:` are refused. Expansion is recursive, so a run, `cairn spec heal` and the step-relative file paths all point at the innermost action file, and `cairn export playwright --project` turns a nested `use:` into a call to that action's module.
 
 ## What gets reused
 

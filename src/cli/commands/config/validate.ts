@@ -1,8 +1,11 @@
 import { readFile, access, constants } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
-import { ConfigSchema, type Config } from "../../../core/schema/config.v1";
-import { findConfigFile } from "../../../core/config/loader";
+import {
+  ConfigSchema,
+  environmentDatasourceProblems,
+  type Config,
+} from "../../../core/schema/config.v1";
+import { findConfigFile, parseConfigText } from "../../../core/config/loader";
 import { emit, resolveFormat } from "../../format";
 
 export interface ConfigValidateOptions {
@@ -21,6 +24,8 @@ export interface ConfigValidateResult {
   keys: string[];
   /** The parsed config if valid (undefined when invalid). */
   config?: Config;
+  /** Non-fatal findings (deprecated keys); present only when some exist. */
+  warnings?: string[];
   /** Summary of services block if present. */
   services?: {
     docker: boolean;
@@ -83,15 +88,11 @@ export async function validateConfigFile(
 
   const text = await readFile(resolvedPath, "utf8");
 
-  // Substitute ${env.X} the same way loadConfig does
-  const substituted = text.replace(
-    /\$\{env\.(\w+)\}/g,
-    (_match, name: string) => process.env[name] ?? "",
-  );
-
+  // The exact text → object step `cairn run` uses (loadConfig): `${env.X}` /
+  // `${env.X:-default}`, YAML merge keys (`<<: *anchor`) and `${config.dir}`.
   let raw: unknown;
   try {
-    raw = parseYaml(substituted);
+    raw = parseConfigText(text, { configPath: resolvedPath });
   } catch (e) {
     return {
       result: {
@@ -126,8 +127,25 @@ export async function validateConfigFile(
     };
   }
 
-  // Valid — build the result with a services summary
   const config = parsed.data;
+  // Datasource overrides are validated per half by the schema; a merge that
+  // only breaks once an environment's override lands on the top-level entry
+  // is reported here instead of on the first verifier that uses it.
+  const mergeProblems = environmentDatasourceProblems(config);
+  if (mergeProblems.length > 0) {
+    return {
+      result: {
+        ok: false,
+        path: resolvedPath,
+        errors: mergeProblems,
+        keys: Object.keys(config),
+      },
+      exitCode: 4,
+    };
+  }
+
+  // Valid — build the result with a services summary
+  const warnings = deprecationWarnings(config);
   return {
     result: {
       ok: true,
@@ -135,6 +153,7 @@ export async function validateConfigFile(
       errors: [],
       keys: Object.keys(config),
       config,
+      ...(warnings.length > 0 ? { warnings } : {}),
       services: config.services
         ? {
             docker: !!config.services.docker,
@@ -146,7 +165,8 @@ export async function validateConfigFile(
             stash: config.services.stash
               ? {
                   enabled: config.services.stash.enabled,
-                  autoStash: config.services.stash.autoStash,
+                  // Unset keeps the legacy "after every invocation".
+                  autoStash: config.services.stash.autoStash ?? "always",
                   capture: config.services.stash.capture,
                   tags: config.services.stash.tags,
                 }
@@ -158,12 +178,30 @@ export async function validateConfigFile(
   };
 }
 
+/** Deprecated-but-valid config keys, one warning each. */
+function deprecationWarnings(config: Config): string[] {
+  const warnings: string[] = [];
+  const servicesStash =
+    "is deprecated: use services.artifacts (bounded, redacted service logs inside each run directory) and let stash.autoStash carry them; until removal it stashes separately, honoring autoStash (unset: after every invocation, as before) and ttl (default 7d)";
+  if (config.services?.stash) warnings.push(`services.stash ${servicesStash}`);
+  for (const [name, environment] of Object.entries(config.environments)) {
+    const services = environment.services;
+    if (services && typeof services === "object" && services.stash) {
+      warnings.push(`environments.${name}.services.stash ${servicesStash}`);
+    }
+  }
+  return warnings;
+}
+
 export async function configValidateCommand(
   opts: ConfigValidateOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
   const { result, exitCode } = await validateConfigFile(opts.config);
 
+  for (const warning of result.warnings ?? []) {
+    process.stderr.write(`cairn config validate: warning: ${warning}\n`);
+  }
   process.stdout.write(emit(format, result, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
   process.exit(exitCode);
@@ -214,6 +252,11 @@ function toMarkdown(r: ConfigValidateResult): string {
     for (const err of r.errors) {
       lines.push(`- ${err}`);
     }
+  }
+
+  if (r.warnings?.length) {
+    lines.push("", "## Warnings");
+    for (const warning of r.warnings) lines.push(`- ${warning}`);
   }
 
   return lines.join("\n");

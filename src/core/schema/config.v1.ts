@@ -1,4 +1,18 @@
 import { z } from "zod";
+import {
+  gateRefNames,
+  GateRefListSchema,
+  GateRefSchema,
+  GatesRegistrySchema,
+  type GateRefList,
+} from "../gates/schema";
+import {
+  DatasourcesConfigSchema,
+  EnvironmentDatasourcesSchema,
+  type EnvironmentDatasources,
+} from "../datasources/schema";
+import { resolveEnvironmentDatasources } from "../datasources/resolve";
+import { FixturesRegistrySchema } from "../fixtures/schema";
 
 /**
  * Project-level Cairntrace config (plan §12).
@@ -38,7 +52,29 @@ export interface EnvironmentConfig {
   services?: false | EnvironmentServicesConfig;
   /** Per-env secrets override (replaces the top-level secrets block). */
   secrets?: SecretsConfig;
+  /** What runs here: ownership trait and whether specs may mutate data. */
+  policy?: EnvironmentPolicy;
+  /** Per-env datasource overrides (partial entries merge; `false` disables). */
+  datasources?: EnvironmentDatasources;
 }
+
+/**
+ * Environment policy (`environments.<name>.policy`), enforced by `cairn run`
+ * before anything starts:
+ *
+ * - `trait`: `owned` (yours alone), `shared` (others use it) or `protected`
+ *   (a spec must list this environment in `requires.env` to run here).
+ * - `mutations: deny` refuses specs that declare `requires.mutates: true`.
+ * - `description`: shown in refusals and `cairn spec verify`.
+ */
+export const EnvironmentPolicySchema = z
+  .object({
+    trait: z.enum(["owned", "shared", "protected"]).optional(),
+    mutations: z.enum(["allow", "deny"]).optional(),
+    description: z.string().min(1).optional(),
+  })
+  .strict();
+export type EnvironmentPolicy = z.infer<typeof EnvironmentPolicySchema>;
 
 export const SecretsProviderSchema = z.enum(["env", "tvault"]);
 export type SecretsProvider = z.infer<typeof SecretsProviderSchema>;
@@ -85,6 +121,45 @@ export const SecretsConfigSchema = z
   });
 export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
 
+/**
+ * Evidence categories a stash, retention archive or publish may carry:
+ * `text` (run records, events, logs, snapshots, network/console — always
+ * redacted), `screenshots`, `traces`, `videos` and `downloads` (downloads and
+ * transform outputs). Default {@link DEFAULT_EVIDENCE_INCLUDE}.
+ */
+export const EVIDENCE_CATEGORIES = [
+  "text",
+  "screenshots",
+  "traces",
+  "videos",
+  "downloads",
+] as const;
+export const EvidenceCategorySchema = z.enum(EVIDENCE_CATEGORIES);
+export type EvidenceCategory = z.infer<typeof EvidenceCategorySchema>;
+export const DEFAULT_EVIDENCE_INCLUDE: readonly EvidenceCategory[] = [
+  "text",
+  "screenshots",
+];
+
+export const EvidenceIncludeSchema = z
+  .array(EvidenceCategorySchema)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, {
+    message: "include categories must be unique",
+  })
+  .refine((values) => values.includes("text"), {
+    message:
+      "include must contain `text` (run.json, events and logs make the copy usable)",
+  });
+
+/** file.cheap TTL: `24h`, `7d`, `2w`, … or an ISO date `2026-12-31`. */
+export const StashTtlSchema = z
+  .string()
+  .regex(
+    /^(?:[1-9][0-9]*[mhdw]|\d{4}-\d{2}-\d{2})$/,
+    "ttl must look like 24h, 7d, 2w or 2026-12-31",
+  );
+
 export const RetentionConfigSchema = z
   .object({
     /** Enable artifact-root pruning after every run (default: true). */
@@ -108,6 +183,12 @@ export const RetentionConfigSchema = z
         enabled: z.boolean().default(false),
         /** Remote file.cheap retention for published run packages. */
         retentionDays: z.number().int().min(1).max(31).default(7),
+        /**
+         * Evidence categories published (default [text, screenshots]).
+         * Secret-bearing and sanitized members (every trace) are never
+         * published.
+         */
+        include: EvidenceIncludeSchema.optional(),
       })
       .strict()
       .optional(),
@@ -201,13 +282,23 @@ export const WebServerConfigSchema = z
      */
     build: z.string().min(1).optional(),
     /**
-     * Readiness probe URL: cairn polls it until it answers (any HTTP response,
-     * incl. 3xx/4xx — "the socket accepts and the app replies"). Defaults to the
-     * resolved environment `baseUrl`. Usable together with `waitForText`.
+     * Readiness probe URL: cairn polls it until it answers 2xx or 3xx
+     * (redirects are not followed). Without `url` and `waitForText`, the
+     * resolved environment `baseUrl` is probed under the same rule. Usable
+     * together with `waitForText` and `ready`. Any HTTP answer (a 503
+     * included) used to count — `anyResponse: true` keeps that rule.
      */
     url: z.string().url().optional(),
+    /** Accept any HTTP answer from the readiness URL (the old rule). Default false. */
+    anyResponse: z.boolean().optional(),
     /** Or treat the server ready once this substring appears on stdout/stderr. */
     waitForText: z.string().min(1).optional(),
+    /**
+     * Gates (registry names or inline) waited in order after `url` /
+     * `waitForText` succeed — also when an existing server is reused. A gate
+     * without its own `timeout` gets what is left of `readyTimeoutMs`.
+     */
+    ready: GateRefListSchema.optional(),
     /** Extra env for the spawned process, merged over process.env. ${env.X} ok. */
     env: z.record(z.string()).optional(),
     /** Working directory for build/command (default: the config file's dir). */
@@ -230,17 +321,28 @@ export const WebServerConfigSchema = z
 export type WebServerConfig = z.infer<typeof WebServerConfigSchema>;
 
 /**
- * Readiness signal for a tmux service window. At least one of `url` or `text`
- * should be set; `url` is an HTTP probe, `text` is a substring scanned from the
- * tmux pane's captured output. If neither is set, the window is considered
- * ready immediately (fire-and-forget services).
+ * Readiness signal for a tmux service window. At least one of `url`, `text`
+ * or `gate` should be set; `url` is an HTTP probe (2xx/3xx unless
+ * `anyResponse`), `text` is a substring scanned from the tmux pane's captured
+ * output, `gate` is a readiness gate (registry name or inline). `url` and
+ * `text` are alternatives: either one signals the window. A `gate` must pass
+ * IN ADDITION (alone, it decides). Without `readyOn` the window is
+ * considered ready immediately (fire-and-forget services).
  */
 export const TmuxReadyOnSchema = z
   .object({
-    /** HTTP URL to probe (any response = ready). */
+    /** HTTP URL to probe: ready on a 2xx/3xx answer (redirects not followed). */
     url: z.string().url().optional(),
+    /** Accept any HTTP answer from `url` (the old rule). Default false. */
+    anyResponse: z.boolean().optional(),
     /** Substring to scan for in the tmux pane's output. */
     text: z.string().min(1).optional(),
+    /**
+     * A readiness gate polled with the pane checks; its `stable` applies, the
+     * window's readiness deadline (tmux `readyTimeoutMs`) replaces its
+     * `timeout`.
+     */
+    gate: GateRefSchema.optional(),
   })
   .strict();
 export type TmuxReadyOn = z.infer<typeof TmuxReadyOnSchema>;
@@ -319,6 +421,14 @@ export const TmuxWindowSchema = z
     command: z.string().min(1),
     /** How cairn knows this window's service is ready. */
     readyOn: TmuxReadyOnSchema.optional(),
+    /**
+     * Gates waited before this window is booted (e.g. the database it
+     * connects to), with the window's env (session env + window env). Each
+     * gate uses its own `timeout`, else the tmux `readyTimeoutMs` — per gate,
+     * not shared with the windows' readiness wait. A window that is already
+     * live is not re-booted, so it does not wait.
+     */
+    after: GateRefListSchema.optional(),
     /** Extra env vars for this window's command (merged over process.env + session env). */
     env: z.record(z.string()).optional(),
     /**
@@ -378,6 +488,14 @@ export const DockerConfigSchema = z
      * start command completes. If not set, the command's exit code is the signal.
      */
     readinessCheck: z.string().min(1).optional(),
+    /**
+     * Gates (registry names or inline) waited in order after the start
+     * command and `readinessCheck` — also when running containers are
+     * reused. A gate without its own `timeout` gets what `readinessCheck`
+     * left of `readyTimeoutMs` (all of it on reuse; 0 = no deadline; default
+     * 120000).
+     */
+    ready: GateRefListSchema.optional(),
     /**
      * Periodic healthcheck for docker infra, run after the readiness check
      * passes. If the check fails `retries` consecutive times, cairn logs a
@@ -562,23 +680,29 @@ export function resolveServicesArtifactsConfig(
 }
 
 /**
- * Controls how services session artifacts are stashed to the fcheap vault
- * after a run completes. When enabled, cairn captures tmux pane output, docker
- * logs, and seed output into a directory and stashes it to fcheap. The stash
- * is best-effort — if fcheap isn't installed, a warning is logged and the run
- * continues normally.
+ * DEPRECATED — use `services.artifacts` (bounded, redacted service logs inside
+ * each run directory, which `stash.autoStash` then carries) instead; `cairn
+ * config validate` warns. Until removal: stashes tmux pane output, docker logs
+ * and seed output to fcheap as a separate stash after the services stop,
+ * honoring `autoStash` (unset keeps the old behavior: after every
+ * invocation), redacting every capture with the run redactor, and passing
+ * `ttl` (default 7d). Best-effort — a missing fcheap only warns.
  */
 export const ServicesStashConfigSchema = z
   .object({
     /** Enable stashing services artifacts to fcheap (default: false). */
     enabled: z.boolean().default(false),
     /**
-     * When to stash: always (after every run) | on-failure (only when the
-     * run has at least one failed outcome) | never (default).
+     * When to stash: always (after every run) | on-failure (only when a run
+     * of the invocation failed or errored) | never. Unset: `always`, the
+     * behavior `enabled: true` had before autoStash was honored (the
+     * services stop prints a deprecation line).
      */
-    autoStash: z.enum(["always", "on-failure", "never"]).default("never"),
+    autoStash: z.enum(["always", "on-failure", "never"]).optional(),
     /** Tags applied to every services stash (e.g. [sample-app, services]). */
     tags: z.array(z.string()).optional(),
+    /** file.cheap TTL for the services stash (default 7d). */
+    ttl: StashTtlSchema.optional(),
     /**
      * What to capture: tmux (pane captures for each window), docker (compose
      * logs), seed (seed command output). Default: ["tmux", "docker", "seed"].
@@ -621,7 +745,12 @@ export const ServicesConfigSchema = z
       // with readyOn must have at least one of url or text.
       if (!cfg.tmux) return true;
       for (const win of cfg.tmux.windows) {
-        if (win.readyOn && !win.readyOn.url && !win.readyOn.text) {
+        if (
+          win.readyOn &&
+          !win.readyOn.url &&
+          !win.readyOn.text &&
+          win.readyOn.gate === undefined
+        ) {
           return false;
         }
       }
@@ -629,7 +758,7 @@ export const ServicesConfigSchema = z
     },
     {
       message:
-        "tmux window readyOn must specify at least one of `url` or `text`",
+        "tmux window readyOn must specify at least one of `url`, `text` or `gate`",
     },
   );
 export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
@@ -653,12 +782,16 @@ export const EnvironmentServicesConfigSchema = z
     (cfg) => {
       if (!cfg.tmux) return true;
       return cfg.tmux.windows.every(
-        (win) => !win.readyOn || win.readyOn.url || win.readyOn.text,
+        (win) =>
+          !win.readyOn ||
+          win.readyOn.url ||
+          win.readyOn.text ||
+          win.readyOn.gate !== undefined,
       );
     },
     {
       message:
-        "tmux window readyOn must specify at least one of `url` or `text`",
+        "tmux window readyOn must specify at least one of `url`, `text` or `gate`",
     },
   );
 export type EnvironmentServicesConfig = z.infer<
@@ -682,6 +815,13 @@ export const EnvironmentConfigSchema = z
       .optional(),
     /** Per-env secrets override (replaces the top-level secrets block). */
     secrets: SecretsConfigSchema.optional(),
+    /** Environment policy: trait + mutations (see EnvironmentPolicySchema). */
+    policy: EnvironmentPolicySchema.optional(),
+    /**
+     * Per-env datasource overrides: a partial entry merges over the
+     * top-level `datasources.<name>`; `<name>: false` disables it here.
+     */
+    datasources: EnvironmentDatasourcesSchema.optional(),
   })
   .strict();
 
@@ -689,10 +829,41 @@ export const StashConfigSchema = z
   .object({
     /** Enable fcheap stash integration (default: false). */
     enabled: z.boolean().default(false),
-    /** Auto-stash failed runs: on-failure | never (default: never). */
-    autoStash: z.enum(["on-failure", "never"]).default("never"),
-    /** Tags applied to every auto-stashed run. */
+    /**
+     * Auto-stash runs: always (every run) | on-failure (failed/errored) |
+     * never (default). Refused runs are never stashed.
+     */
+    autoStash: z.enum(["always", "on-failure", "never"]).default("never"),
+    /** Tags applied to every auto-stashed run (a spec's `stash.tags` add to them). */
     tags: z.array(z.string()).optional(),
+    /**
+     * Evidence categories stashed and archived (default [text, screenshots]):
+     * traces, videos and downloads stay local unless listed here.
+     */
+    include: EvidenceIncludeSchema.optional(),
+    /**
+     * Stash/archive secret-bearing members: a trace that could not be
+     * sanitized, a raw monitor profile, text cairn did not write itself.
+     * Never applies to publish. Default false.
+     */
+    unsafeIncludeRawTraces: z.boolean().optional(),
+    /** TTL for every auto-stash unless passTtl/failTtl is set. */
+    ttl: StashTtlSchema.optional(),
+    /** TTL for passed runs (autoStash: always / --stash). Default 7d. */
+    passTtl: StashTtlSchema.optional(),
+    /** TTL for failed/errored runs. Default: ttl, else never expires. */
+    failTtl: StashTtlSchema.optional(),
+    /**
+     * Tag auto-stashes with every `cairn run --label key=value` (default
+     * false: labels are free-form cohort values; `meta` already records the
+     * run identity as structured manifest fields).
+     */
+    labelsAsTags: z.boolean().optional(),
+    /**
+     * Pass `--meta run_id= status= spec= env= backend= cairn_version=` to
+     * fcheap save when the installed fcheap supports it (default true).
+     */
+    meta: z.boolean().optional(),
   })
   .strict();
 export type StashConfig = z.infer<typeof StashConfigSchema>;
@@ -818,6 +989,98 @@ export const AnnotateConfigSchema = z
   .strict();
 export type AnnotateConfig = z.infer<typeof AnnotateConfigSchema>;
 
+/**
+ * `authoring.template.requires` — the same shape as a spec's `requires:`
+ * (`env` entries: a name, or `{ <env>: { optIn: VAR } }`; `mutates`).
+ * Declared here because spec.v1 imports this module; exports validate the
+ * written spec with the spec schema.
+ */
+const AuthoringRequiresSchema = z
+  .object({
+    env: z
+      .array(
+        z.union([
+          z.string().min(1),
+          z.record(
+            z.string().min(1),
+            z.object({ optIn: z.string().min(1) }).strict(),
+          ),
+        ]),
+      )
+      .min(1)
+      .optional(),
+    mutates: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * Discovery session settings (`discovery:`), read by `cairn discover`,
+ * `cairn_discover_open` and `cairn_discover_resume`. Declared here (not in
+ * discovery.v1) because spec.v1 imports this module and discovery.v1 imports
+ * spec.v1.
+ *
+ * - `sessionTtlMs`: idle time before a session's browser closes (default
+ *   30 min); the journal under `_sessions/` stays.
+ * - `backend`: browser backend for discovery sessions (default
+ *   agent-browser).
+ */
+export const DiscoveryConfigSchema = z
+  .object({
+    sessionTtlMs: z.number().int().positive().optional(),
+    backend: z.enum(["agent-browser", "playwright"]).optional(),
+  })
+  .strict();
+export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
+
+/** Default drafts directory, relative to the config directory. */
+export const DEFAULT_DRAFTS_DIR = "flows/_drafts";
+
+/**
+ * Spec authoring conventions (`authoring:`), read by `cairn discover export`
+ * / `cairn_discover_export` and `cairn spec promote`:
+ *
+ * - `draftsDir`: where convention exports land (default `flows/_drafts`,
+ *   relative to the config directory). Its folder name must start with `_`:
+ *   folders and files starting with `_` are what `cairn run <dir>` skips,
+ *   so that is what keeps drafts out of a suite.
+ * - `template`: what every exported spec starts with — `requires`,
+ *   `metadata.tags`, and `imports` (action files exports look in first and
+ *   import when a step uses one of their actions).
+ */
+export const AuthoringConfigSchema = z
+  .object({
+    draftsDir: z
+      .string()
+      .min(1)
+      .refine(
+        (dir) =>
+          (
+            dir
+              .replace(/[\\/]+$/, "")
+              .split(/[\\/]/)
+              .pop() ?? ""
+          ).startsWith("_"),
+        {
+          message:
+            "must name a folder starting with _ (e.g. flows/_drafts): `cairn run <dir>` skips only _ folders and files, so any other name would let drafts run with the suite",
+        },
+      )
+      .optional(),
+    template: z
+      .object({
+        requires: AuthoringRequiresSchema.optional(),
+        metadata: z
+          .object({ tags: z.array(z.string().min(1)).optional() })
+          .strict()
+          .optional(),
+        imports: z.array(z.string().min(1)).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type AuthoringConfig = z.infer<typeof AuthoringConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.literal(1),
@@ -838,6 +1101,13 @@ export const ConfigSchema = z
     browser: BrowserConfigSchema.optional(),
     /** Optional server lifecycle for `cairn run` (build/boot/ready/teardown). */
     webServer: WebServerConfigSchema.optional(),
+    /**
+     * Named readiness gates (tcp / http / command, `all` / `any`, `stable`,
+     * `every`, `timeout`) referenced from `services.docker.ready`, tmux
+     * `readyOn.gate` / `after`, `webServer.ready`, a spec's
+     * `preconditions.wait` and `cairn wait`.
+     */
+    gates: GatesRegistrySchema.optional(),
     /** Multi-service environment lifecycle (docker/seed/tmux). */
     services: ServicesConfigSchema.optional(),
     /** fcheap stash integration (save/list/search run artifacts). */
@@ -850,6 +1120,111 @@ export const ConfigSchema = z
     diagnostics: DiagnosticsConfigSchema.optional(),
     /** codemap annotation integration (pin run findings to code symbols). */
     annotate: AnnotateConfigSchema.optional(),
+    /** Spec authoring conventions: drafts dir + export template. */
+    authoring: AuthoringConfigSchema.optional(),
+    /** Discovery session settings: idle TTL + backend. */
+    discovery: DiscoveryConfigSchema.optional(),
+    /**
+     * Named connections for the mongo / temporal / http verifiers (and
+     * fixtures): `kind: mongo` (uri or docker compose service), `kind:
+     * temporal` (UI/HTTP API + namespace), `kind: http` (baseUrl). Secrets
+     * via `${secrets.X}`; credentials never reach artifacts.
+     */
+    datasources: DatasourcesConfigSchema.optional(),
+    /**
+     * Named test data specs reference with `fixtures: [name | name.reset |
+     * {use, with, write}]`: `kind: exec | mongo | http` with ensure / reset
+     * / verify / teardown verbs, `scope: run | suite | seed`, `needs`,
+     * `outputs` (`${fixtures.<name>.<key>}`), `owner` and `ttl`. See
+     * `cairn docs fixtures`.
+     */
+    fixtures: FixturesRegistrySchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((config, ctx) => {
+    // F2: a gate name in services / webServer must exist in `gates:` —
+    // reported here, not after `docker compose up` or a server boot.
+    const known = config.gates ?? {};
+    for (const { path, refs } of configGateRefs(config)) {
+      for (const name of gateRefNames(refs)) {
+        if (Object.hasOwn(known, name)) continue;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `unknown gate "${name}" (${
+            Object.keys(known).length > 0
+              ? `defined: ${Object.keys(known).toSorted().join(", ")}`
+              : "the config defines no gates:"
+          })`,
+        });
+      }
+    }
+  });
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** Every gate reference field of a config, with its path. */
+function configGateRefs(config: {
+  webServer?: WebServerConfig | undefined;
+  services?: ServicesConfig | undefined;
+  environments: Record<string, EnvironmentConfig>;
+}): Array<{ path: Array<string | number>; refs: GateRefList | undefined }> {
+  const out: Array<{
+    path: Array<string | number>;
+    refs: GateRefList | undefined;
+  }> = [];
+  const services = (
+    prefix: Array<string | number>,
+    block: {
+      docker?: DockerConfig | undefined;
+      tmux?: TmuxConfig | false | undefined;
+    },
+  ): void => {
+    if (block.docker?.ready !== undefined) {
+      out.push({
+        path: [...prefix, "docker", "ready"],
+        refs: block.docker.ready,
+      });
+    }
+    if (!block.tmux) return;
+    block.tmux.windows.forEach((win, index) => {
+      const at = [...prefix, "tmux", "windows", index];
+      if (win.readyOn?.gate !== undefined) {
+        out.push({ path: [...at, "readyOn", "gate"], refs: win.readyOn.gate });
+      }
+      if (win.after !== undefined) {
+        out.push({ path: [...at, "after"], refs: win.after });
+      }
+    });
+  };
+  if (config.webServer?.ready !== undefined) {
+    out.push({ path: ["webServer", "ready"], refs: config.webServer.ready });
+  }
+  if (config.services) services(["services"], config.services);
+  for (const [name, environment] of Object.entries(config.environments)) {
+    if (environment.services) {
+      services(["environments", name, "services"], environment.services);
+    }
+  }
+  return out;
+}
+
+/**
+ * Datasource entries that only break after an environment's override is
+ * merged over the top-level entry (the schema validates each half alone;
+ * runs report a broken merge lazily, on the verifier that uses it). For
+ * `cairn config validate`: `environments.<env>.datasources.<name>: <why>`.
+ */
+export function environmentDatasourceProblems(config: Config): string[] {
+  const problems: string[] = [];
+  for (const [envName, environment] of Object.entries(config.environments)) {
+    if (!environment.datasources) continue;
+    const set = resolveEnvironmentDatasources(
+      config.datasources,
+      environment.datasources,
+    );
+    for (const [name, why] of Object.entries(set.errors)) {
+      problems.push(`environments.${envName}.datasources.${name}: ${why}`);
+    }
+  }
+  return problems;
+}

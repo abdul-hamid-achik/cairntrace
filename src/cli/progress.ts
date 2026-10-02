@@ -5,8 +5,17 @@
 // glyph/mark helpers used by non-run commands (login, heal) and the plain
 // batch lines.
 import { log as clackLog, S_ERROR, S_SUCCESS, S_WARN } from "@clack/prompts";
+import {
+  formatPreconditionStatus,
+  makePlainNarration,
+  summarizeStepError,
+  truncate,
+} from "../core/artifacts/narration";
 import type { ProgressListener } from "../core/runner/Runner";
 import { formatWhen } from "../core/runner/conditions";
+import { log } from "./logger";
+
+export { summarizeStepError };
 
 /* ----- Color helpers ----- */
 
@@ -61,75 +70,145 @@ export function resolveProgressMode(flag?: string): ProgressMode {
 
 /**
  * Sequential milestone renderer for pipes, tee, and CI. Every line is
- * timestamped and final — nothing is redrawn. Short steps report only on
- * completion; long waits (preconditions, verifier polls) announce themselves
- * so a many-minute gate is attributable from the log alone.
+ * timestamped and final — nothing is redrawn. The formatting lives in the
+ * core narration module so each run's `run.log` carries the same lines.
  */
 export function makePlainListener(
   options: { write?: (s: string) => void } = {},
 ): ProgressListener {
-  const write = options.write ?? out;
-  const line = (s: string) =>
-    write(`[${new Date().toISOString().slice(11, 19)}] ${s}\n`);
-  // The when: gate of the step in flight, for the skip line.
+  return makePlainNarration({ write: options.write ?? out });
+}
+
+/** Leveled sink for JSON narration (the logger's `progress` scope by default). */
+export interface NarrationSink {
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+}
+
+/**
+ * Machine-readable narration for `--format json|yaml` + `--log-format json`.
+ * stdout stays reserved for the structured document; these entries go to
+ * stderr through the leveled logger (scope `progress`), one NDJSON object per
+ * milestone: run start, precondition start (with budget) and finish, step
+ * finish (with an error summary), outcome verifying / verdict (with
+ * expected/actual on failure), run end. Failures log at warn so `--quiet`
+ * keeps them. Every entry after run start carries `runId` (and the batch
+ * position when given) so parallel batches stay attributable.
+ */
+export function makeJsonNarrationListener(
+  options: {
+    sink?: NarrationSink;
+    batch?: { index: number; total: number };
+  } = {},
+): ProgressListener {
+  const sink = options.sink ?? log.scope("progress");
+  let runId: string | undefined;
   let currentWhen: string | undefined;
+  const ctx = (): Record<string, unknown> => ({
+    ...(runId ? { runId } : {}),
+    ...(options.batch
+      ? { specIndex: options.batch.index, specTotal: options.batch.total }
+      : {}),
+  });
   return {
+    onRunStart(spec, id, runDir, backendName, environment) {
+      runId = id;
+      sink.info("run start", {
+        ...ctx(),
+        spec: spec.name,
+        runDir,
+        backend: backendName,
+        environment,
+      });
+    },
+    onPreconditionStart(name, timeoutMs) {
+      sink.info("precondition started", {
+        ...ctx(),
+        name,
+        budgetMs: timeoutMs,
+      });
+    },
+    onPreconditionProgress(name, message) {
+      sink.info("precondition progress", { ...ctx(), name, message });
+    },
+    onPreconditionFinish(name, exitCode, durationMs, details) {
+      const status = formatPreconditionStatus(exitCode, details);
+      const fields = {
+        ...ctx(),
+        name,
+        status,
+        ...(exitCode !== undefined ? { exitCode } : {}),
+        durationMs,
+        ...(details?.timedOut ? { timedOut: true } : {}),
+        ...(details?.signal ? { signal: details.signal } : {}),
+      };
+      if (status === "ok") sink.info("precondition finished", fields);
+      else sink.warn("precondition finished", fields);
+    },
     onStepStart(_idx, step) {
       currentWhen =
         "when" in step && step.when !== undefined
           ? formatWhen(step.when)
           : undefined;
     },
-    onRunStart(spec, _runId, runDir, backendName, environment) {
-      line(
-        `run start: ${spec.name} (env=${environment}, backend=${backendName})`,
-      );
-      line(`run dir: ${runDir}`);
-    },
-    onPreconditionStart(name, timeoutMs) {
-      line(`precondition ${name} started (budget ${formatMs(timeoutMs)})`);
-    },
-    onPreconditionFinish(name, exitCode, durationMs, details) {
-      line(
-        `precondition ${name} ${formatPreconditionStatus(
-          exitCode,
-          details,
-        )} ${formatMs(durationMs)}`,
-      );
-    },
-    onStepFinish(_idx, stepId, status, durationMs, error) {
-      const skipReason =
-        status === "skipped"
-          ? ` (when ${currentWhen ? `"${currentWhen}"` : "condition"} not met)`
-          : "";
-      line(`step ${stepId} ${status}${skipReason} ${formatMs(durationMs)}`);
-      if (status === "failed" && error) {
-        for (const errorLine of summarizeStepError(error)) {
-          write(`  ${errorLine}\n`);
-        }
-      }
+    onStepFinish(idx, stepId, status, durationMs, error) {
+      const fields = {
+        ...ctx(),
+        stepId,
+        index: idx + 1,
+        status,
+        durationMs,
+        ...(status === "skipped" && currentWhen ? { when: currentWhen } : {}),
+        ...(status === "failed" && error
+          ? { error: summarizeStepError(error).join("\n") }
+          : {}),
+      };
+      if (status === "failed") sink.warn("step finished", fields);
+      else sink.info("step finished", fields);
     },
     onOutcomesStart(total) {
-      line(`outcomes: evaluating ${total}`);
+      sink.info("outcomes evaluating", { ...ctx(), total });
     },
     onOutcomeStart(outcome) {
-      line(`outcome ${outcome.id} verifying…`);
+      sink.info("outcome verifying", { ...ctx(), outcomeId: outcome.id });
+    },
+    onOutcomeProgress(outcome, message) {
+      sink.info("outcome progress", {
+        ...ctx(),
+        outcomeId: outcome.id,
+        message,
+      });
     },
     onOutcomeFinish(outcome, evaluation) {
-      if (evaluation.skipped) {
-        line(`outcome ${outcome.id} blocked`);
-        return;
-      }
-      line(`outcome ${outcome.id} ${evaluation.passed ? "passed" : "failed"}`);
-      if (!evaluation.passed) {
-        write(`  expected: ${truncate(evaluation.expected, 200)}\n`);
-        write(
-          `  actual:   ${truncate(
-            evaluation.actual.split("\n")[0] ?? "",
-            200,
-          )}\n`,
-        );
-      }
+      const status = evaluation.skipped
+        ? "skipped"
+        : evaluation.passed
+          ? "passed"
+          : "failed";
+      const fields = {
+        ...ctx(),
+        outcomeId: outcome.id,
+        status,
+        ...(status === "failed"
+          ? {
+              expected: truncate(evaluation.expected, 200),
+              actual: truncate(evaluation.actual.split("\n")[0] ?? "", 200),
+            }
+          : {}),
+      };
+      if (status === "failed") sink.warn(`outcome ${status}`, fields);
+      else sink.info(`outcome ${status}`, fields);
+    },
+    onRunEnd(result) {
+      const fields = {
+        ...ctx(),
+        status: result.status,
+        durationMs: result.durationMs,
+        ...(result.summary ? { summary: result.summary } : {}),
+        runDir: result.runDir,
+      };
+      if (result.status === "passed") sink.info("run end", fields);
+      else sink.warn("run end", fields);
     },
   };
 }
@@ -140,7 +219,7 @@ export function makePlainListener(
  * the live and the plain paths. `color: false` yields the bare glyph.
  */
 export function completionMark(
-  status: "passed" | "failed" | "errored",
+  status: "passed" | "failed" | "errored" | "refused",
   color: boolean,
 ): string {
   const glyph =
@@ -151,7 +230,9 @@ export function completionMark(
       ? ansiColors.green
       : status === "failed"
         ? ansiColors.red
-        : ansiColors.yellow;
+        : status === "refused"
+          ? ansiColors.dim
+          : ansiColors.yellow;
   return `${code}${glyph}${ansiColors.reset}`;
 }
 
@@ -170,55 +251,7 @@ export function clackLine(symbol: string, text: string, spacing = 0): void {
   });
 }
 
-function formatPreconditionStatus(
-  exitCode: number | undefined,
-  details: { timedOut?: boolean; signal?: string } | undefined,
-): string {
-  if (details?.timedOut) {
-    return `timed out${details.signal ? ` (${details.signal})` : ""}`;
-  }
-  return exitCode === 0 ? "ok" : `failed (exit ${exitCode ?? "unknown"})`;
-}
-
 // Progress goes to stderr — stdout is reserved for structured results.
 function out(s: string): void {
   process.stderr.write(s);
-}
-
-function formatMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.floor((ms - m * 60_000) / 1000);
-  return `${m}m ${s}s`;
-}
-
-/**
- * Keep ordinary step errors to the existing 200-character terminal budget;
- * ambiguity reports keep their candidate list (bounded) so a multi-match
- * selector tells the author what to disambiguate with `nth:`.
- */
-export function summarizeStepError(error: string): string[] {
-  const lines = error.split(/\r?\n/);
-  const header = lines[0] ?? error;
-  const totalMatch = /:\s*(\d+) visible matches\b/i.exec(header);
-  if (!/^ambiguous\b/i.test(header) || !totalMatch) {
-    return [truncate(error, 200)];
-  }
-
-  const candidates = lines.filter((line) => /^\s+-\s+/.test(line)).slice(0, 3);
-  if (candidates.length === 0) return [truncate(error, 200)];
-
-  const rendered = [
-    truncate(header, 200),
-    ...candidates.map((line) => truncate(line, 200)),
-  ];
-  const total = Number(totalMatch[1]);
-  const omitted = Math.max(0, total - candidates.length);
-  if (omitted > 0) rendered.push(`  …and ${omitted} more`);
-  return rendered;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
 }

@@ -3,30 +3,39 @@
  * project instead of N monolithic spec files.
  *
  *   out/
- *   ├── README.md            operating manual (env, preconditions, how to run)
+ *   ├── README.md            operating manual (env, preconditions, coverage, risks)
+ *   ├── .cairn-export.json   manifest: versions, digests, file hashes (`--check`)
  *   ├── playwright.config.ts baseURL/serial/bypassCSP/globalSetup wired
- *   ├── global-setup.ts      deduped spec preconditions as a runnable scaffold
+ *   ├── global-setup.ts      one-time suite hook (per-spec preconditions are NOT here)
  *   ├── preconditions.ts     filtered env + process-tree timeout runner
- *   ├── lib/                 shared runtime (evidence, fill retry, click.until)
+ *   ├── lib/                 shared runtime (evidence, fill retry, click.until,
+ *   │                        splices, fixtures, project root)
  *   ├── actions/<name>.ts    each reusable action as `async function(page, vars?)`
- *   │                        — call-site vars are arguments, not inlined steps
+ *   │                        — call-site vars are arguments, not inlined steps;
+ *   │                        captured `assign:` values are returned to callers
+ *   ├── fixtures/            upload files copied in (relocatable)
  *   ├── verifiers/<file>.ts  node verifiers copied in (self-contained project)
- *   └── tests/<spec>.spec.ts steps + outcomes; `use:` steps become action calls
+ *   └── tests/<spec>.spec.ts steps + outcomes; `use:` steps become action calls;
+ *                            preconditions run in each file's beforeAll
  *
  * The same IR/emission layers as the single-file exporter do all rendering —
  * this module only decides FILE STRUCTURE.
  */
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import {
   basename,
   dirname,
   extname,
   isAbsolute,
-  join,
   relative,
   resolve as resolvePath,
   sep,
 } from "node:path";
+import { CAIRN_VERSION } from "../../cli/version";
+import { computeContractHash } from "../contractHash";
+import { realpathNearest } from "./exportManifest";
+import { type ExportEnvTarget, renderRequiresEnvGuard } from "./requiresGuard";
 import {
   parseReusableAction,
   type LoadedAction,
@@ -44,36 +53,54 @@ import {
   type Stmt,
 } from "./codegen";
 import {
-  coverageHasHardSkip,
+  addGeneratedSourceRisks,
+  addRisk,
+  addSpecRisks,
   exportExtension,
+  finalizeCoverage,
   hasNodeFileVerifier,
   newEmitCtx,
   oneLine,
+  referencedRuntimeRefs,
+  renderBindingDeclarations,
   renderNodeVerifierEvidenceRuntime,
   renderNodeVerifierEvidenceSetup,
   renderOutcomeEvidenceSetup,
   renderOutcome,
   renderStep,
   safeIdent,
+  specNeedsNetworkListener,
   type EmitCtx,
   type ExportCoverage,
+  type ExportCoverageSkip,
   type ExportLang,
+  type ExportSemanticRisk,
+  usesExpectCall,
 } from "./playwrightExporter";
 import {
+  isDocumentaryPrecondition,
+  playwrightPreconditionTimeoutBudget,
   playwrightProjectTimeoutBudget,
   playwrightTestTimeoutBudget,
+  timeoutBudgetComment,
 } from "./playwrightTimeout";
 import {
+  assertNoLateBoundLeak,
   emitStr,
   emitValue,
+  humanizeSentinels,
   RUN_TOKEN_SENTINEL,
+  runtimeRefKey,
   varRefSentinel,
   type RefUsage,
 } from "./templateValue";
 import {
   playwrightLibRelPath,
   renderClickUntilRuntime,
+  renderFixturesRuntime,
   renderHydrationRuntime,
+  renderProjectRootRuntime,
+  renderSpliceRuntime,
   renderVerifierRuntime,
   type PlaywrightLibModule,
 } from "./playwrightRuntime";
@@ -103,6 +130,11 @@ export interface ProjectExportOptions {
   /** baseURL for the generated playwright.config.ts. */
   baseUrl?: string;
   /**
+   * The environment `baseUrl` came from: every test's requires guard is
+   * tied to it, and a policy refusal there is an `envPolicy` risk.
+   */
+  envTarget?: ExportEnvTarget;
+  /**
    * Emit into an existing Playwright tree: actions/lib/tests/verifiers/README
    * only — no package.json, tsconfig, playwright.config, or global-setup.
    */
@@ -113,14 +145,28 @@ export interface ProjectExportOptions {
    */
   sourceRoot?: string;
   /**
-   * Source project root used to make precondition cwd relocatable via
-   * `CAIRN_PROJECT_ROOT` / `lib/projectRoot`.
+   * Source project root used to make precondition cwd / verifier specDir
+   * relocatable via `CAIRN_PROJECT_ROOT` / `lib/projectRoot`.
    */
   projectRoot?: string;
   /** Absolute generated-project directory; used to compute projectRoot relative URL. */
   outDir?: string;
+  /**
+   * `${config.dir}` for re-parsed reusable actions: the resolved config's
+   * directory (honours an explicit `--config`). The cwd when omitted.
+   */
+  configDir?: string;
   testIdAttribute?: string;
   viewport?: { width: number; height: number };
+  /**
+   * Copy upload files into `fixtures/` and read them via `cairnFixturePath`.
+   * The caller must then write `ProjectExportResult.fixtureFiles` (the CLI
+   * does). Off by default so writers that only persist `files` keep working
+   * (uploads then reference the resolved absolute source path).
+   */
+  copyFixtures?: boolean;
+  /** The caller writes `.cairn-export.json` (the CLI does); listed in README. */
+  writesManifest?: boolean;
 }
 
 export interface ProjectFile {
@@ -132,6 +178,12 @@ export interface ProjectFile {
 export interface ProjectSpecReport {
   name: string;
   file: string;
+  /** Absolute source spec path. */
+  sourcePath: string;
+  /** sha256 contract hash (intent + outcomes) at export time. */
+  contractHash: string;
+  /** sha256 over the spec source and every imported action source. */
+  sourceDigest: string;
   testTimeoutMs: number;
   coverage: ExportCoverage;
   requiredEnv: string[];
@@ -151,8 +203,28 @@ export interface ProjectExportResult {
   verifierFiles: ProjectVerifierFile[];
   /** eval.file sources copied to evals/ for review. */
   evalFiles: ProjectVerifierFile[];
+  /** Upload fixtures copied to fixtures/ (paths rewritten to cairnFixturePath). */
+  fixtureFiles: ProjectVerifierFile[];
   specs: ProjectSpecReport[];
   requiredEnv: string[];
+}
+
+interface ActionModule {
+  fnName: string;
+  relPath: string;
+  source: string;
+  envNames: string[];
+  usesRunToken: boolean;
+  hasVars: boolean;
+  declaredKeys: string[];
+  defaults: Record<string, string | number | boolean>;
+  /** Runtime bindings the action captures and returns (`requests:x`, …). */
+  produces: Map<
+    string,
+    { source: "requests" | "evals" | "artifacts"; name: string }
+  >;
+  /** Skips/risks inside the action; propagated into every calling test. */
+  coverage: ExportCoverage;
 }
 
 export function exportPlaywrightProject(
@@ -163,6 +235,7 @@ export function exportPlaywrightProject(
   const ext = exportExtension(lang);
   const files: ProjectFile[] = [];
   const verifierFiles = new Set<string>();
+  const fixtureFiles = new Map<string, string>();
   const specs: ProjectSpecReport[] = [];
   const allEnv = new Set<string>();
   let needsProjectRoot = false;
@@ -170,35 +243,42 @@ export function exportPlaywrightProject(
     string,
     ProjectPrecondition & { specDir: string }
   >();
+  const projectRoot = opts.projectRoot
+    ? realpathNearest(resolvePath(opts.projectRoot))
+    : undefined;
 
   // ----- actions: one module per reusable action, deduped by name -----
   const projectUsedLib = new Set<PlaywrightLibModule>();
   const evalFiles = new Set<string>();
-  const actionModules = new Map<
-    string,
-    {
-      fnName: string;
-      relPath: string;
-      source: string;
-      envNames: string[];
-      usesRunToken: boolean;
-      hasVars: boolean;
-      declaredKeys: string[];
-      defaults: Record<string, string | number | boolean>;
-    }
-  >();
+  const actionModules = new Map<string, ActionModule>();
   for (const parsed of parsedSpecs) {
-    for (const [name, loaded] of parsed.actionsByName) {
-      if (actionModules.has(name)) continue;
+    // A11: an action that `use:`s another (its own imports) calls that
+    // action's module, so nested modules are emitted first.
+    const emitAction = (name: string, loaded: LoadedAction): void => {
+      if (actionModules.has(name)) return;
+      for (const step of loaded.action.steps) {
+        if (!("use" in step)) continue;
+        const nestedName = useActionName(step);
+        const nested =
+          loaded.scope?.get(nestedName) ?? parsed.actionsByName.get(nestedName);
+        if (nested && nested !== loaded) emitAction(nestedName, nested);
+      }
       const actionLib = new Set<PlaywrightLibModule>();
       const emitted = emitActionModule(loaded, parsed.vars ?? {}, lang, {
         verifierFiles,
         evalFiles,
+        ...(opts.copyFixtures ? { fixtureFiles } : {}),
         usedLib: actionLib,
+        ...(projectRoot ? { projectRoot } : {}),
+        ...(opts.configDir ? { configDir: opts.configDir } : {}),
+        nestedModules: actionModules,
       });
       for (const libName of actionLib) projectUsedLib.add(libName);
       for (const e of emitted.envNames) allEnv.add(e);
       actionModules.set(name, emitted);
+    };
+    for (const [name, loaded] of parsed.actionsByName) {
+      emitAction(name, loaded);
     }
   }
   for (const m of actionModules.values()) {
@@ -213,29 +293,39 @@ export function exportPlaywrightProject(
     const steps = spec.steps ?? [];
     const relPath = testRelPath(parsed, opts.sourceRoot, ext);
     const importRoot = importRootFromTestRel(relPath);
+    const extName = lang === "js" ? ".js" : "";
+    const specDirRel = projectRelative(projectRoot, specDir);
     const ctx = newEmitCtx(lang, {
       specDir,
       verifierImportPrefix: `${importRoot}/verifiers`,
       verifierFiles,
       evalFiles,
+      ...(opts.copyFixtures ? { fixtureFiles } : {}),
+      ...(projectRoot ? { fixtureRoot: projectRoot } : {}),
       wrapSteps: true,
       libImportPrefix: `${importRoot}/lib`,
       usedLib: new Set<PlaywrightLibModule>(),
+      // The test's OWN steps/outcomes: a splice inside an action is bound and
+      // consumed in the action module, never in the calling test.
+      referencedRefs: referencedRuntimeRefs(parsed.spec),
+      ...(specDirRel !== undefined
+        ? { specDirExpr: `cairnProjectPath(${JSON.stringify(specDirRel)})` }
+        : {}),
     });
     const needsNodeVerifierEvidence = hasNodeFileVerifier(spec);
     if (needsNodeVerifierEvidence) {
       ctx.nodeVerifierRunDir = "cairnRunDir";
       ctx.nodeVerifierEvidence = "cairnNetworkEvidence";
       ctx.usedLib?.add("networkEvidence");
+      ctx.usedLibNames?.add("createCairnNetworkEvidence");
     }
+    if (specNeedsNetworkListener(spec)) ctx.networkRecorder = "requests";
     ctx.coverage.stepsTotal = steps.length;
     ctx.coverage.outcomesTotal = spec.outcomes.length;
 
     const usedActions = new Set<string>();
     const body: Stmt[] = [
-      comment(
-        `Derived from sequential step/outcome budgets; bounded to 30m–4h.`,
-      ),
+      comment(timeoutBudgetComment(timeoutBudget)),
       ...(timeoutBudget.capped
         ? [
             comment(
@@ -248,6 +338,8 @@ export function exportPlaywrightProject(
     ];
     const evidenceInsertAt = body.length;
     body.push(...renderOutcomeEvidenceSetup(spec, lang));
+    const bindingsInsertAt = body.length;
+    let actionCallCounter = 0;
     if (steps.length > 0) {
       body.push(comment(`--- steps ---`));
       let resolvedIdx = 0;
@@ -255,7 +347,8 @@ export function exportPlaywrightProject(
         if ("use" in step) {
           const actionName = useActionName(step);
           const loaded = parsed.actionsByName.get(actionName);
-          const expandedCount = loaded?.action.steps.length ?? 0;
+          const expandedCount =
+            loaded?.expandedStepCount ?? loaded?.action.steps.length ?? 0;
           const mod = actionModules.get(actionName);
           if (mod) {
             usedActions.add(actionName);
@@ -263,37 +356,66 @@ export function exportPlaywrightProject(
               ctx.usage.envNames.add(envName);
             }
             if (mod.usesRunToken) ctx.usage.runToken = true;
+            propagateActionCoverage(ctx.coverage, mod, step.id ?? actionName);
             const passed = resolveActionCallVars(
               mod.declaredKeys,
               mod.defaults,
               parsed.vars ?? {},
               useActionVars(step),
             );
-            const actionCall = raw(
-              `await ${mod.fnName}(${formatActionCallArgs(passed, mod, ctx)});`,
+            const call = `await ${mod.fnName}(${formatActionCallArgs(passed, mod, ctx)})`;
+            // Bindings the action returns that this spec later splices.
+            const needed = [...mod.produces].filter(([key]) =>
+              ctx.referencedRefs?.has(key),
             );
+            const callStmts: Stmt[] = [];
+            if (needed.length > 0) {
+              actionCallCounter += 1;
+              const result = `cairnAction${actionCallCounter}`;
+              callStmts.push(raw(`const ${result} = ${call};`));
+              for (const [key, produced] of needed) {
+                const ident = declareProjectBinding(
+                  ctx,
+                  key,
+                  `cairn${capitalize(produced.source)}_${safeIdent(produced.name)}`,
+                );
+                callStmts.push(
+                  raw(
+                    `${ident} = ${result}.${produced.source}[${JSON.stringify(produced.name)}];`,
+                  ),
+                );
+                ctx.usage.bindings.set(key, ident);
+              }
+            } else {
+              callStmts.push(raw(`${call};`));
+            }
             body.push(
               comment(`step: ${oneLine(step.id ?? actionName)} (action)`),
-              ctx.wrapSteps && step.id
-                ? block(
-                    `await test.step(${JSON.stringify(oneLine(step.id))}, async () => {`,
-                    [actionCall],
-                    `});`,
-                  )
-                : actionCall,
+              ...(ctx.wrapSteps && step.id
+                ? [
+                    block(
+                      `await test.step(${JSON.stringify(oneLine(step.id))}, async () => {`,
+                      callStmts,
+                      `});`,
+                    ),
+                  ]
+                : callStmts),
             );
             ctx.coverage.stepsExported += 1;
             resolvedIdx += expandedCount;
             continue;
           }
           resolvedIdx += expandedCount;
+          ctx.stepIndex = resolvedIdx - 1;
         } else {
+          ctx.stepIndex = resolvedIdx;
           resolvedIdx += 1;
         }
         const rendered = renderStep(step as Step, spec.settleMs, ctx);
         if (rendered.exported) ctx.coverage.stepsExported += 1;
         body.push(...rendered.stmts);
       }
+      delete ctx.stepIndex;
       body.push(blank);
     }
     body.push(comment(`--- outcomes (the contract) ---`));
@@ -314,6 +436,7 @@ export function exportPlaywrightProject(
         body.push(...rendered.stmts, blank);
       }
     }
+    body.splice(bindingsInsertAt, 0, ...renderBindingDeclarations(ctx));
     if (needsNodeVerifierEvidence) {
       body.splice(
         evidenceInsertAt,
@@ -327,10 +450,7 @@ export function exportPlaywrightProject(
       (p) => !isDocumentaryPrecondition(p.run),
     );
     const preconditionEnv = renderPreconditionEnv(spec.preconditions?.env, ctx);
-    const usesProjectRoot = Boolean(opts.projectRoot);
-    if (usesProjectRoot && executablePreconditions.length > 0) {
-      needsProjectRoot = true;
-    }
+    const usesProjectRoot = projectRoot !== undefined;
     const preconditionLines = specPreconditions.map((p) => {
       const resolvedCwd = resolvePreconditionCwd(specDir, p.cwd);
       const timeoutMs = p.timeoutMs ?? DEFAULT_PRECONDITION_TIMEOUT_MS;
@@ -340,33 +460,85 @@ export function exportPlaywrightProject(
         timeoutMs,
         specDir,
       });
-      return `${
-        p.name ? `[${p.name}] ` : ""
-      }${oneLine(p.run).slice(0, 160)} (cwd: ${resolvedCwd}; timeout: ${timeoutMs}ms)`;
+      return humanizeSentinels(
+        `${
+          p.name ? `[${p.name}] ` : ""
+        }${oneLine(p.run).slice(0, 160)} (cwd: ${displayPath(
+          projectRoot,
+          resolvedCwd,
+        )}; timeout: ${timeoutMs}ms)`,
+      );
     });
+    const preconditionBudget = playwrightPreconditionTimeoutBudget(spec);
+    const preconditionStmts =
+      executablePreconditions.length > 0
+        ? executablePreconditions.map((p) => {
+            const cwdExpr = emitPreconditionCwd(specDir, p.cwd, projectRoot);
+            const timeoutMs = p.timeoutMs ?? DEFAULT_PRECONDITION_TIMEOUT_MS;
+            return raw(
+              `await runPrecondition(${emitStr(p.run, ctx.usage)}, { cwd: ${cwdExpr}, timeoutMs: ${timeoutMs}${
+                preconditionEnv ? `, env: ${preconditionEnv}` : ""
+              } });`,
+            );
+          })
+        : [];
 
-    const extName = lang === "js" ? ".js" : "";
+    const testBodySource = print(body);
+    const usesProjectPath = testBodySource.includes("cairnProjectPath(");
+    const usesProjectRootFn =
+      usesProjectRoot && executablePreconditions.length > 0;
+    if (usesProjectPath || usesProjectRootFn) needsProjectRoot = true;
+
     const head: Stmt[] = [
       comment(
-        `Generated by \`cairn export playwright --project\`. Source: ${parsed.path}`,
+        `Generated by \`cairn export playwright --project\`. Source: ${displayPath(projectRoot, parsed.path)}`,
       ),
       comment(`Intent: ${oneLine(spec.intent)}`),
     ];
     if (preconditionLines.length > 0) {
       head.push(
-        comment(`Preconditions run in this file's beforeAll — see README.`),
-      );
-    }
-    head.push(blank, raw(`import { expect, test } from "@playwright/test";`));
-    if (usesProjectRoot && executablePreconditions.length > 0) {
-      head.push(raw(`import { join } from "node:path";`));
-      head.push(
-        raw(
-          `import { cairnProjectRoot } from ${JSON.stringify(`${importRoot}/lib/projectRoot${extName}`)};`,
+        comment(
+          executablePreconditions.length > 0
+            ? `Preconditions run in this file's beforeAll — see README.`
+            : `Documentary preconditions only (echo) — nothing runs before this test.`,
         ),
       );
     }
-    head.push(...libImportStmts(ctx.usedLib ?? new Set(), lang, importRoot));
+    const usesExpect = usesExpectCall(
+      testBodySource + preconditionStmts.map((s) => print([s])).join("\n"),
+    );
+    head.push(
+      blank,
+      raw(
+        `import { ${
+          usesExpect ? "expect, " : ""
+        }test } from "@playwright/test";`,
+      ),
+    );
+    if (usesProjectRootFn) {
+      head.push(raw(`import { join } from "node:path";`));
+    }
+    const projectRootNames = [
+      ...(usesProjectPath ? ["cairnProjectPath"] : []),
+      ...(usesProjectRootFn ? ["cairnProjectRoot"] : []),
+    ];
+    if (projectRootNames.length > 0) {
+      head.push(
+        raw(
+          `import { ${projectRootNames.join(", ")} } from ${JSON.stringify(`${importRoot}/lib/projectRoot${extName}`)};`,
+        ),
+      );
+    }
+    if (ctx.usage.splice || ctx.usage.unresolvedHelper) {
+      ctx.usedLib?.add("splice");
+      if (ctx.usage.splice) ctx.usedLibNames?.add("cairnSplice");
+      if (ctx.usage.unresolvedHelper) {
+        ctx.usedLibNames?.add("cairnUnresolvedSplice");
+      }
+    }
+    head.push(
+      ...libImportStmts(ctx.usedLibNames ?? new Set(), lang, importRoot),
+    );
     if (needsNodeVerifierEvidence && !ctx.libImportPrefix) {
       head.push(
         blank,
@@ -390,8 +562,16 @@ export function exportPlaywrightProject(
     }
     head.push(...runTokenConst(ctx));
 
+    addSpecRisks(parsed.resolved, ctx, {
+      ...readOptional(parsed.path),
+      extraSourceTexts: [...parsed.actionsByName.values()].map(
+        (loaded) => loaded.rawSource,
+      ),
+    });
+    finalizeCoverage(ctx.coverage);
+
     const tags = playwrightTags(spec.metadata?.tags);
-    const testKw = coverageHasHardSkip(ctx.coverage) ? "test.fixme" : "test";
+    const testKw = ctx.coverage.fixme ? "test.fixme" : "test";
     const testOpen =
       tags.length > 0
         ? `${testKw}(${JSON.stringify(spec.name)}, { tag: ${JSON.stringify(tags)} }, async ({ page }${
@@ -402,6 +582,16 @@ export function exportPlaywrightProject(
           }) => {`;
     const testBlock = block(testOpen, body, `});`);
     const suiteBody: Stmt[] = [];
+    // requires → a run-time CAIRN_ENV guard tied to the baked baseURL's
+    // environment, before beforeAll so a skipped suite never runs its
+    // preconditions.
+    const requiresGuard = renderRequiresEnvGuard(spec.requires, opts.envTarget);
+    if (requiresGuard.lines.length > 0) {
+      suiteBody.push(verbatim(requiresGuard.lines));
+    }
+    if (requiresGuard.refusedReason) {
+      addRisk(ctx, "envPolicy", requiresGuard.refusedReason, "requires");
+    }
     if (spec.viewport) {
       suiteBody.push(
         raw(
@@ -415,19 +605,9 @@ export function exportPlaywrightProject(
           `test.beforeAll(async () => {`,
           [
             raw(`if (process.env.SKIP_PRECONDITIONS === "1") return;`),
-            ...executablePreconditions.map((p) => {
-              const cwdExpr = emitPreconditionCwd(
-                specDir,
-                p.cwd,
-                opts.projectRoot,
-              );
-              const timeoutMs = p.timeoutMs ?? DEFAULT_PRECONDITION_TIMEOUT_MS;
-              return raw(
-                `await runPrecondition(${JSON.stringify(p.run)}, { cwd: ${cwdExpr}, timeoutMs: ${timeoutMs}${
-                  preconditionEnv ? `, env: ${preconditionEnv}` : ""
-                } });`,
-              );
-            }),
+            comment(timeoutBudgetComment(preconditionBudget)),
+            raw(`test.setTimeout(${preconditionBudget.timeoutMs});`),
+            ...preconditionStmts,
           ],
           `});`,
         ),
@@ -450,10 +630,17 @@ export function exportPlaywrightProject(
 
     for (const e of ctx.usage.envNames) allEnv.add(e);
     for (const libName of ctx.usedLib ?? []) projectUsedLib.add(libName);
-    files.push({ relPath, source: `${print(head)}\n` });
+    const source = `${print(head)}\n`;
+    addGeneratedSourceRisks(ctx.coverage, source);
+    finalizeCoverage(ctx.coverage);
+    assertNoLateBoundLeak(source, relPath, spec.name);
+    files.push({ relPath, source });
     specs.push({
       name: spec.name,
       file: relPath,
+      sourcePath: parsed.path,
+      contractHash: computeContractHash(spec),
+      sourceDigest: specSourceDigest(parsed),
       testTimeoutMs: timeoutBudget.timeoutMs,
       coverage: ctx.coverage,
       requiredEnv: [...ctx.usage.envNames].toSorted(),
@@ -462,8 +649,13 @@ export function exportPlaywrightProject(
   }
 
   if (
-    parsedSpecs.some(
-      (parsed) => (parsed.spec.preconditions?.commands?.length ?? 0) > 0,
+    parsedSpecs.some((parsed) =>
+      (parsed.spec.preconditions?.commands ?? []).some(
+        (command) =>
+          !isDocumentaryPrecondition(
+            typeof command === "string" ? command : command.run,
+          ),
+      ),
     )
   ) {
     files.push({
@@ -472,8 +664,16 @@ export function exportPlaywrightProject(
     });
   }
 
+  const copiedVerifierFiles = collectVerifierFiles(verifierFiles);
   if (!opts.into) {
-    files.push({ relPath: "package.json", source: renderPackageJson(lang) });
+    files.push({
+      relPath: "package.json",
+      source: renderPackageJson(lang, {
+        verifierSdk: copiedVerifierFiles.some((file) =>
+          importsVerifierSdk(file.sourcePath),
+        ),
+      }),
+    });
     if (lang === "ts") {
       files.push({ relPath: "tsconfig.json", source: renderTsconfig() });
     }
@@ -496,7 +696,11 @@ export function exportPlaywrightProject(
     });
     files.push({
       relPath: `global-setup${lang === "js" ? ".js" : ".ts"}`,
-      source: renderGlobalSetup([...allPreconditions.values()], lang),
+      source: renderGlobalSetup(
+        [...allPreconditions.values()],
+        lang,
+        projectRoot,
+      ),
     });
   }
 
@@ -509,6 +713,8 @@ export function exportPlaywrightProject(
       lang,
       {
         into: Boolean(opts.into),
+        fixtures: fixtureFiles.size > 0,
+        manifest: Boolean(opts.writesManifest),
         ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
         ...(opts.testIdAttribute
           ? { testIdAttribute: opts.testIdAttribute }
@@ -525,34 +731,130 @@ export function exportPlaywrightProject(
       source: renderLibModule(libName, lang),
     });
   }
-  if (needsProjectRoot && opts.projectRoot) {
+  if (needsProjectRoot) {
     files.push({
       relPath: `lib/projectRoot${lang === "js" ? ".js" : ".ts"}`,
       source: renderProjectRootRuntime(
         lang,
-        relativeFromLibToProject(opts.outDir, opts.projectRoot),
+        relativeFromExportRootToProject(opts.outDir, projectRoot),
       ),
     });
   }
 
+  for (const file of files) assertNoLateBoundLeak(file.source, file.relPath);
+
   return {
     files,
-    verifierFiles: collectVerifierFiles(verifierFiles),
+    verifierFiles: copiedVerifierFiles,
     evalFiles: collectEvalFiles(evalFiles),
+    fixtureFiles: [...fixtureFiles]
+      .map(([sourcePath, relPath]) => ({ sourcePath, relPath }))
+      .toSorted((a, b) => a.relPath.localeCompare(b.relPath)),
     specs,
     requiredEnv: [...allEnv].toSorted(),
   };
 }
 
-interface ActionModule {
-  fnName: string;
-  relPath: string;
-  source: string;
-  envNames: string[];
-  usesRunToken: boolean;
-  hasVars: boolean;
-  declaredKeys: string[];
-  defaults: Record<string, string | number | boolean>;
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function declareProjectBinding(
+  ctx: EmitCtx,
+  key: string,
+  preferred: string,
+): string {
+  const produced = ctx.produced ?? (ctx.produced = new Map());
+  const existing = produced.get(key);
+  if (existing) return existing;
+  const taken = new Set(produced.values());
+  let ident = preferred;
+  for (let n = 2; taken.has(ident); n++) ident = `${preferred}${n}`;
+  produced.set(key, ident);
+  return ident;
+}
+
+/** Copy an action's hard/soft skips and risks into a calling test's coverage. */
+function propagateActionCoverage(
+  coverage: ExportCoverage,
+  mod: ActionModule,
+  callId: string,
+): void {
+  for (const entry of mod.coverage.skips) {
+    const propagated: ExportCoverageSkip = {
+      kind: entry.kind,
+      id: callId,
+      reason: `action ${mod.fnName}${
+        entry.id ? ` (${entry.id})` : ""
+      }: ${entry.reason}`,
+      ...(entry.soft ? { soft: true } : {}),
+    };
+    coverage.skips.push(propagated);
+  }
+  for (const risk of mod.coverage.semanticRisks) {
+    const propagated: ExportSemanticRisk = {
+      kind: risk.kind,
+      id: callId,
+      detail: `action ${mod.fnName}${
+        risk.id ? ` (${risk.id})` : ""
+      }: ${risk.detail}`,
+    };
+    coverage.semanticRisks.push(propagated);
+  }
+}
+
+function readOptional(path: string): { sourceText?: string } {
+  try {
+    return { sourceText: readFileSync(path, "utf8") };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * sha256 over the spec source and every imported action's NAME + source
+ * (sorted by name). Content only — never an absolute path — so the digest is
+ * identical in a fresh clone, on CI, or after moving the tree.
+ */
+export function specSourceDigest(parsed: ParseResult): string {
+  const hash = createHash("sha256");
+  hash.update(readOptional(parsed.path).sourceText ?? "");
+  for (const [name, loaded] of [...parsed.actionsByName].toSorted(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    hash.update("\u0000");
+    hash.update(name);
+    hash.update("\u0000");
+    hash.update(loaded.rawSource);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+/** POSIX path of `target` inside `root`, or undefined when not inside. */
+function projectRelative(
+  root: string | undefined,
+  target: string,
+): string | undefined {
+  if (!root) return undefined;
+  const real = realpathNearest(resolvePath(target));
+  const rel = relative(root, real);
+  if (rel === "") return ".";
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return undefined;
+  }
+  return rel.split(sep).join("/");
+}
+
+/**
+ * Human display of a source path for generated comments: relative to the
+ * project root (with `../` when it lives outside), so generated files never
+ * embed a machine-local absolute path. Absolute only without a root.
+ */
+function displayPath(root: string | undefined, target: string): string {
+  const inside = projectRelative(root, target);
+  if (inside !== undefined || !root) return inside ?? target;
+  const rel = relative(root, realpathNearest(resolvePath(target)));
+  return isAbsolute(rel) ? target : rel.split(sep).join("/");
 }
 
 function emitActionModule(
@@ -562,7 +864,12 @@ function emitActionModule(
   opts: {
     verifierFiles: Set<string>;
     evalFiles: Set<string>;
+    fixtureFiles?: Map<string, string>;
     usedLib: Set<PlaywrightLibModule>;
+    projectRoot?: string;
+    configDir?: string;
+    /** Modules of actions this one may `use:` (emitted before it). */
+    nestedModules?: ReadonlyMap<string, ActionModule>;
   },
 ): ActionModule {
   const declaredKeys = Object.keys(loaded.actionDefaults).toSorted();
@@ -577,6 +884,7 @@ function emitActionModule(
           ),
         },
         env: {},
+        ...(opts.configDir ? { configDir: opts.configDir } : {}),
         secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
         runtime: { runToken: RUN_TOKEN_SENTINEL },
       });
@@ -590,12 +898,76 @@ function emitActionModule(
     verifierImportPrefix: "../verifiers",
     verifierFiles: opts.verifierFiles,
     evalFiles: opts.evalFiles,
+    ...(opts.fixtureFiles ? { fixtureFiles: opts.fixtureFiles } : {}),
+    ...(opts.projectRoot ? { fixtureRoot: opts.projectRoot } : {}),
     libImportPrefix: "../lib",
     usedLib: opts.usedLib,
+    // Callers decide which captured values they splice; the action returns all.
+    bindAllProduced: true,
   });
+  ctx.coverage.stepsTotal = action.steps.length;
   const body: Stmt[] = [];
+  const nestedImports = new Map<string, ActionModule>();
   for (const step of action.steps) {
-    body.push(...renderStep(step, undefined, ctx).stmts);
+    const nested =
+      "use" in step ? opts.nestedModules?.get(useActionName(step)) : undefined;
+    if ("use" in step && nested) {
+      // A nested action is a call to its own module.
+      nestedImports.set(nested.fnName, nested);
+      if (nested.usesRunToken) ctx.usage.runToken = true;
+      for (const envName of nested.envNames) ctx.usage.envNames.add(envName);
+      const callId = step.id ?? useActionName(step);
+      propagateActionCoverage(ctx.coverage, nested, callId);
+      const passed = resolveActionCallVars(
+        nested.declaredKeys,
+        nested.defaults,
+        specVars,
+        useActionVars(step),
+      );
+      body.push(
+        comment(`step: ${oneLine(callId)} (action)`),
+        raw(
+          `await ${nested.fnName}(${formatActionCallArgs(passed, nested, ctx)});`,
+        ),
+      );
+      ctx.coverage.stepsExported += 1;
+      continue;
+    }
+    const rendered = renderStep(step, undefined, ctx);
+    if (rendered.exported) ctx.coverage.stepsExported += 1;
+    body.push(...rendered.stmts);
+  }
+  const produced = new Map(ctx.produced ?? []);
+  const produces = new Map<
+    string,
+    { source: "requests" | "evals" | "artifacts"; name: string }
+  >();
+  for (const key of produced.keys()) {
+    const [source, name] = key.split(":") as [
+      "requests" | "evals" | "artifacts",
+      string,
+    ];
+    produces.set(runtimeRefKey(source, name), { source, name });
+  }
+  body.unshift(...renderBindingDeclarations(ctx));
+  if (produced.size > 0) {
+    const group = (source: "requests" | "evals" | "artifacts"): string => {
+      const entries = [...produced]
+        .filter(([key]) => key.startsWith(`${source}:`))
+        .map(
+          ([key, ident]) =>
+            `${JSON.stringify(key.slice(source.length + 1))}: ${ident}`,
+        );
+      return entries.length > 0 ? `{ ${entries.join(", ")} }` : "{}";
+    };
+    body.push(
+      blank,
+      raw(
+        `return { requests: ${group("requests")}, evals: ${group("evals")}, artifacts: ${group("artifacts")} };`,
+      ),
+    );
+    opts.usedLib.add("splice");
+    ctx.usedLibNames?.add("type CairnActionBindings");
   }
   if (declaredKeys.length > 0) {
     body.unshift(
@@ -612,6 +984,13 @@ function emitActionModule(
   }
   if (ctx.usage.runToken) {
     body.unshift(raw(`const RUN_TOKEN = runToken;`), blank);
+  }
+  if (ctx.usage.splice || ctx.usage.unresolvedHelper) {
+    opts.usedLib.add("splice");
+    if (ctx.usage.splice) ctx.usedLibNames?.add("cairnSplice");
+    if (ctx.usage.unresolvedHelper) {
+      ctx.usedLibNames?.add("cairnUnresolvedSplice");
+    }
   }
 
   const fnName = safeIdent(loaded.action.name);
@@ -634,37 +1013,68 @@ function emitActionModule(
   const tokenParam = ctx.usage.runToken
     ? `, runToken${lang === "ts" ? ": string" : ""}`
     : "";
+  const returnType =
+    lang === "ts"
+      ? produced.size > 0
+        ? ": Promise<CairnActionBindings>"
+        : ": Promise<void>"
+      : "";
 
+  const bodySource = print(body);
+  const playwrightImports = [
+    ...(usesExpectCall(bodySource) ? ["expect"] : []),
+    ...(ctx.usesTestInfo ? ["test"] : []),
+    ...(lang === "ts" ? ["type Page"] : []),
+  ];
   const stmts: Stmt[] = [
     comment(
-      `Generated from reusable action ${JSON.stringify(loaded.action.name)} (${loaded.path}).`,
+      `Generated from reusable action ${JSON.stringify(loaded.action.name)} (${displayPath(opts.projectRoot, loaded.path)}).`,
     ),
     comment(`Re-exporting overwrites this file.`),
     blank,
-    raw(
-      lang === "js"
-        ? `import { expect } from "@playwright/test";`
-        : `import { expect, type Page } from "@playwright/test";`,
+    ...(playwrightImports.length > 0
+      ? [
+          raw(
+            `import { ${playwrightImports.join(", ")} } from "@playwright/test";`,
+          ),
+        ]
+      : []),
+    ...libImportStmts(ctx.usedLibNames ?? new Set(), lang),
+    ...[...nestedImports.values()].map((nested) =>
+      raw(
+        `import { ${nested.fnName} } from "./${nested.relPath
+          .replace(/^actions\//, "")
+          .replace(/\.ts$/, "")}";`,
+      ),
     ),
-    ...libImportStmts(opts.usedLib, lang),
     blank,
     block(
       `export async function ${fnName}(page${
         lang === "ts" ? ": Page" : ""
-      }${varsParam}${tokenParam})${lang === "ts" ? ": Promise<void>" : ""} {`,
+      }${varsParam}${tokenParam})${returnType} {`,
       body,
     ),
   ];
+  for (const libName of ctx.usedLib ?? []) opts.usedLib.add(libName);
 
+  const relPath = `actions/${loaded.action.name}${
+    lang === "js" ? ".js" : ".ts"
+  }`;
+  const source = `${print(stmts)}\n`;
+  addGeneratedSourceRisks(ctx.coverage, source);
+  finalizeCoverage(ctx.coverage);
+  assertNoLateBoundLeak(source, relPath);
   return {
     fnName,
-    relPath: `actions/${loaded.action.name}${lang === "js" ? ".js" : ".ts"}`,
-    source: `${print(stmts)}\n`,
+    relPath,
+    source,
     envNames: [...ctx.usage.envNames],
     usesRunToken: ctx.usage.runToken,
     hasVars: declaredKeys.length > 0,
     declaredKeys,
     defaults: loaded.actionDefaults,
+    produces,
+    coverage: ctx.coverage,
   };
 }
 
@@ -708,38 +1118,35 @@ function formatActionCallArgs(
   return args.join(", ");
 }
 
+const LIB_IMPORT_ORDER: Array<[PlaywrightLibModule, string[]]> = [
+  ["networkEvidence", ["createCairnNetworkEvidence"]],
+  ["hydration", ["verifiedFill", "verifiedType"]],
+  ["clickUntil", ["clickUntil"]],
+  ["verifier", ["loadCairnVerifier"]],
+  [
+    "splice",
+    ["cairnSplice", "cairnUnresolvedSplice", "type CairnActionBindings"],
+  ],
+  ["fixtures", ["cairnFixturePath"]],
+];
+
+/** Import only the lib helpers the module actually references. */
 function libImportStmts(
-  used: Set<PlaywrightLibModule>,
+  usedNames: Set<string>,
   lang: ExportLang,
   importRoot = "..",
 ): Stmt[] {
   const ext = lang === "js" ? ".js" : "";
   const stmts: Stmt[] = [];
-  if (used.has("networkEvidence")) {
-    stmts.push(
-      raw(
-        `import { createCairnNetworkEvidence } from ${JSON.stringify(`${importRoot}/lib/networkEvidence${ext}`)};`,
-      ),
+  for (const [module, names] of LIB_IMPORT_ORDER) {
+    const used = names.filter(
+      (name) =>
+        usedNames.has(name) && (lang === "ts" || !name.startsWith("type ")),
     );
-  }
-  if (used.has("hydration")) {
+    if (used.length === 0) continue;
     stmts.push(
       raw(
-        `import { verifiedFill, verifiedType } from ${JSON.stringify(`${importRoot}/lib/hydration${ext}`)};`,
-      ),
-    );
-  }
-  if (used.has("clickUntil")) {
-    stmts.push(
-      raw(
-        `import { clickUntil } from ${JSON.stringify(`${importRoot}/lib/clickUntil${ext}`)};`,
-      ),
-    );
-  }
-  if (used.has("verifier")) {
-    stmts.push(
-      raw(
-        `import { loadCairnVerifier } from ${JSON.stringify(`${importRoot}/lib/verifier${ext}`)};`,
+        `import { ${used.join(", ")} } from ${JSON.stringify(`${importRoot}/lib/${module}${ext}`)};`,
       ),
     );
   }
@@ -756,6 +1163,10 @@ function renderLibModule(name: PlaywrightLibModule, lang: ExportLang): string {
       return renderClickUntilRuntime(lang);
     case "verifier":
       return renderVerifierRuntime(lang);
+    case "splice":
+      return renderSpliceRuntime(lang);
+    case "fixtures":
+      return renderFixturesRuntime(lang);
   }
 }
 
@@ -792,10 +1203,6 @@ function resolvePreconditionCwd(
   return authoredCwd ? resolvePath(specDir, authoredCwd) : specDir;
 }
 
-function isDocumentaryPrecondition(run: string): boolean {
-  return /^\s*echo(\s|$)/.test(run);
-}
-
 function emitPreconditionCwd(
   specDir: string,
   authoredCwd: string | undefined,
@@ -803,7 +1210,8 @@ function emitPreconditionCwd(
 ): string {
   const abs = resolvePreconditionCwd(specDir, authoredCwd);
   if (!projectRoot) return JSON.stringify(abs);
-  const rel = relative(projectRoot, abs).replaceAll("\\", "/") || ".";
+  const rel =
+    relative(projectRoot, realpathNearest(abs)).split(sep).join("/") || ".";
   return `join(cairnProjectRoot(), ${JSON.stringify(rel)})`;
 }
 
@@ -853,33 +1261,19 @@ function aggregatePlaywrightCapture(specs: Spec[]): {
   return { screenshot, trace };
 }
 
-function relativeFromLibToProject(
+/**
+ * Relative path from the EXPORT ROOT to the source project root, computed on
+ * real paths (a symlinked out dir such as macOS `/tmp` → `/private/tmp` would
+ * otherwise produce a path that resolves somewhere that does not exist).
+ */
+export function relativeFromExportRootToProject(
   outDir: string | undefined,
-  projectRoot: string,
+  projectRoot: string | undefined,
 ): string | undefined {
-  if (!outDir) return undefined;
-  return relative(join(outDir, "lib"), projectRoot).replaceAll("\\", "/");
-}
-
-function renderProjectRootRuntime(
-  lang: ExportLang,
-  relFromLib: string | undefined,
-): string {
-  const ts = lang === "ts";
-  const fallback = relFromLib
-    ? `fileURLToPath(new URL(${JSON.stringify(relFromLib.endsWith("/") ? relFromLib : `${relFromLib}/`)}, import.meta.url))`
-    : `process.cwd()`;
-  return [
-    `// Generated by \`cairn export playwright --project\`.`,
-    `// Override with CAIRN_PROJECT_ROOT when the export is relocated.`,
-    `import { fileURLToPath } from "node:url";`,
-    ``,
-    `export function cairnProjectRoot()${ts ? ": string" : ""} {`,
-    `  if (process.env.CAIRN_PROJECT_ROOT) return process.env.CAIRN_PROJECT_ROOT;`,
-    `  return ${fallback};`,
-    `}`,
-    ``,
-  ].join("\n");
+  if (!outDir || !projectRoot) return undefined;
+  const from = realpathNearest(resolvePath(outDir));
+  const to = realpathNearest(resolvePath(projectRoot));
+  return relative(from, to).split(sep).join("/") || ".";
 }
 
 function collectEvalFiles(entries: Set<string>): ProjectVerifierFile[] {
@@ -916,6 +1310,7 @@ function renderPreconditionRuntime(lang: ExportLang): string {
     `// Generated by \`cairn export playwright --project\` — edit knowingly;`,
     `// Runs preconditions with Cairn's child-env and process-tree boundaries.`,
     `import { spawn, spawnSync } from "node:child_process";`,
+    `import { existsSync } from "node:fs";`,
     ``,
     ...(ts
       ? [
@@ -936,6 +1331,12 @@ function renderPreconditionRuntime(lang: ExportLang): string {
     }, options${ts ? ": RunPreconditionOptions" : ""})${
       ts ? ": Promise<void>" : ""
     } {`,
+    `  if (!existsSync(options.cwd)) {`,
+    `    throw new Error(`,
+    `      "Precondition cwd does not exist: " + options.cwd + ". " +`,
+    `        "Set CAIRN_PROJECT_ROOT to the Cairntrace project root (the directory holding the source specs); this export may have been moved.",`,
+    `    );`,
+    `  }`,
     `  const env = targetPreconditionEnv(options.env ?? {});`,
     `  await new Promise${ts ? "<void>" : ""}((resolve, reject) => {`,
     `    const windows = process.platform === "win32";`,
@@ -1088,6 +1489,10 @@ function renderConfig(
     `  use: {`,
     ...(baseUrl ? [`    baseURL: ${JSON.stringify(baseUrl)},`] : []),
     `    headless: true,`,
+    `    // Cairntrace bounds each step (default 30s); without these a stuck locator`,
+    `    // would consume the whole derived test timeout before failing.`,
+    `    actionTimeout: 30_000,`,
+    `    navigationTimeout: 30_000,`,
     `    // The app ships a strict CSP (script-src without unsafe-eval) which`,
     `    // blocks exported string-eval steps — standard test-context bypass.`,
     `    bypassCSP: true,`,
@@ -1111,7 +1516,21 @@ function renderConfig(
   return lines.join("\n");
 }
 
-function renderPackageJson(lang: ExportLang): string {
+const VERIFIER_SDK_SPECIFIER = /["']@thelacanians\/cairntrace\/verifier["']/;
+
+/** A copied verifier module that imports the verifier SDK needs the package. */
+function importsVerifierSdk(sourcePath: string): boolean {
+  try {
+    return VERIFIER_SDK_SPECIFIER.test(readFileSync(sourcePath, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+function renderPackageJson(
+  lang: ExportLang,
+  needs: { verifierSdk?: boolean } = {},
+): string {
   const scripts =
     lang === "ts"
       ? { test: "playwright test", typecheck: "tsc --noEmit" }
@@ -1122,6 +1541,11 @@ function renderPackageJson(lang: ExportLang): string {
   if (lang === "ts") {
     devDependencies["@types/node"] = "^22.20.1";
     devDependencies.typescript = "^5.9.3";
+  }
+  // Outside `cairn run` nothing redirects the SDK import to the runner's own
+  // copy, so the exported project installs the package that ships it.
+  if (needs.verifierSdk) {
+    devDependencies["@thelacanians/cairntrace"] = `^${CAIRN_VERSION}`;
   }
   return `${JSON.stringify(
     {
@@ -1329,11 +1753,19 @@ function isPathInside(root: string, candidate: string): boolean {
 function renderGlobalSetup(
   preconditions: Array<ProjectPrecondition & { specDir: string }>,
   lang: ExportLang,
+  projectRoot?: string,
 ): string {
-  const names = preconditions
-    .map(
-      (p) =>
-        `//   - ${p.name ?? oneLine(p.run).slice(0, 80)} (cwd: ${p.cwd ?? p.specDir}; timeout: ${p.timeoutMs ?? DEFAULT_PRECONDITION_TIMEOUT_MS}ms)`,
+  const executable = preconditions.filter(
+    (p) => !isDocumentaryPrecondition(p.run),
+  );
+  const names = executable
+    .map((p) =>
+      humanizeSentinels(
+        `//   - ${p.name ?? oneLine(p.run).slice(0, 80)} (cwd: ${displayPath(
+          projectRoot,
+          p.cwd ?? p.specDir,
+        )}; timeout: ${p.timeoutMs ?? DEFAULT_PRECONDITION_TIMEOUT_MS}ms)`,
+      ),
     )
     .join("\n");
   return `// Generated by \`cairn export playwright --project\`.
@@ -1341,9 +1773,11 @@ function renderGlobalSetup(
 // Per-spec preconditions run in each test file's beforeAll (mirroring the
 // Cairntrace per-spec semantics — a single global gate would let backend
 // debris pile up between tests). This hook is the place for ONE-TIME suite
-// setup (auth warmup, seeding); it currently only logs. Known per-spec
-// preconditions, for reference:
-${names}
+// setup (auth warmup, seeding); it currently only logs.${
+    names
+      ? ` Known per-spec\n// preconditions (run by beforeAll, not here), for reference:\n${names}`
+      : ""
+  }
 export default async function globalSetup()${
     lang === "ts" ? ": Promise<void>" : ""
   } {
@@ -1367,6 +1801,8 @@ function renderProjectReadme(
   lang: ExportLang,
   extras: {
     into?: boolean;
+    fixtures?: boolean;
+    manifest?: boolean;
     baseUrl?: string;
     testIdAttribute?: string;
     viewport?: { width: number; height: number };
@@ -1393,13 +1829,23 @@ function renderProjectReadme(
               ]
             : []),
           "playwright.config.*   serial, bypassCSP, derived timeout, globalSetup wired",
-          "global-setup.*        spec preconditions (data resets, pipeline gates)",
+          "global-setup.*        one-time suite hook (per-spec preconditions run in beforeAll)",
         ]),
     "preconditions.*       filtered env + process-tree timeout runner",
     "lib/                  fill retry, click.until, verifier loader, evidence",
     "actions/              shared UI flows (login, …) imported by tests",
     "verifiers/            node-context durable-processing verifiers (copied)",
     "evals/                copied eval.file sources (embedded at export time)",
+    ...(extras.fixtures
+      ? [
+          "fixtures/             copied upload files (resolved via lib/fixtures)",
+        ]
+      : []),
+    ...(extras.manifest
+      ? [
+          ".cairn-export.json    export manifest; `cairn export playwright --check <dir>` detects drift",
+        ]
+      : []),
     "tests/                one spec file per Cairntrace spec (folders preserved)",
     "```",
     "",
@@ -1461,7 +1907,7 @@ function renderProjectReadme(
     "- `CAIRN_RUN_TOKEN` — pins the per-run uniqueness token (default: random per run).",
     "- `CAIRN_COMPLETION_TIMEOUT_MS` — widens verifier completion waits on slow machines.",
     "- `SKIP_PRECONDITIONS=1` — skip per-file beforeAll preconditions (wire your own in CI).",
-    "- `CAIRN_PROJECT_ROOT` — source repo root for precondition cwd (defaults to the path baked at export).",
+    "- `CAIRN_PROJECT_ROOT` — Cairntrace source project root for precondition cwd and verifier specDir (default: resolved relative to this export, as recorded at export time; preconditions fail fast with guidance when it does not exist).",
     "- `MONGO_URI` — point verifiers at a remote MongoDB instead of local docker.",
     "",
     "## Actions",
@@ -1481,7 +1927,10 @@ function renderProjectReadme(
   for (const s of specs) {
     lines.push(
       `### ${s.name} (\`${s.file}\`)`,
-      `- coverage: steps ${s.coverage.stepsExported}/${s.coverage.stepsTotal}, outcomes ${s.coverage.outcomesExported}/${s.coverage.outcomesTotal}`,
+      `- coverage: steps ${s.coverage.stepsExported}/${s.coverage.stepsTotal}, outcomes ${s.coverage.outcomesExported}/${s.coverage.outcomesTotal}${
+        s.coverage.fixme ? " — **test.fixme**" : ""
+      }`,
+      ...coverageReadmeLines(s.coverage),
       `- test timeout: ${formatDuration(s.testTimeoutMs)} (derived from sequential budgets; 4h ceiling)`,
       ...(s.preconditions.length > 0
         ? [`- preconditions:`, ...s.preconditions.map((p) => `  - ${p}`)]
@@ -1500,4 +1949,35 @@ function dirOf(p: string): string {
 function formatDuration(ms: number): string {
   const minutes = ms / 60_000;
   return Number.isInteger(minutes) ? `${minutes}m` : `${minutes.toFixed(1)}m`;
+}
+
+/** README bullets for hard skips, diagnostic skips, and semantic risks. */
+function coverageReadmeLines(coverage: ExportCoverage): string[] {
+  const lines: string[] = [];
+  const hard = coverage.skips.filter((entry) => !entry.soft);
+  if (hard.length > 0) {
+    lines.push(`- skipped (marks test.fixme):`);
+    for (const entry of hard) {
+      lines.push(
+        `  - [${entry.kind}]${entry.id ? ` ${entry.id}` : ""}: ${entry.reason}`,
+      );
+    }
+  }
+  if (coverage.diagnosticSkips.length > 0) {
+    lines.push(`- diagnostic skips (no effect on pass/fail):`);
+    for (const entry of coverage.diagnosticSkips) {
+      lines.push(
+        `  - [${entry.kind}]${entry.id ? ` ${entry.id}` : ""}: ${entry.reason}`,
+      );
+    }
+  }
+  if (coverage.semanticRisks.length > 0) {
+    lines.push(`- semantic risks:`);
+    for (const risk of coverage.semanticRisks) {
+      lines.push(
+        `  - ${risk.kind}${risk.id ? ` (${risk.id})` : ""}: ${risk.detail}`,
+      );
+    }
+  }
+  return lines.map(humanizeSentinels);
 }

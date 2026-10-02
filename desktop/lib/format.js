@@ -17,6 +17,9 @@ const STATUS_TONES = {
   skip: "muted",
   unknown: "muted",
   interrupted: "warn",
+  // Refused by the environment policy before anything ran: not a failure,
+  // so it has a tone of its own instead of "bad".
+  refused: "refused",
   failed: "bad",
   fail: "bad",
   errored: "bad",

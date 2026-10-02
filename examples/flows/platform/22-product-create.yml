@@ -1,7 +1,9 @@
 # Platform form flow — create a product through the real form.
 #
 # Demonstrates: chained reusable actions (login + parameterized create),
-# per-run unique SKU via ${run.token}, redirect flash + outcome evidence.
+# per-run unique SKU via ${run.token}, redirect flash + outcome evidence, and a
+# spec teardown that deletes the product again (pass or fail), so the seeded
+# catalog count in 21-product-catalog stays exact across runs.
 version: 1
 name: product_create
 intent: an operator creates a product through the form and sees it confirmed
@@ -41,4 +43,10 @@ steps:
     wait:
       text: "Product created: ${vars.productSku}"
       timeoutMs: 10000
+teardown:
+  - id: delete_created_product
+    run:
+      node: ../../fixtures/demo-product.mjs
+      args: [delete, "${vars.productSku}"]
+      timeoutMs: 30000
 contractHash: sha256:e1143485c4f58826f54f19fc3b6c46a7e8c6d79ef7ebcd978419498990490488

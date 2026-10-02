@@ -174,4 +174,66 @@ describe("exportPlaywright goldens", () => {
       }).source,
     );
   });
+
+  it("late-bound needles, eval, fill, and bound runtime splices", () => {
+    const s = spec({
+      version: 1,
+      name: "golden_late_bound_text",
+      intent:
+        "run tokens and secrets in waits, when, eval, fill; bound splices",
+      steps: [
+        { id: "go", open: "https://example.com/orders" },
+        {
+          id: "create",
+          request: {
+            method: "POST",
+            url: "/api/orders",
+            body: { ref: "order-__CAIRN_RUN_TOKEN__" },
+            assign: "created",
+            expectStatus: 201,
+          },
+        },
+        {
+          id: "read_state",
+          eval: {
+            js: "return { id: window.__orderId, token: '__CAIRN_RUN_TOKEN__' };",
+            assign: "state",
+          },
+        },
+        {
+          id: "wait_order",
+          wait: { text: "Order __CAIRN_RUN_TOKEN__ created", timeoutMs: 5000 },
+        },
+        {
+          id: "dismiss_banner",
+          when: "text:Welcome back __CAIRN_SECRET_REF__DEMO_USER__",
+          click: { by: "role", role: "button", name: "Dismiss" },
+        },
+        {
+          id: "fill_reference",
+          fill: {
+            by: "label",
+            name: "Reference",
+            value: "${requests.created.body.id}-__CAIRN_RUN_TOKEN__",
+          },
+        },
+        {
+          id: "open_detail",
+          open: "/orders/${evals.state.value.id}",
+        },
+      ],
+      outcomes: [
+        {
+          id: "detail_shows_token",
+          description: "detail page shows the run token",
+          verify: { text: { contains: "__CAIRN_RUN_TOKEN__" } },
+        },
+      ],
+    });
+    const source = exportPlaywright(s, {
+      sourcePath: "/tmp/late-text.yml",
+    }).source;
+    expect(source).not.toMatch(/__CAIRN_[A-Z_]+__/i);
+    checkGolden("late-bound-text", source);
+  });
 });

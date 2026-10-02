@@ -330,3 +330,262 @@ describe("locatorFromSnapshotRef", () => {
     });
   });
 });
+
+async function journalEvents(
+  dir: string,
+): Promise<Array<Record<string, unknown>>> {
+  const { readFile } = await import("node:fs/promises");
+  return (await readFile(join(dir, "events.ndjson"), "utf8"))
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+describe("accompany session journal", () => {
+  it("journals decisions and applies accepted ones to a draft copy, never the source", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const specPath = await writeClickSpec("journal_choose");
+    const source = await readFile(specPath, "utf8");
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("0 visible matches");
+    const { open, handle } = await openAccompany({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+    expect(open.status).toBe("needs_choice");
+    const dir = handle.journal!;
+    expect(dir).toBe(join(artifactRoot, "_sessions", open.sessionId));
+    const session = JSON.parse(
+      await readFile(join(dir, "session.json"), "utf8"),
+    );
+    expect(session).toMatchObject({
+      version: 1,
+      kind: "accompany",
+      status: "open",
+      specPath,
+      backend: "mock",
+    });
+
+    // A miss, then a hit.
+    backend.failNextStep("0 visible matches");
+    expect(
+      (
+        await chooseAccompany(open.sessionId, {
+          by: "role",
+          role: "button",
+          name: "Nope",
+        })
+      ).status,
+    ).toBe("needs_choice");
+    const next = await chooseAccompany(open.sessionId, {
+      by: "role",
+      role: "button",
+      name: "OK",
+    });
+    expect(next.status).toBe("completed");
+    const status = statusAccompany(open.sessionId)!;
+    expect(status.decisions?.map((d) => [d.stepId, d.ok])).toEqual([
+      ["go", false],
+      ["go", true],
+    ]);
+    expect(status.draftPath).toBe(join(dir, "draft.spec.yml"));
+
+    const events = await journalEvents(dir);
+    const choices = events.filter((e) => e["type"] === "action.performed");
+    expect(choices.map((e) => [e["action"], e["ok"], e["stepId"]])).toEqual([
+      ["choose", false, "go"],
+      ["choose", true, "go"],
+    ]);
+    expect(events.find((e) => e["type"] === "step.recorded")).toMatchObject({
+      index: 2,
+      step: { id: "go", click: { by: "role", role: "button", name: "OK" } },
+      origin: { file: specPath, stepIndex: 0, stepId: "go" },
+    });
+    const draft = await readFile(join(dir, "draft.spec.yml"), "utf8");
+    expect(draft).toContain("name: OK");
+    expect(draft).toContain("intent: click a button");
+    expect(await readFile(specPath, "utf8")).toBe(source);
+
+    await closeAccompany(open.sessionId);
+    const closed = JSON.parse(
+      await readFile(join(dir, "session.json"), "utf8"),
+    );
+    expect(closed.status).toBe("closed");
+    expect(closed.draftPath).toBe("draft.spec.yml");
+  });
+
+  it("records a snapshot @ref choice as role + name, and writes draftTo", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const specPath = await writeClickSpec("journal_ref");
+    const backend = new MockBrowserBackend();
+    backend.setSnapshot(`- button "Continue" [ref=e9]`);
+    backend.failNextStep("0 visible matches");
+    const draftTo = join(artifactRoot, "flows", "_drafts", "journal_ref.yml");
+    const { open } = await openAccompany({
+      specPath,
+      backend,
+      artifactRoot,
+      journal: { draftTo },
+    });
+    await chooseAccompany(open.sessionId, { by: "selector", selector: "@e9" });
+    expect(statusAccompany(open.sessionId)?.decisions?.[0]?.locator).toEqual({
+      by: "role",
+      role: "button",
+      name: "Continue",
+    });
+    expect(statusAccompany(open.sessionId)?.draftPath).toBe(draftTo);
+    const draft = await readFile(draftTo, "utf8");
+    expect(draft).toContain("name: Continue");
+    expect(draft).not.toContain("@e9");
+    await closeAccompany(open.sessionId);
+  });
+
+  it("refuses draftTo pointing at the source spec without leaking a slot", async () => {
+    const specPath = await writeClickSpec("journal_self");
+    await expect(
+      openAccompany({
+        specPath,
+        backend: new MockBrowserBackend(),
+        artifactRoot,
+        journal: { draftTo: specPath },
+      }),
+    ).rejects.toThrow(/never written|must not be the source/);
+    expect(listAccompany()).toEqual([]);
+  });
+
+  it("refuses a draftTo that is the source by another name (link, case)", async () => {
+    const { link, symlink } = await import("node:fs/promises");
+    const { existsSync } = await import("node:fs");
+    const specPath = await writeClickSpec("journal_alias");
+    const aliases = [
+      join(artifactRoot, "hard.yml"),
+      join(artifactRoot, "soft.yml"),
+    ];
+    await link(specPath, aliases[0]!);
+    await symlink(specPath, aliases[1]!);
+    const upper = join(artifactRoot, "JOURNAL_ALIAS.yml");
+    // A case-insensitive volume (the macOS default) sees the source here.
+    if (existsSync(upper)) aliases.push(upper);
+    for (const draftTo of aliases) {
+      await expect(
+        openAccompany({
+          specPath,
+          backend: new MockBrowserBackend(),
+          artifactRoot,
+          journal: { draftTo },
+        }),
+      ).rejects.toThrow(/must not be the source/);
+    }
+    expect(listAccompany()).toEqual([]);
+  });
+
+  it("keeps the spec's placeholders in the draft copy (valid YAML)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { parse } = await import("yaml");
+    const specPath = await writeClickSpec(
+      "journal_placeholders",
+      `  - id: api
+    request:
+      method: GET
+      url: "https://app.example.test/api/me?token=\${vars.t}"
+      headers:
+        Authorization: "Bearer \${env.API_TOKEN}"
+`,
+    );
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("0 visible matches");
+    const draftTo = join(artifactRoot, "drafts", "journal_placeholders.yml");
+    const { open, handle } = await openAccompany({
+      specPath,
+      backend,
+      artifactRoot,
+      vars: { t: "abc" },
+      env: { ...process.env, API_TOKEN: "api-token-secret-value" },
+      journal: { draftTo },
+    });
+    const done = await chooseAccompany(open.sessionId, {
+      by: "role",
+      role: "button",
+      name: "OK",
+    });
+    expect(done.status).toBe("completed");
+    for (const path of [draftTo, join(handle.journal!, "draft.spec.yml")]) {
+      const text = await readFile(path, "utf8");
+      const steps = parse(text).steps;
+      expect(steps[0].click.name).toBe("OK");
+      expect(steps[1].request).toMatchObject({
+        url: "https://app.example.test/api/me?token=${vars.t}",
+        headers: { Authorization: "Bearer ${env.API_TOKEN}" },
+      });
+      expect(text).not.toContain("api-token-secret-value");
+    }
+    await closeAccompany(open.sessionId);
+  });
+
+  it("journals a replacement for an imported action step without touching either file", async () => {
+    const { mkdir, readFile } = await import("node:fs/promises");
+    await mkdir(join(artifactRoot, "actions"), { recursive: true });
+    const actionPath = join(artifactRoot, "actions", "press_go.yml");
+    await writeFile(
+      actionPath,
+      `version: 1
+name: press_go
+steps:
+  - click: { by: role, role: button, name: Go }
+`,
+    );
+    const specPath = join(artifactRoot, "uses_action.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: uses_action
+intent: click through an action
+coldStart: guest
+imports: [actions/press_go.yml]
+outcomes:
+  - id: clean
+    description: mock console stays clean
+    verify: { console: { errorsMax: 0 } }
+steps:
+  - use: press_go
+`,
+    );
+    const actionSource = await readFile(actionPath, "utf8");
+    const backend = new MockBrowserBackend();
+    backend.failNextStep("0 visible matches");
+    const { open, handle } = await openAccompany({
+      specPath,
+      backend,
+      artifactRoot,
+    });
+    await chooseAccompany(open.sessionId, {
+      by: "role",
+      role: "button",
+      name: "Proceed",
+    });
+    const recorded = (await journalEvents(handle.journal!)).find(
+      (e) => e["type"] === "step.recorded",
+    );
+    expect(recorded).toMatchObject({
+      step: { click: { by: "role", role: "button", name: "Proceed" } },
+      origin: { file: actionPath, stepIndex: 0 },
+    });
+    // Only spec-level steps are patched into the draft copy.
+    expect(statusAccompany(open.sessionId)?.draftPath).toBeUndefined();
+    expect(await readFile(actionPath, "utf8")).toBe(actionSource);
+    await closeAccompany(open.sessionId);
+  });
+
+  it("journal: false keeps the session journal-less", async () => {
+    const specPath = await writeClickSpec("no_journal");
+    const { open, handle } = await openAccompany({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      journal: false,
+    });
+    expect(open.status).toBe("completed");
+    expect(handle.journal).toBeUndefined();
+    await closeAccompany(open.sessionId);
+  });
+});

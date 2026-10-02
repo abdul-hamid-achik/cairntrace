@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { isSeq, parseDocument } from "yaml";
 import type { BrowserBackend } from "../../adapters/browserBackend";
+import { resolveSpecRuntimeContext } from "../config/runtimeContext";
 import { parseSpec } from "../parser/parseSpec";
 import { runSpec, type ProgressListener } from "../runner/Runner";
 import type { PatchOp } from "../schema/heal.v1";
@@ -25,6 +26,25 @@ export interface HealOptions {
    * listener `cairn run` uses, so heal is never a silent re-run.
    */
   listener?: ProgressListener;
+  /** Environment override for the heal run(s) (`--env`), same as `cairn run`. */
+  environmentOverride?: string;
+  /** Explicit cairntrace.config.yml (`--config`); disables auto-discovery. */
+  configPath?: string;
+  /** Runtime `${vars.X}` overrides (`--var`); win over config env vars. */
+  vars?: Record<string, string | number | boolean>;
+}
+
+/** The config/env/vars slice of HealOptions, forwarded to every run + parse. */
+function runtimeOpts(
+  opts: HealOptions,
+): Pick<HealOptions, "environmentOverride" | "configPath" | "vars"> {
+  return {
+    ...(opts.environmentOverride !== undefined
+      ? { environmentOverride: opts.environmentOverride }
+      : {}),
+    ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+    ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
+  };
 }
 
 export interface HealOutput {
@@ -75,6 +95,7 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     backend: opts.backend,
     ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
     ...(opts.listener ? { listener: opts.listener } : {}),
+    ...runtimeOpts(opts),
   });
 
   if (result.status === "passed") {
@@ -105,8 +126,21 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
   }
 
   // Re-parse the spec with origins so we can map the resolved-step index back
-  // to the file that owns it (main spec OR an imported action file).
-  const parsed = await parseSpec(opts.specPath);
+  // to the file that owns it (main spec OR an imported action file). Resolve
+  // config/env/vars the same way the run did, or a `${vars.X}` spec cannot be
+  // re-parsed at all.
+  const runtime = await resolveSpecRuntimeContext(opts.specPath, {
+    ...(opts.environmentOverride !== undefined
+      ? { envOverride: opts.environmentOverride }
+      : {}),
+    ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+    ...(opts.vars !== undefined ? { vars: opts.vars } : {}),
+  });
+  const parsed = await parseSpec(opts.specPath, {
+    vars: runtime.vars,
+    configDir: runtime.configDir,
+    ...(runtime.baseUrl ? { baseUrl: runtime.baseUrl } : {}),
+  });
   const origin = parsed.origins[failedStepIdx];
   if (!origin) {
     return {
@@ -552,6 +586,34 @@ export interface HealVerifyResult {
   replay?: string;
 }
 
+/** POSIX shell quoting: bare when safe, else single-quoted. */
+function shellQuote(value: string): string {
+  if (/^[\w./:=@%+,-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The `cairn run` that replays a verified heal with the same runtime inputs
+ * (`--env`, `--config`, every `--var`), shell-quoted so it can be pasted.
+ */
+export function healReplayCommand(
+  opts: Pick<
+    HealOptions,
+    "specPath" | "environmentOverride" | "configPath" | "vars"
+  >,
+): string {
+  const args = ["cairn", "run", shellQuote(opts.specPath)];
+  if (opts.environmentOverride) {
+    args.push("--env", shellQuote(opts.environmentOverride));
+  }
+  if (opts.configPath) args.push("--config", shellQuote(opts.configPath));
+  for (const [key, value] of Object.entries(opts.vars ?? {})) {
+    args.push("--var", shellQuote(`${key}=${String(value)}`));
+  }
+  args.push("--json");
+  return args.join(" ");
+}
+
 /**
  * Verify a heal transactionally (SPEC §7.2): propose ops, apply them to the
  * owning file, cold-start rerun the spec, and accept only if the rerun passes.
@@ -567,7 +629,7 @@ export async function healVerify(opts: HealOptions): Promise<HealVerifyResult> {
     ops: out.ops,
     verified: false,
     confidence: "low",
-    replay: `cairn run ${opts.specPath} --json`,
+    replay: healReplayCommand(opts),
   };
 
   if (out.ops.length === 0) {
@@ -592,6 +654,7 @@ export async function healVerify(opts: HealOptions): Promise<HealVerifyResult> {
       backend: opts.backend,
       ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
       ...(opts.listener ? { listener: opts.listener } : {}),
+      ...runtimeOpts(opts),
     });
   } catch (e) {
     // Rerun errored — rollback.

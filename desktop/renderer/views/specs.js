@@ -5,9 +5,16 @@
  * editor is deliberately plain: cairn's `spec verify` is the authority on
  * whether a spec is valid, so this view saves the file and immediately shows
  * what the CLI says, including contract-hash refusals (exit 6).
+ *
+ * Environment policy: each spec shows its `requires:` (env list, mutates),
+ * and the detail lets the user pick the environment to run on. When the
+ * environment policy would refuse the spec there, a warning says why and Run
+ * asks once — it never blocks: `cairn run` is the authority, and a refused
+ * run simply ends with status "refused" (exit 7).
  */
 (function bootSpecsView() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h, state, actions, api, fmt, toast } = Studio;
 
   /**
@@ -25,6 +32,103 @@
       state.selectedSpec = state.specs[0].path;
     paint(root);
     if (state.selectedSpec) await loadSelected(root);
+    // Suite locks come and go while the view is open (app.js polls them).
+    // Internal re-renders (Rescan) replace the listener instead of stacking.
+    offLocks?.();
+    offLocks = Studio.on("locks", () => applyLockState());
+    applyLockState();
+    return {
+      destroy() {
+        offLocks?.();
+        offLocks = null;
+      },
+    };
+  }
+
+  /** @type {(() => void) | null} */
+  let offLocks = null;
+
+  /**
+   * The environment picked in the detail toolbar ("" = the run settings /
+   * the spec's own environment / the config default, like the CLI).
+   */
+  let runEnv = "";
+  /**
+   * Opt-in states (name → granted?) for the open spec, from spec:read and
+   * spec:write; `optInsPath` is the spec they answer for.
+   */
+  /** @type {Record<string, boolean>} */
+  let optIns = {};
+  /** @type {string | null} */
+  let optInsPath = null;
+
+  /**
+   * Would `cairn run` refuse this spec on the environment it resolves to?
+   * Same rules as the CLI (lib/policy.js); a warning, never a block.
+   * @param {any} summary
+   */
+  function policyVerdict(summary) {
+    const config = state.project?.config ?? null;
+    const resolved = CairnPolicy.resolveEnvironment({
+      override: runEnv || state.settings?.run?.env || null,
+      specEnvironment: summary?.environment ?? null,
+      defaultEnvironment: config?.defaultEnvironment ?? null,
+    });
+    const envConfig = (config?.environments ?? []).find(
+      (/** @type {any} */ entry) => entry.name === resolved.name,
+    );
+    return {
+      ...CairnPolicy.evaluateRequires({
+        requires: summary?.requires ?? null,
+        env: resolved.name,
+        policy: envConfig?.policy ?? null,
+        optIns,
+      }),
+      source: resolved.source,
+    };
+  }
+
+  /**
+   * Paint the policy warning under the toolbar for the open spec.
+   * @param {any} summary
+   */
+  function paintPolicyWarning(summary) {
+    const node = document.getElementById("spec-policy-warning");
+    if (!node) return;
+    const verdict = policyVerdict(summary);
+    node.classList.toggle("hidden", !verdict.refused);
+    node.textContent = verdict.refused
+      ? `cairn would refuse this spec on "${verdict.env}": ${verdict.summary}. Run still starts it — the CLI decides, and a refused run ends with status refused (exit 7) before anything starts.`
+      : "";
+  }
+
+  /**
+   * Disable every Run button while a configured suite lock exists, and say
+   * who holds it (launch safety: the task runner's lock is the authority).
+   */
+  function applyLockState() {
+    const active = state.locks?.active ?? [];
+    const locked = active.length > 0;
+    for (const node of document.querySelectorAll("[data-run-button]")) {
+      const button = /** @type {HTMLButtonElement} */ (node);
+      if (button.dataset.titleOriginal === undefined)
+        button.dataset.titleOriginal = button.title ?? "";
+      button.disabled = locked;
+      button.title = locked
+        ? `suite in progress (${active[0].path}) — Run is disabled while the lock exists`
+        : button.dataset.titleOriginal;
+    }
+    const banner = document.getElementById("spec-lock-banner");
+    if (!banner) return;
+    banner.classList.toggle("hidden", !locked);
+    banner.textContent = locked
+      ? `Suite in progress: ${active
+          .map(
+            (lock) =>
+              `${lock.path}${lock.owner ? ` (owner: ${lock.owner})` : ""}`,
+          )
+          .join(", ")} — Run is disabled until the lock is released.`
+      : "";
   }
 
   /** @param {HTMLElement} root */
@@ -63,17 +167,26 @@
       ),
     );
 
+    const notice = Studio.setupNotice();
+    if (notice) root.appendChild(notice);
+
     if (!state.specs.length) {
       root.appendChild(
         Studio.empty(
           "No specs found",
-          "Cairntrace looks for YAML files declaring `steps:` plus `intent:` or `outcomes:`. Open a project that contains them, or scaffold one.",
+          "Cairntrace looks for YAML files declaring `steps:` plus `intent:` or `outcomes:`. Open a project that contains them, or scaffold a first spec here.",
           [
             h("button", {
               class: "btn btn-primary",
               type: "button",
               text: "Open project…",
               onClick: () => Studio.emit("menu:open-project"),
+            }),
+            h("button", {
+              class: "btn",
+              type: "button",
+              text: "New spec…",
+              onClick: () => void scaffoldDialog(root),
             }),
           ],
         ),
@@ -88,7 +201,19 @@
       onInput: (event) => filterList(event.target.value),
     });
 
-    const listHost = h("div", { class: "panel spec-list" });
+    const listHost = h("div", {
+      class: "panel spec-list",
+      role: "listbox",
+      ariaLabel: "specs",
+    });
+    // Arrows move between specs, Enter/Space opens one; one Tab stop.
+    Studio.rovingKeys(listHost, {
+      items: () => /** @type {HTMLElement[]} */ ([
+        ...listHost.querySelectorAll(".spec-item"),
+      ]),
+      roving: true,
+      onActivate: (item) => item.click(),
+    });
     const detailHost = h("div", { id: "spec-detail" });
 
     root.appendChild(
@@ -147,9 +272,21 @@
           "div",
           {
             class: `spec-item${selected ? " selected" : ""}`,
+            role: "option",
+            ariaSelected: selected ? "true" : "false",
+            tabindex: "-1",
+            dataset: { path: spec.path },
             onClick: () => {
               state.selectedSpec = spec.path;
               paintList(host, needle);
+              // The list was rebuilt: keep keyboard focus on the choice.
+              /** @type {HTMLElement | undefined} */ (
+                [...host.querySelectorAll(".spec-item")].find(
+                  (item) =>
+                    /** @type {HTMLElement} */ (item).dataset.path ===
+                    spec.path,
+                )
+              )?.focus();
               void loadSelected(document.getElementById("view"));
             },
           },
@@ -165,6 +302,13 @@
             summary.contractHash ? Studio.tag("hashed", "ok") : null,
             summary.parseError ? Studio.tag("yaml error", "bad") : null,
           ),
+          summary.requires
+            ? h("div", {
+                class: "path requires-line",
+                title: "requires (environment policy)",
+                text: `requires ${CairnPolicy.describeRequires(summary.requires) ?? "—"}`,
+              })
+            : null,
           summary.intent
             ? h("div", {
                 class: "intent",
@@ -175,11 +319,19 @@
           h(
             "div",
             { class: "path" },
-            `${(summary.outcomes ?? []).length} outcomes · ${(summary.steps ?? []).length} steps · ${fmt.relativeTime(spec.mtimeMs)}`,
+            `${(summary.outcomes ?? []).length} outcomes · ${(summary.steps ?? []).length} steps · `,
+            Studio.relTime(spec.mtimeMs, { prefix: "edited " }),
           ),
         ),
       );
     }
+    const rows = /** @type {HTMLElement[]} */ ([
+      ...host.querySelectorAll(".spec-item"),
+    ]);
+    Studio.setRovingStop(
+      rows,
+      rows.find((row) => row.dataset.path === state.selectedSpec),
+    );
   }
 
   /**
@@ -201,7 +353,10 @@
     state.specText = spec.text;
     state.specSummary = spec.summary;
     state.specDirty = false;
+    optIns = spec.optIns ?? {};
+    optInsPath = spec.path ?? state.selectedSpec;
     paintDetail(host, spec, root);
+    applyLockState();
   }
 
   /**
@@ -235,6 +390,12 @@
     const coldStart = coldStartStatus(summary, spec.text);
 
     host.appendChild(
+      h("div", {
+        id: "spec-lock-banner",
+        class: "lock-banner hidden",
+      }),
+    );
+    host.appendChild(
       h(
         "div",
         { class: "editor-wrap" },
@@ -255,6 +416,7 @@
             : Studio.tag("no contractHash", "warn"),
           Studio.tag(coldStart.label, coldStart.tone),
           h("div", { class: "spacer" }),
+          envPicker(summary),
           h("button", {
             class: "btn",
             type: "button",
@@ -280,12 +442,14 @@
             type: "button",
             text: "Run",
             title: "cairn run with the current run settings",
+            dataset: { runButton: "1" },
             onClick: () => void runSpec(spec.path, false),
           }),
           h("button", {
             class: "btn",
             type: "button",
             text: "Run headed",
+            dataset: { runButton: "1" },
             onClick: () => void runSpec(spec.path, false, { headed: true }),
           }),
           h("button", {
@@ -293,12 +457,15 @@
             type: "button",
             text: "Cold-start run",
             title: "cairn run --cold-start",
+            dataset: { runButton: "1" },
             onClick: () => void runSpec(spec.path, false, { coldStart: true }),
           }),
           h("button", {
             class: "btn",
             type: "button",
             text: "Heal…",
+            title: "cairn spec heal re-runs the spec (preconditions included)",
+            dataset: { runButton: "1" },
             onClick: () => void healDialog(spec.path),
           }),
           h("button", {
@@ -316,6 +483,11 @@
           style: { marginBottom: "8px" },
           text: spec.path,
         }),
+        h("div", {
+          id: "spec-policy-warning",
+          class: "policy-warning hidden",
+          role: "status",
+        }),
         editor,
         findingsHost,
         h("div", { class: "section-title" }, "Contract"),
@@ -327,10 +499,23 @@
             Studio.keyValue([
               ["intent", summary.intent ?? "—"],
               ["environment", summary.environment ?? "(config default)"],
+              [
+                "requires",
+                h("span", {
+                  id: "spec-requires-value",
+                  text: requiresText(summary.requires),
+                }),
+              ],
               ["imports", (summary.imports ?? []).join(", ") || "—"],
               ["session.resume", summary.session?.resume ?? "—"],
               ["coldStart", summary.coldStart ?? "—"],
               ["tags", (summary.tags ?? []).join(", ") || "—"],
+              ...((summary.fixtures ?? []).length
+                ? [["fixtures", summary.fixtures.join(", ")]]
+                : []),
+              ...((summary.wait ?? []).length
+                ? [["preconditions.wait", summary.wait.join(" → ")]]
+                : []),
             ]),
             h(
               "div",
@@ -360,6 +545,7 @@
                         ...(outcome.verifiers ?? []).map((verifier) =>
                           Studio.tag(verifier, "info"),
                         ),
+                        outcome.polled ? Studio.tag("poll", "muted") : null,
                       ),
                     ),
                   ),
@@ -405,6 +591,38 @@
                   ),
                 )
               : h("p", { class: "cell-dim", text: "no steps declared" }),
+            (summary.teardown ?? []).length
+              ? h(
+                  "div",
+                  h(
+                    "div",
+                    { class: "section-title" },
+                    `Teardown (${summary.teardown.length})${
+                      summary.teardownFailsRun ? " · failRun" : ""
+                    }`,
+                  ),
+                  h(
+                    "div",
+                    { class: "panel" },
+                    h(
+                      "div",
+                      { class: "panel-body tight" },
+                      summary.teardown.map((step) =>
+                        h(
+                          "div",
+                          { class: "list-row" },
+                          h("span", {
+                            class: "mono",
+                            style: { fontSize: "11.5px" },
+                            text: step.id,
+                          }),
+                          Studio.tag(step.kind, "muted"),
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+              : null,
             summary.parseError
               ? h(
                   "div",
@@ -419,7 +637,94 @@
       ),
     );
 
+    paintPolicyWarning(summary);
     if (root) void root;
+  }
+
+  /** @param {any} requires */
+  function requiresText(requires) {
+    return (
+      CairnPolicy.describeRequires(requires) ??
+      "— (any environment the policy allows)"
+    );
+  }
+
+  /**
+   * A save changed the spec on disk: everything the policy warning and the
+   * pre-Run check read (`requires`, opt-ins) follows it, and so do the
+   * Contract panel's requires and the list row's requires line.
+   * @param {string} file
+   * @param {any} result spec:write's answer
+   */
+  function adoptSaved(file, result) {
+    if (!result?.summary) return;
+    state.specSummary = result.summary;
+    optIns = result.optIns ?? {};
+    optInsPath = file;
+    const entry = (state.specs ?? []).find((spec) => spec.path === file);
+    if (entry) entry.summary = { ...entry.summary, ...result.summary };
+    const value = document.getElementById("spec-requires-value");
+    if (value) value.textContent = requiresText(result.summary.requires);
+    const row = /** @type {HTMLElement | undefined} */ (
+      [...document.querySelectorAll(".spec-item")].find(
+        (item) => /** @type {HTMLElement} */ (item).dataset.path === file,
+      )
+    );
+    if (row) {
+      const described = CairnPolicy.describeRequires(result.summary.requires);
+      let line =
+        /** @type {HTMLElement | null} */ (row.querySelector(".requires-line"));
+      if (!described) line?.remove();
+      else {
+        if (!line) {
+          line = h("div", {
+            class: "path requires-line",
+            title: "requires (environment policy)",
+          });
+          row.querySelector(".name")?.after(line);
+        }
+        line.textContent = `requires ${described}`;
+      }
+    }
+    paintPolicyWarning(result.summary);
+  }
+
+  /**
+   * "run on" environment select: the default (what the CLI would resolve)
+   * plus every environment the config defines, with its policy.
+   * @param {any} summary
+   * @returns {HTMLElement}
+   */
+  function envPicker(summary) {
+    const config = state.project?.config ?? null;
+    const fallback = CairnPolicy.resolveEnvironment({
+      override: state.settings?.run?.env || null,
+      specEnvironment: summary?.environment ?? null,
+      defaultEnvironment: config?.defaultEnvironment ?? null,
+    });
+    const names = (config?.environments ?? []).map(
+      (/** @type {any} */ env) => env.name,
+    );
+    if (runEnv && !names.includes(runEnv)) runEnv = "";
+    const select = Studio.select(
+      [
+        ["", `default (${fallback.name})`],
+        ...(config?.environments ?? []).map((/** @type {any} */ env) => {
+          const policy = CairnPolicy.describePolicy(env.policy);
+          return [env.name, policy ? `${env.name} · ${policy}` : env.name];
+        }),
+      ],
+      {
+        value: runEnv,
+        ariaLabel: "environment to run on",
+        title: "the environment Run, Run headed, Cold-start run and Heal use",
+        onChange: (/** @type {Event} */ event) => {
+          runEnv = /** @type {HTMLSelectElement} */ (event.target).value;
+          paintPolicyWarning(state.specSummary ?? summary);
+        },
+      },
+    );
+    return h("label", { class: "env-picker" }, "run on", select);
   }
 
   /**
@@ -476,7 +781,8 @@
   async function save(file, editor, findingsHost) {
     if (!file) return;
     try {
-      await api.call("spec:write", file, editor.value);
+      const written = await api.call("spec:write", file, editor.value);
+      adoptSaved(file, written);
       state.specDirty = false;
       editor.classList.remove("dirty");
       toast("Spec saved", file.split("/").pop(), "ok", 2200);
@@ -624,6 +930,28 @@
    * @param {Record<string, any>} [overrides]
    */
   async function runSpec(file, _stamp, overrides) {
+    // Opt-ins answer for one spec: re-read when they belong to another
+    // (⌘R can fire for a spec this view never opened).
+    if (optInsPath !== file || !state.specSummary) {
+      try {
+        const spec = await api.call("spec:read", file);
+        state.specSummary = spec.summary;
+        optIns = spec.optIns ?? {};
+        optInsPath = file;
+      } catch {
+        // cairn run is the authority; an unreadable spec is its to report
+      }
+    }
+    const verdict = policyVerdict(state.specSummary);
+    if (verdict.refused) {
+      const proceed = await Studio.confirm({
+        title: `cairn would refuse this spec on "${verdict.env}"`,
+        body: `${verdict.summary}.\n\nRun anyway? The CLI decides: a refused run ends with status refused (exit 7) before any service, precondition or browser starts.`,
+        confirmLabel: "Run anyway",
+      });
+      if (!proceed) return;
+    }
+    if (runEnv) overrides = { ...overrides, env: runEnv };
     if (state.specDirty) {
       const proceed = await Studio.confirm({
         title: "Run with unsaved changes?",
@@ -664,6 +992,8 @@
       editor.value = reloaded.text;
       state.specText = reloaded.text;
       state.specSummary = reloaded.summary;
+      optIns = reloaded.optIns ?? {};
+      optInsPath = file;
       state.specDirty = false;
       editor.classList.remove("dirty");
       toast(
@@ -696,6 +1026,7 @@
         spec: file,
         backend: backend || null,
         apply: !dryRun,
+        ...(runEnv ? { env: runEnv } : {}),
       });
       state.specFindings = null;
       const reloaded = await api.call("spec:read", file);
@@ -862,4 +1193,15 @@
 
   Studio.views = Studio.views || {};
   Studio.views.specs = { id: "specs", label: "Specs", glyph: "≡", render };
+  /**
+   * ⌘R (menu "Run Focused Spec"): the Run button's path for the focused
+   * spec — the "run on" environment, the policy warning, the unsaved-edits
+   * question — from any view.
+   */
+  Studio.specsView = {
+    runFocused: () =>
+      state.selectedSpec
+        ? runSpec(state.selectedSpec, false)
+        : Promise.resolve(),
+  };
 })();

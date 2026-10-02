@@ -1,0 +1,6 @@
+{"ts":"2026-09-01T12:00:00.000Z","type":"run.started","runId":"2026-09-01T12-00-00-000Z_reset_data_0a0b0c","spec":"reset_data"}
+{"ts":"2026-09-01T12:00:00.010Z","type":"precondition.started","name":"seed_fixture","timeoutMs":120000}
+{"ts":"2026-09-01T12:00:01.510Z","type":"precondition.run","name":"seed_fixture","exitCode":0,"durationMs":1500,"timedOut":false,"output":"seeded 3 rows\n"}
+{"ts":"2026-09-01T12:00:01.520Z","type":"precondition.started","name":"quiesce","timeoutMs":60000}
+{"ts":"2026-09-01T12:01:01.600Z","type":"precondition.run","name":"quiesce","durationMs":60080,"timedOut":true,"signal":"SIGKILL","output":"waiting for 4 jobs\nwaiting for 4 jobs\nwaiting for 2 jobs\n"}
+{"ts":"2026-09-01T12:01:01.700Z","type":"run.errored","runId":"2026-09-01T12-00-00-000Z_reset_data_0a0b0c","phase":"precondition","name":"quiesce","durationMs":61700,"timedOut":true,"signal":"SIGKILL"}

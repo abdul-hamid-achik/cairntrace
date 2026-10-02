@@ -68,6 +68,8 @@ export const VerifierDocSchema = z
       "file",
       "escape-hatch",
       "process",
+      /** Reads a config datasource or a value the run holds (mongo/temporal/http/value). */
+      "data",
     ]),
     summary: z.string().min(1),
     yamlExample: z.string().min(1),
@@ -98,6 +100,9 @@ export const StepDocSchema = z
       "batch",
       "eval",
       "monitor",
+      "run",
+      "expect",
+      "capture",
     ]),
     kind: z.enum([
       "navigation",
@@ -108,6 +113,8 @@ export const StepDocSchema = z
       "artifact",
       "escape-hatch",
       "process",
+      /** Typed in-flow checks and captured values (expect / capture). */
+      "assertion",
     ]),
     summary: z.string().min(1),
     yamlExample: z.string().min(1),

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   clackLine,
   completionMark,
+  makeJsonNarrationListener,
   makePlainListener,
   resolveProgressMode,
   summarizeStepError,
@@ -113,6 +114,110 @@ describe("onRunStart env header", () => {
   });
 });
 
+function recordingSink() {
+  const entries: Array<{
+    level: "info" | "warn";
+    msg: string;
+    fields: Record<string, unknown>;
+  }> = [];
+  return {
+    entries,
+    sink: {
+      info: (msg: string, fields: Record<string, unknown> = {}) =>
+        entries.push({ level: "info", msg, fields }),
+      warn: (msg: string, fields: Record<string, unknown> = {}) =>
+        entries.push({ level: "warn", msg, fields }),
+    },
+  };
+}
+
+describe("makeJsonNarrationListener", () => {
+  it("emits leveled milestones tagged with runId and batch position", () => {
+    const { entries, sink } = recordingSink();
+    const listener = makeJsonNarrationListener({
+      sink,
+      batch: { index: 2, total: 3 },
+    });
+    const spec = { name: "checkout" } as never;
+    listener.onRunStart?.(spec, "run_1", "/runs/run_1", "mock", "staging");
+    listener.onPreconditionStart?.("quiesce", 1_800_000);
+    listener.onPreconditionFinish?.("quiesce", 0, 754_000);
+    listener.onStepStart?.(
+      0,
+      { when: "text:Accept", click: { by: "text", text: "Accept" } },
+      "banner",
+    );
+    listener.onStepFinish?.(0, "banner", "skipped", 3, undefined);
+    listener.onStepFinish?.(1, "save", "failed", 40, "x".repeat(300));
+    listener.onOutcomesStart?.(1);
+    listener.onOutcomeStart?.({ id: "saved" } as never);
+    listener.onOutcomeFinish?.({ id: "saved" } as never, {
+      passed: false,
+      expected: "text contains Saved",
+      actual: "body was empty\nsecond line",
+    });
+
+    expect(entries.map((e) => [e.level, e.msg])).toEqual([
+      ["info", "run start"],
+      ["info", "precondition started"],
+      ["info", "precondition finished"],
+      ["info", "step finished"],
+      ["warn", "step finished"],
+      ["info", "outcomes evaluating"],
+      ["info", "outcome verifying"],
+      ["warn", "outcome failed"],
+    ]);
+    for (const entry of entries) {
+      expect(entry.fields).toMatchObject({
+        runId: "run_1",
+        specIndex: 2,
+        specTotal: 3,
+      });
+    }
+    expect(entries[1]!.fields).toMatchObject({
+      name: "quiesce",
+      budgetMs: 1_800_000,
+    });
+    expect(entries[2]!.fields).toMatchObject({ status: "ok", exitCode: 0 });
+    expect(entries[3]!.fields).toMatchObject({
+      stepId: "banner",
+      status: "skipped",
+      when: "text:Accept",
+    });
+    expect(String(entries[4]!.fields.error)).toHaveLength(200);
+    expect(entries[7]!.fields).toMatchObject({
+      outcomeId: "saved",
+      status: "failed",
+      expected: "text contains Saved",
+      actual: "body was empty",
+    });
+  });
+
+  it("logs failed or timed-out preconditions and non-passing runs at warn", () => {
+    const { entries, sink } = recordingSink();
+    const listener = makeJsonNarrationListener({ sink });
+    listener.onPreconditionFinish?.("guard", undefined, 1_250, {
+      timedOut: true,
+      signal: "SIGKILL",
+    });
+    listener.onRunEnd?.({
+      status: "errored",
+      durationMs: 1_300,
+      summary: "errored in precondition",
+      runDir: "/runs/r",
+    } as never);
+    expect(entries[0]).toMatchObject({
+      level: "warn",
+      fields: { status: "timed out (SIGKILL)", timedOut: true },
+    });
+    expect(entries[1]).toMatchObject({
+      level: "warn",
+      msg: "run end",
+      fields: { status: "errored", summary: "errored in precondition" },
+    });
+  });
+});
+
 describe("completionMark", () => {
   it("renders the clack glyph family, bare without color", () => {
     // Glyphs follow clack's unicode detection (◆/■/▲ or their ASCII
@@ -181,5 +286,54 @@ describe("resolveProgressMode", () => {
     // escape hatch.
     process.env.CAIRN_PROGRESS = "plain";
     expect(resolveProgressMode(undefined)).toBe("plain");
+  });
+});
+
+describe("progress messages", () => {
+  const outcome = {
+    id: "tasks_terminal",
+    description: "tasks terminal",
+    verify: { url: { matches: "/" } },
+  } as const;
+
+  it("narrates precondition and verifier progress in plain mode", () => {
+    const lines: string[] = [];
+    const listener = makePlainListener({ write: (s) => lines.push(s) });
+    listener.onPreconditionProgress?.("quiesce", "3/9 queues idle");
+    listener.onOutcomeProgress?.(outcome, "47/120 tasks terminal");
+    expect(lines).toEqual([
+      expect.stringMatching(
+        /^\[\d\d:\d\d:\d\d\] precondition quiesce: 3\/9 queues idle\n$/,
+      ),
+      expect.stringMatching(
+        /^\[\d\d:\d\d:\d\d\] outcome tasks_terminal: 47\/120 tasks terminal\n$/,
+      ),
+    ]);
+    // The plain stderr listener keeps its byte-stable shape: no run-end line.
+    expect(listener.onRunEnd).toBeUndefined();
+  });
+
+  it("emits progress entries in JSON narration", () => {
+    const entries: Array<{ msg: string; fields?: Record<string, unknown> }> =
+      [];
+    const sink = {
+      info: (msg: string, fields?: Record<string, unknown>) =>
+        entries.push({ msg, fields }),
+      warn: (msg: string, fields?: Record<string, unknown>) =>
+        entries.push({ msg, fields }),
+    };
+    const listener = makeJsonNarrationListener({ sink });
+    listener.onPreconditionProgress?.("quiesce", "3/9");
+    listener.onOutcomeProgress?.(outcome, "47/120");
+    expect(entries).toEqual([
+      {
+        msg: "precondition progress",
+        fields: { name: "quiesce", message: "3/9" },
+      },
+      {
+        msg: "outcome progress",
+        fields: { outcomeId: "tasks_terminal", message: "47/120" },
+      },
+    ]);
   });
 });

@@ -76,6 +76,15 @@ export function refreshAgentContextCodeMatches(runDir: string): boolean {
 }
 
 /**
+ * Whether a run's trace is a Playwright Trace Viewer zip (`playwright
+ * show-trace`). agent-browser traces are Chrome trace-event JSON — named
+ * `traces/agent-browser-trace.json`, or `.zip` in older runs.
+ */
+export function isTraceViewerZip(backend: string, tracePath: string): boolean {
+  return backend !== "agent-browser" && tracePath.endsWith(".zip");
+}
+
+/**
  * Render the agent-neutral run context (plan §13 `agent_context.md`).
  * No agent-specific phrasing — any agent that can read markdown can use this.
  */
@@ -213,16 +222,30 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     "```",
   );
 
-  // Trace viewer hint — Playwright traces are viewable directly; agent-browser
-  // traces ship as a .zip in the same Trace Viewer format.
+  // Trace viewer hint — only a Playwright trace is a Trace Viewer zip.
+  // agent-browser writes Chrome trace-event JSON (older runs named it
+  // `.zip`), which `playwright show-trace` cannot open: Perfetto can.
   if (result.artifacts.trace) {
-    lines.push(
-      "",
-      "## View the trace",
-      "```bash",
-      `bunx playwright show-trace ${result.runDir}/${result.artifacts.trace}`,
-      "```",
-    );
+    const tracePath = `${result.runDir}/${result.artifacts.trace}`;
+    if (isTraceViewerZip(result.backend, result.artifacts.trace)) {
+      lines.push(
+        "",
+        "## View the trace",
+        "```bash",
+        `bunx playwright show-trace ${tracePath}`,
+        "```",
+      );
+    } else {
+      lines.push(
+        "",
+        "## View the trace",
+        `- ${tracePath} is Chrome trace-event JSON${
+          result.artifacts.trace.endsWith(".zip")
+            ? " (despite the .zip name)"
+            : ""
+        }: open https://ui.perfetto.dev and load the file, or chrome://tracing.`,
+      );
+    }
   }
 
   // Video hint — .webm files can be opened directly or fed to vidtrace for

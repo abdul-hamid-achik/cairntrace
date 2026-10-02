@@ -4,6 +4,8 @@ import type {
   ConsoleEntry,
   NetworkEntry,
 } from "../../../adapters/browserBackend";
+import type { EnvironmentDatasourceSet } from "../../datasources/resolve";
+import type { MongoDriverModule } from "../../datasources/mongo";
 import type { ProcessMetricsSummary } from "../../monitor/processSampler";
 import type { Verifier } from "../../schema/verifier.v1";
 
@@ -77,6 +79,54 @@ export interface VerifierContext {
    * `process` verifier. Absent when the run wasn't monitored.
    */
   processMetrics?: ProcessMetricsSummary;
+  /**
+   * Config datasources of the active environment (top-level merged with
+   * `environments.<env>.datasources`), for the mongo/temporal/http verifiers.
+   */
+  datasources?: EnvironmentDatasourceSet;
+  /** Active environment name (datasource error messages). */
+  envName?: string;
+  /**
+   * Values captured during the run: `capture` steps and verifier `assign`s.
+   * Read as `${captures.<name>…}`. Verifiers with `assign` write here, so
+   * later outcomes see earlier ones.
+   */
+  captures?: Record<string, unknown>;
+  /** `network.assign` results, read as `${network.<name>.at}` etc. */
+  networkAssigns?: Record<string, NetworkAssignment>;
+  /** Fixture outputs, read as `${fixtures.<name>.<key>}` (fixtures registry). */
+  fixtureOutputs?: Record<string, Record<string, unknown>>;
+  /** `run` step outputs, read as `${runs.<assign>…}`. */
+  runOutputs?: Record<string, unknown>;
+  /** ISO start of the run, read as `${run.startedAt}`. */
+  runStartedAt?: string;
+  /** `browser.testIdAttribute` for `by: testid` in table/expect/capture. */
+  testIdAttribute?: string;
+  /** Test seam: the optional `mongodb` driver module. */
+  loadMongoDriver?: () => Promise<MongoDriverModule | undefined>;
+  /** Run cancellation: polling stops and in-flight I/O is aborted. */
+  signal?: AbortSignal;
+}
+
+/** What a `network` verifier with `assign` exposes to later outcomes. */
+export interface NetworkAssignment {
+  /** ISO time of the last matching request. */
+  at?: string;
+  /** ISO time of the first matching request. */
+  firstAt?: string;
+  count: number;
+  url?: string;
+  method?: string;
+  status?: number;
+  /** Parsed JSON request body of the last match, when there was one. */
+  body?: unknown;
+}
+
+/** One poll sample, as recorded in `outcomes/<id>.raw.json`. */
+export interface PollAttemptRecord {
+  at: string;
+  ok: boolean;
+  summary: string;
 }
 
 /**
@@ -96,8 +146,15 @@ export interface VerifierEvaluation {
   expected: string;
   /** Short description of what was observed. Bullet list as a single string OK. */
   actual: string;
-  /** Deep / unstructured data — written to outcomes/<id>.raw.json (script verifier only). */
+  /**
+   * Deep / unstructured data — written to outcomes/<id>.raw.json (script,
+   * datasource, value and http verifiers; any verifier evaluated with poll).
+   */
   raw?: unknown;
+  /** Evaluations performed under `poll` (absent without poll). */
+  attempts?: number;
+  /** Wall time spent polling, in ms (absent without poll). */
+  polledMs?: number;
 }
 
 export type VerifierEvaluator = (

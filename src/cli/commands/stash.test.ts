@@ -33,50 +33,84 @@ afterAll(async () => {
 });
 
 describe("maybeAutoStash", () => {
+  // A fake fcheap that records every argv and fails saves (best-effort path).
+  // Never the real binary: the vitest guard fails a test that reaches it.
+  let fakeRoot: string;
+  let argsLog: string;
+  let binaryBeforeSuite: string | undefined;
+  const saveCalls = async (): Promise<string[]> =>
+    (await readFile(argsLog, "utf8").catch(() => ""))
+      .split("\n")
+      .filter((line) => line.startsWith("save ") && !line.includes("--help"));
+
+  beforeAll(async () => {
+    fakeRoot = await mkdtemp(join(tmpdir(), "cairntrace-auto-stash-fake-"));
+    argsLog = join(fakeRoot, "args.log");
+    const fake = join(fakeRoot, "fcheap");
+    await writeFile(
+      fake,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> '${argsLog}'
+echo "simulated save failure" >&2
+exit 3
+`,
+    );
+    await chmod(fake, 0o755);
+    binaryBeforeSuite = process.env.FCHEAP_BIN;
+    process.env.FCHEAP_BIN = fake;
+  });
+
+  afterAll(async () => {
+    if (binaryBeforeSuite === undefined) delete process.env.FCHEAP_BIN;
+    else process.env.FCHEAP_BIN = binaryBeforeSuite;
+    await rm(fakeRoot, { recursive: true, force: true });
+  });
+
   it("does nothing when stashOnFailure is false and config is absent", async () => {
-    // maybeAutoStash returns early; no fcheap call is made.
-    // We can't easily assert "no process.exit" without mocking execa,
-    // but we can verify it doesn't throw and doesn't exit.
-    await maybeAutoStash("/tmp/fake-run-dir", "run-123", "my_spec", {
+    const before = (await saveCalls()).length;
+    const result = await maybeAutoStash(dir, "run-123", "my_spec", {
       stashOnFailure: false,
     });
-    // If we reach here, the function returned without exiting.
-    expect(true).toBe(true);
+    expect(result).toBeUndefined();
+    expect(await saveCalls()).toHaveLength(before);
   });
 
   it("does nothing when config.stash is not enabled", async () => {
-    await maybeAutoStash("/tmp/fake-run-dir", "run-123", "my_spec", {
+    const before = (await saveCalls()).length;
+    await maybeAutoStash(dir, "run-123", "my_spec", {
       stashOnFailure: false,
       configStash: { enabled: false, autoStash: "on-failure" },
     });
-    expect(true).toBe(true);
+    expect(await saveCalls()).toHaveLength(before);
   });
 
   it("does nothing when config.stash.autoStash is 'never'", async () => {
-    await maybeAutoStash("/tmp/fake-run-dir", "run-123", "my_spec", {
+    const before = (await saveCalls()).length;
+    await maybeAutoStash(dir, "run-123", "my_spec", {
       stashOnFailure: false,
       configStash: { enabled: true, autoStash: "never" },
     });
-    expect(true).toBe(true);
+    expect(await saveCalls()).toHaveLength(before);
   });
 
   it("attempts to stash when stashOnFailure is true (best-effort, non-fatal)", async () => {
-    // stashOnFailure=true triggers the fcheap call. fcheap likely isn't installed
-    // in CI, so the call fails — but maybeAutoStash is best-effort and should
-    // write to stderr without throwing or exiting.
-    // We just verify it doesn't throw.
-    await maybeAutoStash("/tmp/fake-run-dir", "run-456", "my_spec", {
+    const before = (await saveCalls()).length;
+    const result = await maybeAutoStash(dir, "run-456", "my_spec", {
       stashOnFailure: true,
     });
-    expect(true).toBe(true);
+    expect(result).toMatchObject({ ok: false, reason: "save-failed" });
+    expect(await saveCalls()).toHaveLength(before + 1);
   });
 
   it("attempts to stash when config.stash.autoStash is on-failure and enabled", async () => {
-    await maybeAutoStash("/tmp/fake-run-dir", "run-789", "my_spec", {
+    const before = (await saveCalls()).length;
+    await maybeAutoStash(dir, "run-789", "my_spec", {
       stashOnFailure: false,
       configStash: { enabled: true, autoStash: "on-failure", tags: ["audit"] },
     });
-    expect(true).toBe(true);
+    const calls = await saveCalls();
+    expect(calls).toHaveLength(before + 1);
+    expect(calls.at(-1)).toContain("--tag my_spec --tag audit");
   });
 
   it("adds a safe receipt and event without changing finalized run.json", async () => {
@@ -212,13 +246,14 @@ describe("isFcheapAvailable", () => {
   });
 });
 
-describe("file.cheap save contract", () => {
+// Spawns bin/cairn; vitest's 5s default is too tight under full-suite load.
+describe("file.cheap save contract", { timeout: 30_000 }, () => {
   it("accepts canonical fcheap save --json output through the real CLI boundary", async () => {
     const fixtureRoot = await mkdtemp(
       join(tmpdir(), "cairntrace-fcheap-contract-"),
     );
     const runsRoot = join(fixtureRoot, "runs");
-    const runId = "checkout-2026-07-23T120000Z";
+    const runId = "2026-07-23T12-00-00-000Z_checkout_a1b2c3";
     const runDir = join(runsRoot, runId);
     const fakeBin = join(fixtureRoot, "bin");
     await mkdir(runDir, { recursive: true });
@@ -302,7 +337,7 @@ exit 2
       join(tmpdir(), "cairntrace-fcheap-partial-save-"),
     );
     const runsRoot = join(fixtureRoot, "runs");
-    const runId = "audit-2026-07-24T010203Z";
+    const runId = "2026-07-24T01-02-03-000Z_audit_a1b2c3";
     const runDir = join(runsRoot, runId);
     const fakeFcheap = join(fixtureRoot, "fcheap");
     await mkdir(runDir, { recursive: true });
@@ -363,7 +398,8 @@ exit 2
   });
 });
 
-describe("file.cheap restore contract", () => {
+// Spawns bin/cairn; vitest's 5s default is too tight under full-suite load.
+describe("file.cheap restore contract", { timeout: 30_000 }, () => {
   it("preserves the structured receipt when restored files fail verification", async () => {
     const fixtureRoot = await mkdtemp(
       join(tmpdir(), "cairntrace-fcheap-restore-mismatch-"),

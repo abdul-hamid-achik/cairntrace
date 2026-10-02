@@ -239,6 +239,10 @@ export class PlaywrightAdapter implements BrowserBackend {
         const { saveAs, assign: _assign, timeoutMs, ...loc } = step.download;
         const timeout = timeoutMs ?? this.opts.defaultTimeoutMs ?? 30_000;
         const downloadPromise = page.waitForEvent("download", { timeout });
+        // A failed click leaves this wait unawaited: without a handler its
+        // later rejection (page closed, timeout) is an unhandled rejection
+        // that crashes the process with exit 1 after the result was printed.
+        downloadPromise.catch(() => undefined);
         await this.resolveLocator(loc as Locator).click({ timeout });
         const download = await downloadPromise;
         await download.saveAs(saveAs);

@@ -1,0 +1,12 @@
+{"ts":"2026-10-01T08:59:50.000Z","type":"invocation.started","invocationId":"2026-10-01T08-59-50-000Z_4242_abc123","planned":7}
+{"ts":"2026-10-01T08:59:50.010Z","type":"phase.changed","phase":"services","budgetMs":600000}
+{"ts":"2026-10-01T08:59:50.020Z","type":"log.opened","kind":"services","name":"docker","path":"logs/services-docker.log"}
+{"ts":"2026-10-01T08:59:50.030Z","type":"services.docker.start","message":"docker compose up -d"}
+{"ts":"2026-10-01T08:59:55.000Z","type":"services.docker.healthcheck","message":"healthy"}
+{"ts":"2026-10-01T08:59:55.010Z","type":"services.docker.ready","message":"docker ready"}
+{"ts":"2026-10-01T08:59:55.020Z","type":"services.seed.fail","message":"exit 3","data":{"exitCode":3}}
+{"ts":"2026-10-01T08:59:56.000Z","type":"phase.changed","phase":"before-hooks"}
+{"ts":"2026-10-01T08:59:56.010Z","type":"hook.started","hook":"before","index":1,"command":"./tools/warm-cache.sh","logPath":"logs/hook-before-01.log"}
+{"ts":"2026-10-01T08:59:58.000Z","type":"hook.finished","hook":"before","index":1,"exitCode":0,"durationMs":1990,"outputTail":"cache warm\n"}
+{"ts":"2026-10-01T09:00:05.000Z","type":"run.heartbeat","phase":"steps","elapsedMs":15000,"pid":4242}
+{"ts":"2026-10-01T09:30:00.000Z","type":"invocation.finished","invocationId":"2026-10-01T08-59-50-000Z_4242_abc123","status":"failed"}

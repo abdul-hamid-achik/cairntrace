@@ -1,13 +1,18 @@
-import { resolve } from "node:path";
-import { loadConfig } from "../../core/config/loader";
+import {
+  type BrowseTarget,
+  redactBrowseUrl,
+  resolveBrowseTarget,
+} from "../../core/discovery/browseTarget";
 import {
   collectLocatorInventory,
   type LocatorInventory,
 } from "../../core/snapshot/locatorInventory";
-import { isRelativeUrl, joinUrl } from "../../core/runner/url";
 import { type BackendChoice, createBackend } from "../backendFactory";
 import { trackBackend } from "../cleanup";
 import { emit, resolveFormat } from "../format";
+import { log } from "../logger";
+import { browseErrorExitCode } from "./discover";
+import { backendOpts, parseVarFlags } from "./run";
 
 export interface SnapshotCommandOptions {
   roles?: boolean;
@@ -20,6 +25,8 @@ export interface SnapshotCommandOptions {
   provider?: string;
   device?: string;
   config?: string;
+  /** Repeatable `--var key=value` overrides for `${vars.X}` in the URL. */
+  var?: string[];
   format?: string;
   json?: boolean;
   yaml?: boolean;
@@ -38,17 +45,23 @@ export async function snapshotCommand(
   opts: SnapshotCommandOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
-  const backend = createBackend({
-    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
-    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
-    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
-    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
-    ...(opts.device !== undefined ? { device: opts.device } : {}),
-  });
+  // Same config/env/var resolution as `cairn discover`: URL, baseUrl and the
+  // project `browser:` block (testIdAttribute!) come from cairntrace.config.yml.
+  let target: BrowseTarget;
+  try {
+    target = await resolveSnapshotTarget(targetUrl, opts);
+  } catch (e) {
+    process.stderr.write(`cairn snapshot: ${(e as Error).message}\n`);
+    process.exit(browseErrorExitCode(e));
+    return;
+  }
+  for (const warning of target.warnings) log.warn(warning);
+
+  const backend = createBackend(backendOpts(opts, target.browser));
   const untrack = trackBackend(backend);
 
   try {
-    const resolvedUrl = await resolveSnapshotUrl(targetUrl, opts);
+    const resolvedUrl = target.url;
     // Use the object-form open with waitUntil so SPA inventory isn't captured
     // pre-hydration (a bare open snapshots immediately, before the framework
     // renders interactive elements).
@@ -58,7 +71,12 @@ export async function snapshotCommand(
         : { open: resolvedUrl };
     const opened = await backend.runStep(openStep);
     if (!opened.ok) {
-      throw new Error(opened.stderr || opened.stdout || "open step failed");
+      throw new Error(
+        redactBrowseUrl(
+          target,
+          opened.stderr || opened.stdout || "open step failed",
+        ),
+      );
     }
 
     const includeRoles = opts.roles || (!opts.roles && !opts.testids);
@@ -66,11 +84,15 @@ export async function snapshotCommand(
     const inventory = await collectLocatorInventory(backend, {
       roles: includeRoles,
       testids: includeTestIds,
+      ...(target.testIdAttribute
+        ? { testIdAttribute: target.testIdAttribute }
+        : {}),
     });
     const report: SnapshotReport = {
       status: "ok",
       requestedUrl: targetUrl,
-      url: await backend.getUrl(),
+      // The page URL can carry a secret the resolved URL had; never print it.
+      url: redactBrowseUrl(target, await backend.getUrl()),
       backend: backend.name,
       ...inventory,
     };
@@ -86,24 +108,29 @@ export async function snapshotCommand(
   }
 }
 
+/**
+ * Resolve the snapshot target (URL + project browser settings) from config.
+ * `--var` values feed `${vars.X}` in the URL.
+ */
+export async function resolveSnapshotTarget(
+  targetUrl: string,
+  opts: Pick<SnapshotCommandOptions, "config" | "env" | "var"> = {},
+): Promise<BrowseTarget> {
+  const vars = parseVarFlags(opts.var);
+  return resolveBrowseTarget({
+    url: targetUrl,
+    label: "snapshot",
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
+    ...(opts.config !== undefined ? { config: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  });
+}
+
 export async function resolveSnapshotUrl(
   targetUrl: string,
-  opts: Pick<SnapshotCommandOptions, "config" | "env"> = {},
+  opts: Pick<SnapshotCommandOptions, "config" | "env" | "var"> = {},
 ): Promise<string> {
-  if (!isRelativeUrl(targetUrl)) return targetUrl;
-
-  const loaded = await loadConfig(
-    resolve(process.cwd(), "__cairntrace_snapshot__.yml"),
-    opts.config,
-  );
-  const envName = opts.env ?? loaded?.config.defaultEnvironment ?? "local";
-  const baseUrl = loaded?.config.environments[envName]?.baseUrl;
-  if (!baseUrl) {
-    throw new Error(
-      `relative snapshot URL "${targetUrl}" requires environments.${envName}.baseUrl`,
-    );
-  }
-  return joinUrl(baseUrl, targetUrl);
+  return (await resolveSnapshotTarget(targetUrl, opts)).url;
 }
 
 function snapshotToMarkdown(report: SnapshotReport): string {
@@ -131,9 +158,15 @@ function snapshotToMarkdown(report: SnapshotReport): string {
   }
 
   if (report.testids) {
-    lines.push("", "## Test IDs");
+    const attribute = report.testIdAttribute ?? "data-testid";
+    lines.push(
+      "",
+      attribute === "data-testid"
+        ? "## Test IDs"
+        : `## Test IDs (${attribute})`,
+    );
     if (report.testids.length === 0) {
-      lines.push("- No data-testid attributes found");
+      lines.push(`- No ${attribute} attributes found`);
     } else {
       for (const entry of report.testids) {
         const count =
@@ -144,8 +177,10 @@ function snapshotToMarkdown(report: SnapshotReport): string {
         const sample = entry.textSamples[0]
           ? ` text: ${entry.textSamples[0]}`
           : "";
+        // `by: testid` reads browser.testIdAttribute at run time, so the
+        // first-class locator stays portable; the raw selector is kept too.
         lines.push(
-          `- ${entry.testId}${count} -> { by: selector, selector: ${entry.selector} } tags: ${tags}${sample}`,
+          `- ${entry.testId}${count} -> { by: testid, testid: ${entry.testId} } (selector: ${entry.selector}) tags: ${tags}${sample}`,
         );
       }
     }

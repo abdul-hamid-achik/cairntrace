@@ -9,6 +9,7 @@ import { contextCommand } from "./commands/context";
 import { diffCommand } from "./commands/diff";
 import { logsCommand } from "./commands/logs";
 import { statsCommand } from "./commands/stats";
+import { catalogCommand } from "./commands/catalog";
 import { doctorCommand } from "./commands/doctor";
 import { docsCommand, DOC_TOPICS } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
@@ -17,10 +18,18 @@ import { exportBriefCommand } from "./commands/exportBrief";
 import { importPlaywrightCommand } from "./commands/import";
 import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
-import { runCommand } from "./commands/run";
+import { configureRunCommand, runCommand } from "./commands/run";
 import { snapshotCommand } from "./commands/snapshot";
-import { discoverCommand } from "./commands/discover";
+import {
+  discoverCommand,
+  discoverExportCommand,
+  discoverSessionsCommand,
+} from "./commands/discover";
+import { finishCommand } from "./commands/spec/finish";
 import { healCommand } from "./commands/spec/heal";
+import { lintCommand } from "./commands/spec/lint";
+import { promoteCommand } from "./commands/spec/promote";
+import { agentKitCommand } from "./commands/init";
 import { scaffoldCommand } from "./commands/spec/scaffold";
 import { verifyCommand } from "./commands/spec/verify";
 import {
@@ -30,11 +39,18 @@ import {
   stashSaveCommand,
   stashSearchCommand,
 } from "./commands/stash";
+import { pinCommand, unpinCommand } from "./commands/pin";
+import { publishCommand } from "./commands/publishCommand";
 import { investigateCommand, auditCommand } from "./commands/investigate";
 import { annotateCommand } from "./commands/annotate";
 import { isTvaultAvailable, getTvaultKeys } from "./commands/secrets";
 import { configValidateCommand } from "./commands/config/validate";
 import { servicesStatusCommand } from "./commands/services/status";
+import { servicesUpCommand } from "./commands/services/up";
+import { servicesDownCommand } from "./commands/services/down";
+import { waitCommand } from "./commands/wait";
+import { fixturesCommand } from "./commands/fixtures";
+import { verifierSchemaCommand } from "./commands/verifier";
 import { CAIRN_VERSION } from "./version";
 import { configureLoggerFromFlags } from "./logger";
 
@@ -81,128 +97,9 @@ function addFormatFlags(c: Command): Command {
     .option("--md", "shorthand for --format md");
 }
 
-addFormatFlags(
-  program
-    .command("run <spec...>")
-    .description("Run one or more behavioral specs")
-    .option("--env <name>", "environment override")
-    .option("--cold-start", "force fresh browser profile (default: on in CI)")
-    .option(
-      "--progress <mode>",
-      "narration renderer: auto | tty | plain (auto = tty on a terminal, plain when piped)",
-    )
-    .option("--headed", "show the browser window", false)
-    .option("--mock", "use the in-memory mock backend", false)
-    .option("--backend <name>", "agent-browser (default) | playwright | mock")
-    .option(
-      "--provider <name>",
-      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
-    )
-    .option(
-      "--device <name>",
-      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
-    )
-    .option(
-      "--parallel <n>",
-      "run N specs concurrently (each in its own browser session)",
-      "1",
-    )
-    .option("--artifact-root <path>", "override artifact root directory")
-    .option("--junit <file>", "write a JUnit XML report")
-    .option(
-      "--stamp-if-green",
-      "write contractHash only after all requested specs pass",
-      false,
-    )
-    .option(
-      "--config <path>",
-      "explicit cairntrace.config.yml (overrides auto-discovery)",
-    )
-    .option(
-      "--var <key=value>",
-      "runtime var override; repeatable, wins over config env vars",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--no-web-server",
-      "skip the config webServer lifecycle (manage the server yourself)",
-    )
-    .option(
-      "--no-services",
-      "skip the config services lifecycle (docker/seed/tmux)",
-    )
-    .option(
-      "--services-dry-run",
-      "print the services lifecycle plan and exit without running specs",
-      false,
-    )
-    .option(
-      "--stash-on-failure",
-      "auto-stash failed run directories to fcheap (non-fatal if fcheap is missing)",
-      false,
-    )
-    .option(
-      "--auto-annotate <mode>",
-      "auto-annotate runs into codemap: on-run (pass+fail) | never (default: config annotate.autoAnnotate or never)",
-    )
-    .option(
-      "--monitor",
-      "sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json}. Zero-cost when absent.",
-      false,
-    )
-    .option(
-      "--since-codemap <ref>",
-      "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
-    )
-    .option(
-      "--tag <tag>",
-      "run only specs whose metadata.tags includes this tag (repeatable = AND, case-insensitive)",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--label <key=value>",
-      "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=legacy)",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--before <shell>",
-      "run a shell command after services/secrets and before the first spec of each run (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--after <shell>",
-      "run a shell command after EACH spec finishes (pass or fail), while services are still up (repeatable). $CAIRN_RUN_DIR points at the run directory; collectors may write $CAIRN_RUN_DIR/diagnostics/ (numeric top-level fields of diagnostics/report.json become `cairn stats --metric` values). Failures are logged, non-fatal.",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--repeat <n>",
-      "run the spec set n times sequentially (distinct run dirs), stamping label repeat=<i>; --before hooks run per run",
-    )
-    .option(
-      "--matrix <spec>",
-      "run the cartesian product of key=a,b[;key2=x,y]: each combination exports CAIRN_MATRIX_<KEY> env vars and key=value labels (so `cairn stats --group-by key` works)",
-    )
-    .option(
-      "--stop-on-fail",
-      "with --repeat/--matrix: stop at the first run that does not pass",
-      false,
-    )
-    .option(
-      "--hook-timeout-ms <ms>",
-      "maximum duration of each --before/--after hook (default 600000; max 7200000)",
-      "600000",
-    )
-    .option(
-      "--select-only",
-      "resolve which specs WOULD run and exit 0 without launching a browser (SelectionResult v1); pairs with --tag and/or --since-codemap",
-      false,
-    ),
-).action((specs: string[], opts) => runCommand(specs, opts));
+configureRunCommand(program.command("run <spec...>")).action(
+  (specs: string[], opts) => runCommand(specs, opts),
+);
 
 addFormatFlags(
   program
@@ -223,6 +120,11 @@ addFormatFlags(
     )
     .option("--keep <n>", "keep the newest N runs per spec")
     .option("--all", "remove ALL run directories", false)
+    .option(
+      "--include-pinned",
+      "also prune pinned runs (cairn pin), which retention otherwise never removes",
+      false,
+    )
     .option("--artifact-root <path>", "artifact root to clean")
     .option(
       "--config <path>",
@@ -267,14 +169,24 @@ addFormatFlags(
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
     ),
 ).action((url: string, opts) => snapshotCommand(url, opts));
 
-addFormatFlags(
+const discover = addFormatFlags(
   program
-    .command("discover <url>")
+    .command("discover")
+    .argument(
+      "[url]",
+      "page to inspect (a relative path joins the environment baseUrl)",
+    )
     .description(
-      "Inspect a page and return full accessibility tree + locator inventory",
+      "Inspect a page and return full accessibility tree + locator inventory (subcommands: export, sessions)",
     )
     .option("--roles", "include accessibility role locators", false)
     .option("--testids", "include data-testid locators", false)
@@ -297,8 +209,117 @@ addFormatFlags(
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--use <action>",
+      "setup: run an imported reusable action first (repeatable; name or name:key=value,…)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--import <file>",
+      "action file for --use (repeatable; default: actions/ dirs under the config dir)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--from-spec <path>",
+      "setup: replay this spec's steps through --until-step",
+    )
+    .option(
+      "--until-step <id>",
+      "last --from-spec step to replay (step id or 1-based position)",
+    )
+    .option(
+      "--resume <checkpoint>",
+      "restore a scoped checkpoint before the setup",
+    )
+    .option(
+      "--snapshot-mode <mode>",
+      "returned snapshot: none | diff | compact | full (default full; the journal keeps the full text)",
+    )
+    .option(
+      "--max-bytes <n>",
+      "cap the returned snapshot JSON at n bytes (default 16384)",
     ),
-).action((url: string, opts) => discoverCommand(url, opts));
+).action((url: string | undefined, opts) => discoverCommand(url, opts));
+
+// Subcommands read --config / --format from `discover` (optsWithGlobals):
+// commander lets the parent consume the options both would define.
+discover
+  .command("export")
+  .description(
+    "Write a discovery session as a spec from its journal alone (works after the browser expired or closed)",
+  )
+  .option(
+    "--from-session <dir|id>",
+    "session journal directory, or a session id under <artifactRoot>/_sessions/",
+  )
+  .option("--path <file>", "spec to write")
+  .option(
+    "--intent <text>",
+    "one-line intent of the spec (default: the session's last export)",
+  )
+  .option(
+    "--outcomes <file>",
+    "YAML/JSON file with the outcomes array, the contract (default: the session's last export)",
+  )
+  .option(
+    "--resume <checkpoint>",
+    "write session: { resume } (default: the session's own)",
+  )
+  .option(
+    "--overwrite",
+    "replace a stamped spec (or, with conventions, any existing file)",
+    false,
+  )
+  .option("--artifact-root <path>", "override artifact root directory")
+  .option(
+    "--into <dir|file>",
+    "convention export: folder (or .yml) relative to the config dir; default the drafts dir",
+  )
+  .option("--name <name>", "spec name (snake_case) and file name inside --into")
+  .option(
+    "--conventions",
+    "apply project conventions (implied by --into or a missing --path)",
+    false,
+  )
+  .option("--no-reuse-actions", "do not replace steps by existing actions")
+  .option("--no-lift-vars", "do not write config var values as ${vars.X}")
+  .option(
+    "--allow-secret-literals",
+    "keep a password-field literal no known secret explains (warning instead of refusal; convention exports only, a plain --path export warns)",
+    false,
+  )
+  .option(
+    "--requires-env <envs>",
+    "requires.env for the spec (comma-separated environment names)",
+  )
+  .option("--mutates", "requires.mutates: true (the flow changes data)", false)
+  .option(
+    "--tag <tag>",
+    "metadata.tags entry (repeatable)",
+    collectRepeatable,
+    [] as string[],
+  )
+  .action((_opts, cmd: Command) =>
+    discoverExportCommand(cmd.optsWithGlobals()),
+  );
+
+discover
+  .command("sessions")
+  .description("List session journals (discovery and accompany), newest first")
+  .option("--artifact-root <path>", "override artifact root directory")
+  .option("--limit <n>", "newest n sessions (default 20)")
+  .action((_opts, cmd: Command) =>
+    discoverSessionsCommand(cmd.optsWithGlobals()),
+  );
 
 program
   .command("context <run>")
@@ -363,6 +384,40 @@ addFormatFlags(
     ),
 ).action((opts) => statsCommand(opts));
 
+addFormatFlags(
+  program
+    .command("catalog")
+    .description(
+      "List what the project already has (actions, vars, verifiers, envs, flows, checkpoints) so agents reuse it",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--env <name>",
+      "environment for vars, last runs and checkpoint origin checks",
+    )
+    .option(
+      "--query <text>",
+      "keyword ranking across names, descriptions, intents and comments",
+    )
+    .option(
+      "--kind <kinds>",
+      "actions | vars | verifiers | envs | flows | checkpoints | fixtures (repeatable or comma-separated)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--limit <n>",
+      "rows per kind (default 10 with --query, otherwise all)",
+    )
+    .option(
+      "--artifact-root <path>",
+      "override the artifact root scanned for last runs",
+    ),
+).action((opts) => catalogCommand(opts));
+
 program
   .command("logs [ref]")
   .description(
@@ -376,12 +431,35 @@ program
     "--service <window>",
     "stream one tmux window's captured pane log to stdout",
   )
+  .option(
+    "--follow",
+    "keep streaming until the run/invocation settles (exit 2 if its process died)",
+  )
+  .option(
+    "--log <name>",
+    "live log instead of events: run|precondition|outcome|<file>; with --invocation: narration|services|hook|<file>",
+  )
+  .option("--invocation <id>", "invocation journal: <id> | latest | previous")
+  .option("--format <fmt>", "invocation summary format: json|yaml|md")
+  .option("--json", "shorthand for --format json")
   .action((ref: string | undefined, opts) => logsCommand(ref, opts));
 
 program
   .command("mcp")
   .description("Start the Cairntrace MCP server on stdio")
-  .action(() => mcpCommand());
+  .option(
+    "--allow-hooks",
+    "accept cairn_run before/after shell hooks (arbitrary shell; also CAIRN_MCP_ALLOW_HOOKS=1)",
+    false,
+  )
+  .option(
+    "--allow-services",
+    "let MCP tools start config services (docker/seed/tmux) and run their teardown: cairn_run / cairn_spec_finish / cairn_audit without noServices, cairn_services_up / _down (also CAIRN_MCP_ALLOW_SERVICES=1)",
+    false,
+  )
+  .action((opts: { allowHooks?: boolean; allowServices?: boolean }) =>
+    mcpCommand(opts),
+  );
 
 const exportCmd = program
   .command("export")
@@ -389,7 +467,7 @@ const exportCmd = program
 
 addFormatFlags(
   exportCmd
-    .command("playwright <spec>")
+    .command("playwright [spec]")
     .description(
       "Emit a @playwright/test .spec.ts|.spec.js from a Cairntrace spec (or directory)",
     )
@@ -421,8 +499,12 @@ addFormatFlags(
     .option(
       "--into <dir>",
       "write actions/lib/tests/verifiers into an existing Playwright tree (no package.json or playwright.config)",
+    )
+    .option(
+      "--check <exportDir>",
+      "verify an export against its .cairn-export.json (regenerates in memory; writes nothing; exit 0 fresh, 1 stale, 2 error)",
     ),
-).action((p: string, opts) => exportPlaywrightCommand(p, opts));
+).action((p: string | undefined, opts) => exportPlaywrightCommand(p, opts));
 
 addFormatFlags(
   exportCmd
@@ -482,6 +564,15 @@ program
   .option(
     "--device <name>",
     'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+  )
+  .option(
+    "--env <name>",
+    "environment the checkpoint is for: its baseUrl scopes the checkpoint (resume refuses another origin)",
+  )
+  .option("--config <path>", "explicit cairntrace.config.yml for --env")
+  .option(
+    "--ttl <duration>",
+    "checkpoint lifetime, e.g. 30m, 12h, 7d; resume refuses it afterwards",
   )
   .action((name: string, opts) => loginCommand(name, opts));
 
@@ -547,8 +638,142 @@ addFormatFlags(
       "--device <name>",
       'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
     )
-    .option("--headed", "show the browser window", false),
+    .option("--headed", "show the browser window", false)
+    .option(
+      "--env <name>",
+      "environment override (resolved like cairn run --env)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
+    ),
 ).action((p: string, opts) => healCommand(p, opts));
+
+addFormatFlags(
+  spec
+    .command("lint <spec...>")
+    .description(
+      "Friendly fix-it findings before a spec runs (quoting, files, cold start, secrets, evals, ids, vars per env)",
+    )
+    .option(
+      "--env <names>",
+      "resolve vars/files in these environments (comma-separated or repeatable)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--fix",
+      "apply safe fixes in place (quote # selectors, add step ids)",
+      false,
+    ),
+).action((specs: string[], opts) =>
+  lintCommand(specs, { ...opts, env: opts.env.join(",") }),
+);
+
+addFormatFlags(
+  spec
+    .command("finish <spec>")
+    .description(
+      "Lint, run cold through the cairn run engine, stamp the contract when green, summarize the run",
+    )
+    .option("--env <name>", "environment (as cairn run --env)")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--var <key=value>",
+      "runtime var override; repeatable, wins over config env vars",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option("--headed", "show the browser window", false)
+    .option(
+      "--mock",
+      "use the in-memory mock backend (never touches the app; promote refuses it without --force)",
+      false,
+    )
+    .option("--backend <name>", "agent-browser (default) | playwright | mock")
+    .option(
+      "--provider <name>",
+      "agent-browser provider: ios | browserbase | kernel | … (wins over config browser.provider)",
+    )
+    .option(
+      "--device <name>",
+      "iOS device name (with --provider ios; wins over config browser.device)",
+    )
+    .option(
+      "--artifact-root <path>",
+      "run artifact root (finish receipts live under it; pass the same to promote)",
+    )
+    .option(
+      "--reuse-services",
+      "run against the services cairn services up owns (default: when such a lock exists)",
+    )
+    .option("--no-services", "skip the config services lifecycle")
+    .option(
+      "--no-web-server",
+      "skip the config webServer lifecycle (use the dev server you already run)",
+    ),
+).action((p: string, opts) => finishCommand(p, opts));
+
+addFormatFlags(
+  spec
+    .command("promote <draft>")
+    .description(
+      "Move a draft out of the drafts dir after a green cairn spec finish, rebase its paths, stamp the contract",
+    )
+    .option("--to <path>", "destination spec file or folder")
+    .option(
+      "--force",
+      "promote without a green finish of this exact content",
+      false,
+    )
+    .option(
+      "--expect-content-hash <sha256>",
+      "refuse unless the draft text still has this sha256 (the content a reviewer saw)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option("--artifact-root <path>", "where finish receipts live"),
+).action((p: string, opts) => promoteCommand(p, opts));
+
+const init = program.command("init").description("Set up a project for agents");
+
+addFormatFlags(
+  init
+    .command("agent-kit")
+    .description(
+      "Print (or --write into AGENTS.md) a short project section on authoring Cairntrace specs",
+    )
+    .option(
+      "--write",
+      "append to AGENTS.md next to the config (replaces an earlier agent-kit block)",
+      false,
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((opts) => agentKitCommand(opts));
 
 const checkpoint = program
   .command("checkpoint")
@@ -568,6 +793,15 @@ checkpoint
     "agent-browser provider the target session uses (e.g. ios)",
   )
   .option("--device <name>", "iOS device name the target session uses")
+  .option(
+    "--env <name>",
+    "environment the checkpoint is for: its baseUrl scopes the checkpoint (resume refuses another origin)",
+  )
+  .option("--config <path>", "explicit cairntrace.config.yml for --env")
+  .option(
+    "--ttl <duration>",
+    "checkpoint lifetime, e.g. 30m, 12h, 7d; resume refuses it afterwards",
+  )
   .action((name: string, opts) => captureFromSessionCommand(name, opts));
 
 addFormatFlags(
@@ -642,6 +876,12 @@ addFormatFlags(
       "--ttl <duration>",
       "file.cheap time-to-live, e.g. 30d (default: never expires)",
     )
+    .option(
+      "--include <category>",
+      "evidence category to stash: text | screenshots | traces | videos | downloads; repeatable (default: config stash.include, else text + screenshots)",
+      collectRepeatable,
+      [] as string[],
+    )
     .option("--tool <name>", "tool name (default: cairntrace)")
     .option("--source <path>", "source artifact path")
     .option("--artifact-root <path>", "override artifact root directory")
@@ -684,6 +924,61 @@ addFormatFlags(
     .option("--mode <mode>", "search mode: keyword | semantic | hybrid")
     .option("--limit <n>", "max results", "20"),
 ).action((query: string, opts) => stashSearchCommand(query, opts));
+
+/* ----- pin / unpin / publish (evidence kept past retention) ----- */
+
+addFormatFlags(
+  program
+    .command("pin <run-ref>")
+    .description(
+      "Keep a run: retention never prunes a pinned run (run-ref: run id, 'latest', or 'previous')",
+    )
+    .option("--reason <text>", "why the run is kept (stored on run.json)")
+    .option(
+      "--stash",
+      "also stash it to fcheap with the keep tag and no TTL",
+      false,
+    )
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runRef: string, opts) => pinCommand(runRef, opts));
+
+addFormatFlags(
+  program
+    .command("unpin <run-ref>")
+    .description("Let retention prune a pinned run again")
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runRef: string, opts) => unpinCommand(runRef, opts));
+
+addFormatFlags(
+  program
+    .command("publish <run-ref>")
+    .description(
+      "Publish a run to the private file.cheap artifact service with a RunIndexV1 sidecar (run-ref: run id, 'latest', or 'previous')",
+    )
+    .option(
+      "--retention-days <n>",
+      "remote retention, 1-31 days (default: config retention.publish.retentionDays, else 7)",
+    )
+    .option(
+      "--include <category>",
+      "evidence category to publish: text | screenshots | traces | videos | downloads; repeatable (default: config retention.publish.include, else text + screenshots)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option("--artifact-root <path>", "override artifact root directory")
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    ),
+).action((runRef: string, opts) => publishCommand(runRef, opts));
 
 /* ----- investigate (fcheap connect + vecgrep) ----- */
 
@@ -754,6 +1049,11 @@ addFormatFlags(
     )
     .option("--env <name>", "environment override")
     .option("--no-cold-start", "reuse existing browser state for this audit")
+    .option("--no-services", "skip the config services lifecycle")
+    .option(
+      "--reuse-services",
+      "run against the services `cairn services up` owns for this config + env (no start, no teardown); without it the audit refuses (exit 4) while that lock exists",
+    )
     .option("--artifact-root <path>", "override artifact root directory")
     .option(
       "--config <path>",
@@ -878,7 +1178,7 @@ addFormatFlags(
     ),
 ).action((opts) => configValidateCommand(opts));
 
-/* ----- services (status) ----- */
+/* ----- services (status / up / down) ----- */
 
 const servicesCmd = program
   .command("services")
@@ -888,13 +1188,217 @@ addFormatFlags(
   servicesCmd
     .command("status")
     .description(
-      "Check the current state of the services environment (docker, seed, tmux)",
+      "Check the current state of the services environment (docker, seed, tmux) and its `services up` lock",
     )
     .option(
       "--config <path>",
       "explicit cairntrace.config.yml (overrides auto-discovery)",
     )
+    .option(
+      "--env <name>",
+      "environment (default: config defaultEnvironment, else local)",
+    )
     .option("--project <name>", "project name override (default: from config)"),
 ).action((opts) => servicesStatusCommand(opts));
+
+addFormatFlags(
+  servicesCmd
+    .command("up")
+    .description(
+      "Start the config services (docker → seed → tmux) like `cairn run` would, leave them running and write the config's owner lock; runs of that env then need --reuse-services",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--env <name>",
+      "environment (default: config defaultEnvironment, else local)",
+    ),
+).action((opts) => servicesUpCommand(opts));
+
+addFormatFlags(
+  servicesCmd
+    .command("down")
+    .description(
+      "Tear the config services down (the configured teardown commands in order, then the tmux session) and remove the `services up` lock",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--env <name>",
+      "environment (default: config defaultEnvironment, else local)",
+    ),
+).action((opts) => servicesDownCommand(opts));
+
+const verifierCmd = program
+  .command("verifier")
+  .description("Inspect script verifiers (the verifier SDK fixtures contract)");
+
+addFormatFlags(
+  verifierCmd
+    .command("schema <file>")
+    .description(
+      "Print a script verifier's fixtures contract: read statically from defineVerifier({ fixtures: z.object(…) }) (never executed), else the header comment / code reads",
+    )
+    .option(
+      "--load",
+      "import the module in a Node child to read a contract the static reader reports as dynamic (RUNS its top-level code: trusted files only)",
+    )
+    .option(
+      "--timeout-ms <ms>",
+      "kill the --load child after this many ms (default 10000)",
+    ),
+).action((file: string, opts) => verifierSchemaCommand(file, opts));
+
+/* ----- wait (typed readiness gates) ----- */
+
+addFormatFlags(
+  program
+    .command("wait <target...>")
+    .description(
+      "Wait for readiness gates in order: config gates: names, http(s):// URLs (2xx/3xx unless --status) or tcp://host:port; exit 0 ready, 1 not ready",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (its gates: registry; default: discovered from the cwd)",
+    )
+    .option(
+      "--env <name>",
+      "environment whose scoped secrets gates may reference (default: config defaultEnvironment, else local)",
+    )
+    .option(
+      "--status <codes>",
+      "accepted statuses for URL targets: codes, classes, ranges (e.g. 2xx,401); default 2xx,3xx",
+    )
+    .option(
+      "--any-response",
+      "URL targets accept any HTTP answer (the old readiness rule)",
+    )
+    .option(
+      "--timeout <duration>",
+      "override every target's budget (ms or 30s/5m; 0 = no deadline; default: the gate's timeout, else 60s)",
+    )
+    .option(
+      "--every <duration>",
+      "override the pause between attempts (default: the gate's every, else 1s)",
+    )
+    .option(
+      "--stable <n>",
+      "override the consecutive passing attempts required (default: the gate's stable, else 1)",
+    ),
+).action((targets: string[], opts) => waitCommand(targets, opts));
+
+/* ----- fixtures (config fixtures: registry) ----- */
+
+const fixtures = program
+  .command("fixtures")
+  .description(
+    "Inspect and drive the config fixtures: registry (exec / mongo / http test data): list, status, ensure, reset, teardown, sweep",
+  );
+
+function fixtureScopeFlags(c: Command): Command {
+  return c
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (default: discovered from the cwd)",
+    )
+    .option(
+      "--env <name>",
+      "environment (datasources, vars, secrets, policy; default: config defaultEnvironment, else local)",
+    );
+}
+
+addFormatFlags(
+  fixtureScopeFlags(
+    fixtures
+      .command("list")
+      .description(
+        "List the registry: kind, scope, verbs, needs, outputs, owner, ttl",
+      ),
+  ),
+).action((opts) => fixturesCommand("list", [], opts));
+
+addFormatFlags(
+  fixtureScopeFlags(
+    fixtures
+      .command("status [name...]")
+      .description(
+        "Ledger state per fixture in the environment: live, expired, failed, torn-down or never",
+      ),
+  ).option(
+    "--verify",
+    "run each recorded fixture's verify verb against its recorded outputs (exit 1 when one fails)",
+  ),
+).action((names: string[], opts) => fixturesCommand("status", names, opts));
+
+for (const verb of ["ensure", "reset"] as const) {
+  addFormatFlags(
+    fixtureScopeFlags(
+      fixtures
+        .command(`${verb} <name>`)
+        .description(
+          verb === "ensure"
+            ? "Ensure a fixture (its needs first) and record it in the ledger; nothing is torn down"
+            : "Ensure a fixture's needs, then run its reset verb",
+        ),
+    )
+      .option(
+        "--with <key=value>",
+        "fixture parameter (repeatable; JSON values are parsed)",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--allow-writes",
+        "write on an environment whose policy trait is shared (otherwise the verb is dry-run there)",
+      ),
+  ).action((name: string, opts) => fixturesCommand(verb, [name], opts));
+}
+
+addFormatFlags(
+  fixtureScopeFlags(
+    fixtures
+      .command("teardown <name>")
+      .description(
+        "Tear a fixture down with the outputs and parameters its last ensure recorded",
+      ),
+  )
+    .option(
+      "--with <key=value>",
+      "override a recorded parameter (repeatable; JSON values are parsed)",
+      collectRepeatable,
+      [] as string[],
+    )
+    .option(
+      "--allow-writes",
+      "write on an environment whose policy trait is shared (otherwise the verb is dry-run there)",
+    ),
+).action((name: string, opts) => fixturesCommand("teardown", [name], opts));
+
+addFormatFlags(
+  fixtureScopeFlags(
+    fixtures
+      .command("sweep")
+      .description(
+        "Find fixtures the ledger still shows live (a crash, a kill) and tear them down with --apply",
+      ),
+  )
+    .option(
+      "--older-than <duration>",
+      "only leftovers ensured at least this long ago (ms or 30m/2h/1d; default 1h); expired ttls always qualify",
+    )
+    .option("--apply", "tear the candidates down (default: report only)")
+    .option(
+      "--include-seed",
+      "seed-scoped fixtures too (default: only those past their ttl)",
+    )
+    .option(
+      "--allow-writes",
+      "write on an environment whose policy trait is shared (otherwise teardowns are dry-run there)",
+    ),
+).action((opts) => fixturesCommand("sweep", [], opts));
 
 await program.parseAsync(process.argv);

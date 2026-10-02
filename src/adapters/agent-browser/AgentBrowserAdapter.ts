@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { execa } from "execa";
 import { targetChildEnv } from "../../core/processEnv";
 import {
@@ -152,6 +152,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
   private readonly globalArgs: string[];
   /** Set when a child had to be killed — close() escalates to a daemon kill. */
   private sawChildTimeout = false;
+  /**
+   * Why screenshots are off for this session: set once a capture timed out
+   * and the daemon finished it without a file (Chromium had no composited
+   * frame — a slept or locked display). Later captures fail at once instead
+   * of each spending the full deadline again.
+   */
+  private screenshotTimeout: string | undefined;
+  /**
+   * Set when a timed-out capture was still blocking the daemon's serial
+   * queue after the drain window (see {@link drainAfterScreenshotTimeout}):
+   * the daemon and its browser were stopped, so every later command is
+   * refused with this reason instead of running on a fresh, empty browser.
+   */
+  private sessionStopped: string | undefined;
   /** Environment-level multiplier for waits and network-idle quiet windows. */
   private waitScale = 1;
 
@@ -165,6 +179,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * this run. Once true, stays true — a re-spawned daemon on a later step
    * is rare in practice and would itself need a fresh `false` baseline that
    * the spec-time evidence can't distinguish from "the same wedged session".
+   * A screenshot timeout alone does not count (see {@link screenshot}): the
+   * capture first gets a bounded queue drain, and only a capture still stuck
+   * after it — or an interaction, wait or query hitting its deadline — does.
    */
   isWedged(): boolean {
     return this.sawChildTimeout;
@@ -481,15 +498,41 @@ export class AgentBrowserAdapter implements BrowserBackend {
     format?: "png" | "jpeg";
     quality?: number;
   }): Promise<ScreenshotResult> {
+    const off = this.sessionStopped ?? this.screenshotTimeout;
+    if (off !== undefined) {
+      return {
+        ok: false,
+        path: opts.path,
+        durationMs: 0,
+        error: `screenshot skipped: ${off}`,
+      };
+    }
     const argv: string[] = ["screenshot", opts.path];
     if (opts.fullPage) argv.push("--full");
     if (opts.annotate) argv.push("--annotate");
     if (opts.format) argv.push("--screenshot-format", opts.format);
     if (opts.quality !== undefined)
       argv.push("--screenshot-quality", String(opts.quality));
-    const r = await this.invoke(argv, { timeoutMs: SCREENSHOT_TIMEOUT_MS });
+    // A screenshot is optional evidence. Its deadline kills only the client,
+    // never the session daemon or its browser (the next step would see an
+    // empty page), and does not by itself mark the session wedged. The
+    // daemon still works through the capture, so the drain below settles it
+    // before the next command can queue behind it.
+    const before = fileStamp(opts.path);
+    const r = await this.invoke(argv, {
+      timeoutMs: SCREENSHOT_TIMEOUT_MS,
+      softTimeout: true,
+    });
+    if (!r.ok && DEADLINE_KILL.test(r.stderr)) {
+      return this.drainAfterScreenshotTimeout(opts.path, r.durationMs, before);
+    }
+    // agent-browser reporting its own timeout: the daemon is done with it.
+    const timedOut = !r.ok && /timed out/i.test(r.stderr);
+    if (timedOut) {
+      this.screenshotTimeout = `an earlier capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms, so this session takes no more screenshots — Chromium may have no rendering surface (is the display asleep/headless?)`;
+    }
     const error = !r.ok
-      ? /timed out/i.test(r.stderr)
+      ? timedOut
         ? `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms — Chromium may have no rendering surface (is the display asleep/headless?)`
         : r.stderr.trim() || `screenshot capture failed with exit ${r.exitCode}`
       : undefined;
@@ -498,6 +541,51 @@ export class AgentBrowserAdapter implements BrowserBackend {
       path: opts.path,
       durationMs: r.durationMs,
       ...(error ? { error } : {}),
+    };
+  }
+
+  /**
+   * The capture's client was killed at its deadline, but agent-browser's
+   * daemon still works through it: its per-session queue is serial and its
+   * screenshot has no deadline of its own (agent-browser 0.38.2: a capture on
+   * a blocked renderer returned after 59s; the command after a killed client
+   * waited for it). Settle it here, bounded, so the next step, diagnostics
+   * or snapshot never absorbs the stuck capture:
+   *   - drained, the capture wrote its file → a late but real screenshot;
+   *   - drained, no file → screenshots are off for the session;
+   *   - still stuck → the wedge path now: the probe's deadline kills the
+   *     daemon and marks the session wedged, and later commands are refused
+   *     with the capture named as the cause.
+   */
+  private async drainAfterScreenshotTimeout(
+    path: string,
+    captureMs: number,
+    /** {@link fileStamp} of `path` before the capture started. */
+    before: string | undefined,
+  ): Promise<ScreenshotResult> {
+    const probe = await this.invoke(["get", "url"], {
+      timeoutMs: SCREENSHOT_DRAIN_TIMEOUT_MS,
+    });
+    const durationMs = captureMs + probe.durationMs;
+    if (!probe.ok && DEADLINE_KILL.test(probe.stderr)) {
+      this.sessionStopped = `the session's daemon and browser were stopped after a screenshot capture got no frame within ${SCREENSHOT_TIMEOUT_MS + SCREENSHOT_DRAIN_TIMEOUT_MS}ms (is the display asleep, locked or headless?), so its page state is gone`;
+      return {
+        ok: false,
+        path,
+        durationMs,
+        error: `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms and agent-browser was still stuck on it ${SCREENSHOT_DRAIN_TIMEOUT_MS}ms later, so the session daemon and its browser were stopped (the page state is gone) — Chromium may have no rendering surface (is the display asleep/headless?)`,
+      };
+    }
+    const after = fileStamp(path);
+    if (after !== undefined && after !== before) {
+      return { ok: true, path, durationMs };
+    }
+    this.screenshotTimeout = `an earlier capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms, so this session takes no more screenshots — Chromium may have no rendering surface (is the display asleep/headless?)`;
+    return {
+      ok: false,
+      path,
+      durationMs,
+      error: `screenshot capture timed out after ${SCREENSHOT_TIMEOUT_MS}ms — Chromium may have no rendering surface (is the display asleep/headless?)`,
     };
   }
 
@@ -795,6 +883,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
     await this.invoke(["trace", "start"]);
   }
 
+  /**
+   * `trace stop <path>` writes Chrome trace-event JSON (Perfetto /
+   * chrome://tracing), not a Playwright Trace Viewer zip, so the runner names
+   * it `traces/agent-browser-trace.json`. The runner also drops an empty or
+   * oversized file (`artifacts.capture.traceMaxBytes`) with an
+   * `artifact.trace` event; `ok` here only reports the command's exit.
+   */
   async stopTrace(path: string): Promise<{ ok: boolean; path: string }> {
     const r = await this.invoke(["trace", "stop", path]);
     return { ok: r.ok, path };
@@ -875,6 +970,19 @@ export class AgentBrowserAdapter implements BrowserBackend {
       return {
         ok: true,
         stdout: "session daemon terminated after child timeout",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+        argv: ["--session", this.opts.session, "close"],
+      };
+    }
+    // A hung screenshot already stopped the daemon (and its pid file may
+    // be gone): nothing is left to close, and `close` would only be refused.
+    if (this.sessionStopped !== undefined) {
+      return {
+        ok: true,
+        stdout:
+          "session daemon already stopped after a screenshot capture hung",
         stderr: "",
         exitCode: 0,
         durationMs: 0,
@@ -2045,8 +2153,19 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   private async invoke(
     argv: string[],
-    invokeOpts: { timeoutMs?: number } = {},
+    invokeOpts: InvokeOptions = {},
   ): Promise<InvocationResult> {
+    if (this.sessionStopped !== undefined) {
+      // No "timed out" here: polling loops must stop, not retry.
+      return {
+        ok: false,
+        stdout: "",
+        stderr: `not run: ${this.sessionStopped}. Open a new session once the display is awake.`,
+        exitCode: -1,
+        durationMs: 0,
+        argv: ["--session", this.opts.session, ...this.globalArgs, ...argv],
+      };
+    }
     let result = await this.invokeOnce(argv, invokeOpts);
     for (const backoffMs of DAEMON_BUSY_BACKOFF_MS) {
       // sawChildTimeout === true means the *previous* child was killed by
@@ -2056,6 +2175,9 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // a healthy-looking but really-unresponsive daemon would burn the
       // whole backoff window before the step surfaces as failed.
       if (result.ok || this.sawChildTimeout) break;
+      // A soft deadline kill (screenshot) is not a busy daemon either: the
+      // retry would queue behind the same stuck capture.
+      if (invokeOpts.softTimeout && DEADLINE_KILL.test(result.stderr)) break;
       if (!isTransientDaemonError(result.stderr)) break;
       await sleep(backoffMs);
       result = await this.invokeOnce(argv, invokeOpts);
@@ -2065,7 +2187,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   private async invokeOnce(
     argv: string[],
-    invokeOpts: { timeoutMs?: number } = {},
+    invokeOpts: InvokeOptions = {},
   ): Promise<InvocationResult> {
     const start = Date.now();
     const fullArgv = [
@@ -2090,8 +2212,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
       timeout: timeoutMs + EXECA_TIMEOUT_FALLBACK_MS,
       env: targetChildEnv(process.env),
     });
-    const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs, () =>
-      this.terminateDaemon(),
+    // A soft deadline (optional evidence such as a screenshot) kills only
+    // this client's process tree: the session daemon and its browser stay.
+    const watchdog = createProcessTreeWatchdog(
+      subprocess.pid,
+      timeoutMs,
+      invokeOpts.softTimeout ? undefined : () => this.terminateDaemon(),
     );
     let result;
     try {
@@ -2109,14 +2235,18 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ok: false,
         stdout: typeof result.stdout === "string" ? result.stdout : "",
         stderr: [
-          `timed out after ${timeoutMs}ms — killed \`${this.binary} ${argv.join(" ")}\` (agent-browser daemon may be unresponsive)`,
+          `timed out after ${timeoutMs}ms — killed \`${this.binary} ${argv.join(" ")}\` ${
+            invokeOpts.softTimeout
+              ? "(the session daemon and browser were left running)"
+              : "(agent-browser daemon may be unresponsive)"
+          }`,
           ...(stderr.trim() ? [stderr.trim()] : []),
         ].join("\n"),
         exitCode: result.exitCode ?? -1,
         durationMs: Date.now() - start,
         argv: fullArgv,
       };
-      this.sawChildTimeout = true;
+      if (!invokeOpts.softTimeout) this.sawChildTimeout = true;
       return ret;
     }
     return {
@@ -2131,6 +2261,16 @@ export class AgentBrowserAdapter implements BrowserBackend {
 }
 
 /* ----- helpers — see ./parseOutput.ts for unit-tested implementations ----- */
+
+interface InvokeOptions {
+  /** Hard per-invocation deadline (default: the adapter's command budget). */
+  timeoutMs?: number;
+  /**
+   * The deadline kills only the client: no daemon kill, and the session is
+   * not marked wedged. For optional evidence (screenshots), never steps.
+   */
+  softTimeout?: boolean;
+}
 
 const DEFAULT_LOCATOR_TIMEOUT_MS = 10000;
 const POLL_INTERVAL_MS = 250;
@@ -2213,6 +2353,31 @@ const LINK_CLICK_PROBE_KEY = "cairntrace.link-click-delivery";
  * command budget on an optional artifact.
  */
 const SCREENSHOT_TIMEOUT_MS = 15_000;
+
+/**
+ * After a capture's client was killed at {@link SCREENSHOT_TIMEOUT_MS}, how
+ * long the daemon's serial queue gets to finish it (probed with `get url`)
+ * before the session is treated as wedged.
+ */
+const SCREENSHOT_DRAIN_TIMEOUT_MS = 20_000;
+
+/** The stderr lead of an invocation Cairn's own deadline killed. */
+const DEADLINE_KILL = /^timed out after \d+ms — killed /;
+
+/**
+ * Size and mtime of a non-empty file at an absolute path, else undefined:
+ * compared across a timed-out capture to tell a file it finished writing
+ * while the queue drained from one that was already there.
+ */
+function fileStamp(path: string): string | undefined {
+  if (!isAbsolute(path)) return undefined;
+  try {
+    const stat = statSync(path);
+    return stat.size > 0 ? `${stat.size}:${stat.mtimeMs}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Budget for the post-scrollIntoView viewport confirmation. Covers a CSS

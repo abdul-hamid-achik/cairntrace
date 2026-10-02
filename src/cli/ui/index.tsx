@@ -103,6 +103,9 @@ export function makeInkProgressListener(store: TuiStore): ProgressListener {
     onPreconditionStart(name) {
       store.push({ type: "precondition-start", id: name });
     },
+    onPreconditionProgress(name, message) {
+      store.push({ type: "precondition-progress", id: name, message });
+    },
     onPreconditionFinish(name, exitCode, durationMs, details) {
       const ok = exitCode === 0 && !details?.timedOut;
       store.push({
@@ -132,6 +135,9 @@ export function makeInkProgressListener(store: TuiStore): ProgressListener {
     },
     onOutcomeStart(outcome) {
       store.push({ type: "outcome-start", id: outcome.id });
+    },
+    onOutcomeProgress(outcome, message) {
+      store.push({ type: "outcome-progress", id: outcome.id, message });
     },
     onOutcomeFinish(outcome, evaluation) {
       store.push({

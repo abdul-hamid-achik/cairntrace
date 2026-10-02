@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: cairn-artifact:; media-src cairn-artifact:; font-src 'self'; connect-src 'self'"
     />
     <title>Cairntrace Studio</title>
     <link rel="stylesheet" href="styles.css" />
@@ -41,6 +41,10 @@
             <span id="cairn-status" class="meta-item" title="resolved cairn binary">—</span>
           </div>
           <div class="topbar-actions">
+            <span id="lock-pill" class="pill pill-lock hidden">
+              <span class="dot dot-warn"></span>
+              <span id="lock-label">suite in progress</span>
+            </span>
             <span id="active-run-pill" class="pill pill-live hidden">
               <span class="dot dot-running"></span>
               <span id="active-run-label">running</span>
@@ -67,14 +71,21 @@
     <dialog id="modal" class="modal"></dialog>
 
     <script src="../lib/format.js"></script>
+    <script src="../lib/events.js"></script>
+    <script src="../lib/policy.js"></script>
     <script src="dom.js"></script>
     <script src="markdown.js"></script>
     <script src="state.js"></script>
     <script src="components.js"></script>
+    <script src="panes.js"></script>
     <script src="views/runs.js"></script>
     <script src="views/run-detail.js"></script>
     <script src="views/specs.js"></script>
+    <script src="views/catalog.js"></script>
     <script src="views/live.js"></script>
+    <script src="views/invocations.js"></script>
+    <script src="views/sessions.js"></script>
+    <script src="views/stashes.js"></script>
     <script src="views/stats.js"></script>
     <script src="views/docs.js"></script>
     <script src="views/environment.js"></script>

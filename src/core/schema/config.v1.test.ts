@@ -30,3 +30,31 @@ describe("diagnostics monitor targets", () => {
     });
   });
 });
+
+describe("discovery block", () => {
+  it("accepts sessionTtlMs and backend, and rejects unknown keys", () => {
+    const config = ConfigSchema.parse({
+      version: 1,
+      environments: { local: {} },
+      discovery: { sessionTtlMs: 600000, backend: "playwright" },
+    });
+    expect(config.discovery).toEqual({
+      sessionTtlMs: 600000,
+      backend: "playwright",
+    });
+    expect(
+      ConfigSchema.safeParse({
+        version: 1,
+        environments: { local: {} },
+        discovery: { ttl: 5 },
+      }).success,
+    ).toBe(false);
+    expect(
+      ConfigSchema.safeParse({
+        version: 1,
+        environments: { local: {} },
+        discovery: { sessionTtlMs: 0 },
+      }).success,
+    ).toBe(false);
+  });
+});

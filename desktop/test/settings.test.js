@@ -151,3 +151,168 @@ describe("recent projects", () => {
     assert.equal(after.activeProject, "/tmp/b");
   });
 });
+
+describe("interface + per-project launch settings", () => {
+  it("ships interface defaults and an empty per-project map", () => {
+    const defaults = store.defaultSettings();
+    assert.deepEqual(defaults.ui, {
+      density: "comfortable",
+      screenshotMaxWidth: 720,
+      autoRefreshRuns: true,
+      livePollMs: 400,
+    });
+    assert.deepEqual(defaults.projectSettings, {});
+  });
+
+  it("merges one project's launch settings without touching another's", () => {
+    const base = store.mergeDeep(store.defaultSettings(), {
+      projectSettings: {
+        "/work/a": {
+          launchTemplate: "task run {spec}",
+          lockFiles: ["runs/.a.lock"],
+        },
+      },
+    });
+    const next = store.mergeDeep(base, {
+      projectSettings: { "/work/b": { launchTemplate: null, lockFiles: [] } },
+    });
+    assert.equal(
+      next.projectSettings["/work/a"].launchTemplate,
+      "task run {spec}",
+    );
+    assert.deepEqual(next.projectSettings["/work/b"].lockFiles, []);
+  });
+});
+
+describe("renderer settings patch (settings:update)", () => {
+  it("accepts only run/ui and refuses every other key", () => {
+    assert.deepEqual(
+      store.sanitizeRendererPatch({ ui: { density: "compact" } }),
+      { ui: { density: "compact" } },
+    );
+    for (const key of [
+      "cairnBin",
+      "artifactRoot",
+      "projectSettings",
+      "projects",
+      "activeProject",
+    ])
+      assert.throws(
+        () => store.sanitizeRendererPatch({ [key]: "/anything" }),
+        /cannot change/,
+        key,
+      );
+    assert.throws(() => store.sanitizeRendererPatch(null), /patch required/);
+  });
+
+  it("validates run values that become cairn argv", () => {
+    assert.deepEqual(
+      store.sanitizeRunSettings({
+        env: " staging ",
+        backend: null,
+        headed: 1,
+        parallel: "99",
+        labels: ["round=2", ""],
+        vars: null,
+        junit: "/tmp/out.xml",
+        unknown: "dropped",
+      }),
+      {
+        env: "staging",
+        backend: null,
+        headed: true,
+        parallel: 32,
+        labels: ["round=2"],
+        vars: [],
+      },
+    );
+    assert.throws(
+      () => store.sanitizeRunSettings({ env: "--config=/tmp/x.yml" }),
+      /cannot start with "-"/,
+    );
+    assert.throws(
+      () => store.sanitizeRunSettings({ labels: ["--junit", "/tmp/x"] }),
+      /cannot start with "-"/,
+    );
+    assert.throws(
+      () => store.sanitizeRunSettings({ device: "a\nb" }),
+      /single line/,
+    );
+  });
+
+  it("clamps ui values", () => {
+    assert.deepEqual(
+      store.sanitizeUiSettings({
+        density: "huge",
+        screenshotMaxWidth: 99999,
+        livePollMs: 1,
+        autoRefreshRuns: 0,
+        extra: true,
+      }),
+      {
+        density: "comfortable",
+        screenshotMaxWidth: 4000,
+        livePollMs: 150,
+        autoRefreshRuns: false,
+      },
+    );
+  });
+});
+
+describe("checkCairnBinary / checkArtifactRoot", () => {
+  it("requires an existing executable and flags non-cairn names for confirmation", () => {
+    const dir = tempDir("cairn-bin-");
+    const cairn = path.join(dir, "cairn");
+    const other = path.join(dir, "wrapper.sh");
+    const plain = path.join(dir, "notes.txt");
+    fs.writeFileSync(cairn, "#!/bin/sh\n", { mode: 0o755 });
+    fs.writeFileSync(other, "#!/bin/sh\n", { mode: 0o755 });
+    fs.writeFileSync(plain, "x", { mode: 0o644 });
+    assert.deepEqual(store.checkCairnBinary(cairn), {
+      path: cairn,
+      needsConfirm: false,
+    });
+    assert.deepEqual(store.checkCairnBinary(other), {
+      path: other,
+      needsConfirm: true,
+    });
+    assert.deepEqual(store.checkCairnBinary(""), {
+      path: null,
+      needsConfirm: false,
+    });
+    assert.throws(() => store.checkCairnBinary(plain), /not executable/);
+    assert.throws(() => store.checkCairnBinary(dir), /not a file/);
+    assert.throws(() => store.checkCairnBinary("bin/cairn"), /absolute/);
+    assert.throws(
+      () => store.checkCairnBinary(path.join(dir, "missing")),
+      /no file/,
+    );
+    assert.equal(store.checkCairnBinary("~/cairn", { home: dir }).path, cairn);
+  });
+
+  it("refuses the filesystem root, home, and parents of home", () => {
+    const home = tempDir("cairn-home-");
+    assert.throws(
+      () => store.checkArtifactRoot("/", { home }),
+      /filesystem root/,
+    );
+    assert.throws(() => store.checkArtifactRoot(home, { home }), /home folder/);
+    assert.throws(() => store.checkArtifactRoot("~", { home }), /home folder/);
+    assert.throws(
+      () => store.checkArtifactRoot(path.dirname(home), { home }),
+      /home folder/,
+    );
+    assert.throws(() => store.checkArtifactRoot("runs", { home }), /absolute/);
+    assert.equal(
+      store.checkArtifactRoot("~/.cairntrace/runs", { home }),
+      path.join(home, ".cairntrace", "runs"),
+    );
+    assert.equal(store.checkArtifactRoot(null, { home }), null);
+    const file = path.join(home, "file.txt");
+    fs.writeFileSync(file, "x");
+    assert.throws(
+      () => store.checkArtifactRoot(file, { home: tempDir("cairn-h2-") }),
+      /not a directory/,
+    );
+  });
+});

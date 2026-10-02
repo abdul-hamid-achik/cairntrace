@@ -11,7 +11,8 @@
  * links. Anything unrecognised is emitted as literal text.
  */
 (function bootMarkdown() {
-  const Studio = (globalThis.Studio = globalThis.Studio || {});
+  const Studio = (globalThis.Studio =
+    globalThis.Studio || /** @type {StudioGlobal} */ ({}));
   const { h } = Studio;
 
   const LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);

@@ -1,0 +1,12 @@
+{"ts":"2026-09-01T11:00:00.000Z","type":"run.started","runId":"2026-09-01T11-00-00-000Z_checkout_d4e5f6","spec":"checkout"}
+{"ts":"2026-09-01T11:00:00.100Z","type":"step.started","stepId":"open_cart"}
+{"ts":"2026-09-01T11:00:00.700Z","type":"step.finished","stepId":"open_cart","durationMs":600}
+{"ts":"2026-09-01T11:00:00.800Z","type":"step.started","stepId":"click_pay"}
+{"ts":"2026-09-01T11:00:05.800Z","type":"artifact.snapshot","stepId":"click_pay","path":"snapshots/002_click_pay.txt"}
+{"ts":"2026-09-01T11:00:05.900Z","type":"artifact.screenshot","stepId":"click_pay","path":"screenshots/002_click_pay.png"}
+{"ts":"2026-09-01T11:00:06.000Z","type":"artifact.diagnostics","stepId":"click_pay","path":"diagnostics/002_click_pay.json"}
+{"ts":"2026-09-01T11:00:06.050Z","type":"step.failed","stepId":"click_pay","durationMs":5250,"error":"locator not found: role=button name=\"Pay now\" (waited 5000ms)"}
+{"ts":"2026-09-01T11:00:06.200Z","type":"outcome.skipped","outcomeId":"order_saved"}
+{"ts":"2026-09-01T11:00:06.400Z","type":"artifact.video","action":"warning","warning":"video capture is requested but the 'agent-browser' backend does not record video — only the playwright backend does."}
+{"ts":"2026-09-01T11:00:06.500Z","type":"run.failed","runId":"2026-09-01T11-00-00-000Z_checkout_d4e5f6","durationMs":6500}
+{"ts":"2026-09-01T11:00:07.000Z","type":"artifact.stash","action":"auto-stash","receipt":"stash-receipt.json","stashId":"stash_7f3a9c","status":"saved","postSaveFailureCount":0}

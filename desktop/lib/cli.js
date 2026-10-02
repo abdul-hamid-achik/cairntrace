@@ -232,18 +232,42 @@ function buildVerifyArgv(options) {
 }
 
 /**
- * @param {{ spec: string, backend?: string | null, mock?: boolean, headed?: boolean, apply?: boolean, verify?: boolean, config?: string | null }} options
+ * Heal reruns resolve the environment, vars and config like `cairn run`, so
+ * Studio passes the same `--env` / `--var` as its Run.
+ * @param {{ spec: string, backend?: string | null, mock?: boolean, headed?: boolean, apply?: boolean, verify?: boolean, config?: string | null, env?: string | null, vars?: string[] }} options
  * @returns {string[]}
  */
 function buildHealArgv(options) {
   const argv = ["spec", "heal", options.spec];
+  if (options.env) argv.push("--env", options.env);
   if (options.backend) argv.push("--backend", options.backend);
   if (options.config) argv.push("--config", options.config);
+  argv.push(...repeated("--var", options.vars));
   if (options.mock) argv.push("--mock");
   if (options.headed) argv.push("--headed");
   if (options.apply) argv.push("--apply");
   if (options.verify) argv.push("--verify");
   argv.push("--format", "json");
+  return argv;
+}
+
+/**
+ * `cairn clean` over the artifact root: everything (`--all`), or the newest
+ * N runs per spec (`--keep N`); with neither, the config's `retention` applies.
+ * @param {{ artifactRoot: string, all?: boolean, keepRuns?: number | string | null }} options
+ * @returns {string[]}
+ */
+function buildCleanArgv(options) {
+  const argv = [
+    "clean",
+    "--artifact-root",
+    options.artifactRoot,
+    "--format",
+    "json",
+  ];
+  if (options.all) argv.push("--all");
+  else if (options.keepRuns)
+    argv.push("--keep", String(Math.trunc(Number(options.keepRuns)) || 1));
   return argv;
 }
 
@@ -409,6 +433,8 @@ function describeExitCode(code) {
       return "heal made no progress";
     case 6:
       return "contract-hash mismatch";
+    case 7:
+      return "refused by environment policy";
     case null:
       return "terminated by signal";
     default:
@@ -431,6 +457,7 @@ function describeExitCode(code) {
  *   env?: NodeJS.ProcessEnv,
  *   timeoutMs?: number,
  *   onLog?: (entry: Record<string, unknown>) => void,
+ *   onSpawn?: (pid: number | undefined) => void,
  *   signal?: AbortSignal,
  * }} options
  * @returns {Promise<{ ok: boolean, exitCode: number | null, signal: string | null, payload: unknown, logs: Array<Record<string, unknown>>, stdout: string, stderr: string, timedOut: boolean, cancelled: boolean }>}
@@ -443,6 +470,7 @@ function execCairn(options) {
     env = augmentedEnv(),
     timeoutMs = 120_000,
     onLog,
+    onSpawn,
     signal,
   } = options;
   return new Promise((resolve, reject) => {
@@ -459,6 +487,11 @@ function execCairn(options) {
     } catch (error) {
       reject(error);
       return;
+    }
+    try {
+      onSpawn?.(child.pid);
+    } catch {
+      // a listener failure must not orphan the child
     }
     const logs = [];
     let stdout = "";
@@ -580,6 +613,36 @@ function execCairn(options) {
   });
 }
 
+/**
+ * Launch a GUI helper (e.g. a trace viewer) fully detached: no pipes, its own
+ * process group, and the app does not wait for it.
+ * @param {string} command
+ * @param {string[]} args
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv }} [options]
+ * @returns {number | undefined} the child pid
+ */
+function spawnDetached(command, args, options = {}) {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env ?? augmentedEnv(),
+    detached: true,
+    stdio: "ignore",
+  });
+  child.on("error", () => {});
+  child.unref();
+  return child.pid;
+}
+
+/**
+ * The version line `cairn --version` prints (first semver-looking token).
+ * @param {string | null | undefined} output
+ * @returns {string | null}
+ */
+function parseVersionOutput(output) {
+  const match = /(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/.exec(String(output ?? ""));
+  return match ? match[1] : null;
+}
+
 module.exports = {
   EXTRA_PATH_DIRS,
   extraPathDirs,
@@ -590,10 +653,13 @@ module.exports = {
   buildRunArgv,
   buildVerifyArgv,
   buildHealArgv,
+  buildCleanArgv,
   buildStatsArgv,
   buildDiffArgv,
   createLineDecoder,
   parseJsonPayload,
   describeExitCode,
   execCairn,
+  spawnDetached,
+  parseVersionOutput,
 };

@@ -102,10 +102,27 @@ vi.mock("./webServer", () => ({
     if (shellImpl) return shellImpl(command, opts);
     return { exitCode: 0, stdout: "", stderr: "" };
   }),
+  // Teardown commands (detached in production): same recording and impl.
+  runShellDetached: vi.fn(async (command: string, opts: unknown) => {
+    shellCalls.push({ command, opts: opts as { cwd?: string } });
+    const result = shellImpl
+      ? await shellImpl(command, opts)
+      : { exitCode: 0, stdout: "", stderr: "" };
+    return { ...result, signal: null };
+  }),
   probeOnce: vi.fn(async (url: string) => {
     if (probeOnceImpl) return probeOnceImpl(url);
     return true;
   }),
+  // F2 readiness (2xx/3xx) rides the same switch: "answers" = ready here.
+  probeReady: vi.fn(async (url: string) => {
+    const ok = probeOnceImpl ? await probeOnceImpl(url) : true;
+    return ok
+      ? { ready: true, status: 200, detail: `GET ${url} → 200` }
+      : { ready: false, detail: `GET ${url}: ECONNREFUSED` };
+  }),
+  warnLegacyReadiness: vi.fn(),
+  readinessHint: () => "",
   sleep: vi.fn(async (ms: number) => {
     // Advance the virtual clock so Date.now()-based wait loops terminate.
     testClock.now += ms;
@@ -141,12 +158,36 @@ let stashCalls: {
   name?: string;
   tool?: string;
   tags?: string[];
+  ttl?: string;
+  /** File name → content of the stashed directory at save time. */
+  files?: Record<string, string>;
 }[] = [];
 
 vi.mock("../../cli/commands/stash", () => ({
   stashDirectory: vi.fn(async (dir: string, opts: unknown) => {
-    const o = opts as { name?: string; tool?: string; tags?: string[] };
-    stashCalls.push({ dir, name: o?.name, tool: o?.tool, tags: o?.tags });
+    const o = opts as {
+      name?: string;
+      tool?: string;
+      tags?: string[];
+      ttl?: string;
+    };
+    const fs = await import("node:fs");
+    const files: Record<string, string> = {};
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        files[name] = fs.readFileSync(`${dir}/${name}`, "utf8");
+      }
+    } catch {
+      // directory already gone
+    }
+    stashCalls.push({
+      dir,
+      name: o?.name,
+      tool: o?.tool,
+      tags: o?.tags,
+      ttl: o?.ttl,
+      files,
+    });
     if (stashImpl)
       return stashImpl(
         dir,
@@ -2349,6 +2390,38 @@ describe("startServices — seed env injection", () => {
     expect(capturedEnv!.FILECHEAP_INGEST_TOKEN).toBeUndefined();
     void handle;
   });
+
+  it("filters inherited vault controls but keeps the ones the config sets explicitly", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    let capturedEnv: Record<string, string | undefined> | undefined;
+    shellImpl = async (_command, opts) => {
+      capturedEnv = (opts as { env?: Record<string, string | undefined> }).env;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    track(
+      await startServices(
+        {
+          seed: {
+            command: "provision",
+            env: { TVAULT_DIR: "/vaults/ops" },
+          },
+        },
+        {
+          configDir: dir,
+          project: "test",
+          coldStart: false,
+          env: {
+            TVAULT_DIR: "/inherited",
+            TVAULT_PASSPHRASE_FILE: "/inherited/pass",
+            CAIRN_TVAULT_ENV: "dev",
+          },
+        },
+      ),
+    );
+    expect(capturedEnv!.TVAULT_DIR).toBe("/vaults/ops");
+    expect(capturedEnv!.TVAULT_PASSPHRASE_FILE).toBeUndefined();
+    expect(capturedEnv!.CAIRN_TVAULT_ENV).toBeUndefined();
+  });
 });
 
 describe("startServices — tvault integration", () => {
@@ -2592,12 +2665,12 @@ describe("startServices — teardown best-effort (errors don't propagate)", () =
         expect.objectContaining({
           phase: "teardown",
           event: "fail",
-          data: { index: 0, exitCode: 1 },
+          data: { index: 0, exitCode: 1, durationMs: expect.any(Number) },
         }),
         expect.objectContaining({
           phase: "teardown",
           event: "complete",
-          data: { index: 1, exitCode: 0 },
+          data: { index: 1, exitCode: 0, durationMs: expect.any(Number) },
         }),
       ]),
     );
@@ -3551,6 +3624,153 @@ describe("startServices — fcheap stash integration", () => {
     await handle.stop();
     // No stash calls because there were no artifacts
     expect(stashCalls.length).toBe(0);
+  });
+});
+
+function servicesStashConfig(autoStash: "always" | "on-failure" | "never") {
+  return {
+    tmux: {
+      session: "test-sess",
+      readyTimeoutMs: 2000,
+      windows: [
+        { name: "web", command: "yarn start", readyOn: { text: "web ready" } },
+      ],
+    },
+    stash: {
+      enabled: true,
+      autoStash,
+      capture: ["tmux", "docker", "seed"] as Array<"tmux" | "docker" | "seed">,
+    },
+  };
+}
+
+describe("startServices — deprecated services.stash fixes", () => {
+  const tmuxWithSecretPane = (secret: string) => {
+    execaImpl = async (cmd, args) => {
+      if (cmd === "docker") return { exitCode: 0, stdout: "[]", stderr: "" };
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return {
+          exitCode: 0,
+          stdout: `web ready\nAuthorization: Bearer abc.def\nuser ${secret}`,
+          stderr: "",
+        };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  };
+  it("on-failure stashes only after a run failed, redacted and with a 7d TTL", async () => {
+    tmuxWithSecretPane("pane-secret-value");
+    const ctx = {
+      configDir: dir,
+      project: "sample-app",
+      coldStart: true,
+      secretValues: ["pane-secret-value"],
+    };
+    const passedOnly = track(
+      await startServices(servicesStashConfig("on-failure"), ctx),
+    );
+    await passedOnly.captureRunArtifacts("passed");
+    await passedOnly.stop();
+    expect(stashCalls).toHaveLength(0);
+
+    const failed = track(
+      await startServices(servicesStashConfig("on-failure"), ctx),
+    );
+    await failed.captureRunArtifacts("failed");
+    await failed.stop();
+    expect(stashCalls).toHaveLength(1);
+    expect(stashCalls[0]!.ttl).toBe("7d");
+    const pane = stashCalls[0]!.files?.["tmux-web.txt"] ?? "";
+    expect(pane).toContain("web ready");
+    expect(pane).not.toContain("pane-secret-value");
+    expect(pane).not.toContain("Bearer abc.def");
+  });
+
+  it("enabled without autoStash keeps the old after-every-invocation stash and says so", async () => {
+    tmuxWithSecretPane("x");
+    const logs: string[] = [];
+    const legacy = servicesStashConfig("always");
+    delete (legacy.stash as { autoStash?: string }).autoStash;
+    const handle = track(
+      await startServices(legacy, {
+        configDir: dir,
+        project: "test",
+        coldStart: true,
+        log: (message: string) => logs.push(message),
+      }),
+    );
+    await handle.captureRunArtifacts("passed");
+    await handle.stop();
+    expect(stashCalls).toHaveLength(1);
+    expect(logs).toContainEqual(
+      expect.stringContaining(
+        "`enabled: true` without `autoStash` still stashes after every invocation",
+      ),
+    );
+  });
+
+  it("autoStash never does not stash even when enabled", async () => {
+    tmuxWithSecretPane("x");
+    const handle = track(
+      await startServices(servicesStashConfig("never"), {
+        configDir: dir,
+        project: "test",
+        coldStart: true,
+      }),
+    );
+    await handle.captureRunArtifacts("failed");
+    await handle.stop();
+    expect(stashCalls).toHaveLength(0);
+  });
+
+  it("captures a reused tmux session and the seed output", async () => {
+    seedStateReadResult = { shouldRun: true, reason: "no-previous-seed" };
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 0, stdout: "", stderr: "" };
+      if (cmd === "tmux" && args[0] === "list-windows")
+        return { exitCode: 0, stdout: "web", stderr: "" };
+      if (cmd === "tmux" && args[0] === "display-message")
+        return { exitCode: 0, stdout: "node", stderr: "" };
+      if (cmd === "tmux" && args[0] === "capture-pane")
+        return { exitCode: 0, stdout: "reused pane output", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    shellImpl = async () => ({
+      exitCode: 0,
+      stdout: "seeded 3 records",
+      stderr: "",
+    });
+    const handle = track(
+      await startServices(
+        {
+          seed: { command: "yarn seed" },
+          tmux: {
+            session: "test-sess",
+            reuseExisting: true,
+            windows: [{ name: "web", command: "yarn start" }],
+          },
+          stash: {
+            enabled: true,
+            autoStash: "always",
+            ttl: "2d",
+            capture: ["tmux", "docker", "seed"],
+          },
+        },
+        { configDir: dir, project: "test", coldStart: false },
+      ),
+    );
+    await handle.stop();
+    expect(stashCalls).toHaveLength(1);
+    expect(stashCalls[0]!.ttl).toBe("2d");
+    expect(stashCalls[0]!.files?.["tmux-web.txt"]).toContain(
+      "reused pane output",
+    );
+    expect(stashCalls[0]!.files?.["seed-output.txt"]).toContain(
+      "seeded 3 records",
+    );
   });
 });
 
@@ -4891,5 +5111,126 @@ describe("maybeStartServices — dry-run mode", () => {
     });
     await noopHandle.stop();
     expect(() => noopHandle.terminateSync()).not.toThrow();
+  });
+});
+
+/* ---------- F2: tmux readyOn.gate / after (real listeners) ---------- */
+
+describe("startServices — tmux readiness gates", () => {
+  it("readyOn.gate needs the gate's stable passes before the window is ready", async () => {
+    const { createServer } = await import("node:http");
+    let hits = 0;
+    const server = createServer((_req, res) => {
+      hits += 1;
+      res.statusCode = hits === 1 ? 503 : 200;
+      res.end("x");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const gateEvents: Array<{ type: string; name: string }> = [];
+    try {
+      const handle = track(
+        await startServices(
+          {
+            tmux: {
+              session: "gate-sess",
+              readyTimeoutMs: 60_000,
+              windows: [
+                {
+                  name: "api",
+                  command: "yarn start",
+                  readyOn: {
+                    gate: {
+                      name: "api-ready",
+                      http: `http://127.0.0.1:${port}/ready`,
+                      stable: 2,
+                      every: 10,
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          {
+            configDir: dir,
+            project: "test",
+            coldStart: true,
+            onGateEvent: (event) => gateEvents.push(event),
+          },
+        ),
+      );
+      expect(handle.startedByUs).toBe(true);
+      expect(hits).toBe(3);
+      expect(gateEvents[0]).toMatchObject({
+        type: "gate.started",
+        name: "api-ready",
+      });
+      expect(gateEvents.at(-1)).toMatchObject({
+        type: "gate.passed",
+        name: "api-ready",
+      });
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it("after: gates are waited before the window's command is sent", async () => {
+    const { createServer } = await import("node:net");
+    const probe = createServer();
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((r) => probe.close(() => r()));
+    const order: string[] = [];
+    execaImpl = async (cmd, args) => {
+      if (cmd === "tmux" && args[0] === "has-session")
+        return { exitCode: 1, stdout: "", stderr: "" };
+      if (
+        cmd === "tmux" &&
+        args[0] === "send-keys" &&
+        args.includes("yarn worker")
+      )
+        order.push("send worker");
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    const listener = createServer((socket) => socket.end());
+    const opening = setTimeout(() => listener.listen(port, "127.0.0.1"), 150);
+    try {
+      track(
+        await startServices(
+          {
+            tmux: {
+              session: "after-sess",
+              readyTimeoutMs: 60_000,
+              windows: [
+                {
+                  name: "worker",
+                  command: "yarn worker",
+                  after: { tcp: `127.0.0.1:${port}`, name: "db", every: 25 },
+                },
+              ],
+            },
+          },
+          {
+            configDir: dir,
+            project: "test",
+            coldStart: true,
+            onGateEvent: (event) => {
+              if (event.type === "gate.passed")
+                order.push(`passed ${event.name}`);
+            },
+          },
+        ),
+      );
+      expect(order[0]).toBe("passed db");
+      expect(order).toContain("send worker");
+    } finally {
+      clearTimeout(opening);
+      await new Promise<void>((r) => listener.close(() => r()));
+    }
   });
 });

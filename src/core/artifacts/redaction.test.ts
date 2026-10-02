@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   clearRegisteredSecretValues,
   createArtifactRedactor,
+  createLiveArtifactRedactor,
   registerSecretValues,
 } from "./redaction";
 
@@ -138,6 +139,25 @@ describe("createArtifactRedactor", () => {
     );
   });
 
+  it("keeps a bare placeholder under a sensitive key (it names a value, it is not one)", () => {
+    const redactor = createArtifactRedactor(undefined, {});
+    expect(
+      redactor.value({
+        fill: { by: "label", name: "Password", value: "${secrets.APP_PW}" },
+        vars: { password: "${env.APP_PW}", token: "${vars.token}" },
+        headers: { Authorization: "Bearer ${secrets.API}" },
+        other: { password: "${env.APP_PW:-literal-default}" },
+        literal: { name: "Password", value: "hunter2" },
+      }),
+    ).toEqual({
+      fill: { by: "label", name: "Password", value: "${secrets.APP_PW}" },
+      vars: { password: "${env.APP_PW}", token: "${vars.token}" },
+      headers: { Authorization: "[redacted]" },
+      other: { password: "[redacted]" },
+      literal: { name: "Password", value: "[redacted]" },
+    });
+  });
+
   it("redacts registered vault values even when the key name is not sensitive", () => {
     // Regression: a vault secret like MONGO_URI dodges SENSITIVE_KEY_RE, so
     // before the fix its plaintext leaked into artifacts.
@@ -189,5 +209,106 @@ describe("createArtifactRedactor", () => {
     expect(redactor.text("see another-leaky-value")).toBe(
       "see another-leaky-value",
     );
+  });
+});
+
+describe("multi-line secrets", () => {
+  const PEM = [
+    "-----BEGIN DEMO KEY-----",
+    "MIIEdemoSECRETbodyLINE1",
+    "MIIEdemoSECRETbodyLINE2",
+    "abc=",
+    "-----END DEMO KEY-----",
+  ].join("\r\n");
+
+  it("redacts the whole value, and each substantial line on its own", () => {
+    const redactor = createArtifactRedactor(undefined, {
+      DEMO_PRIVATE_TOKEN: PEM,
+    });
+    expect(redactor.text(`key: ${PEM} end`)).toBe("key: [redacted] end");
+    // A line-at-a-time sink (live logs) sees one line of it.
+    expect(redactor.text("MIIEdemoSECRETbodyLINE2")).toBe("[redacted]");
+    expect(redactor.text("-----END DEMO KEY-----")).toBe("[redacted]");
+    // Lines shorter than 8 characters are not registered on their own.
+    expect(redactor.text("abc=")).toBe("abc=");
+  });
+
+  it("applies to spec-declared values too", () => {
+    const redactor = createArtifactRedactor(
+      { values: ['{\n  "private_key": "demo-pk-0042-xyz"\n}'] },
+      {},
+    );
+    // Lines are registered trimmed; indentation around them stays.
+    expect(redactor.text('  "private_key": "demo-pk-0042-xyz"')).toBe(
+      "  [redacted]",
+    );
+    expect(redactor.text("}")).toBe("}");
+  });
+});
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
+describe("withheld child credentials backstop", () => {
+  const saved = process.env.FILECHEAP_INGEST_TOKEN;
+  const savedTvault = process.env.TVAULT_TOKEN;
+  const savedProject = process.env.TVAULT_PROJECT;
+  afterEach(() => {
+    const restore = restoreEnv;
+    restore("FILECHEAP_INGEST_TOKEN", saved);
+    restore("TVAULT_TOKEN", savedTvault);
+    restore("TVAULT_PROJECT", savedProject);
+  });
+
+  it("scrubs publisher and TinyVault tokens even from a filtered env", () => {
+    process.env.FILECHEAP_INGEST_TOKEN = "canary-ingest-1234";
+    process.env.TVAULT_TOKEN = "canary-tvault-5678";
+    process.env.TVAULT_PROJECT = "demo-project";
+    // Callers pass the filtered target env, which no longer has these keys.
+    const redactor = createArtifactRedactor(undefined, { HOME: "/home/demo" });
+    expect(
+      redactor.text("ingest=canary-ingest-1234 tv=canary-tvault-5678"),
+    ).toBe("ingest=[redacted] tv=[redacted]");
+    // A non-sensitive TinyVault control value is not a secret.
+    expect(redactor.text("project demo-project")).toBe("project demo-project");
+  });
+});
+
+describe("createLiveArtifactRedactor", () => {
+  afterEach(() => {
+    clearRegisteredSecretValues();
+  });
+
+  it("picks up values registered after it was created", () => {
+    const redactor = createLiveArtifactRedactor(undefined, {});
+    expect(redactor.text("late-literal-0042")).toBe("late-literal-0042");
+    registerSecretValues(["late-literal-0042"]);
+    expect(redactor.text("late-literal-0042")).toBe("[redacted]");
+    expect(redactor.value({ note: "late-literal-0042" })).toEqual({
+      note: "[redacted]",
+    });
+  });
+
+  it("rebuilds only when the registered set changes", () => {
+    const env: Record<string, string | undefined> = {};
+    const redactor = createLiveArtifactRedactor(undefined, env);
+    expect(redactor.text("tok_live_0042")).toBe("tok_live_0042");
+    // Cached: a later env mutation alone is not seen...
+    env.API_TOKEN = "tok_live_0042";
+    expect(redactor.text("tok_live_0042")).toBe("tok_live_0042");
+    // ...until a registration bumps the version.
+    registerSecretValues(["unrelated-literal-7788"]);
+    expect(redactor.text("tok_live_0042")).toBe("[redacted]");
+  });
+
+  it("applies its config (spec redaction blocks) from the first call", () => {
+    const redactor = createLiveArtifactRedactor(
+      { values: ["spec-literal-7788"], headers: ["X-Demo-Key"] },
+      {},
+    );
+    expect(redactor.text("echo spec-literal-7788")).toBe("echo [redacted]");
+    expect(redactor.text("X-Demo-Key: abc")).toBe("X-Demo-Key: [redacted]");
   });
 });

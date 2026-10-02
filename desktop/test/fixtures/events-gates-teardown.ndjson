@@ -1,0 +1,29 @@
+{"ts":"2026-10-02T09:00:00.000Z","type":"run.started","runId":"2026-10-02T09-00-00-000Z_order_sync_ddeeff","spec":"order_sync"}
+{"ts":"2026-10-02T09:00:00.010Z","type":"phase.changed","phase":"preconditions","item":"api-health","budgetMs":60000,"deadline":"2026-10-02T09:01:00.010Z"}
+{"ts":"2026-10-02T09:00:00.020Z","type":"gate.started","name":"api-health","budgetMs":60000,"scope":"precondition","everyMs":1000}
+{"ts":"2026-10-02T09:00:00.040Z","type":"gate.attempt","name":"api-health","attempt":1,"ok":false,"detail":"GET http://localhost:8787/health → 503 (want 2xx|3xx)","scope":"precondition"}
+{"ts":"2026-10-02T09:00:03.050Z","type":"gate.attempt","name":"api-health","attempt":4,"ok":true,"detail":"GET http://localhost:8787/health → 200","scope":"precondition"}
+{"ts":"2026-10-02T09:00:03.060Z","type":"gate.passed","name":"api-health","attempts":4,"durationMs":3040,"lastDetail":"GET http://localhost:8787/health → 200","scope":"precondition"}
+{"ts":"2026-10-02T09:00:03.070Z","type":"fixture.ensure","name":"demo_order","adapter":"mongo","status":"ok","durationMs":25,"outputs":{"orderId":"665f00000000000000000001"},"scope":"run"}
+{"ts":"2026-10-02T09:00:03.080Z","type":"fixture.reset","name":"demo_order","adapter":"mongo","status":"dry-run","durationMs":1,"scope":"run","reason":"shared environment"}
+{"ts":"2026-10-02T09:00:03.100Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-02T09:00:03.110Z","type":"step.started","stepId":"seed_order","index":1,"total":3,"kind":"run","label":"run ./seed-order.sh → seeded"}
+{"ts":"2026-10-02T09:00:04.000Z","type":"step.finished","stepId":"seed_order","durationMs":890}
+{"ts":"2026-10-02T09:00:04.010Z","type":"step.started","stepId":"open_orders","index":2,"total":3,"kind":"open","label":"open /orders"}
+{"ts":"2026-10-02T09:00:04.800Z","type":"step.finished","stepId":"open_orders","durationMs":790,"url":"http://localhost:8787/orders"}
+{"ts":"2026-10-02T09:00:04.810Z","type":"step.started","stepId":"banner_saved","index":3,"total":3,"kind":"step","label":"step"}
+{"ts":"2026-10-02T09:00:05.600Z","type":"expect.passed","stepId":"banner_saved","expectId":"banner_saved","kind":"visible+text","path":"expects/003_banner_saved.json","attempts":3,"durationMs":780,"expected":"visible, text contains \"Saved\"","actual":"visible, text \"Order saved\""}
+{"ts":"2026-10-02T09:00:05.610Z","type":"step.finished","stepId":"banner_saved","durationMs":800}
+{"ts":"2026-10-02T09:00:05.700Z","type":"phase.changed","phase":"outcomes"}
+{"ts":"2026-10-02T09:00:05.710Z","type":"outcome.started","outcomeId":"order_in_db","kind":"mongo","timeoutMs":30000}
+{"ts":"2026-10-02T09:00:05.900Z","type":"outcome.progress","outcomeId":"order_in_db","message":"attempt 1/~31: count=0 (want exists)"}
+{"ts":"2026-10-02T09:00:07.900Z","type":"outcome.progress","outcomeId":"order_in_db","message":"attempt 3/~31: count=1"}
+{"ts":"2026-10-02T09:00:07.910Z","type":"outcome.passed","outcomeId":"order_in_db","durationMs":2200,"attempts":3,"polledMs":2010}
+{"ts":"2026-10-02T09:00:08.000Z","type":"phase.changed","phase":"teardown","item":"clear_order","budgetMs":60000}
+{"ts":"2026-10-02T09:00:08.010Z","type":"teardown.started","index":1,"total":2,"kind":"run","stepId":"clear_order","label":"run ./clear-order.sh","runStatus":"passed"}
+{"ts":"2026-10-02T09:00:08.400Z","type":"teardown.finished","index":1,"kind":"run","stepId":"clear_order","status":"failed","durationMs":390,"error":"run ./clear-order.sh failed (exit 1): no order matched demo-order-1"}
+{"ts":"2026-10-02T09:00:08.410Z","type":"phase.changed","phase":"teardown","item":"close_banner","budgetMs":59590}
+{"ts":"2026-10-02T09:00:08.420Z","type":"teardown.started","index":2,"total":2,"kind":"click","stepId":"close_banner","runStatus":"passed"}
+{"ts":"2026-10-02T09:00:08.600Z","type":"teardown.finished","index":2,"kind":"click","stepId":"close_banner","status":"passed","durationMs":180}
+{"ts":"2026-10-02T09:00:08.650Z","type":"fixture.teardown","name":"demo_order","adapter":"mongo","status":"ok","durationMs":30,"scope":"run"}
+{"ts":"2026-10-02T09:00:08.700Z","type":"run.passed","runId":"2026-10-02T09-00-00-000Z_order_sync_ddeeff","durationMs":8700}

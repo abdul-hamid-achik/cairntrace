@@ -26,6 +26,9 @@ export async function showCheckpointCommand(
     path: summary.path,
     sizeBytes: summary.sizeBytes,
     modifiedAt: summary.modifiedAt.toISOString(),
+    health: summary.health,
+    ...(summary.staleMeta ? { staleMeta: true } : {}),
+    ...(summary.meta ? { meta: summary.meta } : {}),
     preview: summary.preview,
   };
 
@@ -37,6 +40,17 @@ export async function showCheckpointCommand(
         `Path: ${d.path}`,
         `Size: ${kb} KB`,
         `Modified: ${d.modifiedAt}`,
+        `Health: ${d.health}${
+          d.staleMeta
+            ? " (stale scope ignored: the state was rewritten after it)"
+            : ""
+        }`,
+        d.meta?.env ? `Environment: ${d.meta.env}` : "",
+        d.meta?.baseUrl ? `Base URL: ${d.meta.baseUrl}` : "",
+        d.meta ? `Captured: ${d.meta.createdAt}` : "",
+        d.meta?.expiresAt
+          ? `Expires: ${d.meta.expiresAt} (ttl ${d.meta.ttl ?? "?"})`
+          : "",
         "",
         "## Preview",
         "```json",

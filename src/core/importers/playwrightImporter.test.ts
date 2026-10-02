@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 import { exportPlaywright } from "../exporters/playwrightExporter";
+import { exportPlaywrightProject } from "../exporters/playwrightProject";
 import { parseSpec } from "../parser/parseSpec";
 import { SpecSchema, type Spec } from "../schema/spec.v1";
 import { importPlaywright } from "./playwrightImporter";
@@ -308,5 +309,151 @@ describe("importPlaywright", () => {
           (o.verify.text as { contains?: string }).contains === "Saved",
       ),
     ).toBe(true);
+  });
+
+  it("never treats test.step / hooks / test.use as tests and accepts test(title, options, fn)", () => {
+    const source = [
+      `import { expect, test } from "@playwright/test";`,
+      ``,
+      `test.use({ viewport: { width: 1280, height: 720 } });`,
+      `test.beforeAll(async () => {});`,
+      `test.beforeEach(async ({ page }) => { await page.goto("/warmup"); });`,
+      ``,
+      `async function openSettings(page) {`,
+      `  await test.step("open settings", async () => {`,
+      `    await page.getByRole("link", { name: "Settings" }).click();`,
+      `  });`,
+      `}`,
+      ``,
+      `test("checkout succeeds", { tag: ["@smoke"], annotation: { type: "issue", description: "x" } }, async ({ page }) => {`,
+      `  await page.goto("/cart");`,
+      `  await page.getByRole("button", { name: "Pay" }).click();`,
+      `  await expect(page.getByText("Thanks")).toBeVisible();`,
+      `});`,
+      ``,
+      `test.afterEach(async () => {});`,
+    ].join("\n");
+
+    const imported = importPlaywright(source);
+    expect(imported.spec.name).toBe("checkout_succeeds");
+    expect(imported.spec.steps).toEqual([
+      { open: "/cart" },
+      { click: { by: "role", role: "button", name: "Pay" } },
+    ]);
+    expect(imported.todos.some((todo) => todo.includes("Skipped test"))).toBe(
+      false,
+    );
+  });
+
+  it("imports a --project export: step ids from test.step, helpers, no scaffolding TODOs", () => {
+    const spec: Spec = {
+      version: 1,
+      name: "project_round_trip",
+      intent: "project exports import back with ids",
+      mode: "normal",
+      steps: [
+        { id: "open_form", open: "/form" },
+        {
+          id: "fill_name",
+          fill: { by: "label", name: "Name", value: "Ada" },
+        },
+        {
+          id: "save",
+          click: { by: "role", role: "button", name: "Save" },
+        },
+      ],
+      outcomes: [
+        {
+          id: "saved_visible",
+          description: "saved",
+          verify: { text: { contains: "Saved" } },
+        },
+        {
+          id: "console_clean",
+          description: "no console errors",
+          verify: { console: { errorsMax: 0 } },
+        },
+      ],
+    };
+    const project = exportPlaywrightProject([
+      {
+        spec,
+        resolved: spec,
+        path: "/tmp/flows/project_round_trip.yml",
+        contractHashValid: true,
+        origins: [],
+        actionsByName: new Map(),
+      },
+    ]);
+    const testSource = project.files.find(
+      (file) => file.relPath === "tests/project_round_trip.spec.ts",
+    )!.source;
+
+    const imported = importPlaywright(testSource);
+    expect(imported.spec.name).toBe("project_round_trip");
+    expect(imported.spec.steps).toEqual([
+      { id: "open_form", open: "/form" },
+      {
+        id: "fill_name",
+        fill: { by: "label", name: "Name", value: "Ada" },
+      },
+      { id: "save", click: { by: "role", role: "button", name: "Save" } },
+    ]);
+    expect(imported.spec.outcomes).toEqual([
+      {
+        id: "saved_visible",
+        description: "expected text is present",
+        verify: { text: { contains: "Saved" } },
+      },
+      {
+        id: "console_clean",
+        description: "console errors stay within budget",
+        verify: { console: { errorsMax: 0 } },
+      },
+    ]);
+    expect(imported.todos).toEqual([]);
+    expect(SpecSchema.safeParse(imported.spec).success).toBe(true);
+  });
+
+  it("imports a POM-style test: real title, expect mapped, page-object calls left as TODOs", () => {
+    const source = [
+      `import { expect, test, type Page } from "@playwright/test";`,
+      ``,
+      `class LoginPage {`,
+      `  constructor(private readonly page: Page) {}`,
+      `  async login(user: string, password: string) {`,
+      `    await test.step("log in", async () => {`,
+      `      await this.page.getByLabel("Email").fill(user);`,
+      `      await this.page.getByLabel("Password").fill(password);`,
+      `    });`,
+      `  }`,
+      `}`,
+      ``,
+      `test.describe("account", () => {`,
+      `  test("user sees the dashboard after login", async ({ page }) => {`,
+      `    const loginPage = new LoginPage(page);`,
+      `    await page.goto("/login");`,
+      `    await loginPage.login("demo@example.test", "pw");`,
+      `    await expect(page.getByText("Dashboard")).toBeVisible();`,
+      `  });`,
+      `});`,
+    ].join("\n");
+
+    const imported = importPlaywright(source);
+    expect(imported.spec.name).toBe("user_sees_the_dashboard_after_login");
+    expect(imported.spec.steps).toEqual([{ open: "/login" }]);
+    expect(imported.spec.outcomes).toEqual([
+      {
+        id: "text_visible",
+        description: "expected text is visible",
+        verify: { text: { contains: "Dashboard" } },
+      },
+    ]);
+    expect(imported.todos).toContain(
+      `await loginPage.login("demo@example.test", "pw");`,
+    );
+    expect(imported.todos.some((todo) => todo.includes("Skipped test"))).toBe(
+      false,
+    );
   });
 });

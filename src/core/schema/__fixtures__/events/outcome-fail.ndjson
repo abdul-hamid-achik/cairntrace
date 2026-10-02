@@ -1,0 +1,12 @@
+{"ts":"<ts>","type":"run.started","runId":"<runId>","spec":"demo_outcome_fail"}
+{"ts":"<ts>","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"steps"}
+{"ts":"<ts>","type":"step.started","stepId":"step_1","index":1,"total":1,"kind":"open","label":"open https://demo.example.test/home"}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"step_1","path":"snapshots/001_step_1.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"step_1","durationMs":0,"url":"https://demo.example.test/home"}
+{"ts":"<ts>","type":"phase.changed","phase":"outcomes"}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"welcome_copy","kind":"text"}
+{"ts":"<ts>","type":"outcome.failed","outcomeId":"welcome_copy","durationMs":0}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"home","kind":"url"}
+{"ts":"<ts>","type":"outcome.passed","outcomeId":"home","durationMs":0}
+{"ts":"<ts>","type":"run.failed","runId":"<runId>","durationMs":0}

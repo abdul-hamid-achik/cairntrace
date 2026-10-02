@@ -6,6 +6,7 @@ import {
   replaceContractHashLine,
   stampSpecContractHash,
   verifyCommand,
+  verifySpec,
 } from "./verify";
 
 class ExitIntercept extends Error {
@@ -417,5 +418,131 @@ outcomes:
     const parsed = JSON.parse(result.stdout);
     expect(parsed.status).toBe("valid");
     expect(parsed.referenceFindings).toBe(0);
+  });
+});
+
+describe("verifySpec (shared CLI + MCP verify path)", () => {
+  const SPEC = `version: 1
+name: shared_verify
+intent: shared verify path
+preconditions:
+  commands:
+    - run: "echo \${secrets.ENV_LEVEL_SECRET}"
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+`;
+
+  it("fails with exit 4 and a clear error for an unknown --env", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments:\n  local:\n    baseUrl: http://localhost:9\n",
+    );
+    const specPath = join(dir, "unknown-env.yml");
+    await writeFile(specPath, SPEC);
+    const { result, exitCode } = await verifySpec(specPath, {
+      env: "prod",
+      config: configPath,
+    });
+    expect(exitCode).toBe(4);
+    expect(result.status).toBe("invalid");
+    expect(result.errors[0]).toContain('unknown environment "prod"');
+    expect(result.errors[0]).toContain("defines: local");
+
+    const cli = await runVerify(specPath, {
+      json: true,
+      env: "prod",
+      config: configPath,
+    });
+    expect(cli.code).toBe(4);
+  });
+
+  it("audits against the EFFECTIVE (environment-level) secrets.required", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+secrets:
+  provider: env
+  required: [TOP_LEVEL_ONLY]
+environments:
+  local:
+    baseUrl: http://localhost:9
+  ci:
+    baseUrl: http://localhost:9
+    secrets:
+      provider: env
+      required: [ENV_LEVEL_SECRET]
+`,
+    );
+    const specPath = join(dir, "env-secrets.yml");
+    await writeFile(specPath, SPEC);
+    const local = await verifySpec(specPath, { config: configPath });
+    expect(local.exitCode).toBe(4);
+    expect(local.result.referenceFindings).toBe(1);
+    const ci = await verifySpec(specPath, { config: configPath, env: "ci" });
+    expect(ci.exitCode).toBe(0);
+    expect(ci.result.referenceFindings).toBe(0);
+    expect(ci.result.coldStartSatisfied).toBe(true);
+  });
+
+  it("surfaces implicit-environment warnings without failing", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments:\n  staging:\n    baseUrl: http://localhost:9\n",
+    );
+    const specPath = join(dir, "implicit-env.yml");
+    await writeFile(specPath, SPEC.replace("ENV_LEVEL_SECRET", "X:-x"));
+    const { result, exitCode } = await verifySpec(specPath, {
+      config: configPath,
+    });
+    expect(exitCode).toBe(0);
+    expect(result.warnings.some((w) => w.includes('no "local"'))).toBe(true);
+  });
+
+  it("keeps `environment: local` specs valid against a config with no environments", async () => {
+    // Regression: the spec-level environment was briefly a hard error, which
+    // broke every scaffolded spec (`environment: local`) in projects whose
+    // config defines `environments: {}`.
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments: {}\nbrowser: { testIdAttribute: data-qa }\n",
+    );
+    const specPath = join(dir, "spec-local.yml");
+    await writeFile(
+      specPath,
+      `${SPEC.replace("ENV_LEVEL_SECRET", "X:-x")}environment: local\nsteps:\n  - open: https://example.test/\n`,
+    );
+    const { result, exitCode } = await verifySpec(specPath, {
+      config: configPath,
+    });
+    expect(exitCode).toBe(0);
+    expect(result.status).not.toBe("invalid");
+    expect(result.warnings.join("\n")).not.toContain("environment");
+  });
+
+  it("only warns when a spec's environment: is not defined in the config", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments:\n  dev: {}\n  prod: {}\n",
+    );
+    const specPath = join(dir, "spec-stale-env.yml");
+    await writeFile(
+      specPath,
+      `${SPEC.replace("ENV_LEVEL_SECRET", "X:-x")}environment: local\n`,
+    );
+    const { result, exitCode } = await verifySpec(specPath, {
+      config: configPath,
+    });
+    expect(exitCode).toBe(0);
+    expect(
+      result.warnings.some((w) => w.includes(`the spec's environment "local"`)),
+    ).toBe(true);
   });
 });

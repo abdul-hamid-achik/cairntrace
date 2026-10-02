@@ -1,0 +1,18 @@
+{"ts":"<ts>","type":"run.started","runId":"<runId>","spec":"demo_script_progress"}
+{"ts":"<ts>","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"preconditions","item":"quiesce","budgetMs":30000,"deadline":"<ts>"}
+{"ts":"<ts>","type":"log.opened","kind":"precondition","name":"quiesce","path":"logs/precondition-01-quiesce.log"}
+{"ts":"<ts>","type":"precondition.started","name":"quiesce","timeoutMs":30000,"index":1,"total":1,"logPath":"logs/precondition-01-quiesce.log"}
+{"ts":"<ts>","type":"precondition.progress","name":"quiesce","message":"3/9 queues idle"}
+{"ts":"<ts>","type":"precondition.run","name":"quiesce","exitCode":0,"durationMs":0,"timedOut":false,"output":"waiting\nsettled","logPath":"logs/precondition-01-quiesce.log"}
+{"ts":"<ts>","type":"phase.changed","phase":"steps"}
+{"ts":"<ts>","type":"step.started","stepId":"step_1","index":1,"total":1,"kind":"open","label":"open https://demo.example.test/tasks"}
+{"ts":"<ts>","type":"artifact.snapshot","stepId":"step_1","path":"snapshots/001_step_1.txt"}
+{"ts":"<ts>","type":"step.finished","stepId":"step_1","durationMs":0,"url":"https://demo.example.test/tasks"}
+{"ts":"<ts>","type":"phase.changed","phase":"outcomes"}
+{"ts":"<ts>","type":"outcome.started","outcomeId":"tasks_terminal","kind":"script"}
+{"ts":"<ts>","type":"log.opened","kind":"outcome","name":"tasks_terminal","path":"logs/outcome-tasks_terminal.log"}
+{"ts":"<ts>","type":"outcome.progress","outcomeId":"tasks_terminal","message":"47/120 tasks terminal"}
+{"ts":"<ts>","type":"outcome.progress","outcomeId":"tasks_terminal","message":"120/120 tasks terminal"}
+{"ts":"<ts>","type":"outcome.passed","outcomeId":"tasks_terminal","durationMs":0}
+{"ts":"<ts>","type":"run.passed","runId":"<runId>","durationMs":0}

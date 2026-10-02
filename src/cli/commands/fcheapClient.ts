@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { pathFreeMessage } from "../../core/artifacts/retention";
 import { fcheapPublisherEnv, targetChildEnv } from "../../core/processEnv";
 
 export interface FcheapProcessResult {
@@ -6,6 +7,10 @@ export interface FcheapProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** The binary could not be executed (not installed / not on $PATH). */
+  missing?: boolean;
+  /** The process was killed at `timeoutMs`. */
+  timedOut?: boolean;
 }
 
 export interface FcheapProcessOptions {
@@ -45,16 +50,33 @@ export async function runFcheap(
       ? fcheapPublisherEnv(requestedEnv)
       : targetChildEnv(requestedEnv);
   try {
+    // extendEnv: false — execa would otherwise merge process.env back in and
+    // hand the publisher token / TinyVault controls to every fcheap child.
+    // Both filtered maps keep PATH and HOME.
     const result = await execa(resolveFcheapBinary(env), fullArgs, {
       reject: false,
       timeout: opts.timeoutMs ?? 60_000,
       env,
+      extendEnv: false,
     });
+    const failedToSpawn =
+      result.exitCode === undefined &&
+      (result as { code?: string }).code === "ENOENT";
+    if (failedToSpawn) {
+      return {
+        ok: false,
+        stdout: "",
+        stderr: `fcheap not found on $PATH. ${FCHEAP_INSTALL_HINT}`,
+        exitCode: -1,
+        missing: true,
+      };
+    }
     return {
       ok: result.exitCode === 0,
       stdout: typeof result.stdout === "string" ? result.stdout : "",
       stderr: typeof result.stderr === "string" ? result.stderr : "",
       exitCode: result.exitCode ?? -1,
+      ...(result.timedOut ? { timedOut: true } : {}),
     };
   } catch (error) {
     const cause = error as Error & { code?: string };
@@ -64,6 +86,7 @@ export async function runFcheap(
         stdout: "",
         stderr: `fcheap not found on $PATH. ${FCHEAP_INSTALL_HINT}`,
         exitCode: -1,
+        missing: true,
       };
     }
     return {
@@ -77,4 +100,89 @@ export async function runFcheap(
 
 export async function isFcheapAvailable(): Promise<boolean> {
   return (await runFcheap(["--version"], { timeoutMs: 10_000 })).ok;
+}
+
+const saveMetaSupport = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether the installed `fcheap save` accepts `--meta key=value` (0.36+),
+ * detected once per binary from `fcheap save --help`. Any failure means
+ * "unsupported" so callers degrade to a plain save.
+ */
+export function fcheapSupportsSaveMeta(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const binary = resolveFcheapBinary(env);
+  let probe = saveMetaSupport.get(binary);
+  if (!probe) {
+    probe = runFcheap(["save", "--help"], { timeoutMs: 10_000, env }).then(
+      (r) => r.ok && /(^|\s)--meta\b/m.test(r.stdout),
+      () => false,
+    );
+    saveMetaSupport.set(binary, probe);
+  }
+  return probe;
+}
+
+const publishRunIndexSupport = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether the installed `fcheap publish` accepts `--run-index` (the
+ * metadata-only RunIndexV1 sidecar), detected once per binary.
+ */
+export function fcheapSupportsPublishRunIndex(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const binary = resolveFcheapBinary(env);
+  let probe = publishRunIndexSupport.get(binary);
+  if (!probe) {
+    probe = runFcheap(["publish", "--help"], { timeoutMs: 10_000, env }).then(
+      (r) => r.ok && /(^|\s)--run-index\b/m.test(r.stdout),
+      () => false,
+    );
+    publishRunIndexSupport.set(binary, probe);
+  }
+  return probe;
+}
+
+/** Forget cached capability probes (tests swap FCHEAP_BIN). */
+export function resetFcheapCapabilityCache(): void {
+  saveMetaSupport.clear();
+  publishRunIndexSupport.clear();
+}
+
+export type FcheapFailureReason =
+  | "fcheap-missing"
+  | "save-failed"
+  | "auth"
+  | "too-large"
+  | "timeout"
+  | "unknown";
+
+/**
+ * Map a failed fcheap process to the short, path-free reason code recorded in
+ * `artifact.stash` / `artifact.publish` events.
+ */
+export function classifyFcheapFailure(
+  result: Pick<FcheapProcessResult, "missing" | "timedOut" | "stderr">,
+  fallback: FcheapFailureReason = "save-failed",
+): FcheapFailureReason {
+  if (result.missing) return "fcheap-missing";
+  if (result.timedOut) return "timeout";
+  // Classify the message, not the paths in it: a spec or run named
+  // `oauth_login` must not read as an auth failure.
+  const stderr = result.stderr
+    .split(/\r?\n/)
+    .map((line) => pathFreeMessage(line))
+    .join("\n")
+    .toLowerCase();
+  if (
+    /\b(?:401|403)\b|unauthori[sz]ed|forbidden|not (?:logged|signed) in|\blogin required\b|\bauth(?:entication|orization)?\b/.test(
+      stderr,
+    )
+  ) {
+    return "auth";
+  }
+  if (/\b413\b|too large|exceeds|\bquota\b/.test(stderr)) return "too-large";
+  return fallback;
 }

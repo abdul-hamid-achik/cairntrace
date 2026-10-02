@@ -1,0 +1,19 @@
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.docker.start","message":"docker compose up -d"}
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.docker.readiness-check","message":"curl -fsS http://localhost:8787/health"}
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.docker.ready","message":"docker ready"}
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.seed.skip","message":"freshness check passed"}
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.tmux.ready-wait","message":"waiting for \"web\"","data":{"window":"web"}}
+{"ts":"2026-09-01T13:00:00.000Z","type":"services.tmux.ready","message":"\"web\" ready","data":{"window":"web"}}
+{"ts":"2026-09-01T13:00:01.000Z","type":"run.started","runId":"2026-09-01T13-00-01-000Z_report_export_112233","spec":"report_export"}
+{"ts":"2026-09-01T13:00:01.100Z","type":"artifact.video","action":"start","policy":"on-failure"}
+{"ts":"2026-09-01T13:00:01.200Z","type":"step.started","stepId":"open_reports"}
+{"ts":"2026-09-01T13:00:02.000Z","type":"step.finished","stepId":"open_reports","durationMs":800}
+{"ts":"2026-09-01T13:00:02.100Z","type":"step.started","stepId":"download_report"}
+{"ts":"2026-09-01T13:00:03.100Z","type":"artifact.download","stepId":"download_report","path":"downloads/report.xlsx","assign":"report"}
+{"ts":"2026-09-01T13:00:03.150Z","type":"step.finished","stepId":"download_report","durationMs":1050}
+{"ts":"2026-09-01T13:00:04.000Z","type":"outcome.passed","outcomeId":"report_downloaded"}
+{"ts":"2026-09-01T13:00:09.000Z","type":"outcome.failed","outcomeId":"report_rows"}
+{"ts":"2026-09-01T13:00:09.100Z","type":"artifact.video","action":"stop","path":"videos/run.webm"}
+{"ts":"2026-09-01T13:00:09.200Z","type":"artifact.services","action":"capture","path":"services/manifest.json","sources":4,"errors":0,"totalBytes":20480,"truncated":false}
+{"ts":"2026-09-01T13:00:09.300Z","type":"run.failed","runId":"2026-09-01T13-00-01-000Z_report_export_112233","durationMs":8300}
+{"ts":"2026-09-01T13:00:09.400Z","type":"artifact.retention","action":"warning","warning":"retention.archiveToStash is enabled but no archive adapter was provided; pruning was skipped"}

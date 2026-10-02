@@ -12,6 +12,11 @@ import {
 
 let root: string;
 
+/** A run-directory name the stats scan accepts (RUN_DIR_PATTERN). */
+function runDirName(id: string): string {
+  return `2026-07-17T00-00-00-000Z_${id}_0a1b2c`;
+}
+
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
@@ -80,21 +85,21 @@ describe("percentiles", () => {
 describe("aggregateRunStats", () => {
   it("groups by label and computes pass rates + duration stats", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-"));
-    await writeRun(join(root, "r1"), {
+    await writeRun(join(root, runDirName("r1")), {
       runId: "r1",
       labels: { path: "legacy", suite: "ab" },
       status: "passed",
       durationMs: 1000,
       exitCode: 0,
     });
-    await writeRun(join(root, "r2"), {
+    await writeRun(join(root, runDirName("r2")), {
       runId: "r2",
       labels: { path: "legacy", suite: "ab" },
       status: "failed",
       durationMs: 2000,
       exitCode: 1,
     });
-    await writeRun(join(root, "t1"), {
+    await writeRun(join(root, runDirName("t1")), {
       runId: "t1",
       labels: { path: "next", suite: "ab" },
       status: "passed",
@@ -102,7 +107,7 @@ describe("aggregateRunStats", () => {
       exitCode: 0,
     });
     // wrong suite — filtered out
-    await writeRun(join(root, "other"), {
+    await writeRun(join(root, runDirName("other")), {
       runId: "other",
       labels: { path: "next", suite: "other" },
       status: "passed",
@@ -110,7 +115,7 @@ describe("aggregateRunStats", () => {
       exitCode: 0,
     });
     // no labels — ignored
-    await writeRun(join(root, "nolabel"), {
+    await writeRun(join(root, runDirName("nolabel")), {
       runId: "nolabel",
       status: "passed",
       durationMs: 50,
@@ -147,7 +152,7 @@ describe("aggregateRunStats", () => {
 
   it("harvests processingDurationMS from outcome raw sidecars", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-metric-"));
-    const runDir = join(root, "m1");
+    const runDir = join(root, runDirName("m1"));
     await writeRun(runDir, {
       runId: "m1",
       labels: { path: "next" },
@@ -181,12 +186,12 @@ describe("aggregateRunStats", () => {
 
   it("honors baseline group for deltas", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-base-"));
-    await writeRun(join(root, "r"), {
+    await writeRun(join(root, runDirName("r")), {
       runId: "r",
       labels: { path: "legacy" },
       durationMs: 100,
     });
-    await writeRun(join(root, "t"), {
+    await writeRun(join(root, runDirName("t")), {
       runId: "t",
       labels: { path: "next" },
       durationMs: 200,
@@ -202,7 +207,7 @@ describe("aggregateRunStats", () => {
 
   it("does not harvest generic durationMs as domain metric", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-nodur-"));
-    const runDir = join(root, "x");
+    const runDir = join(root, runDirName("x"));
     await writeRun(runDir, {
       runId: "x",
       labels: { path: "legacy" },
@@ -227,7 +232,7 @@ describe("aggregateRunStats", () => {
 
   it("honors custom --metric field name", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-custom-metric-"));
-    const runDir = join(root, "c");
+    const runDir = join(root, runDirName("c"));
     await writeRun(runDir, {
       runId: "c",
       labels: { path: "next" },
@@ -250,8 +255,10 @@ describe("aggregateRunStats", () => {
 
   it("skips corrupt run.json and empty artifact roots", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-corrupt-"));
-    await mkdir(join(root, "bad"), { recursive: true });
-    await writeFile(join(root, "bad", "run.json"), "{not-json");
+    await mkdir(join(root, runDirName("bad")), { recursive: true });
+    await writeFile(join(root, runDirName("bad"), "run.json"), "{not-json");
+    // Not a run directory: never scanned (and never counted toward --limit).
+    await mkdir(join(root, "_invocations", "x"), { recursive: true });
     const empty = await aggregateRunStats({
       artifactRoot: join(root, "missing-root-does-not-exist"),
       groupBy: "path",
@@ -269,14 +276,14 @@ describe("aggregateRunStats", () => {
 
   it("counts errored status separately from failed", async () => {
     root = mkdtempSync(join(tmpdir(), "cairn-stats-errored-"));
-    await writeRun(join(root, "e"), {
+    await writeRun(join(root, runDirName("e")), {
       runId: "e",
       labels: { path: "next" },
       status: "errored",
       durationMs: 10,
       exitCode: 2,
     });
-    await writeRun(join(root, "f"), {
+    await writeRun(join(root, runDirName("f")), {
       runId: "f",
       labels: { path: "next" },
       status: "failed",

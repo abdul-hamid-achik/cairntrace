@@ -247,6 +247,66 @@ services:
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes("not found"))).toBe(true);
   });
+
+  it("parses like `cairn run`: YAML merge keys, ${env.X:-default}, ${config.dir}", async () => {
+    // Before: a private ${env.X} regex + plain parseYaml rejected merge-key
+    // configs that run accepted, and left ${config.dir} literal.
+    const path = writeConfig(
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars: &shared
+      fixtures: "\${config.dir}/fixtures"
+      tenant: "\${env.CAIRN_VALIDATE_UNSET_TENANT:-acme}"
+  staging:
+    baseUrl: https://staging.example.test
+    vars:
+      <<: *shared
+      tenant: staging
+`,
+      tmpDir,
+    );
+    const { result, exitCode } = await runValidate(path);
+    expect(result.errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(result.config?.environments.local?.vars).toEqual({
+      fixtures: `${tmpDir}/fixtures`,
+      tenant: "acme",
+    });
+    expect(result.config?.environments.staging?.vars).toEqual({
+      fixtures: `${tmpDir}/fixtures`,
+      tenant: "staging",
+    });
+  });
+
+  it("reports a datasource that only breaks after an environment override is merged", async () => {
+    const path = writeConfig(
+      `version: 1
+datasources:
+  app:
+    kind: mongo
+    docker: { service: mongo }
+    database: shop
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  dev:
+    baseUrl: http://localhost:8081
+    datasources:
+      app: { transport: driver }
+`,
+      tmpDir,
+    );
+    const { result, exitCode } = await runValidate(path);
+    expect(exitCode).toBe(4);
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([
+      expect.stringMatching(
+        /^environments\.dev\.datasources\.app: .*transport driver needs uri/,
+      ),
+    ]);
+  });
 });
 
 describe("TmuxConfigSchema validations", () => {

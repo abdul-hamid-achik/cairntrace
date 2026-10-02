@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildExplain } from "./explain";
+import { buildExplain, explainToMarkdown } from "./explain";
 import { ExplainResultSchema } from "../../core/schema/explain.v1";
 import { DOC_TOPICS } from "./docs";
 
@@ -44,5 +44,82 @@ describe("buildExplain", () => {
     expect(brief).toBeDefined();
     expect(brief!.synopsis).toContain("cairn export brief");
     expect(brief!.outputSchema).toBe("urn:cairntrace.dev:brief:v1");
+  });
+});
+
+describe("buildExplain run hooks and placeholders", () => {
+  const doc = buildExplain();
+  const run = doc.commands.find((c) => c.name === "run")!;
+  const flag = (cmd: string, name: string) =>
+    doc.commands
+      .find((c) => c.name === cmd)
+      ?.flags.find((f) => f.name === name);
+
+  it("says --after runs after EACH spec with the CAIRN_RUN_* env (2.14.0+)", () => {
+    const after = flag("run", "--after")!;
+    expect(after.description).toContain("after EACH spec");
+    for (const env of [
+      "CAIRN_RUN_DIR",
+      "CAIRN_RUN_ID",
+      "CAIRN_RUN_STATUS",
+      "CAIRN_SPEC_PATH",
+    ]) {
+      expect(after.description).toContain(env);
+    }
+    expect(after.description).not.toMatch(/once after all specs/);
+  });
+
+  it("documents --repeat/--matrix/--stop-on-fail/--hook-timeout-ms", () => {
+    for (const name of [
+      "--repeat",
+      "--matrix",
+      "--stop-on-fail",
+      "--hook-timeout-ms",
+      "--progress",
+      "--provider",
+      "--device",
+    ]) {
+      expect(flag("run", name), name).toBeDefined();
+    }
+  });
+
+  it("documents ${project.root} and ${config.dir} in run notes and markdown", () => {
+    expect(run.notes).toContain("${project.root}");
+    expect(run.notes).toContain("action's directory");
+    expect(run.notes).toContain("${config.dir}");
+    const md = explainToMarkdown(doc);
+    expect(md).toContain("## Placeholders");
+    expect(md).toContain("${config.dir}");
+  });
+
+  it("documents heal/discover/snapshot runtime flags and testIdAttribute", () => {
+    // The CLI registers --env/--config/--var on `spec heal` and --var on
+    // discover/snapshot (the parity test checks the CLI side); the MCP tool
+    // takes the same inputs, and the notes say so.
+    const heal = doc.commands.find((c) => c.name === "spec heal")!;
+    for (const name of ["--env", "--config", "--var"]) {
+      expect(flag("spec heal", name), name).toBeDefined();
+    }
+    expect(heal.exitCodes["4"]).toContain("unknown --env");
+    expect(heal.synopsis).toContain("--var key=value");
+    expect(heal.notes).toContain("cairn_spec_heal");
+    for (const command of ["discover", "snapshot"]) {
+      expect(flag(command, "--var"), command).toBeDefined();
+      expect(doc.commands.find((c) => c.name === command)!.synopsis).toContain(
+        "--var key=value",
+      );
+    }
+    expect(doc.commands.find((c) => c.name === "discover")!.notes).toContain(
+      "recorded relative",
+    );
+    expect(flag("discover", "--testids")!.description).toContain(
+      "browser.testIdAttribute",
+    );
+    expect(flag("snapshot", "--testids")!.description).toContain(
+      "browser.testIdAttribute",
+    );
+    expect(
+      doc.commands.find((c) => c.name === "spec verify")!.exitCodes["4"],
+    ).toContain("reference audit");
   });
 });

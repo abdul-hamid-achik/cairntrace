@@ -40,7 +40,7 @@ describe("exported node verifier evidence", () => {
       `const cairnRunDir = testInfo.outputPath("cairn-run");`,
     );
     expect(source).toContain(
-      `cairnNetworkEvidence.recordApiRequest({ url: mutation.url(), method: "PATCH", status: mutation.status(), timestamp: mutationCairnRequestTimestamp, body: { "answer": "expected-value", "password": "must-not-leak" }, contentType: "application/json" });`,
+      `cairnNetworkEvidence.recordApiRequest({ url: cairnResponse.url(), method: "PATCH", status: cairnResponse.status(), timestamp: cairnResponseTimestamp, body: { "answer": "expected-value", "password": "must-not-leak" }, contentType: "application/json" });`,
     );
     expect(source).toContain(
       `await cairnNetworkEvidence.persist(cairnRunDir);`,

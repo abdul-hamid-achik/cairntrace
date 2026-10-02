@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolveSnapshotUrl } from "./snapshot";
+import { resolveSnapshotTarget, resolveSnapshotUrl } from "./snapshot";
 
 describe("resolveSnapshotUrl", () => {
   let dir: string;
@@ -44,5 +44,29 @@ describe("resolveSnapshotUrl", () => {
     await expect(resolveSnapshotUrl("/dashboard")).rejects.toThrow(
       /requires environments\.local\.baseUrl/,
     );
+  });
+});
+
+describe("resolveSnapshotTarget", () => {
+  it("carries the config browser.testIdAttribute and --var values", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-snapshot-target-"));
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:8787",
+        "browser:",
+        "  testIdAttribute: data-qa",
+      ].join("\n"),
+    );
+    const target = await resolveSnapshotTarget("/t/${vars.id}", {
+      config: configPath,
+      var: ["id=7"],
+    });
+    expect(target.url).toBe("http://localhost:8787/t/7");
+    expect(target.testIdAttribute).toBe("data-qa");
   });
 });

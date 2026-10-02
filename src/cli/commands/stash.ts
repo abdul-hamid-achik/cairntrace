@@ -1,6 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { resolveArtifactRoot, resolveRunRef } from "../runRefs";
+import { parse as parseYaml } from "yaml";
+import {
+  resolveArtifactRoot,
+  resolveArtifactRootContext,
+  resolveRunRef,
+} from "../runRefs";
 import { emit, resolveFormat } from "../format";
 import { log } from "../logger";
 import type { OutputFormat } from "../format";
@@ -18,13 +23,32 @@ import {
   type FcheapRestoreResult,
   type FcheapSearchResult,
 } from "./fcheapContract.js";
-import { runFcheap } from "./fcheapClient.js";
-import { ArtifactWriter } from "../../core/artifacts/ArtifactWriter.js";
+import {
+  classifyFcheapFailure,
+  fcheapSupportsSaveMeta,
+  runFcheap,
+} from "./fcheapClient.js";
+import {
+  ArtifactWriter,
+  type ArtifactRedactor,
+} from "../../core/artifacts/ArtifactWriter.js";
+import {
+  selectRunEvidence,
+  stageRunEvidence,
+} from "../../core/artifacts/evidenceSelection.js";
 import { createArtifactRedactor } from "../../core/artifacts/redaction.js";
+import { pathFreeMessage } from "../../core/artifacts/retention.js";
+import {
+  EvidenceCategorySchema,
+  type EvidenceCategory,
+  type StashConfig,
+} from "../../core/schema/config.v1.js";
+import type { EvidenceFailureReason } from "../../core/schema/events.v1.js";
 import {
   StashReceiptSchema,
   type StashReceipt,
 } from "../../core/schema/stash.v1.js";
+import { CAIRN_VERSION } from "../version.js";
 
 export { isFcheapAvailable } from "./fcheapClient.js";
 
@@ -41,11 +65,22 @@ export interface StashSaveResult {
   source?: string;
   status?: "saved" | "saved_with_failures";
   failures?: Array<{ id: string; stage: string; error: string }>;
+  /** Relative paths/dirs the evidence gate left out (`traces/`). */
+  excluded?: string[];
+  /** Secret-scanner findings file.cheap reported for the saved copy. */
+  secretsFound?: number;
+  ttl?: string;
+  expiresAt?: string;
+  /** Run-relative receipt written into the run (`stash-receipt.json`). */
+  receipt?: string;
 }
 
 export type StashListItem = FcheapListItem;
 export type StashInfo = FcheapInfo;
 export type StashSearchResult = FcheapSearchResult;
+
+/** Default TTL of a PASSED run's auto-stash (`stash.passTtl`). */
+export const DEFAULT_PASS_STASH_TTL = "7d";
 
 /* ---------------------------------------------------------------------------
  * Stash commands
@@ -106,6 +141,73 @@ export async function stashTagsForRun(
   return tags;
 }
 
+/** A spec's `stash.tags` as recorded in the run's spec.resolved.yml. */
+export async function readSpecStashTags(runDir: string): Promise<string[]> {
+  try {
+    const spec = parseYaml(
+      await readFile(join(runDir, "spec.resolved.yml"), "utf8"),
+    ) as { stash?: { tags?: unknown } } | null;
+    const tags = spec?.stash?.tags;
+    return Array.isArray(tags)
+      ? tags.filter((tag): tag is string => typeof tag === "string" && !!tag)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Non-secret run identity passed as `fcheap save --meta key=value` (keys
+ * file.cheap accepts: `[a-z0-9][a-z0-9_.-]*`, values ≤ 256 bytes).
+ */
+export function stashMetaForRun(run: {
+  runId?: string;
+  status?: string;
+  spec?: { name?: string };
+  environment?: string;
+  backend?: string;
+}): Record<string, string> {
+  const meta: Record<string, string> = { cairn_version: CAIRN_VERSION };
+  const put = (key: string, value: string | undefined): void => {
+    if (!value) return;
+    // eslint-disable-next-line no-control-regex
+    const clean = value.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 200);
+    if (clean) meta[key] = clean;
+  };
+  put("run_id", run.runId);
+  put("status", run.status);
+  put("spec", run.spec?.name);
+  put("env", run.environment);
+  put("backend", run.backend);
+  return meta;
+}
+
+/** run.json fields the stash metadata needs (missing/invalid → {}). */
+async function readRunIdentity(
+  runDir: string,
+): Promise<Parameters<typeof stashMetaForRun>[0]> {
+  try {
+    const raw = JSON.parse(
+      await readFile(join(runDir, "run.json"), "utf8"),
+    ) as Record<string, unknown>;
+    return {
+      ...(typeof raw.runId === "string" ? { runId: raw.runId } : {}),
+      ...(typeof raw.status === "string" ? { status: raw.status } : {}),
+      ...(typeof raw.environment === "string"
+        ? { environment: raw.environment }
+        : {}),
+      ...(typeof raw.backend === "string" ? { backend: raw.backend } : {}),
+      ...(raw.spec &&
+      typeof raw.spec === "object" &&
+      typeof (raw.spec as { name?: unknown }).name === "string"
+        ? { spec: { name: (raw.spec as { name: string }).name } }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export interface StashSaveOptions {
   artifactRoot?: string;
   config?: string;
@@ -114,6 +216,11 @@ export interface StashSaveOptions {
   labelsAsTags?: boolean;
   /** file.cheap TTL such as `30d`; omitted keeps the stash until dropped. */
   ttl?: string;
+  /**
+   * Evidence categories to carry (repeatable); default config
+   * `stash.include`, else [text, screenshots].
+   */
+  include?: string[];
   tool?: string;
   source?: string;
   format?: string;
@@ -122,17 +229,62 @@ export interface StashSaveOptions {
   md?: boolean;
 }
 
+/** Parse `--include` values; throws on an unknown category or missing `text`. */
+export function parseIncludeFlag(
+  values: readonly string[] | undefined,
+): EvidenceCategory[] | undefined {
+  if (!values || values.length === 0) return undefined;
+  const categories = values
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const parsed: EvidenceCategory[] = [];
+  for (const category of categories) {
+    const result = EvidenceCategorySchema.safeParse(category);
+    if (!result.success) {
+      throw new Error(
+        `--include expects text, screenshots, traces, videos or downloads; got "${category}"`,
+      );
+    }
+    if (!parsed.includes(result.data)) parsed.push(result.data);
+  }
+  if (!parsed.includes("text")) parsed.unshift("text");
+  return parsed;
+}
+
+/** The project config `stash` block (undefined when absent or invalid). */
+export async function loadStashConfig(
+  configPath: string | undefined,
+): Promise<StashConfig | undefined> {
+  try {
+    const context = await resolveArtifactRootContext(
+      configPath ? { config: configPath } : {},
+    );
+    return context.loaded?.config.stash;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * `cairn stash save <run-id>` — stash a run directory to fcheap.
- *
- * Wraps `fcheap save <runDir> --tool cairntrace --tag <spec-name> [--tag ...]
- * --source <spec-path> --json`.
+ * `cairn stash save <run-id>` — stash a run directory to fcheap through the
+ * evidence gate (default [text, screenshots]; `--include` or config
+ * `stash.include` opt into traces/videos/downloads) and record a
+ * `stash-receipt.json` + `artifact.stash` event (action `manual`).
  */
 export async function stashSaveCommand(
   runRef: string,
   opts: StashSaveOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
+  let include: EvidenceCategory[] | undefined;
+  try {
+    include = parseIncludeFlag(opts.include);
+  } catch (error) {
+    process.stderr.write(`cairn stash save: ${(error as Error).message}\n`);
+    process.exitCode = 2;
+    return;
+  }
   const root = await resolveArtifactRoot({
     ...(opts.artifactRoot ? { artifactRoot: opts.artifactRoot } : {}),
     ...(opts.config ? { config: opts.config } : {}),
@@ -140,15 +292,22 @@ export async function stashSaveCommand(
 
   const runDir = await resolveRunRef(runRef, root);
   const runId = basename(runDir);
+  const config = await loadStashConfig(opts.config);
 
   const tags = await stashTagsForRun(runDir, opts.tag, opts.labelsAsTags);
   const tool = opts.tool ?? "cairntrace";
 
-  const saved = await stashDirectory(runDir, {
+  const saved = await stashRunDirectory(runDir, {
+    action: "manual",
     tool,
     tags,
     ...(opts.ttl ? { ttl: opts.ttl } : {}),
     ...(opts.source ? { source: opts.source } : {}),
+    ...((include ?? config?.include)
+      ? { include: include ?? config?.include }
+      : {}),
+    ...(config?.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    meta: config?.meta !== false,
   });
   if (!saved.ok || !saved.stashId) {
     process.stderr.write(
@@ -166,11 +325,23 @@ export async function stashSaveCommand(
     ...(opts.source ? { source: opts.source } : {}),
     ...(saved.status ? { status: saved.status } : {}),
     ...(saved.failures?.length ? { failures: saved.failures } : {}),
+    ...(saved.excluded.length > 0 ? { excluded: saved.excluded } : {}),
+    ...(saved.secretsFound !== undefined
+      ? { secretsFound: saved.secretsFound }
+      : {}),
+    ...(saved.ttl ? { ttl: saved.ttl } : {}),
+    ...(saved.expiresAt ? { expiresAt: saved.expiresAt } : {}),
+    ...(saved.receipt ? { receipt: saved.receipt } : {}),
   };
 
   if (saved.warning) {
     process.stderr.write(`cairn stash save: warning: ${saved.warning}\n`);
     process.exitCode = 2;
+  }
+  if (saved.secretsFound) {
+    process.stderr.write(
+      `cairn stash save: warning: ${secretsWarning(saved.secretsFound, saved.secretsRules)}\n`,
+    );
   }
   process.stdout.write(
     emit(format, result, () => stashSaveMarkdown(result, runId)),
@@ -188,10 +359,22 @@ function stashSaveMarkdown(r: StashSaveResult, runId: string): string {
     ...(r.tags.length > 0 ? [`- tags: ${r.tags.join(", ")}`] : []),
     ...(r.source ? [`- source: ${r.source}`] : []),
     ...(r.status ? [`- status: ${r.status}`] : []),
+    ...(r.excluded?.length ? [`- excluded: ${r.excluded.join(", ")}`] : []),
+    ...(r.secretsFound !== undefined
+      ? [`- secretsFound: ${r.secretsFound}`]
+      : []),
+    ...(r.ttl ? [`- ttl: ${r.ttl}`] : []),
+    ...(r.expiresAt ? [`- expiresAt: ${r.expiresAt}`] : []),
     ...(r.failures ?? []).map(
       (failure) => `- ${failure.stage} failed: ${failure.error}`,
     ),
   ].join("\n");
+}
+
+function secretsWarning(count: number, rules: string[] | undefined): string {
+  return `file.cheap's secret scan flagged ${count} potential secret(s)${
+    rules?.length ? ` (${rules.join(", ")})` : ""
+  } in the stashed copy — review it before sharing or restoring elsewhere`;
 }
 
 /* ----- list ----- */
@@ -516,12 +699,15 @@ function stashSearchMarkdown(r: {
   return lines.join("\n");
 }
 
-/* ----- reusable stash helper (used by services lifecycle) ----- */
+/* ----- reusable stash helper (services lifecycle, investigate, clip) ----- */
 
 /**
  * Stash a directory to the fcheap vault. Best-effort: returns a result
- * object instead of throwing. Used by the services lifecycle to persist
- * session artifacts (tmux captures, docker logs, seed output) after a run.
+ * object instead of throwing. A cairn run directory (it holds `run.json`)
+ * always goes through the evidence gate ({@link selectRunEvidence}), so no
+ * caller can ship its traces, raw profiles or other secret-bearing members
+ * by accident; other directories (services captures, clip/vidtrace output)
+ * are saved as they are.
  */
 export interface StashDirectoryResult {
   ok: boolean;
@@ -530,17 +716,106 @@ export interface StashDirectoryResult {
   failures?: Array<{ id: string; stage: string; error: string }>;
   warning?: string;
   error?: string;
+  /** Path-free failure code when `ok` is false. */
+  reason?: EvidenceFailureReason;
+  contentHash?: string;
+  fileCount?: number;
+  sizeBytes?: number;
+  expiresAt?: string;
+  /** Secret-scanner findings from the save manifest (`custom.secrets_found`). */
+  secretsFound?: number;
+  secretsRules?: string[];
+  /** Run directories: relative paths/dirs the evidence gate left out. */
+  excluded?: string[];
+}
+
+interface SaveDirectoryOptions {
+  name?: string;
+  tool?: string;
+  tags?: string[];
+  source?: string;
+  ttl?: string;
+  /** `--meta key=value` pairs (caller checked fcheap supports them). */
+  meta?: Record<string, string>;
 }
 
 export async function stashDirectory(
   dir: string,
-  opts: {
-    name?: string;
-    tool?: string;
-    tags?: string[];
-    source?: string;
-    ttl?: string;
+  /** Run directories: evidence categories (default [text, screenshots]). */
+  /** Run directories: keep secret-bearing members (private vault only). */
+  opts: SaveDirectoryOptions & {
+    include?: readonly EvidenceCategory[];
+    unsafeIncludeRawTraces?: boolean;
   } = {},
+): Promise<StashDirectoryResult> {
+  if (await isRunDirectory(dir)) {
+    const { include, unsafeIncludeRawTraces, ...save } = opts;
+    return saveRunEvidence(dir, {
+      ...save,
+      ...(include ? { include } : {}),
+      ...(unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    });
+  }
+  return saveDirectory(dir, opts);
+}
+
+/** A cairn run directory: `run.json` is a regular file at its top. */
+async function isRunDirectory(dir: string): Promise<boolean> {
+  return lstat(join(dir, "run.json")).then(
+    (info) => info.isFile(),
+    () => false,
+  );
+}
+
+/**
+ * Save a run directory through the evidence gate: when anything is left out
+ * a private staged copy named after the run is saved instead (its `--source`
+ * is the run directory); otherwise the directory is saved in place.
+ */
+async function saveRunEvidence(
+  runDir: string,
+  opts: SaveDirectoryOptions & {
+    include?: readonly EvidenceCategory[];
+    unsafeIncludeRawTraces?: boolean;
+  },
+): Promise<StashDirectoryResult & { excluded: string[] }> {
+  let staged: Awaited<ReturnType<typeof stageRunEvidence>> | undefined;
+  let excluded: string[] = [];
+  try {
+    const selection = await selectRunEvidence(runDir, {
+      purpose: "stash",
+      ...(opts.include ? { include: opts.include } : {}),
+      ...(opts.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    });
+    excluded = selection.excluded;
+    if (!selection.complete) {
+      staged = await stageRunEvidence(runDir, selection, basename(runDir));
+    }
+    const { include: _include, unsafeIncludeRawTraces: _unsafe, ...save } =
+      opts;
+    const result = await saveDirectory(staged?.dir ?? runDir, {
+      ...save,
+      ...(staged
+        ? { name: opts.name ?? basename(runDir), source: opts.source ?? runDir }
+        : {}),
+    });
+    return { ...result, excluded };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `could not prepare the run for stashing: ${(error as Error).message}`,
+      reason: "unknown",
+      excluded,
+    };
+  } finally {
+    await staged?.cleanup().catch(() => undefined);
+  }
+}
+
+/** `fcheap save <dir>` with no evidence gate (callers gate run dirs). */
+async function saveDirectory(
+  dir: string,
+  opts: SaveDirectoryOptions,
 ): Promise<StashDirectoryResult> {
   const tool = opts.tool ?? "cairntrace";
   const args = [
@@ -552,6 +827,10 @@ export async function stashDirectory(
     ...(opts.tags ?? []).flatMap((t) => ["--tag", t]),
     ...(opts.source ? ["--source", opts.source] : []),
     ...(opts.ttl ? ["--ttl", opts.ttl] : []),
+    ...Object.entries(opts.meta ?? {}).flatMap(([key, value]) => [
+      "--meta",
+      `${key}=${value}`,
+    ]),
   ];
   const r = await runFcheap(args, { json: true });
   try {
@@ -560,12 +839,25 @@ export async function stashDirectory(
       stashId: receipt.stashId,
       ...(receipt.status ? { status: receipt.status } : {}),
       ...(receipt.failed?.length ? { failures: receipt.failed } : {}),
+      ...(receipt.contentHash ? { contentHash: receipt.contentHash } : {}),
+      ...(receipt.fileCount !== undefined
+        ? { fileCount: receipt.fileCount }
+        : {}),
+      ...(receipt.sizeBytes !== undefined
+        ? { sizeBytes: receipt.sizeBytes }
+        : {}),
+      ...(receipt.expiresAt ? { expiresAt: receipt.expiresAt } : {}),
+      // file.cheap records `secrets_found` only when its save-time scan
+      // matched something, so an absent field is zero findings.
+      secretsFound: receipt.secretsFound ?? 0,
+      ...(receipt.secretsRules ? { secretsRules: receipt.secretsRules } : {}),
     };
     if (!r.ok && receipt.status !== "saved_with_failures") {
       return {
         ok: false,
         ...receiptFields,
         error: r.stderr || "fcheap failed after emitting a save receipt",
+        reason: classifyFcheapFailure(r),
       };
     }
     const warning =
@@ -586,16 +878,147 @@ export async function stashDirectory(
         : error instanceof FcheapContractError
           ? error.message
           : `Invalid fcheap save response: ${(error as Error).message}`,
+      reason: r.ok ? "save-failed" : classifyFcheapFailure(r),
     };
   }
 }
 
-/* ----- auto-stash (called from Runner/run.ts) ----- */
+/* ----- gated run stash (auto-stash, stash save, archive, pin) ----- */
 
 /**
- * Auto-stash a failed run to fcheap if config.stash.autoStash is "on-failure"
- * or --stash-on-failure was passed. Best-effort: failures are logged to stderr
- * but never crash the run.
+ * The config `stash` evidence options an explicit run stash honors
+ * (investigate, audit `--connect`, `clip --stash`): the gate's
+ * categories, the unsafe opt-in, and run-identity `--meta`. TTLs are
+ * auto-stash/archive settings; an explicit stash keeps none, like
+ * `cairn stash save` without `--ttl`.
+ */
+export type RunStashEvidence = Pick<
+  StashConfig,
+  "include" | "unsafeIncludeRawTraces" | "meta"
+>;
+
+export interface RunStashOptions {
+  /** auto-stash / manual write a receipt + event; archive writes neither. */
+  action: "auto-stash" | "manual" | "archive";
+  tags: string[];
+  tool?: string;
+  ttl?: string;
+  source?: string;
+  /** Evidence categories (default [text, screenshots]). */
+  include?: readonly EvidenceCategory[];
+  unsafeIncludeRawTraces?: boolean;
+  /**
+   * Pass run identity as `--meta` when fcheap supports it: `true` reads it
+   * from run.json, an object is used as-is, false/undefined skips it.
+   */
+  meta?: boolean | Record<string, string>;
+}
+
+export interface RunStashResult extends StashDirectoryResult {
+  /** Relative paths/dirs the evidence gate left out. */
+  excluded: string[];
+  tags: string[];
+  ttl?: string;
+  /** Run-relative receipt path when one was written. */
+  receipt?: string;
+}
+
+/**
+ * Stash one run directory through the evidence gate. Excluded categories
+ * (and secret-bearing members) are left out by saving a private staged copy
+ * named after the run; a run with nothing excluded is saved in place. For
+ * `auto-stash`/`manual` the outcome is recorded in the run: a
+ * `stash-receipt.json` + `artifact.stash` event on success, an
+ * `artifact.stash` event with `status: "error"` and a reason code otherwise.
+ */
+export async function stashRunDirectory(
+  runDir: string,
+  opts: RunStashOptions,
+): Promise<RunStashResult> {
+  let meta: Record<string, string> | undefined;
+  try {
+    meta =
+      opts.meta && (await fcheapSupportsSaveMeta())
+        ? typeof opts.meta === "object"
+          ? opts.meta
+          : stashMetaForRun(await readRunIdentity(runDir))
+        : undefined;
+  } catch {
+    meta = undefined;
+  }
+  const { excluded, ...result } = await saveRunEvidence(runDir, {
+    tool: opts.tool ?? "cairntrace",
+    tags: opts.tags,
+    ...(opts.source ? { source: opts.source } : {}),
+    ...(opts.ttl ? { ttl: opts.ttl } : {}),
+    ...(meta ? { meta } : {}),
+    ...(opts.include ? { include: opts.include } : {}),
+    ...(opts.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+  });
+  const outcome: RunStashResult = {
+    ...result,
+    excluded,
+    tags: opts.tags,
+    ...(opts.ttl ? { ttl: opts.ttl } : {}),
+  };
+  if (opts.action === "archive") return outcome;
+  try {
+    if (outcome.ok && outcome.stashId) {
+      await writeStashReceipt(runDir, outcome, opts.action);
+      outcome.receipt = "stash-receipt.json";
+    } else {
+      await appendStashErrorEvent(runDir, opts.action, outcome);
+    }
+  } catch (error) {
+    const message = `stash receipt was not written (non-fatal): ${(error as Error).message}`;
+    outcome.warning = outcome.warning
+      ? `${outcome.warning}; ${message}`
+      : message;
+  }
+  return outcome;
+}
+
+/* ----- auto-stash (called from Runner/run.ts) ----- */
+
+export type AutoStashStatus = "passed" | "failed" | "errored" | "refused";
+
+/**
+ * Whether a settled run is auto-stashed: never a refused run; always with
+ * `cairn run --stash`; failed/errored runs with `--stash-on-failure`;
+ * otherwise per config `stash` (enabled + autoStash always|on-failure).
+ */
+export function shouldAutoStash(
+  status: AutoStashStatus,
+  opts: {
+    stash?: boolean;
+    stashOnFailure?: boolean;
+    configStash?: { enabled?: boolean; autoStash?: string };
+  },
+): boolean {
+  if (status === "refused") return false;
+  if (opts.stash) return true;
+  const failed = status !== "passed";
+  if (failed && opts.stashOnFailure) return true;
+  if (!opts.configStash?.enabled) return false;
+  if (opts.configStash.autoStash === "always") return true;
+  return failed && opts.configStash.autoStash === "on-failure";
+}
+
+/** TTL for a run's auto-stash: passTtl/failTtl, then ttl (passes default 7d). */
+export function autoStashTtl(
+  status: AutoStashStatus,
+  config: Pick<StashConfig, "ttl" | "passTtl" | "failTtl"> | undefined,
+): string | undefined {
+  if (status === "passed") {
+    return config?.passTtl ?? config?.ttl ?? DEFAULT_PASS_STASH_TTL;
+  }
+  return config?.failTtl ?? config?.ttl;
+}
+
+/**
+ * Auto-stash a settled run (see {@link shouldAutoStash}). Best-effort:
+ * failures are logged and recorded as an `artifact.stash` error event but
+ * never crash the run.
  */
 export async function maybeAutoStash(
   runDir: string,
@@ -603,39 +1026,67 @@ export async function maybeAutoStash(
   specName: string,
   opts: {
     stashOnFailure?: boolean;
-    configStash?: { enabled?: boolean; autoStash?: string; tags?: string[] };
+    /** `cairn run --stash`: stash regardless of status. */
+    stash?: boolean;
+    /** Settled run status (default "failed", the historical caller). */
+    status?: AutoStashStatus;
+    configStash?: Partial<
+      Pick<
+        StashConfig,
+        | "enabled"
+        | "tags"
+        | "include"
+        | "unsafeIncludeRawTraces"
+        | "ttl"
+        | "passTtl"
+        | "failTtl"
+        | "labelsAsTags"
+        | "meta"
+      >
+    > & { autoStash?: string };
+    /** Run identity for `--meta` (default: read from run.json). */
+    meta?: Record<string, string>;
     /** When provided (tty narration), replaces the logger for stash lines. */
     narrate?: (message: string, kind: "info" | "warn") => void;
   },
-): Promise<StashDirectoryResult | undefined> {
-  const shouldStash =
-    opts.stashOnFailure ||
-    (opts.configStash?.enabled && opts.configStash.autoStash === "on-failure");
+): Promise<RunStashResult | undefined> {
+  const status = opts.status ?? "failed";
+  if (!shouldAutoStash(status, opts)) return undefined;
+  const say = (message: string, kind: "info" | "warn"): void => {
+    if (opts.narrate) opts.narrate(message, kind);
+    else if (kind === "warn") log.scope("stash").warn(message);
+    else log.scope("stash").info(message);
+  };
 
-  if (!shouldStash) return undefined;
-
-  const tags = [specName, ...(opts.configStash?.tags ?? [])];
-  const result = await stashDirectory(runDir, {
+  const config = opts.configStash;
+  const tags = uniqueTags([
+    specName,
+    ...(config?.tags ?? []),
+    ...(await readSpecStashTags(runDir)),
+    ...(config?.labelsAsTags
+      ? tagsFromLabels(await readRunLabels(runDir))
+      : []),
+  ]);
+  const ttl = autoStashTtl(status, config);
+  const result = await stashRunDirectory(runDir, {
+    action: "auto-stash",
     tool: "cairntrace",
     tags,
+    ...(ttl ? { ttl } : {}),
+    ...(config?.include ? { include: config.include } : {}),
+    ...(config?.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    meta: config?.meta === false ? false : (opts.meta ?? true),
   });
   if (!result.ok) {
-    const msg = `auto-stash failed (non-fatal): ${result.error ?? "unknown"}`;
-    if (opts.narrate) opts.narrate(msg, "warn");
-    else log.scope("stash").warn(msg);
+    say(`auto-stash failed (non-fatal): ${result.error ?? "unknown"}`, "warn");
     return result;
   }
-  if (result.warning) {
-    const msg = `auto-stash warning: ${result.warning}`;
-    if (opts.narrate) opts.narrate(msg, "warn");
-    else log.scope("stash").warn(msg);
-  }
-  try {
-    await writeAutoStashReceipt(runDir, result);
-  } catch (error) {
-    const msg = `auto-stash receipt was not written (non-fatal): ${(error as Error).message}`;
-    if (opts.narrate) opts.narrate(msg, "warn");
-    else log.scope("stash").warn(msg);
+  if (result.warning) say(`auto-stash warning: ${result.warning}`, "warn");
+  if (result.secretsFound) {
+    say(
+      `auto-stash: ${secretsWarning(result.secretsFound, result.secretsRules)}`,
+      "warn",
+    );
   }
   const logSafeStashId = result.stashId
     ? createArtifactRedactor(undefined).text(result.stashId)
@@ -655,16 +1106,26 @@ export async function maybeAutoStash(
   return result;
 }
 
+function uniqueTags(tags: readonly string[]): string[] {
+  return [...new Set(tags.filter((tag) => tag.length > 0))];
+}
+
 /**
  * Add the local post-save receipt without reopening or changing run.json,
  * reports, or any semantic result field. The file and event contain only the
- * safe stash identifier plus bounded status metadata. The manifest is rebuilt
- * so its checksummed inventory remains truthful after this append-only
- * enrichment.
+ * safe stash identifier plus bounded, path-free metadata (content hash,
+ * counts, TTL, tags, excluded run-relative paths, secret-scan count). The
+ * manifest is rebuilt so its checksummed inventory remains truthful after
+ * this append-only enrichment.
  */
-export async function writeAutoStashReceipt(
+export async function writeStashReceipt(
   runDir: string,
-  result: StashDirectoryResult,
+  result: StashDirectoryResult & {
+    excluded?: string[];
+    tags?: string[];
+    ttl?: string;
+  },
+  action: "auto-stash" | "manual",
   now: () => Date = () => new Date(),
 ): Promise<StashReceipt> {
   if (!result.ok || !result.stashId) {
@@ -678,8 +1139,21 @@ export async function writeAutoStashReceipt(
     status: result.status ?? "saved",
     postSaveFailureCount: result.failures?.length ?? 0,
     recordedAt: now().toISOString(),
+    action,
+    ...(result.contentHash ? { contentHash: result.contentHash } : {}),
+    ...(result.fileCount !== undefined ? { fileCount: result.fileCount } : {}),
+    ...(result.sizeBytes !== undefined ? { sizeBytes: result.sizeBytes } : {}),
+    ...(result.ttl ? { ttl: result.ttl } : {}),
+    ...(result.expiresAt && isIsoTimestamp(result.expiresAt)
+      ? { expiresAt: result.expiresAt }
+      : {}),
+    tags: result.tags ?? [],
+    excluded: result.excluded ?? [],
+    ...(result.secretsFound !== undefined
+      ? { secretsFound: result.secretsFound }
+      : {}),
   });
-  const redactor = createArtifactRedactor(undefined);
+  const redactor = stringOnlyRedactor();
   if (redactor.text(receipt.stashId) !== receipt.stashId) {
     throw new Error(
       "stash id intersects active secret redaction; recovery receipt was not written",
@@ -690,17 +1164,85 @@ export async function writeAutoStashReceipt(
   await writer.appendEvent({
     ts: receipt.recordedAt,
     type: "artifact.stash",
-    action: "auto-stash",
+    action,
     receipt: "stash-receipt.json",
     stashId: receipt.stashId,
     status: receipt.status,
     postSaveFailureCount: receipt.postSaveFailureCount,
+    ...(receipt.excluded?.length ? { excluded: receipt.excluded } : {}),
+    ...(receipt.secretsFound !== undefined
+      ? { secretsFound: receipt.secretsFound }
+      : {}),
+    ...(receipt.ttl ? { ttl: receipt.ttl } : {}),
+    ...(receipt.expiresAt ? { expiresAt: receipt.expiresAt } : {}),
+    ...(receipt.tags?.length ? { tags: receipt.tags } : {}),
   });
   await writer.writeManifest();
   return receipt;
 }
 
-/* ----- fcheap availability check ----- */
+/** Back-compat name for the auto-stash receipt writer. */
+export async function writeAutoStashReceipt(
+  runDir: string,
+  result: StashDirectoryResult,
+  now: () => Date = () => new Date(),
+): Promise<StashReceipt> {
+  return writeStashReceipt(runDir, result, "auto-stash", now);
+}
+
+/**
+ * Record a stash that produced no durable copy: `artifact.stash` with
+ * `status: "error"`, a reason code and a path-free one-line message.
+ */
+async function appendStashErrorEvent(
+  runDir: string,
+  action: "auto-stash" | "manual",
+  result: RunStashResult,
+): Promise<void> {
+  // Never create a run directory just to report that it could not be read.
+  const isDir = await stat(runDir).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
+  if (!isDir) return;
+  const writer = new ArtifactWriter(runDir, stringOnlyRedactor());
+  await writer.appendEvent({
+    ts: new Date().toISOString(),
+    type: "artifact.stash",
+    action,
+    status: "error",
+    reason: result.reason ?? "unknown",
+    ...(result.error ? { message: pathFreeMessage(result.error) } : {}),
+    ...(result.excluded.length ? { excluded: result.excluded } : {}),
+  });
+}
+
+/**
+ * The stash receipt and its events carry schema-checked metadata whose field
+ * NAMES the key-based redactor would misread (`secretsFound` is a count, not
+ * a secret). Redact every string VALUE (registered secrets, credential
+ * headers, token query params, URI userinfo) and keep the structure.
+ */
+function stringOnlyRedactor(): ArtifactRedactor {
+  const base = createArtifactRedactor(undefined);
+  const walk = (value: unknown): unknown => {
+    if (typeof value === "string") return base.text(value);
+    if (Array.isArray(value)) return value.map(walk);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, child]) => [key, walk(child)]),
+      );
+    }
+    return value;
+  };
+  return { text: base.text, value: <T>(input: T): T => walk(input) as T };
+}
+
+export { pathFreeMessage };
+
+function isIsoTimestamp(value: string): boolean {
+  return StashReceiptSchema.shape.recordedAt.safeParse(value).success;
+}
 
 /* ----- format helper (unused but keeps the import for type-safety) ----- */
 

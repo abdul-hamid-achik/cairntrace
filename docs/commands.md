@@ -13,12 +13,18 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 
 ## Page inspection
 
-- [Discover & snapshot](/discover) — `cairn discover` / `cairn snapshot` return the accessibility tree and locator inventory for a live page.
+- [Discover & snapshot](/discover) — `cairn discover` / `cairn snapshot` return the accessibility tree and locator inventory for a live page. `cairn discover` can start from a setup (`--use`, `--from-spec`) and leaves a session journal; `cairn discover sessions` lists journals and `cairn discover export --from-session` writes a spec from one.
 - [Journey briefs](/brief) — `cairn export brief` compiles a spec into operator instructions for a fragile environment; MCP `cairn_accompany_*` is the live try-then-ask loop.
+
+## Authoring
+
+- [Project catalog](/catalog) — `cairn catalog --query` lists the actions, vars, verifiers, environments, flows and checkpoints a project already has.
+- [Author a spec from a request](/author-flow) — the recipe from a few sentences to a promoted spec; `cairn init agent-kit` writes a short version into your `AGENTS.md`.
+- [Lint, finish, promote](/authoring#lint-before-you-run) — `cairn spec lint [--fix]` gives fix-its before a run, `cairn spec finish` lints + runs cold + stamps when green, `cairn spec promote` moves a green draft out of `flows/_drafts`.
 
 ## Sessions
 
-- [Checkpoints & login](/checkpoint) — `cairn login` captures a session by hand; `cairn checkpoint` manages resumable checkpoints.
+- [Checkpoints & login](/checkpoint) — `cairn login` captures a session by hand; `cairn checkpoint` manages resumable checkpoints. Captures record their scope (`--env` baseUrl, `--ttl`), `checkpoint list --json` shows each one's health, and a run refuses an expired or other-origin checkpoint.
 
 ## Evidence
 
@@ -37,7 +43,8 @@ The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page b
 ## Environment
 
 - [Secrets](/secrets) — `cairn secrets` checks the TinyVault secrets provider.
-- [Services](/services) — `cairn services status` and the config-driven docker/seed/tmux lifecycle.
+- [Services](/services) — `cairn services status` and the config-driven docker/seed/tmux lifecycle; `cairn services up` / `down` keep the stack running between runs under an owner lock, and `cairn run --reuse-services` runs against it.
+- [Fixtures](/fixtures) — `cairn fixtures list | status | ensure | reset | teardown | sweep` drive the config `fixtures:` registry (exec / mongo / http test data) outside a run; `cairn run --allow-fixture-writes` lets fixtures write on a shared or protected environment (never under `policy.mutations: deny`).
 
 ## The core commands
 
@@ -47,7 +54,7 @@ The run/spec/authoring surface is documented elsewhere and is not duplicated her
 - [Authoring](/authoring) — tags, labels, `--before`/`--after` hooks, `cairn stats`.
 - [Steps](/steps) / [Verifiers](/verifiers) — the typed vocabularies.
 - [Snippets](/snippets) — `imports:` / `use:`.
-- [MCP](/mcp) — `cairn mcp serve` and the `cairn_*` tool family.
+- [MCP](/mcp) — `cairn mcp` and the `cairn_*` tool family.
 
 Run `cairn explain --format json` (or MCP `cairn_explain`) for the machine-readable current surface, including every flag.
 

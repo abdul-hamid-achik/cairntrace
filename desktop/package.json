@@ -1,6 +1,6 @@
 {
   "name": "cairntrace-desktop",
-  "version": "2.15.0",
+  "version": "3.0.0",
   "private": true,
   "description": "Cairntrace Studio — desktop console for authoring, running, and inspecting behavioral browser specs",
   "license": "MIT",
@@ -9,7 +9,7 @@
     "start": "electron .",
     "smoke": "electron . --smoke",
     "test": "node --test test/*.test.js",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.renderer.json",
     "dist": "electron-builder --mac --dir",
     "dist:dmg": "electron-builder --mac"
   },
@@ -19,6 +19,7 @@
   "devDependencies": {
     "electron": "^44.4.5",
     "electron-builder": "^26.4.0",
+    "happy-dom": "^20.14.5",
     "typescript": "^5.9.3"
   },
   "trustedDependencies": [

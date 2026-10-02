@@ -7,10 +7,25 @@
  */
 const path = require("node:path");
 const fs = require("node:fs");
-const { app, BrowserWindow, Menu, shell } = require("electron");
+const { app, BrowserWindow, Menu, protocol, shell } = require("electron");
 
 const { registerIpc } = require("./ipc");
+const {
+  MEDIA_SCHEME,
+  createMediaHandler,
+  createMediaRegistry,
+} = require("./lib/media");
 const { closeReportWindows } = require("./windows");
+
+// Videos stream through cairn-artifact://media/<token> (range requests, no
+// data URLs). Privileges must be declared before the app is ready.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: MEDIA_SCHEME,
+    privileges: { standard: true, secure: true, stream: true },
+  },
+]);
+const mediaRegistry = createMediaRegistry();
 
 const isMac = process.platform === "darwin";
 // Packaged apps get argv = [exe, ...flags]; dev gets [electron, ., ...flags].
@@ -143,6 +158,26 @@ function buildMenu() {
           click: () => send("menu:navigate", { view: "live" }),
         },
         {
+          label: "Invocations",
+          accelerator: "CmdOrCtrl+8",
+          click: () => send("menu:navigate", { view: "invocations" }),
+        },
+        {
+          label: "Sessions",
+          accelerator: "CmdOrCtrl+9",
+          click: () => send("menu:navigate", { view: "sessions" }),
+        },
+        {
+          label: "Catalog",
+          accelerator: "CmdOrCtrl+Shift+C",
+          click: () => send("menu:navigate", { view: "catalog" }),
+        },
+        {
+          label: "Stashes",
+          accelerator: "CmdOrCtrl+7",
+          click: () => send("menu:navigate", { view: "stashes" }),
+        },
+        {
           label: "Cohorts",
           accelerator: "CmdOrCtrl+4",
           click: () => send("menu:navigate", { view: "stats" }),
@@ -245,27 +280,33 @@ if (!gotLock) {
     });
 
     const settingsFile = path.join(app.getPath("userData"), "settings.json");
+    protocol.handle(MEDIA_SCHEME, createMediaHandler(mediaRegistry));
     ipcHandle = registerIpc({
       settingsFile,
       repoRoot,
       getWindow,
       send,
+      media: mediaRegistry,
     });
 
     buildMenu();
     mainWindow = createMainWindow();
     if (smokeMode) installSmokeHarness();
 
-    if (pendingFiles.length)
-      send("app:open-files", {
-        files: pendingFiles.map((f) => path.resolve(f)),
-      });
+    if (pendingFiles.length) {
+      const files = pendingFiles.map((f) => path.resolve(f));
+      // Files handed to the app by the user are readable even outside the
+      // open project (the IPC boundary otherwise confines reads to it).
+      ipcHandle.allowFiles(files);
+      send("app:open-files", { files });
+    }
 
     app.on("open-file", (event, file) => {
       event.preventDefault();
       if (!/\.(ya?ml)$/i.test(file)) return;
+      ipcHandle?.allowFiles([path.resolve(file)]);
       const win = getWindow();
-      if (win) send("app:open-files", { files: [file] });
+      if (win) send("app:open-files", { files: [path.resolve(file)] });
       else pendingFiles.push(file);
     });
 

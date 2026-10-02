@@ -1,6 +1,6 @@
 /**
- * Live run tracking: run-directory discovery, event description, step roll-up,
- * and the poller that tails a run in flight.
+ * Live run tracking: run-directory discovery and the poller that tails a run
+ * in flight (event description + roll-up live in events.test.js).
  */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -108,101 +108,6 @@ describe("pickNewRunId", () => {
   });
 });
 
-describe("describeEvent", () => {
-  it("labels the events the timeline shows", () => {
-    assert.equal(
-      live.describeEvent({ type: "run.started", spec: "a" }).label,
-      "run started (a)",
-    );
-    assert.equal(
-      live.describeEvent({ type: "step.started", stepId: "s1" }).label,
-      "step s1 started",
-    );
-    assert.match(
-      live.describeEvent({
-        type: "step.finished",
-        stepId: "s1",
-        durationMs: 12,
-      }).label,
-      /finished in 12ms/,
-    );
-    assert.equal(
-      live.describeEvent({ type: "step.skipped", stepId: "s1" }).tone,
-      "muted",
-    );
-    assert.equal(
-      live.describeEvent({ type: "run.finished", status: "passed" }).tone,
-      "ok",
-    );
-    assert.equal(
-      live.describeEvent({ type: "run.finished", status: "failed" }).tone,
-      "bad",
-    );
-    assert.equal(
-      live.describeEvent({
-        type: "artifact.screenshot",
-        path: "screenshots/1.png",
-      }).label,
-      "screenshot screenshots/1.png",
-    );
-    assert.equal(
-      live.describeEvent({ type: "viewport.set", width: 1440, height: 900 })
-        .label,
-      "viewport 1440×900",
-    );
-    assert.equal(
-      live.describeEvent({ type: "something.new" }).label,
-      "something.new",
-    );
-  });
-
-  it("survives an empty event", () => {
-    assert.equal(live.describeEvent({}).type, "unknown");
-  });
-});
-
-describe("stepProgress", () => {
-  it("rolls events into per-step rows", () => {
-    const rows = live.stepProgress([
-      { type: "step.started", stepId: "s1", ts: "2026-09-01T10:00:00.000Z" },
-      { type: "artifact.snapshot", stepId: "s1", path: "snapshots/001.txt" },
-      { type: "step.finished", stepId: "s1", durationMs: 120 },
-      { type: "step.started", stepId: "s2" },
-      { type: "step.finished", stepId: "s2", durationMs: 40, status: "failed" },
-      { type: "step.skipped", stepId: "s3" },
-      { type: "run.started", spec: "x" },
-    ]);
-    assert.deepEqual(rows, [
-      {
-        stepId: "s1",
-        status: "passed",
-        startedAt: "2026-09-01T10:00:00.000Z",
-        durationMs: 120,
-        artifacts: ["snapshots/001.txt"],
-      },
-      {
-        stepId: "s2",
-        status: "failed",
-        startedAt: null,
-        durationMs: 40,
-        artifacts: [],
-      },
-      {
-        stepId: "s3",
-        status: "skipped",
-        startedAt: null,
-        durationMs: null,
-        artifacts: [],
-      },
-    ]);
-  });
-
-  it("leaves a step running when it never finished", () => {
-    const rows = live.stepProgress([{ type: "step.started", stepId: "s1" }]);
-    assert.equal(rows[0].status, "running");
-  });
-});
-
 describe("createLiveTail", () => {
   it("finds the new run directory, streams events, and ends on run.json", async () => {
     const runsRoot = tempDir("cairn-live-");
@@ -224,6 +129,7 @@ describe("createLiveTail", () => {
       specNames: ["live_spec"],
       knownIds,
       pollMs: 60,
+      lingerMs: 300,
       onRunDir: (dir, id) => seenDirs.push(id),
       onEvents: (events) => seenEvents.push(...events),
       onEnd: () => {
@@ -247,7 +153,7 @@ describe("createLiveTail", () => {
 
       fs.appendFileSync(
         path.join(dir, "events.ndjson"),
-        `${JSON.stringify({ ts: new Date().toISOString(), type: "step.finished", stepId: "s1", durationMs: 9 })}\n`,
+        `${JSON.stringify({ ts: new Date().toISOString(), type: "step.failed", stepId: "s1", durationMs: 9, error: "locator not found" })}\n`,
       );
       fs.writeFileSync(
         path.join(dir, "run.json"),
@@ -260,6 +166,48 @@ describe("createLiveTail", () => {
         seenEvents.length >= 2,
         "trailing events must be drained before onEnd",
       );
+    } finally {
+      tail.stop();
+    }
+  });
+
+  it("keeps draining for the linger window after run.json (stash lands late)", async () => {
+    const runsRoot = tempDir("cairn-live-");
+    const runId = runIdNow("linger_spec");
+    /** @type {any[]} */
+    const seen = [];
+    let ended = false;
+    const tail = live.createLiveTail({
+      runsRoot,
+      specNames: ["linger_spec"],
+      knownIds: new Set(),
+      pollMs: 50,
+      lingerMs: 600,
+      onEvents: (events) => seen.push(...events),
+      onEnd: () => {
+        ended = true;
+      },
+    });
+    try {
+      const dir = path.join(runsRoot, runId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(
+        path.join(dir, "events.ndjson"),
+        `${JSON.stringify({ ts: new Date().toISOString(), type: "run.failed", durationMs: 10 })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(dir, "run.json"),
+        JSON.stringify({ runId, status: "failed" }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(ended, false, "must not end before the linger window");
+      fs.appendFileSync(
+        path.join(dir, "events.ndjson"),
+        `${JSON.stringify({ ts: new Date().toISOString(), type: "artifact.stash", action: "auto-stash", stashId: "stash_1", status: "saved" })}\n`,
+      );
+      await waitFor(() => ended, 3000);
+      assert.ok(seen.some((event) => event.type === "artifact.stash"));
+      assert.equal(tail.ended(), true);
     } finally {
       tail.stop();
     }

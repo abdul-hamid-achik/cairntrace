@@ -5,14 +5,24 @@ import {
   type HealVerifyResult,
 } from "../../../core/healer/Healer";
 import { ContractHashMismatchError } from "../../../core/parser/parseSpec";
+import {
+  resolveSpecRuntimeContext,
+  UnknownEnvironmentError,
+} from "../../../core/config/runtimeContext";
+import type { BrowserConfig } from "../../../core/schema/config.v1";
 import type { HealResult, PatchOp } from "../../../core/schema/heal.v1";
 import { type BackendChoice, createBackend } from "../../backendFactory";
 import { trackBackend } from "../../cleanup";
 import { emit, resolveFormat } from "../../format";
+import { log } from "../../logger";
 import { makePlainListener, resolveProgressMode } from "../../progress";
-import type { ProgressListener } from "../../../core/runner/Runner";
+import {
+  type ProgressListener,
+  SpecRefusedError,
+} from "../../../core/runner/Runner";
 import { getTuiStore, makeInkProgressListener, mountTui } from "../../ui";
 import { TuiStore } from "../../ui/store";
+import { backendOpts, parseVarFlags } from "../run";
 
 export interface HealCommandOptions {
   apply?: boolean;
@@ -22,10 +32,86 @@ export interface HealCommandOptions {
   provider?: string;
   device?: string;
   headed?: boolean;
+  /** Environment override, resolved exactly like `cairn run --env`. */
+  env?: string;
+  /** Explicit cairntrace.config.yml (overrides auto-discovery). */
+  config?: string;
+  /** Repeatable `--var key=value` overrides; win over config env vars. */
+  var?: string[];
   format?: string;
   json?: boolean;
   yaml?: boolean;
   md?: boolean;
+}
+
+/** What heal needs from config before it builds a backend and runs. */
+export interface HealRuntime {
+  /** Forwarded to healSpec / healVerify (and from there to every run). */
+  runtime: {
+    environmentOverride?: string;
+    configPath?: string;
+    vars?: Record<string, string>;
+  };
+  /** Config `browser:` block — backend tuning + `testIdAttribute`. */
+  browser?: BrowserConfig;
+  /** Non-fatal resolution warnings (implicit environment not defined, …). */
+  warnings: string[];
+}
+
+/**
+ * Resolve `--env` / `--config` / `--var` for heal the same way `cairn run`
+ * does: config discovery from the spec (or the explicit path), environment
+ * selection, var overrides. Fails fast — before a browser starts — on a
+ * malformed `--var` or an unknown explicit environment
+ * ({@link UnknownEnvironmentError}, exit 4).
+ */
+export async function resolveHealRuntime(
+  specPath: string,
+  opts: Pick<HealCommandOptions, "env" | "config" | "var">,
+): Promise<HealRuntime> {
+  const vars = parseVarFlags(opts.var);
+  const ctx = await resolveSpecRuntimeContext(specPath, {
+    ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+    ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+    ...(Object.keys(vars).length > 0 ? { vars } : {}),
+  });
+  return {
+    runtime: {
+      ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
+      ...(opts.config !== undefined ? { configPath: opts.config } : {}),
+      ...(Object.keys(vars).length > 0 ? { vars } : {}),
+    },
+    ...(ctx.browser ? { browser: ctx.browser } : {}),
+    warnings: ctx.warnings,
+  };
+}
+
+/**
+ * Exit code for an error thrown before or during a heal (CLI and MCP):
+ * 6 contract changed, 4 unknown --env, 7 the environment policy refused the
+ * spec (heal never runs it there), else 2.
+ */
+export function healErrorExitCode(err: Error): number {
+  if (err instanceof ContractHashMismatchError) return 6;
+  if (err instanceof UnknownEnvironmentError) return err.exitCode;
+  if (err instanceof SpecRefusedError) return err.exitCode;
+  return 2;
+}
+
+function writeHealError(err: Error, format: string, exitCode: number): void {
+  if (format === "json") {
+    process.stdout.write(
+      JSON.stringify({
+        $schema: "urn:cairntrace.dev:heal:v1",
+        version: "1",
+        status: "no-heal-possible",
+        error: { name: err.name, message: err.message },
+        exitCode,
+      }),
+    );
+  } else {
+    process.stderr.write(`cairn spec heal: ${err.message}\n`);
+  }
 }
 
 export async function healCommand(
@@ -33,13 +119,20 @@ export async function healCommand(
   opts: HealCommandOptions,
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
-  const backend = createBackend({
-    ...(opts.mock !== undefined ? { mock: opts.mock } : {}),
-    ...(opts.headed !== undefined ? { headed: opts.headed } : {}),
-    ...(opts.backend !== undefined ? { backend: opts.backend } : {}),
-    ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
-    ...(opts.device !== undefined ? { device: opts.device } : {}),
-  });
+  let resolved: HealRuntime;
+  try {
+    resolved = await resolveHealRuntime(specPath, opts);
+  } catch (e) {
+    const err = e as Error;
+    const code = healErrorExitCode(err);
+    writeHealError(err, format, code);
+    process.exit(code);
+    return;
+  }
+  for (const warning of resolved.warnings) log.warn(warning);
+
+  // CLI flags win over config `browser.*`, exactly like `cairn run`.
+  const backend = createBackend(backendOpts(opts, resolved.browser));
   const untrack = trackBackend(backend);
 
   // Heal re-runs the spec; narrate it with the same renderer `cairn run`
@@ -62,6 +155,7 @@ export async function healCommand(
         specPath,
         backend,
         ...(listener ? { listener } : {}),
+        ...resolved.runtime,
       });
       exitCode = vr.verified ? 0 : 5;
       if (format === "json" || format === "yaml") {
@@ -76,6 +170,7 @@ export async function healCommand(
         backend,
         ...(opts.apply ? { apply: opts.apply } : {}),
         ...(listener ? { listener } : {}),
+        ...resolved.runtime,
       });
 
       exitCode = output.exitCode;
@@ -90,20 +185,8 @@ export async function healCommand(
     }
   } catch (e) {
     const err = e as Error;
-    exitCode = err instanceof ContractHashMismatchError ? 6 : 2;
-    if (format === "json") {
-      process.stdout.write(
-        JSON.stringify({
-          $schema: "urn:cairntrace.dev:heal:v1",
-          version: "1",
-          status: "no-heal-possible",
-          error: { name: err.name, message: err.message },
-          exitCode,
-        }),
-      );
-    } else {
-      process.stderr.write(`cairn spec heal: ${err.message}\n`);
-    }
+    exitCode = healErrorExitCode(err);
+    writeHealError(err, format, exitCode);
   } finally {
     untrack();
     await backend.close().catch(() => undefined);

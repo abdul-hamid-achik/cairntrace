@@ -516,3 +516,71 @@ describe("file.cheap v0.31 contract adapter", () => {
     );
   });
 });
+
+function receiptWithWebUrl(webUrl?: string): string {
+  return JSON.stringify({
+    version: "filecheap-publish/1",
+    sha256: "a".repeat(64),
+    size_bytes: 42,
+    verification: "server-sha256",
+    published_at: "2026-07-24T00:00:00Z",
+    artifact_ref: {
+      $schema: "urn:filecheap.dev:artifact-ref:v1",
+      version: 1,
+      provider: "fcheap-cloud",
+      uri: "fcheap://cloud/vaults/private/artifacts/art-123",
+      artifact_id: "art-123",
+      kind: "cairntrace.run",
+      producer: {
+        tool: "cairntrace",
+        version: "2.0.0",
+        native_schema: "urn:cairntrace.dev:run:v1",
+        native_id: "run-123",
+        entrypoint: "run.json",
+      },
+      ...(webUrl !== undefined ? { web_url: webUrl } : {}),
+    },
+  });
+}
+
+describe("file.cheap web_url and secret-scan fields", () => {
+  it("accepts a stable https web_url on a cloud ref", () => {
+    const result = parseFcheapPublishOutput(
+      receiptWithWebUrl("https://file.cheap/console/artifacts/art-123"),
+    );
+    expect(result.artifactRef.web_url).toBe(
+      "https://file.cheap/console/artifacts/art-123",
+    );
+  });
+
+  it.each([
+    "http://file.cheap/console/artifacts/art-123",
+    "https://file.cheap/console?sig=abc",
+    "https://user:pw@file.cheap/console",
+    "https://file.cheap/console#token",
+    "",
+  ])("rejects web_url %j", (webUrl) => {
+    expect(() => parseFcheapPublishOutput(receiptWithWebUrl(webUrl))).toThrow(
+      /Invalid fcheap publish JSON/,
+    );
+  });
+
+  it("reads secrets_found / secrets_rules from the save manifest", () => {
+    const saved = parseFcheapSaveOutput(
+      JSON.stringify({
+        id: "stash-1",
+        status: "saved",
+        custom: {
+          secrets_found: "3",
+          secrets_rules: "aws-access-key,generic-api-key",
+          run_id: "r1",
+        },
+      }),
+    );
+    expect(saved.secretsFound).toBe(3);
+    expect(saved.secretsRules).toEqual(["aws-access-key", "generic-api-key"]);
+    expect(
+      parseFcheapSaveOutput(JSON.stringify({ id: "stash-2" })).secretsFound,
+    ).toBeUndefined();
+  });
+});

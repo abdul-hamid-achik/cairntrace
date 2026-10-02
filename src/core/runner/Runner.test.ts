@@ -2531,7 +2531,16 @@ describe("runSpec — onRunStart environment argument", () => {
   // config default → spec default → `--env` override, in that precedence —
   // as its own argument, distinct from `spec.environment`.
   it("passes the resolved --env override, not the spec's own environment default", async () => {
-    const specPath = await writeSpec(
+    // Own config dir: an explicit --env must exist in the config (unknown
+    // overrides are rejected), and the shared workDir config only defines
+    // `local`.
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-env-header-"));
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      "version: 1\nenvironments:\n  staging: {}\n  do: {}\n",
+    );
+    const specPath = await writeSpecIn(
+      dir,
       "env_header_override",
       `version: 1
 name: env_header_override
@@ -2569,6 +2578,39 @@ steps: []
     expect(seen!.resolvedEnvironment).toBe("do");
     // Prove the two are genuinely different fields, not a coincidental match.
     expect(seen!.specEnvironment).toBe("staging");
+  });
+
+  it("resolves ${config.dir} to an explicit --config's directory, not the spec's tree", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "cairntrace-cfgdir-cfg-"));
+    const specDir = await mkdtemp(join(tmpdir(), "cairntrace-cfgdir-spec-"));
+    const configPath = join(configDir, "cairntrace.config.yml");
+    await writeFile(configPath, "version: 1\nenvironments:\n  local: {}\n");
+    const marker = join(specDir, "config-dir.txt");
+    const specPath = await writeSpecIn(
+      specDir,
+      "config_dir_explicit",
+      `version: 1
+name: config_dir_explicit
+intent: \${config.dir} follows the resolved --config
+coldStart: guest
+preconditions:
+  commands:
+    - run: "printf %s '\${config.dir}' > config-dir.txt"
+outcomes:
+  - id: ok
+    description: ok
+    verify: { console: { errorsMax: 0 } }
+steps: []
+`,
+    );
+    const result = await runSpec({
+      specPath,
+      backend: new MockBrowserBackend(),
+      artifactRoot,
+      configPath,
+    });
+    expect(result.status, result.failure?.message).toBe("passed");
+    expect(await readFile(marker, "utf8")).toBe(configDir);
   });
 
   it("falls back to the spec's own environment when there is no --env override", async () => {
@@ -3517,10 +3559,8 @@ steps:
   });
 
   it("injects host filePath as bytesBase64 into eval args", async () => {
-    const { writeFile, mkdir } = await import("node:fs/promises");
-    const { join } = await import("node:path");
     const dir = join(artifactRoot, "eval-file-host");
-    await mkdir(dir, { recursive: true });
+    await makeDir(dir, { recursive: true });
     const pdf = join(dir, "tiny.pdf");
     await writeFile(pdf, Buffer.from("%PDF-1.4 host fixture"));
     const specPath = await writeSpec(

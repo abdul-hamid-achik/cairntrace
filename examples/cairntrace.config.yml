@@ -51,3 +51,45 @@ environments:
       expectedRows: 3
       demoEmail: casey@cairntrace.dev
       demoPassword: cairn-demo-2026
+
+# Readiness gates (`cairn docs services`): named probes a spec waits on in
+# `preconditions.wait`, `cairn wait <name>` checks from a shell, and services /
+# webServer `ready:` can reuse. This one passes once the demo app answers with
+# a seeded database.
+gates:
+  demo_api_ready:
+    description: the demo app is up and its database is seeded
+    http:
+      url: http://localhost:8787/api/health
+      json: { database: up, seeded: true }
+    every: 500
+    timeout: 30s
+
+# Datasources (`cairn docs verifiers`): connections the data verifiers read
+# from. `http` calls run Node-side (no browser cookies); the datasource's
+# headers and auth only ever go to its baseUrl's origin.
+datasources:
+  demo_api:
+    kind: http
+    baseUrl: http://localhost:8787
+
+# Fixtures (`cairn docs fixtures`): named test data a spec lists under
+# `fixtures:`. cairn ensures it before the browser starts, splices its outputs
+# as ${fixtures.demo_product.<key>}, and tears it down after the spec's own
+# teardown. Script paths resolve against this file's directory.
+fixtures:
+  demo_product:
+    kind: exec
+    description: a throwaway catalog product created through the JSON API
+    with: { sku: "FX-${run.token}", stock: 5 }
+    ensure:
+      node: fixtures/demo-product.mjs
+      args: [create, "${with.sku}", "${with.stock}"]
+    verify:
+      node: fixtures/demo-product.mjs
+      args: [show, "${fixtures.demo_product.sku}"]
+    teardown:
+      node: fixtures/demo-product.mjs
+      args: [delete, "${fixtures.demo_product.sku}"]
+    outputs: { sku: $.sku, name: $.name, stock: $.stock }
+    timeoutMs: 30000

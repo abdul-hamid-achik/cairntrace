@@ -5,6 +5,7 @@ import type { OutcomeResult, RunResult, StepResult } from "../../schema/run.v1";
  * JSON output. Designed to be short enough to drop into an agent's chat context.
  */
 export function renderRunMarkdown(r: RunResult): string {
+  if (r.status === "refused") return renderRefusedMarkdown(r);
   const statusBadge =
     r.status === "passed"
       ? "PASSED"
@@ -38,11 +39,33 @@ export function renderRunMarkdown(r: RunResult): string {
     `cairn run ${r.spec.path} --env ${r.environment}`,
     "```",
     "",
-    `Run dir: ${r.runDir}`,
-    `Agent context: ${r.runDir}/${r.artifacts.agentContext}`,
+    // A synthesized result (errored or cancelled before its run started)
+    // has a placeholder runDir: never point an agent at it.
+    ...(r.synthetic
+      ? ["Run dir: none — the run never started"]
+      : [
+          `Run dir: ${r.runDir}`,
+          `Agent context: ${r.runDir}/${r.artifacts.agentContext}`,
+        ]),
   );
 
   return lines.join("\n") + "\n";
+}
+
+/** A spec the environment policy refused: nothing ran, no run directory. */
+function renderRefusedMarkdown(r: RunResult): string {
+  return [
+    `# Run: ${r.spec.name} — REFUSED`,
+    "",
+    `- env: ${r.environment} | nothing ran (no services, preconditions or browser; no run directory)`,
+    `- reason: ${r.refusal?.reason ?? r.failure?.message ?? "refused"}`,
+    "",
+    "## Where it may run",
+    "```bash",
+    `cairn spec verify ${r.spec.path} --format md`,
+    "```",
+    "",
+  ].join("\n");
 }
 
 function renderOutcomeLine(o: OutcomeResult): string {

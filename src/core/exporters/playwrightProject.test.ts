@@ -8,6 +8,16 @@ import type { Spec } from "../schema/spec.v1";
 import { exportPlaywrightProject } from "./playwrightProject";
 import { playwrightTestTimeoutBudget } from "./playwrightTimeout";
 
+function exportDevDependencies(
+  exported: ReturnType<typeof exportPlaywrightProject>,
+): Record<string, string> {
+  return (
+    JSON.parse(
+      exported.files.find((file) => file.relPath === "package.json")!.source,
+    ) as { devDependencies: Record<string, string> }
+  ).devDependencies;
+}
+
 describe("exportPlaywrightProject timeout emission", () => {
   it("emits an installable strict TypeScript Playwright project", () => {
     const parsed: ParseResult = {
@@ -124,6 +134,22 @@ describe("exportPlaywrightProject timeout emission", () => {
       expect(
         result.files.some((file) => file.relPath === "lib/verifier.ts"),
       ).toBe(true);
+      expect(exportDevDependencies(result)).not.toHaveProperty(
+        "@thelacanians/cairntrace",
+      );
+
+      // A copied support module that imports the verifier SDK makes the
+      // exported project depend on the package (nothing redirects the
+      // import outside `cairn run`).
+      await writeFile(
+        join(verifierDir, "support", "check.ts"),
+        `import { z } from "@thelacanians/cairntrace/verifier";\nexport function check(): boolean { return z.boolean().parse(true); }\n`,
+      );
+      expect(
+        exportDevDependencies(exportPlaywrightProject([parsed]))[
+          "@thelacanians/cairntrace"
+        ],
+      ).toMatch(/^\^\d+\.\d+\.\d+/);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -324,7 +350,7 @@ describe("exportPlaywrightProject timeout emission", () => {
       `const cairnRunDir = testInfo.outputPath("cairn-run");`,
     );
     expect(source).toContain(
-      `cairnNetworkEvidence.recordApiRequest({ url: patch.url(), method: "PATCH", status: patch.status(), timestamp: patchCairnRequestTimestamp, body: { "answer": "exact-value" }, contentType: "application/json" });`,
+      `cairnNetworkEvidence.recordApiRequest({ url: cairnResponse.url(), method: "PATCH", status: cairnResponse.status(), timestamp: cairnResponseTimestamp, body: { "answer": "exact-value" }, contentType: "application/json" });`,
     );
     expect(source).toContain(
       `import { createCairnNetworkEvidence } from "../lib/networkEvidence";`,
@@ -638,7 +664,7 @@ steps:
         `await clickUntil(page, page.getByRole("button", { name: "Save" }).first(), { timeoutMs: 5000, selectorGone: ".editor" });`,
       );
       expect(action).toContain(
-        `import { verifiedFill, verifiedType } from "../lib/hydration";`,
+        `import { verifiedFill } from "../lib/hydration";`,
       );
       expect(action).toContain(
         `import { clickUntil } from "../lib/clickUntil";`,

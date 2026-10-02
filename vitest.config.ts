@@ -13,6 +13,17 @@ export default defineConfig({
     ...(process.env.CI
       ? { poolOptions: { forks: { minForks: 1, maxForks: 1 } } }
       : {}),
+    // Local cap for shared machines (e.g. agents running the suite while the
+    // developer works): CAIRN_TEST_MAX_WORKERS=3 bun run verify.
+    ...(!process.env.CI && process.env.CAIRN_TEST_MAX_WORKERS
+      ? {
+          minWorkers: 1,
+          maxWorkers: Math.max(
+            1,
+            Number.parseInt(process.env.CAIRN_TEST_MAX_WORKERS, 10) || 1,
+          ),
+        }
+      : {}),
     coverage: {
       provider: "v8",
       include: [

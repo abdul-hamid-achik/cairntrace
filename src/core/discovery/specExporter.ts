@@ -1,4 +1,4 @@
-import { stringify as yamlStringify } from "yaml";
+import { Document, isScalar, Scalar, visit } from "yaml";
 import type { DiscoveryExportInput } from "../schema/discovery.v1";
 
 /**
@@ -7,6 +7,8 @@ import type { DiscoveryExportInput } from "../schema/discovery.v1";
  * The YAML follows the standard spec v1 shape: version, name, intent,
  * outcomes, steps. The agent provides outcomes as plain objects (they get
  * stringified as-is). Steps are the recorded step objects from DiscoverySession.
+ * A session's setup is written as it was given — `imports:` + `use:` steps
+ * (or a source spec's own steps through `untilStep`) — never expanded.
  */
 
 export interface ExportSpecInput {
@@ -20,6 +22,27 @@ export interface ExportSpecInput {
    * authenticated flow captured via cairn_checkpoint_capture.
    */
   resume?: string;
+  /** `imports:` (already relative to the written spec). */
+  imports?: string[];
+  /** Setup steps written before the recorded ones (`use:` steps, …). */
+  setupSteps?: Record<string, unknown>[];
+  /** Spec-level `vars:` (a fromSpec setup carries its source's). */
+  vars?: Record<string, unknown>;
+  /** `requires:` (a fromSpec setup carries its source's). */
+  requires?: unknown;
+  /** `coldStart: guest` (a fromSpec setup carries its source's). */
+  coldStart?: "guest";
+  /** Discovery session the spec came from (header comment). */
+  sessionId?: string;
+  /** The session's live draft rather than an export (header wording). */
+  draft?: boolean;
+  /** `metadata:` (convention exports: `authoring.template.metadata.tags`). */
+  metadata?: { tags?: string[] };
+  /**
+   * Extra header lines (without `# `) after the cold-start block — a
+   * convention export says what it reused and what to run next.
+   */
+  notes?: string[];
 }
 
 export interface ExportSpecResult {
@@ -43,21 +66,75 @@ const SPEC_HEADER = [
   "#",
 ].join("\n");
 
+function header(input: ExportSpecInput): string {
+  if (input.draft) {
+    return [
+      "# Cairntrace discovery DRAFT — regenerated after every recorded step.",
+      `# Discovery session: ${input.sessionId ?? "(unknown)"}`,
+      "# Export it with cairn_discover_export (or `cairn discover export --from-session`);",
+      "# outcomes are the contract and are authored at export time.",
+      "#",
+    ].join("\n");
+  }
+  const notes = (input.notes ?? []).map((line) => (line ? `# ${line}` : "#"));
+  return [
+    SPEC_HEADER,
+    ...(input.sessionId
+      ? [`# Discovery session: ${input.sessionId}`, "#"]
+      : []),
+    ...(notes.length > 0 ? [...notes, "#"] : []),
+  ].join("\n");
+}
+
+/**
+ * YAML for a spec object. Strings holding a `${…}` placeholder are double
+ * quoted: a plain whole-value placeholder takes its value's YAML type after
+ * substitution (`value: ${vars.price}` with price 12.50 would become a
+ * number and fail a string field), a quoted one stays a string.
+ */
+function specYaml(spec: Record<string, unknown>): string {
+  const doc = new Document(spec);
+  visit(doc, {
+    Scalar(_key, node) {
+      if (
+        isScalar(node) &&
+        typeof node.value === "string" &&
+        node.value.includes("${")
+      ) {
+        node.type = Scalar.QUOTE_DOUBLE;
+      }
+    },
+  });
+  return doc.toString();
+}
+
 export function buildSpecYaml(input: ExportSpecInput): ExportSpecResult {
+  const steps = [...(input.setupSteps ?? []), ...input.steps];
   const spec: Record<string, unknown> = {
     version: 1,
     name: input.name,
     intent: input.intent,
+    ...(input.requires !== undefined ? { requires: input.requires } : {}),
+    ...(input.coldStart ? { coldStart: input.coldStart } : {}),
+    ...(input.metadata?.tags && input.metadata.tags.length > 0
+      ? { metadata: { tags: input.metadata.tags } }
+      : {}),
+    ...(input.vars && Object.keys(input.vars).length > 0
+      ? { vars: input.vars }
+      : {}),
+    ...(input.imports && input.imports.length > 0
+      ? { imports: input.imports }
+      : {}),
     // Resuming a captured checkpoint satisfies the cold-start contract for an
     // authenticated flow (coldStartLint sees session.resume).
     ...(input.resume ? { session: { resume: input.resume } } : {}),
     outcomes: input.outcomes,
-    steps: input.steps,
+    steps,
   };
-  const yaml = yamlStringify(spec);
+  const yaml = specYaml(spec);
   return {
-    yaml: SPEC_HEADER + "\n" + yaml,
-    stepCount: input.steps.length,
+    yaml: header(input) + "\n" + yaml,
+    stepCount: steps.length,
   };
 }
 

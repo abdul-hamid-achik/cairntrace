@@ -38,22 +38,37 @@ in AGENTS.md.
 - Playwright `wait` and browser `evaluate` paths are hard-bounded. Real
   Chromium runs use an external watchdog process that kills the browser at the
   deadline, defaulting to 30000ms unless a specific timeout is supplied.
-- Discovery sessions (9 MCP tools: `cairn_discover_open` → `_snapshot` →
-  `_interact` → `_navigate` → `_inventory` → `_suggest` → `_export` →
-  `_close`, plus `_list`) let an agent explore a live page and record steps
-  as a spec. The CLI one-shot is `cairn discover <url>`. Sessions are
-  stateful, auto-expire after 5 min, and use the same `BrowserBackend` as
-  the runner. Exported specs include cold-start contract comments but the
-  agent must satisfy the cold-start contract separately. See
+- Discovery sessions (12 MCP tools: `cairn_discover_open` (optional `setup`
+  / `resume` / `backend`) → `_snapshot` / `_inventory` → `_interact` /
+  `_navigate` → `_network` / `_suggest` / `_remove_step` → `_export` →
+  `_close`, plus `_resume` and `_list`) let an agent explore a live page and
+  record steps as a spec. Every action runs through the `cairn run` engine on
+  the session's browser. The CLI one-shot is `cairn discover [url]`. Each
+  session keeps a journal under `<artifactRoot>/_sessions/<id>/`; the browser
+  closes after 30 min idle (`ttlMs`, config `discovery.sessionTtlMs`) and the
+  journal stays for export and `_resume`. Exported specs include cold-start
+  contract comments but the agent must satisfy the cold-start contract
+  separately. New specs follow `cairn docs author-flow` (catalog → discover →
+  convention export → `cairn spec finish` → `cairn spec promote`). See
   `cairn docs discovery` or the "Discovery sessions" section in AGENTS.md.
+- Backend checks, async effects, test data and cleanup have typed
+  primitives — reach for them before a `script` verifier or a precondition:
+  `mongo` / `temporal` / `http` verifiers over config `datasources:`, `value`
+  and `table`, `poll: { timeoutMs, everyMs, stableMs }` on any verifier,
+  `expect` / `capture` steps, `run:` steps and spec `teardown:`, config
+  `fixtures:` (`cairn fixtures …`) and `gates:` (`preconditions.wait`,
+  `cairn wait`). Node verifiers that remain use the SDK
+  (`@thelacanians/cairntrace/verifier`). See AGENTS.md "Rules for agents
+  authoring specs".
 - The repo is public at `github.com/abdul-hamid-achik/cairntrace` with tagged
   GitHub releases. Don't push or cut a release proactively — the user drives
   that timing. When asked, follow the "Releasing" checklist in AGENTS.md:
-  choose the SemVer increment, bump only `package.json`, create an annotated
-  `vX.Y.Z` tag, push, then run `gh release create`. Tag push publishes npm
-  and updates `abdul-hamid-achik/tap/cairntrace`. Use patch releases for
-  fixes/docs/polish, and never create a floating `latest` tag or rewrite old
-  releases unless the user explicitly asks to rewrite release history.
+  choose the SemVer increment, bump `package.json` + `desktop/package.json`,
+  create an annotated `vX.Y.Z` tag, push, then run `gh release create`. Tag
+  push publishes npm and updates `abdul-hamid-achik/tap/cairntrace`. Use
+  patch releases for fixes/docs/polish, and never create a floating `latest`
+  tag or rewrite old releases unless the user explicitly asks to rewrite
+  release history.
 
 ## Useful one-liners
 

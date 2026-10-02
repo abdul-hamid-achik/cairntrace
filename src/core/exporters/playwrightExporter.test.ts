@@ -38,7 +38,7 @@ describe("exportPlaywright", () => {
     const src = srcOf(baseSpec({}));
     expect(src).toContain(`import { expect, test } from "@playwright/test";`);
     expect(src).toContain(`test("exporter_smoke", async ({ page }) => {`);
-    expect(src).toContain(`test.setTimeout(1800000);`);
+    expect(src).toContain(`test.setTimeout(90000);`);
     expect(src.trim().endsWith("});")).toBe(true);
   });
 
@@ -660,9 +660,11 @@ describe("exportPlaywright", () => {
         ],
       }),
     );
+    // An unreferenced assign binds nothing (no unused local under noUnusedLocals).
     expect(src).toContain(
-      `const seeded = await page.evaluate(async ({ source, args }) => {`,
+      `  await page.evaluate(async ({ source, args }) => {`,
     );
+    expect(src).not.toContain("const seeded");
     expect(src).toContain(`source: "return window.__X = 1;"`);
     expect(src).toContain(`new AsyncFunction("args", source)`);
   });
@@ -789,7 +791,7 @@ describe("exportPlaywright", () => {
     );
     expect(src).toContain(`page.request.fetch("/api/x"`);
     expect(src).toContain(`"Content-Type": "application/json"`);
-    expect(src).toContain(`expect(created.status()).toBe(201);`);
+    expect(src).toContain(`expect(cairnResponse.status()).toBe(201);`);
   });
 
   it("reports coverage skips for monitor and node script", () => {

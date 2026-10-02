@@ -356,6 +356,16 @@ export function stepToArgv(step: Step): string[] {
       "monitor steps are handled by the runner via the monitor CLI before adapter dispatch",
     );
   }
+  if ("run" in step) {
+    throw new Error(
+      "run steps are handled by the runner as host processes before adapter dispatch",
+    );
+  }
+  if ("expect" in step || "capture" in step) {
+    throw new Error(
+      "expect/capture steps are handled by the runner via backend.evaluate before adapter dispatch",
+    );
+  }
   const exhaustive: never = step;
   throw new Error(
     `unhandled step shape: ${JSON.stringify(exhaustive satisfies never)}`,

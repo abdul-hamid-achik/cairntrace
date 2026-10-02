@@ -25,13 +25,17 @@ The seed operator is `casey@cairntrace.dev` / `cairn-demo-2026`.
 ```
 examples/
 ├── README.md                          (this file)
-├── cairntrace.config.yml              baseUrl + vars + webServer + services lifecycle
+├── cairntrace.config.yml              baseUrl + vars + webServer + services lifecycle,
+│                                      a readiness gate, an http datasource and an
+│                                      exec fixture (demo_product)
 ├── docker-compose.yaml                demo Postgres on :5433
 ├── fixtures/
 │   ├── sample-invoice.pdf             public sample PDF (upload fixture)
 │   ├── sample-report.pdf              public sample PDF (seeded document)
 │   ├── product-notebook.jpg           generated product photo (image upload)
-│   └── product-desk-lamp.jpg          generated product photo
+│   ├── product-desk-lamp.jpg          generated product photo
+│   └── demo-product.mjs               create/show/delete a product via the JSON API
+│                                      (the demo_product fixture, run steps, teardown)
 ├── demo-app/
 │   ├── server.ts                      bun server on :8787: static smoke pages,
 │   │                                  DB-backed platform pages, JSON APIs, exports
@@ -89,12 +93,32 @@ examples/
 | `27-api-session.yml` | `request` step login (cookie bridge), `expectStatus` incl. 401 probe, `httpJson` session |
 | `28-form-controls.yml` | `focus`-revealed combobox, `fill` + `press` with target, client-side filter |
 | `29-guest-redirect.yml` | auth wall redirect, `wait.url`, URL outcome on the redirect target |
+| `30-restock-job.yml` | `preconditions.wait` readiness gate, `demo_product` exec fixture (ensured before the browser, deleted after), `expect` + `capture` mid-flow, `expect.request`, `http` verifier on the `demo_api` datasource polled until the async job is done and stays done (`poll.stableMs`), `network` body + count, `value` on a captured table |
+| `31-run-step-teardown.yml` | `run:` step provisioning through a node script (`assign` → `${runs.seeded.*}`), `expect` on the rendered row, `capture` + `value`, `http` without a datasource, spec `teardown:` that always deletes the product |
 
 Data policy for the platform: fixed, realistic operating data for a fictional
 office-supplies warehouse. No real people; the product names and prices are
 ordinary catalog facts, not random strings. Documents uploaded by specs
 accumulate across runs (assertions use `atLeast`), and the seed re-runs
-whenever the products table is empty.
+whenever the products table is empty. Products created by specs are removed
+again — by the `demo_product` fixture's teardown (30), a spec `teardown:`
+(22, 31) — so the seeded catalog count stays exact across runs.
+
+The demo app's JSON API for these specs: `POST /api/products` and
+`DELETE /api/products/<sku>` (signed in), `GET /api/products?sku=…`,
+`POST /api/restock` (signed in; answers 202 and applies the restock about a
+second later) and `GET /api/restock/<id>` (`queued` → `running` → `done`).
+
+### Gates, datasources and fixtures from a shell
+
+```bash
+cd examples
+../bin/cairn wait demo_api_ready                       # the gate the restock spec waits on
+../bin/cairn fixtures list --json                      # the registry
+../bin/cairn fixtures ensure demo_product --json       # create one by hand (outputs: sku, name, stock)
+../bin/cairn fixtures status --json                    # what the ledger knows
+../bin/cairn fixtures teardown demo_product --json     # delete it again
+```
 
 ## Heal demo (`cairn spec heal`)
 
@@ -177,10 +201,14 @@ code 1, the markdown summary shows `FAILED`, and
   `network requests --json` / `console --json`.
 - **Services lifecycle** — docker compose, conditional seed with a data-level
   freshness check, and webServer reuse, all through the config block cairn
-  ships for real projects (the same one graphite uses).
-- **Outcome vocabulary v0** — `text`, `notText` (implicitly via wait), `url`,
-  `count`, `console.errorsMax`, `network`, `noFailedRequests`, browser and
-  Node `script`, `file`, `httpJson`, and `xlsx` across the two suites.
+  ships for real projects.
+- **Outcome vocabulary** — `text`, `notText` (implicitly via wait), `url`,
+  `count`, `console.errorsMax`, `network` (status, body, count),
+  `noFailedRequests`, browser and Node `script`, `file`, `httpJson`, `xlsx`,
+  `http` (with and without a datasource, polled with a stability window) and
+  `value` across the two suites.
+- **Run-time setup** — a readiness gate, an exec fixture, `run:` steps,
+  `expect` / `capture` steps and spec `teardown:` in the platform suite.
 - **Artifact pack** — every artifact category gets written (JSON+YAML+MD trio,
   evidence files, events, snapshots, console, network, downloads, transforms,
   evals, verifier `.raw.json` sidecars).

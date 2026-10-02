@@ -11,6 +11,7 @@ import {
   interact,
   navigate,
   openSession,
+  publicUrl,
   type SessionRegistry,
   sweepSessions,
 } from "./DiscoverySession";
@@ -101,9 +102,17 @@ describe("DiscoverySession", () => {
     it("captures the current page state", async () => {
       const backend = createMockBackend();
       const handle = await openSession(backend, "/login");
-      const { snapshot, url } = await captureSnapshot(handle);
+      const { snapshot, url, snapshotInfo } = await captureSnapshot(handle, {
+        mode: "full",
+      });
 
       expect(snapshot).toHaveLength(6);
+      expect(snapshotInfo).toMatchObject({
+        mode: "full",
+        elements: 6,
+        returned: 6,
+        truncated: false,
+      });
       expect(snapshot[0]!.role).toBe("banner");
       expect(url).toBe("/login");
     });
@@ -111,7 +120,7 @@ describe("DiscoverySession", () => {
     it("handles empty snapshots", async () => {
       const backend = createMockBackend("- generic\n  - body");
       const handle = await openSession(backend, "/empty");
-      const { snapshot } = await captureSnapshot(handle);
+      const { snapshot } = await captureSnapshot(handle, { mode: "full" });
       expect(snapshot).toHaveLength(2);
     });
   });
@@ -127,11 +136,13 @@ describe("DiscoverySession", () => {
       const result = await interact(handle, {
         action: "click",
         target: { by: "role", role: "button", name: "Sign In" },
+        snapshotMode: "full",
       });
 
       expect(result.ok).toBe(true);
       expect(result.url).toBe("/login");
       expect(result.snapshot).toHaveLength(4);
+      expect(result.index).toBe(2);
       expect(result.recordedStep).toEqual({
         click: { by: "role", role: "button", name: "Sign In" },
       });
@@ -343,8 +354,11 @@ describe("DiscoverySession", () => {
       const first = interact(handle, { action: "click", target: "#a" });
       const second = interact(handle, { action: "click", target: "#b" });
 
-      await expect(first).rejects.toThrow("backend exploded");
-      // The stored lock swallows the rejection, so the queued op still runs.
+      // The runner turns the throw into a failed (unrecorded) step …
+      const failed = await first;
+      expect(failed.ok).toBe(false);
+      expect(failed.error).toContain("backend exploded");
+      // … and the queued op still runs.
       const ok = await second;
       expect(ok.ok).toBe(true);
       expect(ok.recordedStep).toEqual({
@@ -359,7 +373,9 @@ describe("DiscoverySession", () => {
       const handle = await openSession(backend, "/login");
 
       backend.setSnapshot(SNAPSHOT_DASHBOARD);
-      const result = await navigate(handle, "/dashboard");
+      const result = await navigate(handle, "/dashboard", {
+        snapshotMode: "full",
+      });
 
       expect(result.ok).toBe(true);
       expect(result.url).toBe("/dashboard");
@@ -568,8 +584,8 @@ describe("DiscoverySession", () => {
       const handle = await openSession(backend, "/login");
       registry.set(handle.session.id, handle);
 
-      // Make the session appear expired
-      handle.session.lastActivity = Date.now() - 10 * 60 * 1000; // 10 min ago
+      // Make the session appear expired (default TTL: 30 min)
+      handle.session.lastActivity = Date.now() - 31 * 60 * 1000;
 
       const expired = await sweepSessions(registry);
       expect(expired).toHaveLength(1);
@@ -593,11 +609,13 @@ describe("DiscoverySession", () => {
       try {
         const registry: SessionRegistry = new Map();
         const backend = createMockBackend();
-        const handle = await openSession(backend, "/login");
+        const handle = await openSession(backend, "/login", {
+          ttlMs: 5 * 60 * 1000,
+        });
         registry.set(handle.session.id, handle);
 
         const now = Date.now();
-        // Exactly at the 5-minute TTL: kept (the check is strictly >).
+        // Exactly at the session's 5-minute TTL: kept (the check is strictly >).
         handle.session.lastActivity = now - 5 * 60 * 1000;
         expect(await sweepSessions(registry)).toHaveLength(0);
         expect(registry.size).toBe(1);
@@ -628,5 +646,134 @@ describe("DiscoverySession", () => {
       expect(b1.closeCalls).toBe(1);
       expect(b2.closeCalls).toBe(1);
     });
+  });
+});
+
+describe("project settings carried by a session", () => {
+  it("scans the session's testIdAttribute for the inventory", async () => {
+    const backend = createMockBackend();
+    backend.enqueueEvalResult([
+      {
+        testId: "save",
+        tagName: "button",
+        text: "Save",
+        selector: '[data-qa="save"]',
+      },
+    ]);
+    const handle = await openSession(backend, "/form", {
+      testIdAttribute: "data-qa",
+    });
+    expect(handle.testIdAttribute).toBe("data-qa");
+    const inventory = await getInventory(handle, { testids: true });
+    expect(backend.lastEvaluatedScript).toContain('const attr = "data-qa"');
+    expect(inventory.testIdAttribute).toBe("data-qa");
+    expect(inventory.testids?.[0]?.locator).toEqual({
+      by: "testid",
+      testid: "save",
+    });
+  });
+
+  it("defaults the inventory to data-testid", async () => {
+    const backend = createMockBackend();
+    backend.enqueueEvalResult([]);
+    const handle = await openSession(backend, "/form");
+    const inventory = await getInventory(handle, { testids: true });
+    expect(backend.lastEvaluatedScript).toContain('const attr = "data-testid"');
+    expect(inventory.testIdAttribute).toBe("data-testid");
+  });
+
+  it("navigates a relative URL on the baseUrl but records it relative", async () => {
+    const backend = createMockBackend();
+    const handle = await openSession(backend, "http://localhost:8080/login", {
+      baseUrl: "http://localhost:8080/app",
+    });
+    const result = await navigate(handle, "/dashboard");
+    // The browser went to the joined URL ...
+    expect(backend.stepLog.at(-1)).toEqual({
+      open: "http://localhost:8080/app/dashboard",
+    });
+    expect(result.url).toBe("http://localhost:8080/app/dashboard");
+    // ... but the exported spec keeps the path, so `cairn run --env staging`
+    // follows staging's baseUrl instead of this session's localhost.
+    expect(handle.session.steps[1]!.step).toEqual({ open: "/dashboard" });
+  });
+
+  it("records a relative navigate with waitUntil in object form", async () => {
+    const backend = createMockBackend();
+    const handle = await openSession(backend, "http://localhost:8080/login", {
+      baseUrl: "http://localhost:8080",
+    });
+    await navigate(handle, "/dashboard", { waitUntil: "load" });
+    expect(backend.stepLog.at(-1)).toEqual({
+      open: { path: "http://localhost:8080/dashboard", waitUntil: "load" },
+    });
+    expect(handle.session.steps[1]!.step).toEqual({
+      open: { path: "/dashboard", waitUntil: "load" },
+    });
+  });
+
+  it("opens the resolved URL but records the requested one", async () => {
+    const backend = createMockBackend();
+    const handle = await openSession(
+      backend,
+      "https://app.example.test/cb?token=s3cr3t-value",
+      {
+        recordUrl: "https://app.example.test/cb?token=${secrets.CB_TOKEN}",
+        redactUrl: (u) => u.replaceAll("s3cr3t-value", "[redacted]"),
+        waitUntil: "load",
+        // The runner resolves the recorded placeholder from the provider.
+        resolveSecrets: async () => ({
+          env: { ...process.env, CB_TOKEN: "s3cr3t-value" },
+          secretValues: ["s3cr3t-value"],
+          secretNames: ["CB_TOKEN"],
+        }),
+      },
+    );
+    expect(backend.stepLog[0]).toEqual({
+      open: {
+        path: "https://app.example.test/cb?token=s3cr3t-value",
+        waitUntil: "load",
+      },
+    });
+    expect(handle.session.steps[0]!.step).toEqual({
+      open: {
+        path: "https://app.example.test/cb?token=${secrets.CB_TOKEN}",
+        waitUntil: "load",
+      },
+    });
+    // The raw page URL stays internal; everything returned is redacted.
+    expect(handle.session.currentUrl).toContain("s3cr3t-value");
+    expect(publicUrl(handle)).toBe(
+      "https://app.example.test/cb?token=[redacted]",
+    );
+    const snap = await captureSnapshot(handle);
+    expect(snap.url).not.toContain("s3cr3t-value");
+    const clicked = await interact(handle, {
+      action: "click",
+      target: { by: "role", role: "button", name: "Sign In" },
+    });
+    expect(clicked.url).not.toContain("s3cr3t-value");
+    const moved = await navigate(handle, "/next");
+    expect(moved.url).toBe("https://app.example.test/next");
+  });
+
+  it("resolves a relative navigate URL against the current http(s) page without a baseUrl", async () => {
+    const backend = createMockBackend();
+    const handle = await openSession(backend, "https://app.example.test/a/b");
+    await navigate(handle, "c");
+    expect(handle.session.steps[1]!.step).toEqual({
+      open: "https://app.example.test/a/c",
+    });
+  });
+
+  it("refuses a bare relative navigate on a real browser with nothing to resolve against", async () => {
+    const backend = createMockBackend();
+    const handle = await openSession(backend, "/login");
+    Object.defineProperty(backend, "name", { value: "agent-browser" });
+    await expect(navigate(handle, "/dashboard")).rejects.toThrow(
+      /relative URL "\/dashboard" cannot be resolved/,
+    );
+    // Nothing was recorded for the refused navigation.
+    expect(handle.session.steps).toHaveLength(1);
   });
 });

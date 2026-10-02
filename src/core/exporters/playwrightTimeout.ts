@@ -1,18 +1,28 @@
 import type { Outcome, Spec, Step } from "../schema/spec.v1";
 
 /**
- * Playwright defaults each test to 30 seconds. Exported Cairntrace specs often
- * contain durable-processing verifiers whose authored budgets are measured in
- * minutes, so every generated test gets an explicit derived timeout instead.
+ * Playwright defaults each test to 30 seconds. Exported Cairntrace specs get
+ * an explicit timeout derived from their sequential step/outcome budgets.
+ * The 30-minute floor is reserved for work that is legitimately slow and
+ * whose authored budget is not the whole story: durable-processing node
+ * verifiers (test budget) and long precondition commands (beforeAll budget).
+ * A plain UI spec gets its derived budget, so a hung step fails in minutes,
+ * not half an hour.
  */
 export const PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS = 30 * 60 * 1000;
 export const PLAYWRIGHT_EXPORTED_TEST_MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+/** A precondition whose own budget reaches this is "long" (gets the floor). */
+export const PLAYWRIGHT_LONG_PRECONDITION_MS = 5 * 60 * 1000;
 
 const DEFAULT_STEP_BUDGET_MS = 30_000;
 const DEFAULT_OUTCOME_BUDGET_MS = 30_000;
 const DEFAULT_PRECONDITION_BUDGET_MS = 120_000;
+/** Matches the exporter's `waitForResponse` default for postconditions. */
+const DEFAULT_POSTCONDITION_BUDGET_MS = 30_000;
 const MIN_OVERHEAD_MS = 60_000;
 const OVERHEAD_RATIO = 0.1;
+
+export type PlaywrightTimeoutFloorReason = "nodeVerifier" | "longPrecondition";
 
 export interface PlaywrightTimeoutBudget {
   /** Sum of sequential authored/default operation budgets, before overhead. */
@@ -23,6 +33,8 @@ export interface PlaywrightTimeoutBudget {
   timeoutMs: number;
   /** True when the requested budget exceeded the four-hour safety ceiling. */
   capped: boolean;
+  /** Why the 30-minute floor applied; absent when purely derived. */
+  floorReason?: PlaywrightTimeoutFloorReason;
 }
 
 /**
@@ -39,24 +51,31 @@ export function playwrightTestTimeoutBudget(
     ...(spec.steps ?? []).map((step) => stepBudgetMs(step, spec.settleMs)),
     ...spec.outcomes.map(outcomeBudgetMs),
   ]);
-  return finishBudget(declaredMs);
+  return finishBudget(
+    declaredMs,
+    hasExportedNodeVerifier(spec) ? "nodeVerifier" : undefined,
+  );
 }
 
 /**
- * `--project` executes all precondition commands for a spec in one beforeAll
- * hook. Its config timeout therefore also needs their sequential budget.
+ * `--project` executes a spec's executable (non-`echo`) precondition
+ * commands in one beforeAll hook, which sets its own timeout from their
+ * sequential budget.
  */
 export function playwrightPreconditionTimeoutBudget(
   spec: Spec,
 ): PlaywrightTimeoutBudget {
-  const declaredMs = safeSum(
-    (spec.preconditions?.commands ?? []).map((command) =>
+  const budgets = (spec.preconditions?.commands ?? [])
+    .filter((command) => !isDocumentaryPrecondition(commandRun(command)))
+    .map((command) =>
       typeof command === "string"
         ? DEFAULT_PRECONDITION_BUDGET_MS
         : (command.timeoutMs ?? DEFAULT_PRECONDITION_BUDGET_MS),
-    ),
+    );
+  const long = budgets.some(
+    (budget) => budget >= PLAYWRIGHT_LONG_PRECONDITION_MS,
   );
-  return finishBudget(declaredMs);
+  return finishBudget(safeSum(budgets), long ? "longPrecondition" : undefined);
 }
 
 /** Maximum test/hook budget used as the generated project's config fallback. */
@@ -78,24 +97,104 @@ export function playwrightProjectTimeoutBudget(
   };
 }
 
-function finishBudget(declaredMs: number): PlaywrightTimeoutBudget {
+/** One-line explanation emitted above `test.setTimeout(...)`. */
+export function timeoutBudgetComment(budget: PlaywrightTimeoutBudget): string {
+  if (budget.floorReason === "nodeVerifier") {
+    return `Derived from sequential step/outcome budgets; 30m floor for durable node verifiers; 4h ceiling.`;
+  }
+  if (budget.floorReason === "longPrecondition") {
+    return `Derived from sequential precondition budgets; 30m floor for long preconditions; 4h ceiling.`;
+  }
+  return `Derived from sequential step/outcome budgets (+10% headroom, at least 1m); 4h ceiling.`;
+}
+
+function finishBudget(
+  declaredMs: number,
+  floorReason?: PlaywrightTimeoutFloorReason,
+): PlaywrightTimeoutBudget {
   const overheadMs = Math.max(
     MIN_OVERHEAD_MS,
     Math.ceil(declaredMs * OVERHEAD_RATIO),
   );
   const requestedMs = safeAdd(declaredMs, overheadMs);
+  const floorMs = floorReason ? PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS : 0;
   return {
     declaredMs,
     overheadMs,
     timeoutMs: Math.min(
       PLAYWRIGHT_EXPORTED_TEST_MAX_TIMEOUT_MS,
-      Math.max(PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS, requestedMs),
+      Math.max(floorMs, requestedMs),
     ),
     capped: requestedMs > PLAYWRIGHT_EXPORTED_TEST_MAX_TIMEOUT_MS,
+    ...(floorReason ? { floorReason } : {}),
   };
 }
 
+/**
+ * A documentary precondition is ONE plain `echo` that only states an
+ * assumption ("demo-app must be running"). Exports never execute it, so any
+ * shell control or substitution outside single quotes (`&&`, `||`, `;`,
+ * `|`, `&`, newline, redirection, `$(…)`, backticks) makes the command
+ * executable: `echo "resetting" && psql …` is a real reset that must run (or
+ * be reported), never a note.
+ */
+export function isDocumentaryPrecondition(run: string): boolean {
+  const command = run.trim();
+  if (!/^echo(\s|$)/.test(command)) return false;
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = undefined;
+      continue;
+    }
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "`") return false;
+    if (ch === "$" && command[i + 1] === "(") return false;
+    if (quote === '"') {
+      if (ch === '"') quote = undefined;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (";&|<>\n\r".includes(ch)) return false;
+  }
+  return quote === undefined;
+}
+
+function commandRun(command: string | { run: string }): string {
+  return typeof command === "string" ? command : command.run;
+}
+
+function hasExportedNodeVerifier(spec: Spec): boolean {
+  return spec.outcomes.some((outcome) => {
+    const verifier = outcome.verify;
+    return (
+      "script" in verifier &&
+      verifier.script.runtime === "node" &&
+      verifier.script.file !== undefined
+    );
+  });
+}
+
 function stepBudgetMs(step: Step, specSettleMs: number | undefined): number {
+  const actionMs = actionBudgetMs(step, specSettleMs);
+  // A network postcondition is armed BEFORE the action and awaited after it,
+  // so the step can take as long as the longer of the two deadlines.
+  const postcondition = step.postcondition?.network;
+  if (!postcondition || actionMs === 0) return actionMs;
+  return Math.max(
+    actionMs,
+    postcondition.timeoutMs ?? DEFAULT_POSTCONDITION_BUDGET_MS,
+  );
+}
+
+function actionBudgetMs(step: Step, specSettleMs: number | undefined): number {
   if ("batch" in step) {
     return safeSum(
       step.batch.map((subStep) =>

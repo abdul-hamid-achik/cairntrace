@@ -8,7 +8,12 @@ import {
 } from "node:fs/promises";
 import { resolveArtifactRootContext, resolveRunRef } from "../runRefs";
 import { emit, resolveFormat } from "../format";
-import { maybeAutoStash, stashDirectory } from "./stash";
+import {
+  maybeAutoStash,
+  type RunStashEvidence,
+  stashDirectory,
+  stashRunDirectory,
+} from "./stash";
 import { isFcheapAvailable, runFcheap } from "./fcheapClient.js";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { codemapRisk } from "./codemap.js";
@@ -23,13 +28,17 @@ import {
 } from "node:path";
 import type { RunResult } from "../../core/schema/run.v1.js";
 import type { BrowserBackend } from "../../adapters/browserBackend.js";
-import type { ServicesHandle } from "../../core/runner/services.js";
+import {
+  ServicesLockError,
+  type ServicesHandle,
+} from "../../core/runner/services.js";
 import type { WebServerHandle } from "../../core/runner/webServer.js";
 import { refreshAgentContextCodeMatches } from "../../core/artifacts/agentContext.js";
 import { ArtifactWriter } from "../../core/artifacts/ArtifactWriter.js";
 import { createArtifactRedactor } from "../../core/artifacts/redaction.js";
 import { loadConfig } from "../../core/config/loader.js";
 import { trackBackend, trackServices, trackWebServer } from "../cleanup.js";
+import { ServicesBootRefusedError } from "../invocation/lifecycle.js";
 import { parseFcheapConnectOutput } from "./fcheapContract.js";
 import {
   AuditResultSchema,
@@ -296,7 +305,7 @@ async function isVidtraceAvailable(): Promise<boolean> {
 }
 
 /* ---------------------------------------------------------------------------
- * codemap structural ranking (CODEMAP-INTEGRATION.md item C / FEATURES item 3)
+ * codemap structural ranking (FEATURES item 3)
  *
  * fcheap/vecgrep returns N raw file:line search matches. We re-rank them by
  * the code graph instead of raw search score:
@@ -635,7 +644,7 @@ function buildSemanticQuery(ctx: FailureContext): string {
 
 /* ---------------------------------------------------------------------------
  * Call-trace reconstruction + per-edge path annotations
- * (CODEMAP-INTEGRATION.md item D / FEATURES item 4)
+ * (FEATURES item 4)
  *
  * Once `rankCodeMatches` has resolved a `symbol` per match, reconstruct the
  * entry→failure call chain from `codemap callers` edges among those symbols,
@@ -835,6 +844,12 @@ export interface InvestigateRunOptions {
   clips?: boolean;
   /** Reuse a receipt from an earlier auto-stash instead of saving twice. */
   stashId?: string;
+  /**
+   * Config `stash` evidence options for the run stash: `include`,
+   * `unsafeIncludeRawTraces`, `meta`. No TTL: like `cairn stash save`
+   * without `--ttl`, an explicit stash is kept until dropped.
+   */
+  stash?: RunStashEvidence;
 }
 
 /**
@@ -867,14 +882,24 @@ export async function investigateRunDirectory(
   if (opts.stashId) {
     result.stashId = opts.stashId;
   } else {
-    const stashPath =
+    const clipsDir =
       opts.clips && existsSync(join(runDir, "videos", "clips"))
         ? resolve(join(runDir, "videos", "clips"))
-        : runDir;
-    const saved = await stashDirectory(stashPath, {
-      tool: "cairntrace",
-      tags: [`investigate-${runId}`],
-    });
+        : undefined;
+    // The run itself goes through the evidence gate with the config's
+    // stash.include / unsafeIncludeRawTraces / meta and gets a receipt;
+    // `--clips` saves only the clips folder (the clips are what it asked for).
+    const saved = clipsDir
+      ? await stashDirectory(clipsDir, {
+          tool: "cairntrace",
+          tags: [`investigate-${runId}`],
+        })
+      : await stashRunDirectory(runDir, {
+          action: "manual",
+          tool: "cairntrace",
+          tags: [`investigate-${runId}`],
+          ...evidenceStashOptions(opts.stash),
+        });
     if (!saved.ok || !saved.stashId) {
       result.stashId = saved.stashId;
       result.error = `fcheap save failed: ${saved.error ?? "missing stash id"}`;
@@ -1025,6 +1050,7 @@ export async function investigateRunRef(
         opts.connect ? config?.codebaseDir : undefined,
         resolved.loaded?.path,
       );
+  const stashConfig = resolved.loaded?.config.stash;
   return investigateRunDirectory(runDir, runId, {
     connect,
     codebase,
@@ -1033,7 +1059,21 @@ export async function investigateRunRef(
     index: opts.index === true || config?.index === true,
     query: opts.query,
     clips: opts.clips,
+    ...(stashConfig ? { stash: stashConfig } : {}),
   });
+}
+
+/** stashRunDirectory options from the config `stash` evidence block. */
+function evidenceStashOptions(stash: RunStashEvidence | undefined): {
+  include?: RunStashEvidence["include"];
+  unsafeIncludeRawTraces?: boolean;
+  meta: boolean;
+} {
+  return {
+    ...(stash?.include ? { include: stash.include } : {}),
+    ...(stash?.unsafeIncludeRawTraces ? { unsafeIncludeRawTraces: true } : {}),
+    meta: stash?.meta !== false,
+  };
 }
 
 export async function investigateCommand(
@@ -1149,6 +1189,17 @@ export interface AuditOptions {
   slowMo?: number | string;
   env?: string;
   coldStart?: boolean;
+  /** Run against services a `cairn services up` lock owns (no start, no teardown). */
+  reuseServices?: boolean;
+  /** Skip the config services lifecycle (MCP `noServices`). */
+  noServices?: boolean;
+  /** commander `--no-services` → false. */
+  services?: boolean;
+  /**
+   * false: refuse (exit 4) when the audit would start config services — an
+   * MCP server started without `--allow-services`.
+   */
+  allowServicesBoot?: boolean;
   artifactRoot?: string;
   config?: string;
   format?: string;
@@ -1194,10 +1245,16 @@ export async function auditSpec(
     const { runSpec } = await import("../../core/runner/Runner");
     const { createBackend } = await import("../backendFactory");
     const lifecycle = await import("./run");
+    // Dynamic: postRun imports this module (auto-investigate).
+    const postRun = await import("../invocation/postRun");
     const coldStart = opts.coldStart ?? true;
     const runOptions = {
       ...(opts.env !== undefined ? { env: opts.env } : {}),
       coldStart,
+      ...(opts.reuseServices ? { reuseServices: true } : {}),
+      ...(opts.noServices || opts.services === false
+        ? { services: false }
+        : {}),
       ...(opts.artifactRoot !== undefined
         ? { artifactRoot: opts.artifactRoot }
         : {}),
@@ -1207,19 +1264,26 @@ export async function auditSpec(
       specPath,
       runOptions,
     );
-    server = await lifecycle.maybeStartWebServer(
-      specPath,
-      runOptions,
-      (terminateSync) => {
-        stopTrackingServer = trackWebServer({ terminateSync });
-      },
-    );
+    // Services first, like `cairn run`: the webServer usually depends on
+    // them, and a `cairn services up` lock refuses (exit 4) before anything
+    // else starts.
     services = await lifecycle.maybeStartServices(
       specPath,
       runOptions,
       scopedSecrets,
       (terminateSync) => {
         stopTrackingServices = trackServices({ terminateSync });
+      },
+      undefined,
+      opts.allowServicesBoot !== undefined
+        ? { allowServicesBoot: opts.allowServicesBoot }
+        : {},
+    );
+    server = await lifecycle.maybeStartWebServer(
+      specPath,
+      runOptions,
+      (terminateSync) => {
+        stopTrackingServer = trackWebServer({ terminateSync });
       },
     );
     const browser = await lifecycle.resolveBrowserConfig(specPath, runOptions);
@@ -1265,21 +1329,12 @@ export async function auditSpec(
       ...(services && services.events.length > 0
         ? { servicesEvents: services.events }
         : {}),
-      onArchiveRun: async (runDir, _runId, tags) => {
-        const archived = await stashDirectory(runDir, {
-          tool: "cairntrace",
-          tags,
-        });
-        if (!archived.ok) {
-          throw new Error(
-            `file.cheap archive failed: ${archived.error ?? "unknown error"}`,
-          );
-        }
-      },
-      onPublishRun: async (runDir, runId, _tags, retentionDays) => {
-        const { publishRunDirectory } = await import("./publish");
-        await publishRunDirectory(runDir, runId, { retentionDays });
-      },
+      // The same gated adapters as `cairn run`: the archive carries
+      // stash.include / ttl / meta, publish retention.publish.include.
+      onArchiveRun: postRun.makeArchiveRun((message) =>
+        result.warnings?.push(message),
+      ),
+      onPublishRun: postRun.publishRun,
       workerIndex: 0,
     });
 
@@ -1352,9 +1407,11 @@ export async function auditSpec(
         result.error =
           "--connect requires --codebase <dir> or investigate.codebaseDir in config";
       } else if (result.runDir && result.runId) {
-        const runStash = await stashDirectory(result.runDir, {
+        const runStash = await stashRunDirectory(result.runDir, {
+          action: "manual",
           tool: "cairntrace",
           tags: [`audit-${result.runId}`],
+          ...evidenceStashOptions(stashConfig),
         });
         if (!runStash.ok || !runStash.stashId) {
           result.error = `fcheap save failed: ${runStash.error ?? "missing stash id"}`;
@@ -1393,6 +1450,7 @@ export async function auditSpec(
             result.runDir,
             result.runId,
             {
+              ...(stashConfig ? { stash: stashConfig } : {}),
               stashId: connectStashId,
               connect: true,
               codebase,
@@ -1426,6 +1484,14 @@ export async function auditSpec(
     }
   } catch (error) {
     result.error = (error as Error).message;
+    // A `cairn services up` lock, or the MCP services gate, refused the
+    // audit before anything started.
+    if (
+      error instanceof ServicesLockError ||
+      error instanceof ServicesBootRefusedError
+    ) {
+      result.exitCode = error.exitCode;
+    }
   } finally {
     await backend?.close().catch(() => undefined);
     stopTrackingBackend?.();
@@ -1442,7 +1508,10 @@ export async function auditSpec(
 }
 
 export function auditResultExitCode(result: AuditResult): number {
-  if (result.error) return 2;
+  // exit 4 without a run: a `cairn services up` lock refused the audit.
+  if (result.error) {
+    return result.exitCode === 4 && result.runId === undefined ? 4 : 2;
+  }
   return result.exitCode ?? 0;
 }
 
