@@ -61,6 +61,11 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      - name: Install root dependencies
+        # Studio tests run the repo's bin/cairn (--help parity checks), which
+        # needs the CLI's own dependencies.
+        run: bun install --frozen-lockfile
+
       - name: Install desktop dependencies
         # The Electron binary itself is not needed to run the node:test suite
         # or tsc; skipping the download keeps this job under a minute.

@@ -240,6 +240,13 @@ describe("argv builders ↔ the real CLI", () => {
   // builder, with every option set, against the repo's own `--help` (plus
   // the program's global options).
   const BIN = path.join(__dirname, "..", "..", "bin", "cairn");
+  const ROOT_DEPS = path.join(
+    __dirname,
+    "..",
+    "..",
+    "node_modules",
+    "commander",
+  );
   const bun = cli.which("bun");
   /** @type {Set<string> | undefined} */
   let globalFlags;
@@ -349,6 +356,12 @@ describe("argv builders ↔ the real CLI", () => {
     it(`cairn ${command.join(" ")} registers every flag Studio sends`, (t) => {
       if (!bun || !fs.existsSync(BIN)) {
         t.skip("needs bun and the repo's bin/cairn");
+        return;
+      }
+      if (!fs.existsSync(ROOT_DEPS)) {
+        t.skip(
+          "needs the repo's root dependencies (bun install at the repo root)",
+        );
         return;
       }
       const registered = registeredFlags(command);
