@@ -393,10 +393,26 @@ async function statusOf(
   journalDir: string | undefined,
   artifactRoot: string | undefined,
 ): Promise<RunInvocationStatusResult> {
-  const journal = journalDir
+  let journal = journalDir
     ? await readInvocationJournal(journalDir)
     : undefined;
   const result = entry?.result;
+  // The engine writes the final journal state before it settles, but a read
+  // can still land in between (or before the file is visible): once this
+  // server knows the invocation settled, give the journal a moment to show
+  // the same terminal state and summary instead of returning a partial view.
+  const settledHere = result !== undefined || entry?.failure !== undefined;
+  if (journalDir && settledHere) {
+    for (
+      let attempt = 0;
+      attempt < 20 &&
+      (!journal || journal.status === "running" || !journal.summary);
+      attempt++
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      journal = await readInvocationJournal(journalDir);
+    }
+  }
   const status: RunInvocationState = entry
     ? invocationState(entry)
     : journal
@@ -627,6 +643,16 @@ export function registerRunTools(
       const entry = registry.get(invocationId);
       let journalDir = entry?.journalDir;
       let root = entry?.artifactRoot;
+      if (entry && !journalDir) {
+        // The registry learns the journal dir only from the settled result;
+        // resolve it from the artifact root so a just-settled (or still
+        // running) invocation reports its journal, summary and runs.
+        root ??= await resolveArtifactRoot({
+          ...(artifactRoot !== undefined ? { artifactRoot } : {}),
+          ...(config !== undefined ? { config } : {}),
+        });
+        journalDir = await resolveInvocationDir(root, invocationId);
+      }
       if (!entry) {
         root = await resolveArtifactRoot({
           ...(artifactRoot !== undefined ? { artifactRoot } : {}),

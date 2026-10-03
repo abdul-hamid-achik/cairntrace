@@ -3,6 +3,26 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.1] - 2026-10-02
+
+First npm publish of the 3.0 line: the v3.0.0 tag's publish verify failed on
+the flaky test fixed below, so 3.0.0 exists on GitHub and Homebrew only.
+Everything in [3.0.0] applies.
+
+### Fixed
+
+- `latest` / `previous` run references (`cairn logs`, `context`, `diff`,
+  `stash`, MCP) resolve deterministically when two run directories share an
+  mtime (same clock tick or a coarse filesystem clock): the timestamped run
+  name breaks the tie, so the newer run always wins.
+- MCP `cairn_run_status` for an invocation this server started resolves its
+  journal from the artifact root when the registry does not know the
+  journal directory yet, and a just-settled invocation briefly re-reads the
+  journal until its final state and summary are visible, so status no longer
+  returns a settled verdict without the summary and run list.
+- CI: the desktop job installs the root dependencies its `cairn --help`
+  parity test needs; the test skips with a clear reason when they are missing.
+
 ## [3.0.0] - 2026-10-02
 
 ### Upgrading from 2.x
