@@ -584,7 +584,12 @@ export class PlaywrightAdapter implements BrowserBackend {
         acceptDownloads: true,
         ...(this.viewport ? { viewport: this.viewport } : {}),
         ...(this.videoEnabled && this.videoTempDir
-          ? { recordVideo: { dir: this.videoTempDir } }
+          ? {
+              recordVideo: {
+                dir: this.videoTempDir,
+                ...(this.viewport ? { size: this.viewport } : {}),
+              },
+            }
           : {}),
       });
       this.page = await this.context.newPage();
@@ -802,7 +807,12 @@ export class PlaywrightAdapter implements BrowserBackend {
       acceptDownloads: true,
       ...(this.viewport ? { viewport: this.viewport } : {}),
       ...(this.videoEnabled && this.videoTempDir
-        ? { recordVideo: { dir: this.videoTempDir } }
+        ? {
+            recordVideo: {
+              dir: this.videoTempDir,
+              ...(this.viewport ? { size: this.viewport } : {}),
+            },
+          }
         : {}),
     });
     return this.context;

@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chromium } from "playwright";
+import { chromium, type BrowserContextOptions } from "playwright";
 import { PlaywrightAdapter } from "./PlaywrightAdapter";
 
 describe("PlaywrightAdapter focus", () => {
@@ -80,37 +80,79 @@ describe("PlaywrightAdapter locators", () => {
 });
 
 describe("PlaywrightAdapter video", () => {
-  it("finalizes the context before saving a native recording", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "cairntrace-video-test-"));
-    const output = join(dir, "recording.webm");
-    const adapter = new PlaywrightAdapter();
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-
-    try {
-      await adapter.startVideo();
-      expect(
-        await adapter.runStep({
-          open: "data:text/html,<main>video smoke</main>",
-        }),
-      ).toMatchObject({ ok: true });
-
-      const result = await Promise.race([
-        adapter.stopVideo(output),
-        new Promise<never>((_resolve, reject) => {
-          deadline = setTimeout(
-            () => reject(new Error("stopVideo did not finalize within 10s")),
-            10_000,
+  it.each(["initial", "restored"])(
+    "records the viewport at native size in the %s context and finalizes it",
+    async (contextKind) => {
+      const dir = await mkdtemp(join(tmpdir(), "cairntrace-video-test-"));
+      const output = join(dir, "recording.webm");
+      const adapter = new PlaywrightAdapter();
+      const contextOptions: (BrowserContextOptions | undefined)[] = [];
+      const originalLaunch = chromium.launch.bind(chromium);
+      const launch = vi
+        .spyOn(chromium, "launch")
+        .mockImplementation(async (options) => {
+          const browser = await originalLaunch(options);
+          const createContext = browser.newContext.bind(browser);
+          vi.spyOn(browser, "newContext").mockImplementation(
+            async (options) => {
+              contextOptions.push(options);
+              return createContext(options);
+            },
           );
-        }),
-      ]);
-      expect(result).toEqual({ ok: true, path: output });
-      expect((await stat(output)).size).toBeGreaterThan(0);
-    } finally {
-      if (deadline) clearTimeout(deadline);
-      await adapter.close();
-      await rm(dir, { recursive: true, force: true });
-    }
-  }, 20_000);
+          return browser;
+        });
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+
+      try {
+        await adapter.setViewport(1560, 1100);
+        await adapter.startVideo();
+        expect(
+          await adapter.runStep({
+            open: "data:text/html,<main>video smoke</main>",
+          }),
+        ).toMatchObject({ ok: true });
+        expect(contextOptions[0]).toMatchObject({
+          viewport: { width: 1560, height: 1100 },
+          recordVideo: { size: { width: 1560, height: 1100 } },
+        });
+        if (contextKind === "restored") {
+          // A newly created recording uses the latest sticky viewport. An
+          // existing recording's canvas remains fixed during in-page resizing.
+          await adapter.setViewport(1600, 1200);
+          const state = join(dir, "state.json");
+          await writeFile(state, JSON.stringify({ cookies: [], origins: [] }));
+          expect(await adapter.loadState(state)).toMatchObject({ ok: true });
+          expect(contextOptions[1]).toMatchObject({
+            viewport: { width: 1600, height: 1200 },
+            recordVideo: { size: { width: 1600, height: 1200 } },
+          });
+          expect(
+            await adapter.runStep({
+              open: "data:text/html,<main>restored video</main>",
+            }),
+          ).toMatchObject({ ok: true });
+        }
+
+        const result = await Promise.race([
+          adapter.stopVideo(output),
+          new Promise<never>((_resolve, reject) => {
+            deadline = setTimeout(
+              () => reject(new Error("stopVideo did not finalize within 10s")),
+              10_000,
+            );
+          }),
+        ]);
+        expect(result).toEqual({ ok: true, path: output });
+        expect((await stat(output)).size).toBeGreaterThan(0);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        await adapter.close();
+        launch.mockRestore();
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
 });
 
 describe("PlaywrightAdapter request", () => {

@@ -1440,7 +1440,15 @@ async function executeSpec(
   // Start video recording. Same best-effort pattern as trace: backends
   // without video support no-op. The default policy is `never` so videos are
   // only recorded when the spec explicitly opts in.
+  const viewport = spec.viewport ?? runtime.viewport;
   if (policy.video !== "never") {
+    // Playwright fixes the recording canvas when trace or cold-start creates
+    // the context. Prime its size now; reapply after checkpoint restore below.
+    if (viewport) {
+      await safe(async () =>
+        opts.backend.setViewport?.(viewport.width, viewport.height),
+      );
+    }
     const videoConfig = {
       ...spec.artifacts?.video,
       ...opts.videoOptions,
@@ -1507,7 +1515,6 @@ async function executeSpec(
   // Apply the viewport before any step runs. Spec-level wins over the
   // environment's config. Placed after loadState so backends that rebuild
   // their page on state restore still end up at the requested size.
-  const viewport = spec.viewport ?? runtime.viewport;
   if (viewport) {
     // Deliberately not routed through safe(): that helper discards the
     // error, and a swallowed setViewport failure previously left the
