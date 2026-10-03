@@ -18,6 +18,23 @@ import { installFcheapTestGuard } from "./src/testing/fcheapTestGuard";
 // `publish`/… without a temp --stash-dir fails the test that ran it.
 installFcheapTestGuard();
 
+// A fork worker whose vitest parent died (a crash, ENOSPC, a killed shell or
+// agent) must die with it. Left alone, vitest 2.x reports the failed IPC send
+// as an unhandled error over the same dead channel and loops: 100% CPU and
+// ~100 MB/s of heap per worker until the machine runs out of memory. Only
+// IPC send failures emit `error` on `process`. SIGKILL because vitest
+// replaces `process.exit` while a test file runs.
+const orphanGuard = Symbol.for("cairn.vitest.orphanGuard");
+const guardState = globalThis as { [orphanGuard]?: true };
+function dieWithParent(): void {
+  process.kill(process.pid, "SIGKILL");
+}
+if (typeof process.send === "function" && !guardState[orphanGuard]) {
+  guardState[orphanGuard] = true;
+  process.on("disconnect", dieWithParent);
+  process.on("error", dieWithParent);
+}
+
 if (!process.env.CAIRN_TEST_HOME) {
   const realHome = process.env.HOME;
   const testHome = mkdtempSync(join(tmpdir(), "cairn-test-home-"));

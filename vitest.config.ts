@@ -7,6 +7,8 @@ export default defineConfig({
     reporters: ["default"],
     // Hermetic HOME per worker so tests never touch the real ~/.cairntrace.
     setupFiles: ["./vitest.setup.ts"],
+    // Per-run TMPDIR, deleted when the run ends (see the file comment).
+    globalSetup: ["./vitest.globalSetup.ts"],
     // GitHub's shared runner cannot reliably execute the browser-heavy suites
     // alongside the runner and CLI suites. One worker keeps per-test timeouts
     // meaningful instead of making the release gate dependent on host load.
