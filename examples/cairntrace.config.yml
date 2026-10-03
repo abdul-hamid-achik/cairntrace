@@ -26,7 +26,9 @@ services:
     command: docker compose up -d
     reuseExisting: true
     readyTimeoutMs: 300000 # first postgres image pull can be slow
-    readinessCheck: docker compose exec -T db pg_isready -U cairn -d cairn
+    # TCP, not the unix socket: the image's init-time server answers on the
+    # socket and then restarts, so a socket check races the seed (ECONNRESET).
+    readinessCheck: docker compose exec -T db pg_isready -h 127.0.0.1 -U cairn -d cairn
   seed:
     command: bun demo-app/db/seed.ts
     ttlSeconds: 0 # always run the data-level check below

@@ -20,6 +20,10 @@ Everything in [3.0.0] applies.
   journal directory yet, and a just-settled invocation briefly re-reads the
   journal until its final state and summary are visible, so status no longer
   returns a settled verdict without the summary and run list.
+- Examples: the demo database's readiness check and compose healthcheck use
+  `pg_isready -h 127.0.0.1` (TCP). The image's init-time server answers on
+  the unix socket and then restarts, so the socket check let the seed connect
+  into that restart (ECONNRESET).
 - CI: the desktop job installs the root dependencies its `cairn --help`
   parity test needs; the test skips with a clear reason when they are missing.
 
