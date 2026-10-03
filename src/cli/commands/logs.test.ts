@@ -129,6 +129,12 @@ describe("cairn logs", () => {
       "healthy\n",
     );
     await writeFile(join(latest, "services", "manifest.json"), "{}\n");
+    // Creating the services folders bumped both run dirs' mtimes; restore the
+    // stagger so "latest" is the newer run regardless of clock resolution.
+    const { utimes } = await import("node:fs/promises");
+    const now = Date.now();
+    await utimes(older, new Date(now - 60_000), new Date(now - 60_000));
+    await utimes(latest, new Date(now - 1_000), new Date(now - 1_000));
 
     await logsCommand(undefined, {
       artifactRoot: runsRoot,

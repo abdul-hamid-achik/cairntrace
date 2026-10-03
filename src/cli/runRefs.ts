@@ -64,10 +64,14 @@ export async function listRunDirsNewestFirst(
   );
   // Only real run directories: `latest`/`previous` must never resolve to
   // `_invocations/` (or any other non-run folder) under the artifact root.
-  return stats
-    .filter((s) => s.isDir && isRunDirName(s.name))
-    .toSorted((a, b) => b.mtime - a.mtime)
-    .map((s) => join(runsRoot, s.name));
+  return (
+    stats
+      .filter((s) => s.isDir && isRunDirName(s.name))
+      // Run dir names start with their UTC timestamp, so the name breaks mtime
+      // ties (coarse filesystem clocks, or both dirs touched in the same tick).
+      .toSorted((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name))
+      .map((s) => join(runsRoot, s.name))
+  );
 }
 
 export async function findRunBySlot(
