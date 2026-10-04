@@ -3,6 +3,18 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **JSON piped out of a command could be cut at 64 KiB.** Most commands print
+  their document and then exit, and a pipe is written asynchronously, so a
+  slow reader (`cairn spec verify --json | jq`, an agent reading the output)
+  got whatever had drained before the exit: a large spec-verify report arrived
+  as 64-72 KiB of a 90 KiB document. stdout and stderr now write
+  synchronously whenever they are not a terminal; a reader that closes early
+  (`| head`) ends the output quietly. `cairn mcp` keeps the runtime's writer.
+
 ## [3.1.0] - 2026-10-04
 
 Fewer `eval` files: loops, branches, retries, custom form controls, API
