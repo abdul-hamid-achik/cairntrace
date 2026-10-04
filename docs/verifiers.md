@@ -63,7 +63,7 @@ verify:
 
 ## `network`
 
-Asserts on the requests the page made. `urlContains` is required; `method` and `status` narrow it (`status` is exactly one of `equals | below | atLeast | in`; absent = any status, a still-pending request included).
+Asserts on the requests the page made. `urlContains` is required; `method` and `status` narrow it (`status` is exactly one of `equals | below | atLeast | in`; absent = any status, a still-pending request included). The status is recorded when the response headers arrive, and a request a `network` / `noFailedRequests` outcome judges that has neither a status nor an error when the steps end (its response event may lag the page by a moment) is waited for, at most 2 seconds, before the outcomes are judged and the network evidence is written; nothing waits when no judged request is in flight. The `agent-browser` backend never marks a failed or cancelled request (its request log keeps neither a status nor an error for one, like a request still in flight), so there the log is read once more after 100ms instead of waiting out the 2 seconds.
 
 ```yaml
 verify:
@@ -89,7 +89,9 @@ verify:
 
 ## `noFailedRequests`
 
-Passes only when no matching request failed (4xx/5xx). `urlContains` is required; `method` is optional. Mandatory for "the user clicked Submit and got a success page" flows — without it, a 500 on the side that did not change visible text would still produce a green run.
+Passes only when no matching request failed (4xx/5xx, or a transport failure: refused, blocked, aborted). `urlContains` is required; `method` is optional. Mandatory for "the user clicked Submit and got a success page" flows — without it, a 500 on the side that did not change visible text would still produce a green run.
+
+On the `agent-browser` backend a refused, blocked or cancelled request cannot be told from one still in flight: agent-browser's request log (`network requests`, also `network request <id>`) records neither a status nor an error for it, and only a HAR capture carries the `net::ERR_*` text. Such requests are not judged failed there; the outcome's evidence says how many matching requests never completed and that the backend could not judge them. Use `--backend playwright` when transport failures must fail the run.
 
 ```yaml
 verify:
@@ -222,20 +224,52 @@ With `source`, the datasource's credentials never leave its origin: `url` is a p
 
 ## `xlsx`
 
-Asserts against a downloaded XLSX workbook. `path` is the workbook (artifact placeholders like `${artifacts.template.path}` are supported). At least one of `sheets` or `validations` is required.
+Asserts against a downloaded workbook without a script verifier. `path` is the workbook (artifact placeholders like `${artifacts.template.path}` are supported); the file is read, never written. Every check below is optional, but at least one is required, and every failure is listed (the raw sidecar records the sheet, its header columns and each check).
 
 ```yaml
 verify:
   xlsx:
     path: ${artifacts.template.path}
+    sheet: Import Template            # name, { match: <regex> } or 0-based index; default: the first sheet
+    contains: [TOKEN-123]             # anywhere in `sheet`, or in ANY sheet when no sheet is given
+    headers:
+      labelRow: 1                     # 1-based Excel rows; labelRow defaults to 1
+      keyRow: 2
+      strip: '\s*\*$'                 # removed before comparing (e.g. a required-field marker)
+      present: [Staff_Email, { matches: "^Start" }]
+      absent: [Address]
+      labels: { Staff_Name: Name, Staff_Country: Country }
+      includesInOrder: ${captures.screen.headers}
+    rows:
+      afterKeyRow: { count: 0 }       # or atLeast / atMost
+      match:
+        - { column: Staff_Name, matcher: Ada }
+        - { column: Email, matcher: { matches: "@example\\.test$" } }
+    cells:
+      - { ref: C3, numFmt: "@" }      # text-formatted
+      - { ref: D3, numFmt: yyyy-mm-dd }
+      - { ref: C1, sheet: Template Guide, equals: Guidance }
+    validations:
+      - { column: Staff_Email, type: custom, formulaMatches: ['SEARCH\("@"', COUNTIF] }
+      - { column: Country, type: list, formulaMatches: "^Lists!" }
     sheets:
       - name: "Template Guide"
-        contains: ["Help Text", "Allowed Values", "Examples"]
-    validations:
-      - { sheet: "Training", column: "Email", type: "textLength" }
+        contains: ["Help Text", "Allowed Values"]
 ```
 
-`sheets[].contains` is a list of strings the sheet text must include. `validations[]` checks a sheet/column carries an Excel data validation, optionally of a given `type`.
+- **`sheet`** selects the worksheet for `headers`, `rows`, `cells` and `validations` (a cell or validation may name its own `sheet`). It also scopes `contains`, which otherwise searches every sheet.
+- **`headers`**: a header name matches a column whose label (the `labelRow` cell) or key (the `keyRow` cell) equals it after whitespace is collapsed and `strip` is removed, ignoring case unless `caseSensitive: true`. `present` / `absent` take names or `{ matches }`; `labels` maps keys to their labels (needs `keyRow`).
+  - The subject of both is the workbook's header row; they check opposite directions.
+  - `includesInOrder` (list ⊆ workbook): every listed name is a column, in that relative order. Extra workbook columns are allowed. Use it to check that the columns shown on screen appear in the export, in the same order.
+  - `withinListInOrder` (workbook ⊆ list): every workbook column is in the list, in the list's relative order. Extra list names are allowed; an extra or reordered workbook column fails. Use it to check that an export has no column outside a template's allowed list.
+  - `includesInOrder` is the name for the list-in-workbook check (it was drafted as `orderedSubsetOf`; neither draft name ever shipped in a release, so there is no alias). The opposite direction is `withinListInOrder`.
+  - Both take a list or one runtime reference that resolves to a list. `${captures.screen.headers}` from a [`capture: table`](/steps#capture) step compares the workbook with what the page rendered; blank entries are skipped.
+- **`rows`** reads the data rows below the key row (the label row without one). `afterKeyRow` counts non-blank rows: `count`, or `atLeast` and/or `atMost`. `match` needs ONE row where every entry's [matcher](#matchers) holds against that row's cell in `column` (a label or key).
+- **`cells`**: `ref` is an A1 reference. `equals` compares the stored string, `matches` is a regex. `numFmt` is the applied number format: a format code (`@` is text, `yyyy-mm-dd`, `General`; case-insensitive) or a built-in id (`49`). It resolves the cell's style, else its row's, else its column's, so it also works on an empty cell.
+- **`validations`** finds the column by header label or key, falling back to a cell with that text in the first 20 rows. It then needs a data validation that covers the column, of `type` when given, whose formula1 or formula2 matches every `formulaMatches` regex. Excel 2010 `x14` validations (lists that reference another sheet) count.
+- **`sheets[].contains`** is a list of strings that sheet's text must include.
+
+Values are the strings Excel stores: numbers and dates are unformatted (a date is its serial number), booleans are `1` / `0`. Operands may splice runtime references (`${captures.…}`, `${fixtures.…}`). A reference that does not resolve fails the outcome at once, even under `poll`. The same parser backs [`ctx.xlsx(path)`](/scripts) in node verifiers.
 
 ## `file`
 

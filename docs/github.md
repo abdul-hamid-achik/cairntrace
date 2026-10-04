@@ -31,12 +31,13 @@ The dependency direction is one-way: `cli → core → {adapters, mcp}`. The CLI
 
 ## CI
 
-`.github/workflows/ci.yml` runs on every push to `main` and every PR (concurrency cancels superseded runs on the same ref). Tag pushes also run `npm-publish.yml` and `homebrew-tap.yml`. The CI job:
+`.github/workflows/ci.yml` runs on every push to `main` and every PR (concurrency cancels superseded runs on the same ref). Tag pushes also run `npm-publish.yml` and `homebrew-tap.yml`. The main job:
 
-1. Sets up Bun (latest) + installs deps (`bun install`).
+1. Sets up Bun (a pinned version) + installs deps (`bun install --frozen-lockfile`).
 2. Installs Playwright Chromium (`bunx playwright install --with-deps chromium`).
 3. Runs `bun run verify` — typecheck (`tsc --noEmit`), lint (`oxlint`), format check (`oxfmt`), knip, and the vitest suite (coverage threshold 80%).
-4. Smoke-runs a real spec end-to-end against Chromium: boots `examples/demo-app/server.ts`, waits for it to answer on `:8787`, then `./bin/cairn run examples/flows/01-dashboard-nav.yml --backend playwright`.
+4. Smoke-runs example specs end-to-end against Chromium with `--backend playwright`. `examples/cairntrace.config.yml` owns the lifecycle: it starts the demo Postgres (docker compose), seeds it and boots `examples/demo-app/server.ts`. The list covers the static pages (navigation, control flow, the widget kit) and the platform suite (sign-in, uploads, exports, the request step and `use: login`, async jobs, `run:` steps, workbook checks).
+5. In separate jobs, tests the Studio desktop core (`node:test` + typecheck), and exports `examples/flows` as a Playwright project (`cairn export playwright --project`), checks it is fresh (`--check`), type-checks it strictly and runs it against the demo app.
 
 A red CI on `main` is a P1. Open a revert PR before shipping the next fix. CI runs the same `bun run verify` you run locally — if it fails locally, it fails in CI.
 

@@ -144,6 +144,94 @@ services:
     expect(result.services!.teardown).toBe(2);
   });
 
+  it("summarizes the services each environment boots and checks an environment-only provisioner", async () => {
+    const path = writeConfig(
+      `version: 1
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  remote:
+    baseUrl: http://localhost:8081
+    services:
+      provisioner: { up: ./up.sh, down: ./down.sh }
+      seed:
+        command: ./seed.sh
+        postCommands: [{ name: kit, run: ./kit.sh }]
+suites:
+  s:
+    specs: [flows]
+    env:
+      remote: { seed: { postCommands: { skip: [kit, nope] } } }
+`,
+      tmpDir,
+    );
+    mkdirSync(join(tmpDir, "flows"));
+    writeFileSync(
+      join(tmpDir, "flows", "a.yml"),
+      "version: 1\nname: a\nintent: a\nsteps:\n  - open: about:blank\noutcomes: []\n",
+    );
+    const { result, exitCode } = await runValidate(path);
+    expect(result.errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(result.environmentServices).toEqual({
+      remote: ["provisioner", "seed"],
+    });
+    expect(result.services).toBeUndefined();
+    expect(result.warnings).toEqual([
+      'suites.s.env.remote.seed.postCommands.skip: "nope" matches no seed postCommand of environment remote (a plain command is matched by its text, a named one by its name)',
+    ]);
+
+    const broken = writeConfig(
+      `version: 1
+environments:
+  remote:
+    services:
+      provisioner: { up: ./up.sh }
+`,
+      tmpDir,
+    );
+    const invalid = await runValidate(broken);
+    expect(invalid.exitCode).toBe(4);
+    expect(invalid.result.errors).toEqual([
+      "environments.remote.services.provisioner: no `down` after the merge (there is no top-level services block: the environment's provisioner stands alone); a provisioner needs both `up` and `down` (a provisioned resource must always have a `down`)",
+    ]);
+  });
+
+  it("lists delegated environments and never counts the top-level services for them", async () => {
+    const path = writeConfig(
+      `version: 1
+services:
+  tmux: { session: demo, windows: [{ name: web, command: "true" }] }
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  remote:
+    runner: { command: [./tools/remote-run.sh], timeoutMs: 600000 }
+`,
+      tmpDir,
+    );
+    const { result, exitCode } = await runValidate(path);
+    expect(result.errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    expect(result.delegatedEnvironments).toEqual(["remote"]);
+    expect(result.environmentServices).toEqual({ local: ["tmux"] });
+
+    const owning = writeConfig(
+      `version: 1
+environments:
+  remote:
+    runner: { command: [./tools/remote-run.sh] }
+    services: { tmux: { session: demo, windows: [{ name: web, command: "true" }] } }
+`,
+      tmpDir,
+    );
+    const invalid = await runValidate(owning);
+    expect(invalid.exitCode).toBe(4);
+    expect(invalid.result.errors.join("\n")).toContain(
+      'environment "remote" has a runner (it runs elsewhere) and cannot own services',
+    );
+  });
+
   it("reports errors for invalid config (wrong version)", async () => {
     const path = writeConfig(
       `version: 2
@@ -306,6 +394,51 @@ environments:
         /^environments\.dev\.datasources\.app: .*transport driver needs uri/,
       ),
     ]);
+  });
+
+  it("warns when an authored ${vars.X} sits in a config field that stays literal", async () => {
+    const path = writeConfig(
+      `version: 1
+vars:
+  host: http://localhost:4173
+  token: abc
+datasources:
+  api:
+    kind: http
+    baseUrl: "\${vars.host}"
+webServer:
+  command: "serve \${vars.host}"
+  url: http://localhost:4173/health
+environments:
+  local:
+    baseUrl: "\${vars.host}/app"
+  dev:
+    baseUrl: http://localhost:1
+metrics:
+  - name: probe
+    command: "echo \${vars.token}"
+    parse: { regex: "(\\\\d+)" }
+  - name: remote
+    http: { url: "\${vars.host}/stats", json: { path: n } }
+`,
+      tmpDir,
+    );
+    const { result, exitCode } = await runValidate(path);
+    expect(result.errors).toEqual([]);
+    expect(exitCode).toBe(0);
+    const literal = (result.findings ?? []).filter(
+      (f) => f.code === "literal-var-ref",
+    );
+    expect(literal.map((f) => [f.level, f.key])).toEqual([
+      ["warning", "webServer.command"],
+      ["warning", "metrics[0].command"],
+      ["warning", "environments.local.baseUrl"],
+    ]);
+    expect(literal[2]!.message).toContain("${vars.host}");
+    expect(literal[2]!.message).toContain("read literally");
+    expect(result.warnings).toEqual(
+      expect.arrayContaining(literal.map((f) => f.message)),
+    );
   });
 });
 
@@ -1216,5 +1349,187 @@ services:
     expect(output).toContain("docker: configured");
     expect(output).not.toContain("tmux session:");
     expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+});
+
+describe("config validate — F15 widget drivers", () => {
+  it("accepts fieldRoot / widgets and reports a missing or invalid driver module", async () => {
+    const dir = makeTmpDir();
+    try {
+      mkdirSync(join(dir, "drivers"));
+      writeFileSync(
+        join(dir, "drivers", "ok.js"),
+        "export default { name: 'ok', match: () => false, read: () => '', write() {} };",
+      );
+      writeFileSync(join(dir, "drivers", "bad.js"), "export const x = 1;");
+      const base = [
+        "version: 1",
+        "environments:",
+        "  local: {}",
+        "browser:",
+        "  fieldRoot: '[data-field=\"{key}\"]'",
+        "  widgets:",
+        "    - use: vue-multiselect",
+      ];
+      const ok = await runValidate(
+        writeConfig(
+          [...base, "    - file: ./drivers/ok.js", ""].join("\n"),
+          dir,
+        ),
+      );
+      expect(ok.exitCode).toBe(0);
+      const missing = await runValidate(
+        writeConfig(
+          [...base, "    - file: ./drivers/missing.js", ""].join("\n"),
+          dir,
+        ),
+      );
+      expect(missing.exitCode).toBe(4);
+      expect(missing.result.errors.join("\n")).toContain(
+        'browser.widgets[1].file "./drivers/missing.js"',
+      );
+      const bad = await runValidate(
+        writeConfig(
+          [...base, "    - file: ./drivers/bad.js", ""].join("\n"),
+          dir,
+        ),
+      );
+      expect(bad.exitCode).toBe(4);
+      expect(bad.result.errors.join("\n")).toContain("export default");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("validates an environment auth block and its hydrate file", async () => {
+    const dir = makeTmpDir();
+    try {
+      mkdirSync(join(dir, "auth"));
+      writeFileSync(join(dir, "auth", "hydrate.js"), "return true;");
+      const ok = await runValidate(
+        writeConfig(authConfig("auth/hydrate.js"), dir),
+      );
+      expect(ok.exitCode).toBe(0);
+      const missing = await runValidate(
+        writeConfig(authConfig("auth/missing.js"), dir),
+      );
+      expect(missing.exitCode).toBe(4);
+      expect(missing.result.errors.join("\n")).toContain(
+        "environments.local.auth.hydrate.file: auth/missing.js does not exist",
+      );
+      const invalid = await runValidate(
+        writeConfig(authConfig("auth/hydrate.js", "      retries: 2"), dir),
+      );
+      expect(invalid.exitCode).toBe(4);
+      expect(invalid.result.errors.join("\n")).toContain(
+        "environments.local.auth",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function authConfig(hydrate: string, extra = ""): string {
+  return [
+    "version: 1",
+    "environments:",
+    "  local:",
+    "    baseUrl: http://localhost:3000",
+    "    auth:",
+    "      login:",
+    "        url: /api/login",
+    '        body: { email: "${secrets.E2E_EMAIL}", password: "${secrets.E2E_PASSWORD}" }',
+    "        expectStatus: 200",
+    "      after:",
+    "        - when: { var: requests.login.body.mfa, equals: otp }",
+    '          request: { method: PUT, url: /api/otp/verify, headers: { authorization: "Bearer ${requests.login.body.token}" } }',
+    `      hydrate: { file: ${hydrate} }`,
+    extra,
+    "",
+  ].join("\n");
+}
+
+describe("config validate: environment alias and suite env fallback", () => {
+  it("accepts an alias and rejects chains, unknown targets and extra keys with exit 4", async () => {
+    const dir = makeTmpDir();
+    try {
+      const ok = await runValidate(
+        writeConfig(
+          "version: 1\nenvironments:\n  stage: { baseUrl: 'http://localhost:1' }\n  remote: { alias: stage }\n",
+          dir,
+        ),
+      );
+      expect(ok.exitCode).toBe(0);
+      expect(ok.result.errors).toEqual([]);
+      for (const [text, needle] of [
+        [
+          "version: 1\nenvironments:\n  stage: {}\n  a: { alias: stage }\n  b: { alias: a }\n",
+          "alias chain",
+        ],
+        [
+          "version: 1\nenvironments:\n  a: { alias: b }\n  b: { alias: a }\n",
+          "alias cycle",
+        ],
+        [
+          "version: 1\nenvironments:\n  stage: {}\n  a: { alias: nope }\n",
+          'unknown environment "nope"',
+        ],
+        [
+          "version: 1\nenvironments:\n  stage: {}\n  a: { alias: stage, waitScale: 2 }\n",
+          "takes no other keys",
+        ],
+      ] as const) {
+        const bad = await runValidate(writeConfig(text, dir));
+        expect(bad.exitCode, text).toBe(4);
+        expect(bad.result.errors.join("\n")).toContain(needle);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("warns (suite-env-fallback) when an admitted environment lacks the override a sibling has", async () => {
+    const dir = makeTmpDir();
+    try {
+      writeFileSync(
+        join(dir, "a.yml"),
+        "version: 1\nname: a\nintent: x\nsteps: []\noutcomes: []\n",
+      );
+      writeFileSync(
+        join(dir, "b.yml"),
+        "version: 1\nname: b\nintent: x\nsteps: []\noutcomes: []\n",
+      );
+      const { result, exitCode } = await runValidate(
+        writeConfig(
+          `version: 1
+environments:
+  local: {}
+  stage: {}
+suites:
+  smoke:
+    specs: [a.yml]
+    requires: { env: [local, stage] }
+    env:
+      local: { specs: [b.yml] }
+`,
+          dir,
+        ),
+      );
+      expect(result.errors).toEqual([]);
+      expect(exitCode).toBe(0);
+      const finding = (result.findings ?? []).find(
+        (f) => f.code === "suite-env-fallback",
+      );
+      expect(finding).toMatchObject({
+        level: "warning",
+        key: "suites.smoke.env.stage",
+      });
+      expect(finding?.message).toContain("suites.smoke");
+      expect(finding?.message).toContain('"stage"');
+      expect(result.warnings).toContain(finding?.message);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

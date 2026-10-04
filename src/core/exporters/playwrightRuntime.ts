@@ -1,3 +1,8 @@
+import { preludeInstallExpression, type AppHandles } from "../prelude/prelude";
+import { widgetScriptParts, type PreparedWidgets } from "../widgets/runtime";
+import type { DataPiece } from "./playwrightRuntimeData";
+import { RUNTIME_MODULES, type RuntimeModuleName } from "./runtimeSources";
+
 /**
  * Shared helpers emitted into `--project` as `lib/*.ts`. Single-file export
  * keeps the equivalent logic inlined so a piped `.spec.ts` stays standalone.
@@ -10,7 +15,168 @@ export type PlaywrightLibModule =
   | "clickUntil"
   | "verifier"
   | "splice"
-  | "fixtures";
+  | "fixtures"
+  | "widgets"
+  | "request"
+  | "auth"
+  | "prelude"
+  | "probe"
+  | "poll"
+  | "fixtureOutputs"
+  // Test-time data glue and the runner modules it judges with (the `lib/`
+  // files of the `value` / `http` / `network` / `file` / `xlsx` coverage).
+  | DataPiece
+  | RuntimeModuleName
+  | "workbook";
+
+/** The exported widget helpers a unit references. */
+export type WidgetHelperName = "cairnWidget" | "cairnWidgetForm";
+
+/**
+ * F15 `cairnWidget` / `cairnWidgetForm`: the same in-page widget runtime and
+ * drivers `cairn run` uses (the script text is embedded), with the project's
+ * `browser.fieldRoot` / `browser.widgets` config baked in. Each call is one
+ * `page.evaluate`; a field that does not read back what was written throws.
+ * TS output types `page` as `Page` (the caller imports the type).
+ */
+export function renderWidgetHelperLines(
+  lang: ExportLang,
+  prepared: PreparedWidgets,
+  opts: { form: boolean; exported?: boolean },
+): string[] {
+  const ts = lang === "ts";
+  const exp = opts.exported ? "export " : "";
+  const parts = widgetScriptParts(prepared);
+  const lines: string[] = [
+    `// Cairntrace widget runtime (set / check / choose / form): the in-page drivers`,
+    `// \`cairn run\` uses, with the project's browser.fieldRoot / browser.widgets.`,
+    `const CAIRN_WIDGETS_PREFIX = ${JSON.stringify(parts.prefix)};`,
+    `const CAIRN_WIDGETS_SUFFIX = ${JSON.stringify(parts.suffix)};`,
+    `const CAIRN_WIDGETS_CONFIG = ${JSON.stringify(prepared.config)};`,
+    `// Like \`cairn run\`: a password control or a credential-named field never puts its values in an error.`,
+    `const CAIRN_WIDGETS_SENSITIVE = /pass(?:word|wd|code|phrase)|pwd|secret|token|credential|otp|cookie|authorization|api[_-]?key|jwt|bearer/i;`,
+    ``,
+  ];
+  if (ts) {
+    lines.push(
+      `${exp}interface CairnWidgetResult {`,
+      `  ok: boolean;`,
+      `  status: string;`,
+      `  driver?: string;`,
+      `  error?: string;`,
+      `  sensitive?: boolean;`,
+      `  actual?: unknown;`,
+      `  label?: unknown;`,
+      `  matches?: boolean;`,
+      `  results?: CairnWidgetResult[];`,
+      `  unanswered?: unknown[];`,
+      `}`,
+      ``,
+    );
+  }
+  lines.push(
+    `/** Run one widget op in the page; throws when it did not commit. */`,
+    `${exp}async function cairnWidget(page${ts ? ": Page" : ""}, input${
+      ts ? ": Record<string, unknown>" : ""
+    })${ts ? ": Promise<CairnWidgetResult>" : ""} {`,
+    `  const script = CAIRN_WIDGETS_PREFIX + JSON.stringify({ timeoutMs: 10000, readBackMs: 2000, ...input, config: CAIRN_WIDGETS_CONFIG }) + CAIRN_WIDGETS_SUFFIX;`,
+    `  const result = (await page.evaluate(script))${
+      ts ? " as CairnWidgetResult" : ""
+    };`,
+    `  if (!result || !result.ok) {`,
+    `    const hidden = (result && result.sensitive === true) || CAIRN_WIDGETS_SENSITIVE.test(JSON.stringify(input.target ?? ""));`,
+    `    throw new Error("cairn widget " + String(input.op) + " failed: " + (hidden ? "values hidden (sensitive field)" + (result && result.driver ? " — " + result.driver : "") : result && result.error ? result.error : "no result"));`,
+    `  }`,
+    `  return result;`,
+    `}`,
+    ``,
+  );
+  if (opts.form) {
+    if (ts) {
+      lines.push(
+        `${exp}interface CairnFormField {`,
+        `  key: string;`,
+        `  value: unknown;`,
+        `  optional?: boolean;`,
+        `  dependsOn?: string[];`,
+        `  driver?: string;`,
+        `  timeoutMs?: number;`,
+        `}`,
+        ``,
+      );
+    }
+    lines.push(
+      `/** Cairntrace form: ordered fields, dependsOn mount waits, a final re-read of every field. */`,
+      `${exp}async function cairnWidgetForm(page${ts ? ": Page" : ""}, fields${
+        ts ? ": CairnFormField[]" : ""
+      }, options${
+        ts
+          ? ": { verify: boolean; dumpUnanswered: boolean; timeoutMs: number }"
+          : ""
+      })${ts ? ": Promise<void>" : ""} {`,
+      `  const skipped = new Set${ts ? "<string>" : ""}();`,
+      `  const written${
+        ts
+          ? ": Array<{ target: { field: string }; value: unknown; label?: unknown; driver?: string }>"
+          : ""
+      } = [];`,
+      `  try {`,
+      `    for (const field of fields) {`,
+      `      const dependsOn = field.dependsOn ?? [];`,
+      `      if (dependsOn.some((dep) => skipped.has(dep))) {`,
+      `        skipped.add(field.key);`,
+      `        continue;`,
+      `      }`,
+      `      const budget = field.timeoutMs ?? options.timeoutMs;`,
+      `      const result = await cairnWidget(page, {`,
+      `        op: "set",`,
+      `        target: { field: field.key },`,
+      `        value: field.value,`,
+      `        timeoutMs: budget,`,
+      `        mountMs: field.optional && dependsOn.length === 0 ? Math.min(budget, 750) : budget,`,
+      `        verify: options.verify,`,
+      `        ...(field.optional ? { optional: true } : {}),`,
+      `        ...(field.driver ? { driver: field.driver } : {}),`,
+      `      });`,
+      `      if (result.status === "skipped") {`,
+      `        skipped.add(field.key);`,
+      `        continue;`,
+      `      }`,
+      `      written.push({ target: { field: field.key }, value: field.value, label: result.label, driver: result.driver });`,
+      `    }`,
+      `    if (options.verify && written.length > 0) {`,
+      `      const reread = await cairnWidget(page, { op: "readMany", timeoutMs: 5000, targets: written });`,
+      `      (reread.results ?? []).forEach((entry, index) => {`,
+      `        if (!entry.ok || entry.status === "absent" || entry.matches === false) {`,
+      `          const key = written[index]${ts ? "!" : ""}.target.field;`,
+      `          const shows = entry.sensitive === true || CAIRN_WIDGETS_SENSITIVE.test(key) ? "[redacted]" : JSON.stringify(entry.actual);`,
+      `          throw new Error("form field " + JSON.stringify(key) + " lost its value after later fields were set (shows " + shows + ")");`,
+      `        }`,
+      `      });`,
+      `    }`,
+      `  } catch (error) {`,
+      `    if (!options.dumpUnanswered) throw error;`,
+      `    const dump = await cairnWidget(page, { op: "dump", timeoutMs: 5000, limit: 50 }).catch(() => undefined);`,
+      `    throw new Error((error instanceof Error ? error.message : String(error)) + "; unanswered fields: " + JSON.stringify(dump?.unanswered ?? []), { cause: error });`,
+      `  }`,
+      `}`,
+      ``,
+    );
+  }
+  return lines;
+}
+
+export function renderWidgetsRuntime(
+  lang: ExportLang,
+  prepared: PreparedWidgets,
+): string {
+  return [
+    `// Generated by \`cairn export playwright --project\`.`,
+    ...(lang === "ts" ? [`import type { Page } from "@playwright/test";`] : []),
+    ``,
+    ...renderWidgetHelperLines(lang, prepared, { form: true, exported: true }),
+  ].join("\n");
+}
 
 /**
  * `cairnSplice` / `cairnUnresolvedSplice` (+ the action binding shape) as
@@ -32,11 +198,13 @@ export function renderSpliceHelperLines(
   const lines: string[] = [];
   if (opts.bindings && ts) {
     lines.push(
-      `/** Values an exported action captured (request/eval/download \`assign:\`). */`,
+      `/** Values an exported action captured (request/eval/download/run/capture \`assign:\`). */`,
       `${exp}interface CairnActionBindings {`,
       `  requests: Record<string, unknown>;`,
       `  evals: Record<string, unknown>;`,
       `  artifacts: Record<string, unknown>;`,
+      `  runs: Record<string, unknown>;`,
+      `  captures: Record<string, unknown>;`,
       `}`,
       ``,
     );
@@ -82,7 +250,7 @@ export function renderSpliceHelperLines(
 export function renderSpliceRuntime(lang: ExportLang): string {
   return [
     `// Generated by \`cairn export playwright --project\`.`,
-    `// Runtime splices for \${requests.<name>…} / \${evals.<name>…} / \${artifacts.<name>…}.`,
+    `// Runtime splices for \${requests|evals|artifacts|runs|captures.<name>…}.`,
     ``,
     ...renderSpliceHelperLines(lang, {
       splice: true,
@@ -93,17 +261,32 @@ export function renderSpliceRuntime(lang: ExportLang): string {
   ].join("\n");
 }
 
-export function renderFixturesRuntime(lang: ExportLang): string {
+/**
+ * How a generated module finds its own directory: ES modules read
+ * `import.meta.url`; a CommonJS host (Playwright loads its files as CommonJS
+ * unless package.json says \`"type": "module"\`) has `__dirname` and no
+ * `import.meta`.
+ */
+export type ExportModuleSystem = "esm" | "cjs";
+
+export function renderFixturesRuntime(
+  lang: ExportLang,
+  moduleSystem: ExportModuleSystem = "esm",
+): string {
   const ts = lang === "ts";
   return [
     `// Generated by \`cairn export playwright --project\`.`,
     `// Upload fixtures are copied into <export>/fixtures/ so the suite is relocatable.`,
-    `import { fileURLToPath } from "node:url";`,
+    ...(moduleSystem === "cjs"
+      ? [`import { resolve } from "node:path";`]
+      : [`import { fileURLToPath } from "node:url";`]),
     ``,
     `export function cairnFixturePath(name${ts ? ": string" : ""})${
       ts ? ": string" : ""
     } {`,
-    `  return fileURLToPath(new URL("../fixtures/" + encodeURIComponent(name), import.meta.url));`,
+    moduleSystem === "cjs"
+      ? `  return resolve(__dirname, "..", "fixtures", encodeURIComponent(name));`
+      : `  return fileURLToPath(new URL("../fixtures/" + encodeURIComponent(name), import.meta.url));`,
     `}`,
     ``,
   ].join("\n");
@@ -120,21 +303,25 @@ export function renderFixturesRuntime(lang: ExportLang): string {
 export function renderProjectRootRuntime(
   lang: ExportLang,
   relFromExportRoot: string | undefined,
+  moduleSystem: ExportModuleSystem = "esm",
 ): string {
   const ts = lang === "ts";
+  const rel = JSON.stringify(
+    relFromExportRoot === "" ? "." : (relFromExportRoot ?? "."),
+  );
   const base =
     relFromExportRoot === undefined
       ? `process.cwd()`
-      : `resolve(fileURLToPath(new URL("..", import.meta.url)), ${JSON.stringify(
-          relFromExportRoot === "" ? "." : relFromExportRoot,
-        )})`;
+      : moduleSystem === "cjs"
+        ? `resolve(__dirname, "..", ${rel})`
+        : `resolve(fileURLToPath(new URL("..", import.meta.url)), ${rel})`;
   return [
     `// Generated by \`cairn export playwright --project\`.`,
     `// Resolves the Cairntrace source project relative to this export's root.`,
     `// Override with CAIRN_PROJECT_ROOT when the export is relocated.`,
     `import { existsSync } from "node:fs";`,
     `import { join, resolve } from "node:path";`,
-    ...(relFromExportRoot === undefined
+    ...(relFromExportRoot === undefined || moduleSystem === "cjs"
       ? []
       : [`import { fileURLToPath } from "node:url";`]),
     ``,
@@ -165,11 +352,17 @@ export function renderProjectRootRuntime(
   ].join("\n");
 }
 
+/** The runner's own modules live in `lib/runtime/`, apart from the generated helpers (an `--into` tree keeps its own `lib/url`, `lib/refs`, …). */
+export const RUNTIME_LIB_DIR = "lib/runtime";
+
 export function playwrightLibRelPath(
   name: PlaywrightLibModule,
   lang: ExportLang,
 ): string {
-  return `lib/${name}${lang === "js" ? ".js" : ".ts"}`;
+  const dir = (RUNTIME_MODULES as readonly string[]).includes(name)
+    ? RUNTIME_LIB_DIR
+    : "lib";
+  return `${dir}/${name}${lang === "js" ? ".js" : ".ts"}`;
 }
 
 export function renderHydrationRuntime(lang: ExportLang): string {
@@ -340,4 +533,82 @@ export function renderVerifierRuntime(lang: ExportLang): string {
     ``,
   ];
   return lines.join("\n");
+}
+
+/** F20 prelude helpers a unit references. */
+export type PreludeHelperName = "CAIRN_PRELUDE" | "cairnAppCheck";
+
+/**
+ * F20: `CAIRN_PRELUDE` (the `window.__cairn` installer, with the config's
+ * `browser.appHandle` getters) and `cairnAppCheck` (one `wait: { app }`
+ * probe). Exported evals that mention `__cairn` run `CAIRN_PRELUDE` first,
+ * like `cairn run` does.
+ */
+export function renderPreludeHelperLines(
+  lang: ExportLang,
+  appHandles: AppHandles | undefined,
+  opts: { appCheck: boolean; exported?: boolean },
+): string[] {
+  const ts = lang === "ts";
+  const exp = opts.exported ? "export " : "";
+  const lines = [
+    `// Cairntrace page prelude: window.__cairn helpers and browser.appHandle accessors,`,
+    `// installed before page JavaScript that uses __cairn (as \`cairn run\` does).`,
+    `${exp}const CAIRN_PRELUDE = ${JSON.stringify(`${preludeInstallExpression(appHandles)};\n`)};`,
+  ];
+  if (opts.appCheck) {
+    lines.push(
+      ``,
+      `/** wait: { app } — true once the handle value at \`path\` passes \`check\`. */`,
+      `${exp}async function cairnAppCheck(page${ts ? ": Page" : ""}, path${
+        ts ? ": string" : ""
+      }, check${ts ? ": Record<string, unknown>" : ""})${
+        ts ? ": Promise<boolean>" : ""
+      } {`,
+      `  return page`,
+      `    .evaluate(`,
+      `      async ({ source, path, check }) => {`,
+      `        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor${
+        ts
+          ? " as new (...parameters: string[]) => (...values: unknown[]) => Promise<unknown>"
+          : ""
+      };`,
+      `        const answer = (await new AsyncFunction("path", "check", source + "return __cairn.__appCheck(path, check);")(path, check))${
+        ts ? " as { ok?: boolean }" : ""
+      };`,
+      `        return answer.ok === true;`,
+      `      },`,
+      `      { source: CAIRN_PRELUDE, path, check },`,
+      `    )`,
+      `    .catch((error${ts ? ": unknown" : ""}) => {`,
+      `      // A strict CSP blocks the string evaluation: say so instead of polling to a timeout.`,
+      `      const message = String((error${
+        ts ? " as { message?: unknown } | undefined" : ""
+      })?.message ?? error);`,
+      `      if (/EvalError|unsafe-eval|Content Security Policy/i.test(message)) {`,
+      `        throw new Error("wait: { app } cannot run: the page's Content Security Policy blocks string evaluation (" + message.split("\\n")[0] + "); set use.bypassCSP: true in the Playwright config");`,
+      `      }`,
+      `      return false;`,
+      `    });`,
+      `}`,
+    );
+  }
+  return lines;
+}
+
+/** `lib/prelude` for `--project`. */
+export function renderPreludeRuntime(
+  lang: ExportLang,
+  appHandles: AppHandles | undefined,
+): string {
+  return [
+    `// Generated by \`cairn export playwright --project\`.`,
+    ...(lang === "ts" ? [`import type { Page } from "@playwright/test";`] : []),
+    ``,
+    ...renderPreludeHelperLines(lang, appHandles, {
+      appCheck: true,
+      exported: true,
+    }),
+    ``,
+  ].join("\n");
 }

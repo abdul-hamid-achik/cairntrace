@@ -38,7 +38,7 @@ test("golden_late_bound_text", async ({ page }) => {
   {
     // request step (created) — page.request shares browser context cookies
     const cairnResponse = await page.request.fetch("/api/orders", { method: "POST", timeout: 30000, headers: { "Content-Type": "application/json" }, data: { "ref": `order-${RUN_TOKEN}` } });
-    cairnRequests_created = { url: cairnResponse.url(), method: "POST", status: cairnResponse.status(), ok: cairnResponse.status() >= 200 && cairnResponse.status() < 400, headers: cairnResponse.headers(), body: ((text) => { if (text === null || text === undefined) return null; try { return JSON.parse(text) as unknown; } catch { return text; } })(await cairnResponse.text()) };
+    cairnRequests_created = { url: cairnResponse.url(), method: "POST", status: cairnResponse.status(), ok: cairnResponse.status() >= 200 && cairnResponse.status() < 400, headers: cairnResponse.headers(), body: ((text) => { if (text === null || text === undefined) { return null; } try { return JSON.parse(text) as unknown; } catch { return text; } })(await cairnResponse.text()) };
     expect(cairnResponse.status()).toBe(201);
   }
   // step: read_state

@@ -33,6 +33,13 @@ export interface InvocationResult {
   resolvedElement?: ResolvedElement;
   /** Network entry that satisfied `postcondition.network`, when armed. */
   networkMatch?: NetworkEntry;
+  /**
+   * F15: the path the backend took when it has more than one (upload:
+   * `setInputFiles` | `dataTransfer`). Recorded on the step result.
+   */
+  via?: string;
+  /** F15: why that path was taken. */
+  detail?: string;
 }
 
 export interface SnapshotResult {
@@ -81,6 +88,11 @@ export interface BackendRequest {
   body?: unknown;
   /** Hard request deadline in milliseconds. */
   timeoutMs?: number;
+  /**
+   * F18: `include` (default) sends the browser context's cookies and keeps
+   * the response's `Set-Cookie`; `omit` sends none and keeps none.
+   */
+  credentials?: "include" | "omit";
 }
 
 export interface BackendResponse {
@@ -165,6 +177,15 @@ export interface BrowserBackend {
   /* ----- network ----- */
   getNetworkRequests(filter?: NetworkFilter): Promise<NetworkEntry[]>;
   clearNetworkLog(): Promise<void>;
+  /**
+   * `false` when the request log never marks a failed or cancelled request:
+   * it keeps neither a status nor an error, so it cannot be told from one
+   * still in flight (agent-browser's `network requests`). The end-of-steps
+   * settle then re-reads the log once instead of waiting for entries that
+   * may never complete, and `noFailedRequests` says what it could not judge.
+   * Absent: the backend reports failures (Playwright's requestfailed).
+   */
+  readonly reportsRequestFailures?: boolean;
 
   /* ----- console ----- */
   getConsole(): Promise<ConsoleEntry[]>;
@@ -196,9 +217,14 @@ export interface BrowserBackend {
   request?(req: BackendRequest): Promise<BackendResponse>;
 
   /* ----- script escape hatch ----- */
+  /**
+   * `sensitive`: the script carries a credential (a request fallback's
+   * headers and body, a login hydrate's response): a backend that runs
+   * scripts through a child process must not put it in argv.
+   */
   evaluate(
     js: string,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; sensitive?: boolean },
   ): Promise<InvocationResult>;
 
   /* ----- state / checkpoints ----- */

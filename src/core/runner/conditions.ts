@@ -1,9 +1,49 @@
 import type { BrowserBackend } from "../../adapters/browserBackend";
+import { describeWaitUrl, matchWaitUrl } from "../locators";
 import type { WhenObject } from "../schema/spec.v1";
 import {
   textContains,
   visibleSelectorHasTextExpression,
 } from "../textMatching";
+
+/**
+ * What a condition may read besides the page (F14 `var` predicates).
+ * `lookupVar` returns the current value of a plain var (the run's vars) or a
+ * dotted runtime reference (`waits.<name>.matched`, `repeat.index`,
+ * `captures.<name>.…`), or undefined when it is not set.
+ */
+export interface ConditionContext {
+  lookupVar?: (name: string) => string | undefined;
+}
+
+/**
+ * The value a `var` predicate compares: the parser-resolved value of a plain
+ * var in the declaring file's scope wins; otherwise the context lookup.
+ */
+function varPredicateSubject(
+  when: WhenObject,
+  ctx: ConditionContext,
+): string | undefined {
+  const name = when.var!;
+  if (!name.includes(".") && when.resolved !== undefined) return when.resolved;
+  return ctx.lookupVar?.(name);
+}
+
+/** `equals` / `in` compare as strings; `exists` holds for a non-empty value. */
+export function varPredicateHolds(
+  when: Pick<WhenObject, "equals" | "in" | "exists">,
+  actual: string | undefined,
+): boolean {
+  if (when.exists !== undefined) {
+    return when.exists === (actual !== undefined && actual !== "");
+  }
+  if (actual === undefined) return false;
+  if (when.equals !== undefined) return actual === String(when.equals);
+  if (when.in !== undefined) {
+    return when.in.some((candidate) => String(candidate) === actual);
+  }
+  return false;
+}
 
 /**
  * Tiny DSL for step-level `when:` predicates. Specs use these to skip steps
@@ -60,18 +100,35 @@ export function parseWhen(when: string): WhenCondition {
 
 export function formatWhen(when: string | WhenObject): string {
   if (typeof when === "string") return when;
-  return Object.entries(when)
-    .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}:${value}`)
-    .join(" ");
+  return (
+    Object.entries(when)
+      // `resolved` is the parser's copy of a var value: never narrate it.
+      .filter(([key, value]) => value !== undefined && key !== "resolved")
+      .map(([key, value]) =>
+        key === "url" && typeof value === "object"
+          ? `url ${describeWaitUrl(value as NonNullable<WhenObject["url"]>)}`
+          : `${key}:${Array.isArray(value) ? value.join(",") : value}`,
+      )
+      .join(" ")
+  );
+}
+
+/** A `when:` as events and artifacts record it (no parser-resolved value). */
+export function whenForEvidence(
+  when: string | WhenObject,
+): string | WhenObject {
+  if (typeof when === "string" || when.resolved === undefined) return when;
+  const { resolved: _resolved, ...rest } = when;
+  return rest as WhenObject;
 }
 
 export async function evaluateWhen(
   when: string | WhenObject,
   backend: BrowserBackend,
+  ctx: ConditionContext = {},
 ): Promise<boolean> {
   if (typeof when !== "string") {
-    return evaluateWhenObject(when, backend);
+    return evaluateWhenObject(when, backend, ctx);
   }
   const cond = parseWhen(when);
   switch (cond.kind) {
@@ -111,7 +168,14 @@ export async function evaluateWhen(
 async function evaluateWhenObject(
   when: WhenObject,
   backend: BrowserBackend,
+  ctx: ConditionContext,
 ): Promise<boolean> {
+  if (when.var !== undefined) {
+    return varPredicateHolds(when, varPredicateSubject(when, ctx));
+  }
+  if (when.url !== undefined) {
+    return matchWaitUrl(await backend.getUrl(), when.url);
+  }
   if (when.urlContains !== undefined) {
     return (await backend.getUrl()).includes(when.urlContains);
   }
@@ -142,7 +206,7 @@ async function evaluateWhenObject(
   return false;
 }
 
-async function evalDocumentPredicate(
+export async function evalDocumentPredicate(
   backend: BrowserBackend,
   expression: string,
 ): Promise<boolean> {

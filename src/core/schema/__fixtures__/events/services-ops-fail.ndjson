@@ -1,0 +1,6 @@
+{"ts":"<ts>","type":"services.provisioner.start","message":"true"}
+{"ts":"<ts>","type":"services.provisioner.ready","message":"provisioner up","data":{"exports":[]}}
+{"ts":"<ts>","type":"services.seed.phase.start","message":"phase import","data":{"phase":"import"}}
+{"ts":"<ts>","type":"services.seed.phase.fail","message":"phase import failed","data":{"phase":"import","exitCode":1}}
+{"ts":"<ts>","type":"services.teardown.failure-cleanup","message":"seed phase import failed (exit 1): echo broken; exit 1\nbroken"}
+{"ts":"<ts>","type":"services.teardown.fail","message":"teardown[0] failed","data":{"index":0,"exitCode":3,"durationMs":0,"critical":true,"provisioner":true}}

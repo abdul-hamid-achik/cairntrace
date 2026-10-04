@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { CheckpointStore } from "../../../core/checkpoint/CheckpointStore";
 import { coldStartLint } from "../../../core/coldStart";
 import {
@@ -21,7 +21,12 @@ import {
 } from "../../../core/parser/parseSpec";
 import { auditPlaceholderReferences } from "../../../core/referenceAudit";
 import type { ConfigVarValue } from "../../../core/schema/config.v1";
-import { SpecSchema } from "../../../core/schema/spec.v1";
+import {
+  SpecSchema,
+  appWaitHandleNames,
+  isBuiltinLoginUse,
+  walkSteps,
+} from "../../../core/schema/spec.v1";
 import { emit, resolveFormat } from "../../format";
 import { parseVarFlags } from "../run";
 
@@ -52,7 +57,9 @@ export interface VerifyFinding {
     | "checkpoint-expired"
     | "checkpoint-base-url-mismatch"
     | "unknown-gate"
-    | "unknown-fixture";
+    | "unknown-fixture"
+    | "missing-auth"
+    | "unknown-app-handle";
   severity: "error" | "warning";
   message: string;
   /** File the finding is about (spec or imported action). */
@@ -174,6 +181,41 @@ export async function verifySpec(
         text: await readFile(action.path, "utf8"),
       });
     }
+    // Static findings that fail verify (exit 4) like the structured ones.
+    const staticFindings: VerifyFinding[] = [];
+    // F18: `use: login` runs the environment's auth block — it must exist,
+    // and its `${secrets.X}` are audited like the spec's own.
+    if (walkSteps(parsed.resolved.steps ?? []).some(isBuiltinLoginUse)) {
+      const auth = runtime.config?.environments[runtime.envName]?.auth;
+      if (!auth) {
+        staticFindings.push({
+          kind: "missing-auth",
+          severity: "error",
+          subject: runtime.envName,
+          field: "use",
+          message: `use: login: environment "${runtime.envName}" has no auth: block (config environments.${runtime.envName}.auth) — add one, or import an action named login`,
+        });
+      } else {
+        auditFiles.push({
+          path: `${runtime.configPath ?? "cairntrace.config.yml"}#environments.${runtime.envName}.auth`,
+          text: stringifyYaml(auth),
+        });
+      }
+    }
+    // F20: `wait: { app }` reads config `browser.appHandle` accessors; a
+    // name the config lacks would fail the step at run time.
+    const configuredHandles = Object.keys(runtime.browser?.appHandle ?? {});
+    for (const name of appWaitHandleNames(parsed.resolved.steps ?? [])) {
+      if (!configuredHandles.includes(name)) {
+        staticFindings.push({
+          kind: "unknown-app-handle",
+          severity: "error",
+          subject: name,
+          field: "wait.app",
+          message: `wait.app: no browser.appHandle named "${name}" (configured: ${configuredHandles.join(", ") || "none"}) — add it to the config browser.appHandle`,
+        });
+      }
+    }
     // The EFFECTIVE secrets block: an environment-level `secrets:` replaces
     // the top-level one, so its `required` list is what providers supply.
     const findings = auditPlaceholderReferences(auditFiles, {
@@ -184,7 +226,7 @@ export async function verifySpec(
       result.errors.push(`${f.file}: ${f.token} — ${f.message}`);
     }
 
-    const structured: VerifyFinding[] = [];
+    const structured: VerifyFinding[] = [...staticFindings];
     // Environment policy: where may this spec run? An explicit --env the
     // policy refuses is an error; the default environment only warns.
     const callerEnv =

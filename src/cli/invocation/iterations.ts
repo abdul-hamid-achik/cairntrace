@@ -50,6 +50,9 @@ export function buildInvocationSummary(
     durationMs: number;
     multiRun: boolean;
     error?: string;
+    /** Specs `--bail` never started (added only when > 0). */
+    skipped?: number;
+    runPolicy?: InvocationSummary["runPolicy"];
   },
 ): InvocationSummary {
   const results = rows.flatMap((row) => row.results);
@@ -63,6 +66,7 @@ export function buildInvocationSummary(
     errored: count("errored"),
     // Additive: only when the environment policy refused a spec.
     ...(refused > 0 ? { refused } : {}),
+    ...(input.skipped ? { skipped: input.skipped } : {}),
     durationMs: Math.max(0, input.durationMs),
     exitCode: input.exitCode,
     ...(input.multiRun
@@ -78,6 +82,7 @@ export function buildInvocationSummary(
         }
       : {}),
     ...(input.error !== undefined ? { error: input.error } : {}),
+    ...(input.runPolicy ? { runPolicy: input.runPolicy } : {}),
   };
 }
 

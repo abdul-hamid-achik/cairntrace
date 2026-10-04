@@ -1,5 +1,6 @@
 import { isSensitiveEnvKey } from "../artifacts/redaction";
 import { readPath } from "../runner/verifiers/matchers";
+import { lookupVar } from "../config/varValue";
 
 /**
  * Placeholders inside fixture definitions, resolved when a verb runs:
@@ -21,7 +22,7 @@ import { readPath } from "../runner/verifiers/matchers";
 export interface FixtureTemplateScope {
   with: Readonly<Record<string, unknown>>;
   fixtures: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
-  vars: Readonly<Record<string, string | number | boolean>>;
+  vars: Readonly<Record<string, unknown>>;
   env: Readonly<Record<string, string | undefined>>;
   baseUrl?: string;
   runToken?: string;
@@ -87,9 +88,9 @@ function lookup(
     return { found: true, value };
   }
   if (ns === "vars") {
-    return Object.hasOwn(scope.vars, rest)
-      ? { found: true, value: scope.vars[rest] }
-      : { found: false };
+    // F7: typed vars keep their type as a whole value; `${vars.name.key}`
+    // reads inside an object / list var.
+    return lookupVar(scope.vars, rest);
   }
   if (ns === "with") {
     const hit = readPath(scope.with, rest);

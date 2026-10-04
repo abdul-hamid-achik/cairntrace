@@ -15,7 +15,9 @@
   const NAV = [
     { id: "runs", label: "Runs", glyph: "▤" },
     { id: "specs", label: "Specs", glyph: "≡" },
+    { id: "suites", label: "Suites", glyph: "☰" },
     { id: "catalog", label: "Catalog", glyph: "⊞" },
+    { id: "config-vars", label: "Config vars", glyph: "≔" },
     { id: "live", label: "Live", glyph: "▶", badge: () => liveCount() },
     { id: "invocations", label: "Invocations", glyph: "⇶" },
     { id: "sessions", label: "Sessions", glyph: "◉" },
@@ -219,10 +221,12 @@
       const active = state.locks?.active ?? [];
       lockPill.classList.toggle("hidden", active.length === 0);
       lockLabel.textContent = active.length
-        ? `suite in progress${active[0].owner ? ` · ${active[0].owner}` : ""}`
+        ? `${Studio.ops.lockHeadline(active)}${
+            active[0].owner ? ` · ${active[0].owner}` : ""
+          }`
         : "";
       lockPill.title = active
-        .map((lock) => `${lock.path}${lock.owner ? ` — ${lock.owner}` : ""}`)
+        .map((lock) => Studio.ops.lockSentence(lock))
         .join("\n");
     }
     const pill = document.getElementById("active-run-pill");
@@ -302,6 +306,7 @@
           Studio.initLiveRecord({
             token: payload.token,
             specs: payload.specs ?? [],
+            suite: payload.suite ?? null,
             argv: payload.argv ?? [],
             command: payload.command ?? "",
             launcher: payload.launcher ?? "cairn",
@@ -391,9 +396,11 @@
             record.runId = payload.payload.runId;
           Studio.markDirty(record, ["status", "badges"]);
         }
-        const specLabel = (record?.specs ?? [])
-          .map((spec) => spec.split("/").pop())
-          .join(", ");
+        const specLabel = record?.suite
+          ? `suite ${record.suite}`
+          : (record?.specs ?? [])
+              .map((spec) => spec.split("/").pop())
+              .join(", ");
         const ok = Boolean(payload.ok) && !refused;
         const refusal = refused
           ? CairnPolicy.documentRefusal(payload.payload)
@@ -692,7 +699,12 @@
       // Locks are files another process creates/removes: poll while
       // configured. The version probe spawns cairn, so it never blocks boot.
       setInterval(() => {
-        if ((state.locks?.lockFiles ?? []).length) void actions.loadLocks();
+        // suite lock files, or a config `run: { lock }` another run may hold
+        if (
+          (state.locks?.lockFiles ?? []).length ||
+          state.locks?.runLock?.configured
+        )
+          void actions.loadLocks();
       }, 5000);
       void actions.loadVersions();
       // One clock for every "3m ago" on screen (time.rel-time), so the same
@@ -734,7 +746,9 @@
         "runs",
         "run",
         "specs",
+        "suites",
         "catalog",
+        "config-vars",
         "live",
         "invocations",
         "sessions",

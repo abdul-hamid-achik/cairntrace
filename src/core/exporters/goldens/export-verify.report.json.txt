@@ -1,0 +1,202 @@
+{
+  "$schema": "urn:cairntrace.dev:export-verify:v1",
+  "version": "1",
+  "status": "failed",
+  "exitCode": 1,
+  "exportDir": "/work/e2e/export",
+  "exporterVersion": "3.1.0",
+  "manifest": {
+    "exporterVersion": "3.1.0",
+    "mode": "into",
+    "lang": "ts",
+    "specs": 3
+  },
+  "verifiedAt": "2026-10-03T12:00:00.000Z",
+  "filesDigest": "sha256:0000",
+  "gates": [
+    {
+      "id": "sentinels",
+      "status": "passed",
+      "summary": "40 files, no late-bound sentinel left",
+      "durationMs": 3
+    },
+    {
+      "id": "freshness",
+      "status": "failed",
+      "summary": "the export no longer matches its sources (re-export it)",
+      "findings": [
+        "stale: tests/checkout.spec.ts",
+        "spec specs/new.yml: new"
+      ],
+      "durationMs": 800
+    },
+    {
+      "id": "typecheck",
+      "status": "passed",
+      "summary": "30 TypeScript files compile (../tsconfig.json); 2 error(s) in host files are not the export's",
+      "durationMs": 5200
+    },
+    {
+      "id": "lint",
+      "status": "skipped",
+      "reason": "no eslint config in or above the export directory",
+      "summary": "no eslint config in or above the export directory",
+      "durationMs": 1
+    },
+    {
+      "id": "list",
+      "status": "passed",
+      "summary": "3 of 3 exported specs listed as one test each (1 deliberate test.fixme skip(s), not run)",
+      "durationMs": 900
+    }
+  ],
+  "differential": {
+    "status": "failed",
+    "runTokenPrefix": "vabc123",
+    "durationRatioThreshold": 3,
+    "preconditionsMode": "inline",
+    "order": "cairn-then-export",
+    "specs": [
+      {
+        "spec": "specs/login.yml",
+        "testFile": "tests/login.spec.ts",
+        "status": "match",
+        "cairn": {
+          "status": "passed",
+          "exitCode": 0,
+          "durationMs": 2100,
+          "runDir": "run_a"
+        },
+        "export": {
+          "status": "passed",
+          "durationMs": 1800
+        },
+        "compared": {
+          "steps": 4,
+          "outcomes": 2
+        },
+        "unmapped": {
+          "cairnSteps": 6,
+          "exportSteps": 0
+        },
+        "mismatches": [],
+        "network": [
+          {
+            "outcome": "session_created",
+            "cairn": 1,
+            "export": 2
+          }
+        ],
+        "durationRatio": 0.86,
+        "warnings": [
+          "network outcome session_created: request counts differ (cairn run 1, export 2); both matched, so only the count moved"
+        ]
+      },
+      {
+        "spec": "specs/checkout.yml",
+        "testFile": "tests/checkout.spec.ts",
+        "status": "mismatch",
+        "cairn": {
+          "status": "passed",
+          "exitCode": 0,
+          "durationMs": 9000,
+          "runDir": "run_b"
+        },
+        "export": {
+          "status": "failed",
+          "durationMs": 3000
+        },
+        "compared": {
+          "steps": 3,
+          "outcomes": 1
+        },
+        "mismatches": [
+          {
+            "kind": "verdict",
+            "cairn": "passed",
+            "export": "failed",
+            "detail": "cairn run passed, the exported test failed"
+          },
+          {
+            "kind": "outcome",
+            "id": "total_shown",
+            "cairn": "passed",
+            "export": "failed",
+            "detail": "outcome total_shown: cairn run passed, the exported test failed"
+          }
+        ],
+        "durationRatio": 0.33,
+        "warnings": []
+      },
+      {
+        "spec": "specs/legacy.yml",
+        "testFile": "tests/legacy.spec.ts",
+        "status": "skipped",
+        "reason": "the exported test is test.fixme (a hard skip recorded in the export's coverage)",
+        "cairn": {
+          "status": "passed",
+          "exitCode": 0,
+          "durationMs": 500
+        },
+        "export": {
+          "status": "skipped"
+        },
+        "mismatches": [],
+        "warnings": []
+      }
+    ],
+    "summary": {
+      "match": 1,
+      "mismatch": 1,
+      "inconclusive": 0,
+      "skipped": 1,
+      "error": 0
+    }
+  },
+  "mutation": {
+    "status": "failed",
+    "scope": "all",
+    "specs": [
+      {
+        "spec": "specs/login.yml",
+        "testFile": "tests/login.spec.ts",
+        "status": "ineffective",
+        "mutants": [
+          {
+            "outcome": "welcome_visible",
+            "status": "killed",
+            "operator": "toContainText -> not.toContainText"
+          },
+          {
+            "outcome": "session_created",
+            "status": "survived",
+            "operator": "toBe -> not.toBe",
+            "detail": "assertion not effective: the inverted outcome still passed"
+          },
+          {
+            "outcome": "profile_loaded",
+            "status": "not-applicable",
+            "detail": "no expect(...) assertion to invert (the outcome is judged by a helper that throws)"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "killed": 1,
+      "survived": 1,
+      "invalid": 0,
+      "notApplicable": 1
+    }
+  },
+  "summary": {
+    "gates": {
+      "passed": 3,
+      "failed": 1,
+      "skipped": 1
+    }
+  },
+  "warnings": [
+    "export used --var tenant; pass the same --var values (freshness and the differential's cairn run read them)"
+  ],
+  "reportFile": ".cairn-export-verify.json"
+}

@@ -10,6 +10,7 @@ import type {
   StepResult,
 } from "../../schema/run.v1";
 import { renderJson } from "./json";
+import { stepResultLabel } from "../stepLabel";
 
 export interface ReportThemeTokens {
   background: string;
@@ -748,10 +749,10 @@ function renderStepRow(step: StepResult): string {
       }${step.resolved.ref ? ` (${step.resolved.ref})` : ""}`
     : "";
   return `            <tr>
-              <td><code>${escapeHtml(step.id)}</code></td>
+              <td><code>${escapeHtml(stepResultLabel(step))}</code></td>
               <td>${statusBadge(step.status)}</td>
               <td>${escapeHtml(formatDuration(step.durationMs))}</td>
-              <td class="path">${escapeHtml(resolved)}</td>
+              <td class="path">${escapeHtml(resolved || (step.detail ?? ""))}</td>
               <td class="error">${escapeHtml(step.error ?? "")}</td>
             </tr>`;
 }

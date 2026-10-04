@@ -14,6 +14,11 @@
  * reports them, else from the config summary main sends with the project
  * (redacted: references stay references, literal URIs are masked), filtered
  * by the search text here; they render even when `cairn catalog` fails.
+ * So do the F15 widget drivers (`browser.widgets`, field roots, F20 app
+ * handles) when the config declares them. Environments gain an auth column
+ * (F18 `environments.<n>.auth`: requests by method and path, secret names)
+ * and Actions the built-in `login` when an environment declares auth and
+ * no imported action is named login (an imported one wins).
  */
 (function bootCatalogView() {
   const Studio = (globalThis.Studio =
@@ -30,9 +35,12 @@
     { id: "datasources", label: "Datasources" },
     { id: "gates", label: "Gates" },
     { id: "fixtures", label: "Fixtures" },
+    { id: "widgets", label: "Widgets" },
   ];
   /** Kinds Studio can read from the config when the catalog has none. */
-  const CONFIG_KINDS = new Set(["datasources", "gates", "fixtures"]);
+  const CONFIG_KINDS = new Set(["datasources", "gates", "fixtures", "widgets"]);
+  /** The built-in action `use: login` runs (environment auth, F18). */
+  const BUILTIN_LOGIN = "login";
   /** Rows per kind with a query (the CLI's default is 10). */
   const QUERY_LIMIT = 50;
   /** Typing pause before the search runs. */
@@ -226,8 +234,46 @@
 
   // ── one renderer per kind ────────────────────────────────────────────────
 
+  /**
+   * F18: environments whose config declares `auth:` (redacted summary).
+   * @returns {Array<Record<string, any>>}
+   */
+  function authEnvironments() {
+    const list = state.project?.config?.registries?.auth;
+    return Array.isArray(list) ? list : [];
+  }
+
+  /**
+   * The built-in `login` action as a catalog row, when an environment
+   * declares `auth:` and the catalog has no action named login (an
+   * imported one wins over the built-in). Null otherwise, or when the
+   * search text does not match it.
+   * @param {Array<Record<string, any>>} actions the catalog's rows
+   * @returns {Record<string, any> | null}
+   */
+  function builtinLoginRow(actions) {
+    const envs = authEnvironments();
+    if (!envs.length) return null;
+    if (actions.some((action) => action?.name === BUILTIN_LOGIN)) return null;
+    const row = {
+      name: BUILTIN_LOGIN,
+      builtin: true,
+      description: `Built-in: signs in through the API with environments.<env>.auth (${envs
+        .map((entry) => entry.env)
+        .join(", ")}); credentials come from the secrets provider`,
+      inputs: [],
+      steps: null,
+      usedBy: [],
+    };
+    const tokens = filters.query.toLowerCase().split(/\s+/).filter(Boolean);
+    const haystack =
+      `${row.name} ${row.description} sign in auth`.toLowerCase();
+    return tokens.every((token) => haystack.includes(token)) ? row : null;
+  }
+
   /** @param {Array<Record<string, any>>} rows */
   function actionsTable(rows) {
+    const authEnvs = authEnvironments();
     return table(
       [
         "action",
@@ -258,6 +304,22 @@
             "td",
             { class: "cell-spec" },
             h("span", { class: "mono", text: action.name }),
+            action.builtin
+              ? (() => {
+                  const node = Studio.tag("built-in", "info");
+                  node.title =
+                    "runs the environment's auth: block; import an action named login to replace it";
+                  return node;
+                })()
+              : action.name === BUILTIN_LOGIN && authEnvs.length
+                ? (() => {
+                    const node = Studio.tag("overrides built-in", "warn");
+                    node.title = `use: login runs this action, not environments.<env>.auth (${authEnvs
+                      .map((entry) => entry.env)
+                      .join(", ")})`;
+                    return node;
+                  })()
+                : null,
             snippetButton("use:", snippet),
           ),
           h(
@@ -297,7 +359,13 @@
           h("td", { class: "num", text: String(action.steps ?? "—") }),
           h("td", null, usedByCell(action.usedBy)),
           h("td", null, runButton(action.lastGreenRun)),
-          h("td", null, fileButton(action.file)),
+          h(
+            "td",
+            null,
+            action.builtin
+              ? h("span", { class: "cell-dim", text: "config auth:" })
+              : fileButton(action.file),
+          ),
         );
       }),
       "catalog-actions",
@@ -467,10 +535,71 @@
     );
   }
 
+  /**
+   * One environment's auth summary (F18): the requests `use: login` sends
+   * by method and path, and the secret names it reads; never values.
+   * @param {Record<string, any> | undefined} auth
+   * @returns {HTMLElement}
+   */
+  function authCell(auth) {
+    if (!auth) return h("td", { class: "cell-dim", text: "—" });
+    const calls = [
+      auth.alreadyAuthenticated
+        ? `probe ${auth.alreadyAuthenticated.method} ${auth.alreadyAuthenticated.path}`
+        : null,
+      auth.login ? `login ${auth.login.method} ${auth.login.path}` : null,
+      ...(auth.after ?? []).map(
+        (/** @type {any} */ entry) =>
+          `${entry.id} ${entry.method} ${entry.path}${
+            entry.when ? ` (when ${entry.when})` : ""
+          }`,
+      ),
+      auth.hydrate ? `hydrate: ${auth.hydrate}` : null,
+    ].filter(Boolean);
+    return h(
+      "td",
+      { class: "cell-labels catalog-auth", title: calls.join("\n") },
+      (() => {
+        const node = Studio.tag("use: login", "ok");
+        node.title = calls.join("\n");
+        return node;
+      })(),
+      h("span", {
+        class: "cell-dim mono",
+        text: ` ${auth.login ? `${auth.login.method} ${auth.login.path}` : ""}${
+          (auth.after ?? []).length
+            ? ` +${auth.after.length} follow-up${
+                auth.after.length === 1 ? "" : "s"
+              }`
+            : ""
+        }${auth.hydrate ? " · hydrate" : ""}`,
+      }),
+      (auth.secrets ?? []).length
+        ? h("div", {
+            class: "cell-dim",
+            title: "secret names the auth block reads (values never shown)",
+            text: `secrets: ${auth.secrets.join(", ")}`,
+          })
+        : null,
+    );
+  }
+
   /** @param {Array<Record<string, any>>} rows */
   function envsTable(rows) {
+    const authByEnv = new Map(
+      authEnvironments().map((entry) => [entry.env, entry]),
+    );
+    const withAuth = authByEnv.size > 0;
     return table(
-      ["environment", "baseUrl", "policy", "services", "secrets", "vars"],
+      [
+        "environment",
+        "baseUrl",
+        "policy",
+        "services",
+        "secrets",
+        "vars",
+        ...(withAuth ? ["auth"] : []),
+      ],
       rows.map((env) =>
         h(
           "tr",
@@ -536,6 +665,7 @@
               : "—",
           }),
           h("td", { class: "num", text: String(env.vars ?? 0) }),
+          withAuth ? authCell(authByEnv.get(env.name)) : null,
         ),
       ),
       "catalog-envs",
@@ -693,6 +823,7 @@
     datasources: datasourcesTable,
     gates: gatesTable,
     fixtures: fixturesTable,
+    widgets: widgetsTable,
   };
 
   // ── painting ─────────────────────────────────────────────────────────────
@@ -711,6 +842,14 @@
     const rows = Array.isArray(payload?.[kind]) ? payload[kind] : [];
     const total =
       typeof payload?.totals?.[kind] === "number" ? payload.totals[kind] : null;
+    if (kind === "actions" && payload) {
+      const login = builtinLoginRow(rows);
+      if (login)
+        return {
+          rows: [...rows, login],
+          total: total === null ? null : total + 1,
+        };
+    }
     return { rows, total };
   }
 
@@ -734,6 +873,7 @@
     if (!CONFIG_KINDS.has(kind) || !fromConfig(kind)) return true;
     if (filters.tab === kind) return true;
     const registries = state.project?.config?.registries ?? null;
+    if (kind === "widgets") return Boolean(registries?.widgets?.declared);
     if (kind === "datasources")
       return (
         (registries?.datasources?.topLevel ?? []).length > 0 ||
@@ -796,6 +936,30 @@
       }
     } else if (kind === "gates") rows = registries.gates ?? [];
     else if (kind === "fixtures") rows = registries.fixtures ?? [];
+    else if (kind === "widgets") {
+      const widgets = registries.widgets ?? null;
+      rows = widgets
+        ? [
+            ...(widgets.drivers ?? []).map(
+              (/** @type {any} */ driver, /** @type {number} */ index) => ({
+                section: "driver",
+                order: index + 1,
+                defaulted: widgets.driversDefaulted,
+                ...driver,
+              }),
+            ),
+            ...(widgets.fieldRoot ?? []).map((/** @type {string} */ name) => ({
+              section: "fieldRoot",
+              name,
+              defaulted: widgets.fieldRootDefaulted,
+            })),
+            ...(widgets.appHandles ?? []).map((/** @type {string} */ name) => ({
+              section: "appHandle",
+              name,
+            })),
+          ]
+        : [];
+    }
     const tokens = filters.query.toLowerCase().split(/\s+/).filter(Boolean);
     if (!tokens.length) return rows;
     return rows.filter((row) => {
@@ -951,6 +1115,115 @@
       ),
       "catalog-fixtures",
     );
+  }
+
+  /** Widget registry sections, in the order the runner uses them. */
+  const WIDGET_SECTIONS = [
+    {
+      id: "driver",
+      label: "drivers",
+      note: "tried in this order by match(root); set / check / choose / form use the first that matches",
+    },
+    {
+      id: "fieldRoot",
+      label: "field roots",
+      note: "{key} → the field container; the first template with a visible match wins",
+    },
+    {
+      id: "appHandle",
+      label: "app handles",
+      note: "window.__cairn.app.<name> for eval, script verifiers and wait: { app }",
+    },
+  ];
+
+  /** @param {Array<Record<string, any>>} rows */
+  function widgetsTable(rows) {
+    /** @type {HTMLElement[]} */
+    const body = [];
+    for (const section of WIDGET_SECTIONS) {
+      const list = rows.filter((row) => row.section === section.id);
+      if (!list.length) continue;
+      body.push(
+        h(
+          "tr",
+          { class: "catalog-group", dataset: { section: section.id } },
+          h(
+            "td",
+            { colspan: "4" },
+            h("strong", { text: section.label }),
+            h("span", { class: "cell-dim", text: ` · ${section.note}` }),
+            list[0].defaulted
+              ? h("span", {
+                  class: "cell-dim",
+                  text: " · default (the config does not set it)",
+                })
+              : null,
+          ),
+        ),
+      );
+      for (const row of list)
+        body.push(
+          h(
+            "tr",
+            {
+              class: "catalog-row",
+              dataset: { name: row.name, section: section.id },
+            },
+            h(
+              "td",
+              { class: "cell-spec" },
+              row.order
+                ? h("span", { class: "cell-dim", text: `${row.order}. ` })
+                : null,
+              h("span", { class: "mono", text: row.name }),
+            ),
+            h(
+              "td",
+              null,
+              section.id === "driver"
+                ? Studio.tag(
+                    row.source === "project" ? "project driver" : "built-in",
+                    row.source === "project" ? "warn" : "info",
+                  )
+                : null,
+              row.appended
+                ? h("span", {
+                    class: "cell-dim",
+                    text: " appended (native)",
+                  })
+                : null,
+            ),
+            h("td", {
+              class: "mono cell-dim",
+              title:
+                row.source === "project"
+                  ? "project code: it runs in the page, like an eval file"
+                  : "",
+              text: row.file ?? "",
+            }),
+            h(
+              "td",
+              null,
+              section.id === "driver"
+                ? snippetButton(
+                    "set",
+                    // a project driver is named by its module's `name`
+                    // export, which the config does not show
+                    row.source === "project"
+                      ? "- set: { field: <key>, value: <value>, driver: <the module's name> }"
+                      : `- set: { field: <key>, value: <value>, driver: ${row.name} }`,
+                  )
+                : section.id === "appHandle"
+                  ? snippetButton(
+                      "wait",
+                      `- wait: { app: { path: ${row.name}, exists: true } }`,
+                    )
+                  : null,
+            ),
+          ),
+        );
+    }
+    return table(["name", "kind", "file", "use"], body, "catalog-widgets");
   }
 
   function paintTabs() {

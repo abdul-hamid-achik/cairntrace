@@ -23,12 +23,16 @@ const PLACEHOLDER_DEFAULT_RE =
 
 /**
  * Whole words of a var name that mark it as a credential. Short, ambiguous
- * ones (`otp`, `pwd`, `jwt`) only count as whole words, so `footprint` or
- * `cwdPath` stay visible; plurals (`tokens`, `cookies`) count too.
+ * ones (`otp`, `pwd`, `pw`, `pass`, `jwt`) only count as whole words, so
+ * `footprint`, `cwdPath`, `bypass` or `compass` stay visible; plurals
+ * (`tokens`, `cookies`) count too.
  */
 const SENSITIVE_WORDS = new Set([
   "password",
   "passwd",
+  "pass",
+  "pw",
+  "pword",
   "pwd",
   "passphrase",
   "passcode",

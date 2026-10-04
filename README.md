@@ -291,7 +291,8 @@ Current step keys:
 
 `open`, `click`, `hover`, `focus`, `fill`, `type`, `select`, `upload`, `download`,
 `transform`, `request`, `wait`, `press`, `scroll`, `snapshot`, `use`, `batch`,
-`eval`, `monitor`, `run`, `expect`, `capture`.
+`eval`, `monitor`, `run`, `expect`, `capture`, `repeat`, `if`, `set`, `check`,
+`uncheck`, `choose`, `form`.
 
 `expect` asserts mid-flow (locator assertions or `expect.request`; a mismatch
 fails the step with evidence), `capture` stores a value from the page
@@ -354,6 +355,18 @@ bounded page-fetch fallback. Relative request URLs resolve against config
 - fill: { by: label, name: Scanner code, value: "${requests.qr.body.token}" }
 ```
 
+Request steps also take `credentials: omit` (an anonymous call), headers
+built from earlier responses (`authorization: "Bearer
+${requests.login.body.token}"`), `until` polling with JSON matchers,
+`retry` on 5xx or network failures, `capture` with JSONPath filters
+(`$.tasks[?(@.title == "Report")].id` → `${requests.<name>.captures.<key>}`),
+and `matrix` with `expectStatus` (one request per combination; the step lists
+every mismatch). `use: login` signs a run in through the API with the
+environment's `auth:` block (an `alreadyAuthenticated` probe, the login, OTP-like
+follow-ups, an optional hydrate script) using provider secrets that never reach
+artifacts. See [Steps](docs/steps.md#credentials-polling-retries-captures-and-matrices)
+and [Configuration](docs/configuration.md#environment-login-auth).
+
 Request-step calls are mirrored into run network evidence, so `network` and
 `noFailedRequests` outcomes can assert on API calls made by the spec itself.
 Native Playwright entries include a numeric epoch `timestamp` and, for valid
@@ -376,6 +389,63 @@ a 300 ms post-action grace and one live-element recovery attempt (including
         by: selector
         selector: '.table-header-hover-actions button[aria-label="Upload data"]'
 ```
+
+Custom form controls are typed too: `set` / `check` / `uncheck` / `choose` /
+`form` find a field (`field: <key>` through `browser.fieldRoot`, or any
+locator), pick a widget driver (vue-multiselect, PrimeVue calendar and
+autocomplete, radio and checkbox groups, pills, native controls, or a project
+driver module), write the value in the page and read it back — the step fails
+with evidence when the field did not commit:
+
+```yaml
+- form:
+    fields:
+      business_owner: "No"
+      country: Spain
+      start_date: "2026-11-30"
+      legacy_supplier: { value: "No", optional: true }
+- click: { by: role, role: button, name: Save, fallback: dispatch }
+- fill: { by: label, name: Address line 1, value: 10 Main Street, mode: set }
+```
+
+See [Widgets](docs/widgets.md) or `cairn docs widgets`.
+
+Control flow is typed too: `repeat: { max, until?, steps }` loops (≤ 100
+iterations; `until` checked before each one), `if: { condition, then, else? }`
+branches, `when: { var, equals | in | exists }` gates on config/spec/use-site
+vars or runtime values, `wait: { any | all: [...] }` and `wait.optional`
+(+ `assign` → `${waits.<name>.matched}`) probe without failing, and
+`use: { action, retry: { times, until? } }` retries a flaky action as one
+group. Nested steps keep stable ids and carry `parentId` / `iteration` /
+`branch` in events and `run.json`:
+
+```yaml
+- id: load_all
+  repeat:
+    max: 20
+    until: { text: All rows loaded }
+    steps:
+      - click: { by: role, role: button, name: Load more }
+- id: banner
+  if:
+    condition: { selector: "#cookie-banner" }
+    then:
+      - click: { by: role, role: button, name: Accept }
+```
+
+Eval steps keep shrinking: a source that mentions `__cairn` gets a page
+prelude first (`sleep`, `visible`, `text`, `labelOf`, `nativeSet`, `fire`,
+`rows`, `waitFor`), installed once per document and never over a page-owned
+`window.__cairn`. Config `browser.appHandle: { <name>: <page expression> }`
+adds read-only accessors (`__cairn.app.store`), and `wait: { app: { path:
+store.user.id, exists: true } }` waits on one without an eval loop. See
+[Steps](docs/steps.md#page-prelude-and-app-handles), and the
+[eval → typed step table](docs/steps.md#eval) for the step that replaces
+each common eval pattern. The demo suite shows them working:
+`examples/flows/08-conditional-step.yml` (control flow),
+`13-widgets-form.yml` (widgets, click/fill flags, `wait.app`, the prelude),
+`platform/32-api-login-v2.yml` (`use: login`, request v2) and
+`platform/33-export-workbook.yml` (xlsx v2).
 
 **Verifiers**
 
@@ -423,6 +493,44 @@ outcomes:
   checks, `tcp`, `command`, `all` / `any`, `stable`). A spec waits on them in
   `preconditions.wait`; services and the webServer use them in `ready:`;
   `cairn wait <gate|url>` checks one from a shell.
+
+**Config instead of wrapper scripts**
+
+What a Taskfile or a `with-cairn.sh` did around `cairn run` is config, enforced
+by the run engine for the CLI and for MCP alike (see
+[Services](docs/services.md) and [Configuration](docs/configuration.md)):
+
+- `run:` — `lock` (one run at a time per config; a live owner is exit 4, for
+  `cairn services up | down | restart` too),
+  `preflight` (a JSON `assert`, a `secret`, a `command` or a `gate` that must
+  pass before any service starts), `verifyClean` (no leftover browsers, tmux
+  session or compose containers after the run; dirty is exit 9) and `finally`
+  commands. `services.teardown` entries with `critical: true` and the
+  `services.provisioner` `down` always run, on SIGINT/SIGTERM too; a failed one
+  is exit 8.
+- `suites:` — `cairn run --suite <name> --env <env>` runs a named, ordered spec
+  set with its vars, `processEnv`, `labels`, once-per-run `before` / `after`
+  hooks, `parallel` and `bail` (per environment too; `--no-bail` overrides);
+  `cairn suites list` shows what each resolves to and `cairn docs run-policy`
+  maps a wrapper's jobs to config.
+- `metrics:` — command or HTTP probes sampled around each spec into
+  `diagnostics/metrics.json`, ready for `cairn stats --metric <name>.delta`.
+- `services:` operations — `restart` / `logs`, tunnels, a provisioner
+  (`up` / `down` / `exports`), atomic `files`, a phased seed transaction —
+  and `requires: { cairntrace: <range> }` to pin the engine.
+
+```yaml
+run:
+  lock: true
+  preflight:
+    - { secret: API_TOKEN }
+    - { command: ./tools/check-quota.sh, expectExit: 0, timeout: 30s }
+  verifyClean: [browsers]
+suites:
+  smoke: { specs: [flows/smoke], bail: true }
+metrics:
+  - { name: queue_depth, command: ./tools/queue-depth.sh, parse: { json: $.depth } }
+```
 
 Scope `text` / `notText` checks with nested `region`:
 
@@ -534,15 +642,20 @@ imported action, the action's directory) and `${config.dir}` is the directory
 of the resolved `cairntrace.config.yml` (an explicit `--config`, else the one
 found by walking up from the spec), so shared fixtures never need absolute
 paths. The config itself supports YAML anchors and merge keys
-(`<<: *shared`) to share blocks between environments; `cairn config validate`
-parses it exactly like a run. An `--env` the config does not define is
+(`<<: *shared`), top-level `vars:` shared by every environment,
+`environments.<n>.extends`, vars built from other vars, typed (list /
+object) vars and `include:` files; `cairn config validate` parses and
+composes it exactly like a run, and `cairn config vars` lists each var's
+value per environment, where it is defined and what uses it. An `--env` the
+config does not define is
 an error rather than a run without baseUrl or vars; a spec's own
 `environment:` that the config lacks only warns.
 
 TinyVault secrets are resolved once into an invocation-scoped environment.
 Cairntrace requests only explicit `secrets.keys`, `secrets.required`, and keys
 referenced as `${env.NAME}` or `${secrets.NAME}` in the root spec or imported
-actions; it never exports an entire project to discover a value. They are
+actions (plus the environment `auth:` block's `${secrets.NAME}` keys when a
+flow uses `use: login`); it never exports an entire project to discover a value. They are
 available to spec substitution,
 preconditions, hooks, and the seed child process, but are never written into
 Cairntrace's global `process.env`. Target children do not inherit `TVAULT_*`
@@ -921,9 +1034,9 @@ Common commands:
 | `cairn checkpoint list/show/delete`            | Manage saved browser-state checkpoints.                                                                                                                                                                                                                                                                            |
 | `cairn checkpoint capture-from-session <name>` | Save state from an existing `agent-browser` session.                                                                                                                                                                                                                                                               |
 | `cairn login <name> --url <url>`               | Open a headed login flow and save a checkpoint.                                                                                                                                                                                                                                                                    |
-| `cairn export playwright <spec\|dir>`          | Emit `@playwright/test` `.spec.ts`/`.spec.js` (`--lang`, `--out-dir`, `--project`, `--config`/`--env`/`--var`, coverage report).                                                                                                                                                                                   |
+| `cairn export playwright <spec\|dir>`          | Emit `@playwright/test` `.spec.ts`/`.spec.js` (`--lang`, `--out-dir`, `--project`, `--into` + `--host-config` + `--map`, `--target`, `--preconditions`, `--verifiers`, `--max-eval-ratio`, `--strict-locators`, `--config`/`--env`/`--var`, coverage report); `--check <dir>` detects drift, `--verify <dir>` proves it faithful (`--differential`, `--mutate`, `--verify-project`; own exit codes 0/1/2/3).                                                                                                                                                                                   |
 | `cairn export brief <spec\|dir>`               | Emit an agent-neutral journey brief (what to fill, what to look for). `--from-run latest` attaches the last green run's resolved role/name. MCP: `cairn_export_brief` + `cairn_accompany_*`.                                                                                                                       |
-| `cairn import playwright <file>`               | Convert common Playwright steps and assertions into reviewable Cairntrace YAML with TODO comments for unmapped lines.                                                                                                                                                                                              |
+| `cairn import playwright <file>`               | Convert a Playwright test (TypeScript AST: page objects, fixtures, helpers, `test.step` inlined) into reviewable Cairntrace YAML with coverage and TODO comments for what it cannot map; `cairn import playwright-trace <trace.zip>` turns a trace into a draft spec (`--force`, `--allow-empty`).                                                                                                                                                                                              |
 | `cairn stash save <run-id>`                    | Stash a run directory to the fcheap vault for persistence and search. Supports `--tag`, `--tool`, `--source`.                                                                                                                                                                                                      |
 | `cairn stash list`                             | List stashes, optionally filtered by `--tag` or `--tool`.                                                                                                                                                                                                                                                          |
 | `cairn stash info <stash-id>`                  | Show detailed metadata and file list for a stash.                                                                                                                                                                                                                                                                  |
@@ -935,12 +1048,18 @@ Common commands:
 | `cairn annotate <symbol>`                      | Pin run evidence to a codemap code graph symbol. Supports `--source`, `--note`, `--data`, `--run-id`, `--codebase`.                                                                                                                                                                                                |
 | `cairn secrets`                                | Check TinyVault provider status and list secret key names (`--project`, or `--group` + `--env`; values are never printed).                                                                                                                                                                                         |
 | `cairn config validate`                        | Validate `cairntrace.config.yml` structure and cross-field rules. Supports `--config`, `--format json\|yaml\|md`. Exit 0 = valid, 4 = invalid.                                                                                                                                                                     |
+| `cairn config vars`                            | List config vars: kind, effective value per environment (masked when secret-like), definitions (file:line), overrides and uses; dead vars with `--unused`. Supports `--config`, `--env`, `--unused`, `--used-by <spec>`, `--format json\|yaml\|md`. |
 | `cairn services status`                        | Check the state of the services environment configured in config (docker containers, seed freshness, tmux session) and the `services up` lock. Supports `--config`, `--env`, `--project`.                                                                                                                         |
-| `cairn services up` / `down`                   | Start the config services and leave them running under an owner lock (`cairn run --reuse-services` runs against them), or tear them down and remove the lock. Supports `--config`, `--env`. |
+| `cairn services up` / `down`                   | Start the config services and leave them running under an owner lock (`cairn run --reuse-services` runs against them), or tear them down and remove the lock. Exit 4 while a live `cairn run` holds the config's `run.lock` (that run owns the stack). Supports `--config`, `--env`. |
+| `cairn services restart <window...>` / `logs <window>` | Restart config tmux windows (Ctrl-C, wait for the exit, resend the command, wait for the new generation's `readyOn`; refuses windows the config does not own, exit 4) or read a window's redacted output (`--since-restart`, `--wait <regex>`, `--follow`). No `services exec`, on purpose. |
+| `cairn doctor --orphans [--kill] [--yes] [--only]` | List the browser sessions cairn started whose `cairn run` is gone but whose browser survives (owned-session ledger, each pid checked by start time and command, never a process-table guess); `--kill` ends them after a confirmation or with `--yes`; `--only <session|pid,...>` limits it to what you confirmed. Exit 0 none, 1 some. |
+| `cairn run --bail`                             | Stop scheduling the remaining specs after the first failed or errored one; they are reported as skipped (`skipped[]`, reason `bailed`) and the exit code follows the usual precedence over the specs that ran. Config `run:` (`lock`, `preflight`, `verifyClean`, `finally`) and critical teardown make a bare `cairn run` safe: exit 4 / 8 / 9 (see `cairn docs services`). |
+| `cairn run --suite <name>`                     | Run a config `suites:` entry instead of spec paths: its specs (paths, directories, globs, spec names, tags) in order, the environment's vars, once-per-run before/after hooks (bounded, journaled, after-hooks on every exit path), `parallel` and `bail`. Spec paths next to it narrow it to those of its own specs (another path is exit 2). |
+| `cairn suites list`                            | List the config suites with the specs each resolves to per environment (or why not); same rows as `cairn catalog --kind suites`. |
 | `cairn wait <gate\|url...>`                    | Wait for readiness gates in order (config `gates:` names, `http(s)://` URLs needing 2xx/3xx, `tcp://host:port`). Exit 0 ready, 1 not ready. |
 | `cairn fixtures <list\|status\|ensure\|reset\|teardown\|sweep>` | Manage the config fixtures registry from a shell: what exists per environment (the fixture ledger), ensure or reset one, tear down or sweep leftovers (`--apply`). |
 | `cairn verifier schema <file>`                 | Print a node verifier's fixtures contract, read statically from its `defineVerifier` zod schema (never executed; `--load` imports it). |
-| `cairn mcp`                                    | Start the MCP server on stdio. `--allow-hooks` accepts `cairn_run` before/after hooks; `--allow-services` lets MCP tools start config services and run their teardown.                                                                                                                                                                                                                             |
+| `cairn mcp`                                    | Start the MCP server on stdio. `--allow-hooks` accepts the before/after hooks a `cairn_run` request carries (config-declared hooks are trusted config); `--allow-services` lets MCP tools start config services and run their teardown.                                                                                                                                                                                                                             |
 
 Structured output is available on commands wired with format flags:
 
@@ -954,9 +1073,9 @@ Structured output is available on commands wired with format flags:
 ```
 
 Commands with structured output today: `run`, `doctor`, `clean`, `explain`,
-`docs`, `snapshot`, `diff`, `import playwright`, `spec verify`, `spec lint`,
+`docs`, `snapshot`, `diff`, `import playwright`, `import playwright-trace`, `spec verify`, `spec lint`,
 `spec finish`, `spec promote`, `spec heal`, `init agent-kit`, `catalog`,
-`config validate`, `wait`, `fixtures`, `verifier schema`, `checkpoint list`,
+`config validate`, `config vars`, `wait`, `fixtures`, `verifier schema`, `checkpoint list`,
 and `checkpoint show`.
 
 Stable exit codes:
@@ -965,12 +1084,18 @@ Stable exit codes:
 | ---- | ----------------------------------------------------------------------------------------- |
 | 0    | success                                                                                   |
 | 1    | outcome failure                                                                           |
-| 2    | errored                                                                                   |
+| 2    | errored (a [delegated runner](docs/delegate.md) that failed, timed out, went silent, or whose exit code the relayed evidence does not support included), or a command-line usage error (unknown flag or command, a missing subcommand — bare `cairn`, `cairn services` —, missing option value or argument, on every command); `--help` / `--version` exit 0 |
 | 3    | cold-start gate                                                                           |
-| 4    | lint or config error (spec lint/verify findings, unknown `--env`, a held or refused services lock, a services boot an MCP server may not do) |
+| 4    | lint or config error (spec lint/verify findings, unknown `--env`, a held or refused services lock, a services boot an MCP server may not do, a run refused by the config `run:` policy: live run lock, failed preflight, dirty machine before the run; `cairn services up / down / restart` while a live run holds that lock) |
 | 5    | heal made no progress                                                                     |
 | 6    | contract-hash mismatch                                                                    |
 | 7    | refused by the environment policy (nothing ran, or any refusal under `--strict-requires`) |
+| 8    | a critical teardown failed (`services.teardown` entry with `critical: true`); outranks every other code |
+| 9    | dirty state after the run (`run.verifyClean` found a survivor); outranks the run's own code except 8 |
+
+A delegated invocation (`environments.<n>.runner`) exits with its runner's code (0–9, or 130 / 143 when the remote side was interrupted) only when the evidence supports it: a 0 needs every planned run settled by a run directory of this invocation, consistent with the stream and the remote invocation's own summary; a 1 needs a run that failed. Otherwise it settles on 2 (or the code the evidence shows); see [Delegated runners](docs/delegate.md#exit-codes).
+
+`cairn export playwright --verify` has its own table: 0 passed, 1 a gate / differential spec / mutant failed (or a refused spec), 2 usage or environment error, 3 inconclusive (nothing proven; never a pass). `--check` exits 0 fresh, 1 stale, 2 error. `cairn import` exits 0 written, 1 a draft that maps nothing was refused, 2 error (an existing `--out` without `--force`).
 
 ## MCP Integration
 
@@ -1001,7 +1126,8 @@ The MCP server exposes these tools:
 `cairn_spec_finish`, `cairn_spec_promote`, `cairn_spec_heal`, `cairn_catalog`,
 `cairn_checkpoint_list`, `cairn_checkpoint_show`, `cairn_checkpoint_delete`,
 `cairn_checkpoint_capture`, `cairn_snapshot`, `cairn_export_playwright`,
-`cairn_export_brief`, `cairn_pin`, `cairn_publish`,
+`cairn_export_verify`, `cairn_export_brief`, `cairn_import_playwright`,
+`cairn_import_playwright_trace`, `cairn_pin`, `cairn_publish`,
 `cairn_config_validate`, `cairn_services_status`, `cairn_services_up`,
 `cairn_services_down`, `cairn_wait`, the `cairn_fixtures_*` tools (`list`,
 `status`, `ensure`, `reset`, `teardown`, `sweep`), `cairn_stash_save`,
@@ -1028,9 +1154,9 @@ boots the config's webServer unless you pass `noWebServer`. Config services
 with exit 4 before anything starts (pass `noServices` or `reuseServices`), and
 `cairn_services_up` / `cairn_services_down` refuse. `wait: false` returns an `invocationId` at once;
 poll `cairn_run_status` and `cairn_logs` (cursor-based slices of the live
-logs) and stop it with `cairn_run_cancel`. `before`/`after` hooks over MCP
-need `cairn mcp --allow-hooks` (a gate, not a sandbox: config and spec shell
-still runs), and invocations that boot services or a webServer from the same
+logs) and stop it with `cairn_run_cancel`. `before`/`after` hooks a request
+carries need `cairn mcp --allow-hooks` (a gate, not a sandbox: config-declared
+hooks and other config and spec shell still run), and invocations that boot services or a webServer from the same
 config run one at a time inside the server.
 
 Agents should call `cairn_explain` once at session start, then `cairn_docs`
@@ -1070,8 +1196,12 @@ separate so the core stays deterministic and testable.
   `downloads/`, optionally assigning it as `${artifacts.<name>.path}`.
 - **Transform artifacts:** `transform` runs a Node-side script to turn a
   downloaded file into a new upload fixture under `transforms/`.
-- **Workbook assertions:** `xlsx` verifies workbook sheet text and Excel data
-  validation metadata.
+- **Workbook assertions:** `xlsx` reads a downloaded workbook without a
+  script: text anywhere or per sheet, label/key header rows (present, absent,
+  key → label, `includesInOrder` / `withinListInOrder` against a list or a
+  captured table), data rows after the key row, cell values and number
+  formats, and data validations by type and formula. Node verifiers get the
+  same parser as `ctx.xlsx(path)`.
 - **Custom assertions:** `script` runs browser or Node code and returns
   `{ ok, evidence }`.
 - **Locator inventory:** `cairn snapshot <url> --json` returns role and
@@ -1081,22 +1211,39 @@ separate so the core stays deterministic and testable.
   drafts, and writes JUnit XML for CI dashboards.
 - **Contract stamping after proof:** `cairn run <spec-or-dir> --stamp-if-green`
   stamps `contractHash` only when every requested spec passes.
-- **Playwright import:** `cairn import playwright <file>` converts common
-  Playwright actions and assertions to Cairntrace YAML, preserving TODO
-  comments for unmapped lines that need human review.
+- **Playwright import:** `cairn import playwright <file>` walks the test's
+  TypeScript AST (page objects, fixtures, helpers, `test.step`) into Cairntrace
+  YAML with a coverage summary and TODO comments for what it cannot map;
+  `cairn import playwright-trace <trace.zip>` turns a trace archive into a draft
+  spec (credentials always `${secrets.X}`). Neither overwrites a file without
+  `--force` nor writes a draft that maps nothing without `--allow-empty`
+  (exit 1, with the TODOs that say why).
 - **Playwright export:** `cairn export playwright <spec|dir> [--lang js|ts]
-[--out-dir <dir>] [--project] [--config <path>] [--env <name>] [--var k=v]`
+[--out-dir <dir>] [--project | --into <dir> [--host-config <playwright.config>] [--map <export.map.yml>]] [--target <name>] [--preconditions inline|global|skip|manifest] [--verifiers keep|gate|drop] [--max-eval-ratio <0..1>] [--config <path>] [--env <name>] [--var k=v]`
   emits `@playwright/test` `.spec.ts` or `.spec.js` with a coverage report
   (skips for constructs that cannot translate). `--config`/`--env`/`--var`
-  resolve `${vars.*}`/`baseUrl` like `spec verify`; secrets and `${run.token}`
-  are never inlined (env/RUN_TOKEN references instead); `runtime: node` file
+  resolve `${vars.*}`/`baseUrl` like `spec verify`; secrets, `${env.X}` (in
+  the spec or the config: vars, `baseUrl`, `auth:`, datasources) and
+  `${run.token}` are never inlined (env/RUN_TOKEN references instead); `runtime: node` file
   verifiers export via dynamic import; `--project` generates a structured
   project (`playwright.config.ts`, `global-setup.ts`, `actions/`,
   `verifiers/`, `fixtures/`, `tests/`, `README.md`) instead of standalone spec
   files. `--project`, `--into` and `--out-dir` exports write a
   `.cairn-export.json` manifest; `cairn export playwright --check <dir>`
   regenerates in memory and exits 1 when the committed export drifted from
-  its specs. MCP: `cairn_export_playwright` (same code path). Docs:
+  its specs, and `--verify <dir>` proves it faithful: static gates (sentinels,
+  tsc with the target's tsconfig, the host's eslint, `playwright test --list`,
+  freshness), `--differential` (`cairn run` and the exported test with the
+  same `CAIRN_RUN_TOKEN`, verdicts and network evidence compared) and
+  `--mutate` (an inverted assertion must fail); exit 0 pass / 1 failed / 2
+  error / 3 inconclusive (nothing proven, e.g. no local tsc or Playwright —
+  never a pass). `--into <dir> --host-config <playwright.config>` fits the
+  output to an existing Playwright tree (config read statically, never run);
+  `--map` binds actions to the host's fixtures and page objects; `--preconditions`
+  decides whether `run:` steps, `teardown:`, fixtures and gates run inline, once
+  in `global-setup`, or are only listed; `export.targets.<name>` in the config
+  names a profile for `--target`. MCP: `cairn_export_playwright` (same code
+  path), `cairn_export_verify`. Docs:
   `cairn docs export`.
 - **Journey brief:** `cairn export brief <spec> [--from-run latest]` compiles
   operator instructions (what to fill, what to look for) when locators will

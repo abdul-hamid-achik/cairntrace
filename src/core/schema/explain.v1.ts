@@ -103,6 +103,15 @@ export const StepDocSchema = z
       "run",
       "expect",
       "capture",
+      // F14 control flow.
+      "repeat",
+      "if",
+      // F15 widget kit.
+      "set",
+      "check",
+      "uncheck",
+      "choose",
+      "form",
     ]),
     kind: z.enum([
       "navigation",
@@ -115,6 +124,10 @@ export const StepDocSchema = z
       "process",
       /** Typed in-flow checks and captured values (expect / capture). */
       "assertion",
+      /** F14: repeat / if blocks that run nested steps. */
+      "control-flow",
+      /** F15: set / check / uncheck / choose / form through widget drivers. */
+      "widget",
     ]),
     summary: z.string().min(1),
     yamlExample: z.string().min(1),
@@ -206,6 +219,30 @@ export const ConfigDocSchema = z
       .optional(),
     /** Optional (added in 1.12): capture policy overview for traces and video. */
     capture: CapturePolicyDocSchema,
+    /**
+     * F15 (additive): the widget kit — built-in drivers in detection order,
+     * the default `browser.fieldRoot` templates, and the custom driver
+     * contract.
+     */
+    widgets: z
+      .object({
+        builtinDrivers: z.array(z.string()),
+        defaultFieldRoot: z.array(z.string()),
+        customDriver: z.string(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * F18: `environments.<name>.auth` — what the built-in `use: login`
+     * runs, and a YAML example.
+     */
+    auth: z
+      .object({
+        summary: z.string(),
+        yamlExample: z.string(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type ConfigDoc = z.infer<typeof ConfigDocSchema>;

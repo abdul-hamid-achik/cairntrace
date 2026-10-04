@@ -18,6 +18,19 @@ function configFile(body: string): string {
 }
 
 describe("stash / retention / evidence config", () => {
+  it("accepts failTtl never and rejects a malformed failTtl", () => {
+    expect(StashConfigSchema.parse({ failTtl: "never" }).failTtl).toBe("never");
+    expect(StashConfigSchema.parse({ failTtl: "45d" }).failTtl).toBe("45d");
+    for (const bad of ["forever", "0d", "Never", "30"]) {
+      expect(StashConfigSchema.safeParse({ failTtl: bad }).success).toBe(false);
+    }
+    // `never` is a failTtl-only spelling: ttl / passTtl still need a duration.
+    expect(StashConfigSchema.safeParse({ ttl: "never" }).success).toBe(false);
+    expect(StashConfigSchema.safeParse({ passTtl: "never" }).success).toBe(
+      false,
+    );
+  });
+
   it("accepts the evidence gate, TTLs, labelsAsTags and meta", () => {
     const stash = StashConfigSchema.parse({
       enabled: true,

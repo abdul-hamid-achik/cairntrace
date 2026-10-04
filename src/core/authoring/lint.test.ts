@@ -511,3 +511,137 @@ teardown:
     expect(shell[1]!.message).toContain("reads $2 but the step passes 1 arg");
   });
 });
+
+describe("cairn spec lint: control-flow blocks", () => {
+  it("lints steps nested in repeat / if blocks and flags duplicate authored ids", async () => {
+    const dir = await project();
+    const spec = join(dir, "flows", "nested.yml");
+    await writeFile(
+      spec,
+      `version: 1
+name: nested_spec
+intent: Nested
+coldStart: guest
+outcomes:
+  - id: home
+    description: home
+    verify: { url: { matches: "/" } }
+steps:
+  - id: go
+    open: /
+  - id: each
+    repeat:
+      max: 2
+      steps:
+        - id: go
+          click: { by: role, role: button, name: Next }
+        - id: pass
+          fill: { by: label, name: Password, value: hunter-two-x }
+  - id: maybe
+    if:
+      condition: "text:Banner"
+      then:
+        - id: dismiss
+          eval: { js: "document.querySelector('#close').click()" }
+        - id: seed
+          run: 'node ./seed.mjs "$1"'
+  - id: twice
+    open: /a
+  - id: twice
+    open: /b
+`,
+    );
+    await writeFile(join(dir, "flows", "seed.mjs"), "");
+    const result = await lintSpecs([spec], { cwd: dir, env });
+    const findings = result.files[0]!.findings;
+    const byRule = (rule: string) => findings.filter((f) => f.rule === rule);
+    expect(
+      byRule("duplicate-step-id").map((f) => [f.severity, f.message]),
+    ).toEqual([
+      [
+        "error",
+        expect.stringContaining(
+          'step id "go" is used by steps[0], steps[1].repeat.steps[0]',
+        ),
+      ],
+      [
+        "warning",
+        expect.stringContaining(
+          'step id "twice" is used by steps[3], steps[4]',
+        ),
+      ],
+    ]);
+    expect(byRule("literal-secret").map((f) => f.where)).toContain(
+      "steps[1].repeat.steps[1].fill.value",
+    );
+    expect(byRule("eval-typed-equivalent").map((f) => f.where)).toEqual([
+      "steps[2].if.then[0].eval",
+    ]);
+    expect(byRule("shell-arg-unset").map((f) => f.where)).toEqual([
+      "steps[2].if.then[1].run",
+    ]);
+    expect(lintExitCode(result)).toBe(4);
+  });
+});
+
+describe("cairn spec lint: eval-ratio (E12)", () => {
+  const spec = `version: 1
+name: eval_heavy
+intent: seeds state through page evals
+coldStart: guest
+outcomes:
+  - id: seeded
+    description: seeded
+    verify: { text: { contains: Seeded } }
+steps:
+  - id: open_it
+    open: /
+  - id: seed_a
+    eval: { js: "window.__a = 1;" }
+  - id: seed_b
+    eval: { js: "window.__b = 2;" }
+`;
+
+  it("warns when an export target's maxEvalRatio would refuse the spec", async () => {
+    const dir = await project();
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+secrets:
+  provider: env
+  required: [LINT_APP_PASSWORD]
+environments:
+  local:
+    baseUrl: http://app.test
+export:
+  targets:
+    strict: { maxEvalRatio: 0.5 }
+    lenient: { maxEvalRatio: 0.9 }
+    unlimited: { into: out }
+`,
+    );
+    const path = join(dir, "flows", "eval_heavy.yml");
+    await writeFile(path, spec);
+    const result = await lintSpecs([path], { cwd: dir, env });
+    const found = result.files[0]!.findings.filter(
+      (f) => f.rule === "eval-ratio",
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ severity: "warning" });
+    expect(found[0]!.message).toContain(
+      '2/3 step(s) (67%) are page eval, over export target "strict" maxEvalRatio 0.5',
+    );
+    expect(found[0]!.message).toContain(
+      "cairn export playwright --target strict",
+    );
+  });
+
+  it("says nothing without a target that limits the ratio", async () => {
+    const dir = await project();
+    const path = join(dir, "flows", "eval_heavy.yml");
+    await writeFile(path, spec);
+    const result = await lintSpecs([path], { cwd: dir, env });
+    expect(rules(result)).not.toContain("eval-ratio");
+  });
+});

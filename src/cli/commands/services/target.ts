@@ -5,9 +5,11 @@ import {
   UnknownEnvironmentError,
 } from "../../../core/config/runtimeContext";
 import { createArtifactRedactor } from "../../../core/artifacts/redaction";
+import { EngineRequirementError } from "../../../core/engineRequirements";
 import type { ArtifactRedactor } from "../../../core/artifacts/ArtifactWriter";
 import type { GateNode } from "../../../core/gates/schema";
-import type { ServicesConfig } from "../../../core/schema/config.v1";
+import type { Config, ServicesConfig } from "../../../core/schema/config.v1";
+import type { RunPolicyConfig } from "../../../core/runPolicy/schema";
 import { noSecretsScope } from "../../invocation/policy";
 import { resolveScopedSecrets, type ScopedSecrets } from "../secrets";
 
@@ -26,6 +28,12 @@ export interface ServicesTarget {
   services?: ServicesConfig;
   /** The config's `gates:` registry (`docker.ready`, tmux readiness gates). */
   gates?: Readonly<Record<string, GateNode>>;
+  /** The config's own `project:` (unset: none; `project` then reads "cairntrace"). */
+  configProject?: string;
+  /** The environment's effective `run:` policy (its `lock` guards services commands). */
+  runPolicy?: RunPolicyConfig;
+  /** The config's `run:` and environments (every declared run lock). */
+  lockConfig?: Pick<Config, "run" | "environments">;
   scopedSecrets: ScopedSecrets;
   /** Redacts the scoped secret values out of commands and events. */
   redactor: ArtifactRedactor;
@@ -49,6 +57,14 @@ export interface ServicesTargetOptions {
   cwd?: string;
 }
 
+/** An unmet `requires.cairntrace` refuses with exit 4, like a run. */
+function targetExitCode(e: unknown): 2 | 4 {
+  return e instanceof UnknownEnvironmentError ||
+    e instanceof EngineRequirementError
+    ? 4
+    : 2;
+}
+
 /**
  * Resolve the target. `secrets: "required"` (up) fails when the TinyVault
  * scope cannot be resolved, like a run; `"best-effort"` (down) falls back to
@@ -60,7 +76,13 @@ export interface ServicesTargetOptions {
 export async function resolveServicesTarget(
   opts: ServicesTargetOptions,
   secrets: "required" | "best-effort",
+  /**
+   * `teardown` (`services down`): an unmet `requires.cairntrace` is a
+   * warning, never a refusal — a pinned config must still be torn down.
+   */
+  purpose: "boot" | "teardown" = "boot",
 ): Promise<ServicesTarget> {
+  const skipRequires = purpose === "teardown";
   const cwd = opts.cwd ?? process.cwd();
   const configPath = await resolveServicesConfigPath(opts);
   if (!configPath) {
@@ -78,10 +100,11 @@ export async function resolveServicesTarget(
     scopedSecrets = await resolveScopedSecrets(configPath, {
       configPath,
       ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
+      ...(skipRequires ? { skipRequires: true } : {}),
     });
   } catch (e) {
-    if (e instanceof UnknownEnvironmentError) {
-      throw new ServicesCommandError(e.message, 4);
+    if (targetExitCode(e) === 4) {
+      throw new ServicesCommandError((e as Error).message, 4);
     }
     if (secrets === "required" || !/tvault/i.test((e as Error).message)) {
       throw new ServicesCommandError((e as Error).message, 2);
@@ -100,13 +123,11 @@ export async function resolveServicesTarget(
       cwd,
       env: scopedSecrets.env,
       ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
+      ...(skipRequires ? { skipRequires: true } : {}),
       onWarning: (message) => warnings.push(message),
     });
   } catch (e) {
-    throw new ServicesCommandError(
-      (e as Error).message,
-      e instanceof UnknownEnvironmentError ? 4 : 2,
-    );
+    throw new ServicesCommandError((e as Error).message, targetExitCode(e));
   }
   return {
     configPath,
@@ -115,6 +136,16 @@ export async function resolveServicesTarget(
     envName: ctx.envName,
     ...(ctx.services ? { services: ctx.services } : {}),
     ...(ctx.config?.gates ? { gates: ctx.config.gates } : {}),
+    ...(ctx.config?.project ? { configProject: ctx.config.project } : {}),
+    ...(ctx.runPolicy ? { runPolicy: ctx.runPolicy } : {}),
+    ...(ctx.config
+      ? {
+          lockConfig: {
+            ...(ctx.config.run ? { run: ctx.config.run } : {}),
+            environments: ctx.config.environments,
+          },
+        }
+      : {}),
     scopedSecrets,
     redactor: createArtifactRedactor(
       undefined,

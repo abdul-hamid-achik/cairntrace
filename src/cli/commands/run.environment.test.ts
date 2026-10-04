@@ -1,10 +1,11 @@
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
 import { UnknownEnvironmentError } from "../../core/config/runtimeContext";
+import { InvocationJournalSchema } from "../../core/schema/events.v1";
 import { RunResultSchema } from "../../core/schema/run.v1";
 import { BatchRunResultSchema } from "../../core/schema/runBatch.v1";
 import { preflightEnvironments, synthesizeErroredResult } from "./run";
@@ -219,5 +220,148 @@ describe("preflightEnvironments / synthesizeErroredResult", () => {
     expect(
       synthesizeErroredResult("/specs/a.yml", new Error("boom")).exitCode,
     ).toBe(2);
+  });
+});
+
+describe("cairn run --env <alias>", () => {
+  const ALIAS_CONFIG = `version: 1
+environments:
+  local: {}
+  staging: {}
+  remote: { alias: staging }
+`;
+
+  it(
+    "canonicalizes to the target: policy, run.json and the journal see staging",
+    async () => {
+      const { dir, artifactRoot, a } = await project();
+      await writeFile(join(dir, "cairntrace.config.yml"), ALIAS_CONFIG);
+      // requires.env lists the TARGET; the alias must still be admitted.
+      await writeFile(
+        a,
+        SPEC("env_a").replace(
+          "coldStart: guest\n",
+          "coldStart: guest\nrequires:\n  env: [staging]\n",
+        ),
+      );
+      const result = await cairn(
+        [
+          "run",
+          a,
+          "--mock",
+          "--env",
+          "remote",
+          "--artifact-root",
+          artifactRoot,
+          "--json",
+        ],
+        dir,
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      const doc = RunResultSchema.parse(JSON.parse(result.stdout));
+      expect(doc.status).toBe("passed");
+      expect(doc.environment).toBe("staging");
+      expect(doc.envAlias).toBe("remote");
+      const onDisk = RunResultSchema.parse(
+        JSON.parse(await readFile(join(doc.runDir, "run.json"), "utf8")),
+      );
+      expect(onDisk.environment).toBe("staging");
+      expect(onDisk.envAlias).toBe("remote");
+      const journals = await readdir(join(artifactRoot, "_invocations"));
+      expect(journals).toHaveLength(1);
+      const journal = InvocationJournalSchema.parse(
+        JSON.parse(
+          await readFile(
+            join(artifactRoot, "_invocations", journals[0]!, "invocation.json"),
+            "utf8",
+          ),
+        ),
+      );
+      expect(journal.env).toBe("staging");
+      expect(journal.envAlias).toBe("remote");
+    },
+    E2E_TIMEOUT_MS,
+  );
+
+  it(
+    "leaves envAlias off a run that used the real name",
+    async () => {
+      const { dir, artifactRoot, a } = await project();
+      await writeFile(join(dir, "cairntrace.config.yml"), ALIAS_CONFIG);
+      const result = await cairn(
+        [
+          "run",
+          a,
+          "--mock",
+          "--env",
+          "staging",
+          "--artifact-root",
+          artifactRoot,
+          "--json",
+        ],
+        dir,
+      );
+      expect(result.exitCode, result.stderr).toBe(0);
+      const doc = RunResultSchema.parse(JSON.parse(result.stdout));
+      expect(doc.environment).toBe("staging");
+      expect(doc.envAlias).toBeUndefined();
+    },
+    E2E_TIMEOUT_MS,
+  );
+
+  it(
+    "a suite that requires the target runs under --env <alias>",
+    async () => {
+      const { dir } = await project();
+      await writeFile(
+        join(dir, "cairntrace.config.yml"),
+        `${ALIAS_CONFIG}suites:
+  smoke:
+    specs: [a.yml]
+    requires: { env: staging }
+`,
+      );
+      const viaAlias = await cairn(
+        [
+          "run",
+          "--suite",
+          "smoke",
+          "--env",
+          "remote",
+          "--select-only",
+          "--json",
+        ],
+        dir,
+      );
+      expect(viaAlias.exitCode, viaAlias.stderr).toBe(0);
+      expect(JSON.parse(viaAlias.stdout).selected).toHaveLength(1);
+      const wrong = await cairn(
+        [
+          "run",
+          "--suite",
+          "smoke",
+          "--env",
+          "local",
+          "--select-only",
+          "--json",
+        ],
+        dir,
+      );
+      expect(wrong.exitCode).not.toBe(0);
+    },
+    E2E_TIMEOUT_MS,
+  );
+
+  it("does not warn about a CAIRN_TVAULT_ENV that names the alias", async () => {
+    const { dir, a } = await project();
+    await writeFile(join(dir, "cairntrace.config.yml"), ALIAS_CONFIG);
+    const warnings: string[] = [];
+    await preflightEnvironments(
+      [a],
+      { env: "remote" },
+      (m) => warnings.push(m),
+      { CAIRN_TVAULT_ENV: "remote" },
+    );
+    expect(warnings).toEqual([]);
   });
 });

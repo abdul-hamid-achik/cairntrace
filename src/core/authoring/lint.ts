@@ -16,12 +16,17 @@ import {
 import { ZodError, type ZodIssue, type ZodTypeAny } from "zod";
 import { analyzeVerifierSource } from "../catalog/verifierContract";
 import { isSensitiveName, looksLikeSecretValue } from "../catalog/mask";
-import { coldStartLint } from "../coldStart";
+import { coldStartLint, usesLogin } from "../coldStart";
 import {
   resolveSpecRuntimeContext,
   UnknownEnvironmentError,
 } from "../config/runtimeContext";
 import { auditFileReferences } from "../fileReferenceAudit";
+import {
+  evalStepRatio,
+  exceedsEvalRatio,
+  formatEvalRatio,
+} from "../exporters/evalRatio";
 import {
   ContractHashMismatchError,
   MissingTemplateVariableError,
@@ -33,24 +38,31 @@ import { auditPlaceholderReferences } from "../referenceAudit";
 import type { ConfigVarValue } from "../schema/config.v1";
 import {
   BatchStepSchema,
+  CheckStepSchema,
+  ChooseStepSchema,
   ClickStepSchema,
   DownloadStepSchema,
   EvalStepSchema,
   FillStepSchema,
   FocusStepSchema,
+  FormStepSchema,
   HoverStepSchema,
+  IfStepSchema,
   MonitorStepSchema,
   OpenStepSchema,
   PressStepSchema,
+  RepeatStepSchema,
   RequestStepSchema,
   ReusableActionSchema,
   ScrollStepSchema,
   SelectStepSchema,
+  SetStepSchema,
   SnapshotStepSchema,
   SpecSchema,
   StepSchema,
   TransformStepSchema,
   TypeStepSchema,
+  UncheckStepSchema,
   UploadStepSchema,
   UseStepSchema,
   WaitStepSchema,
@@ -94,8 +106,10 @@ export type LintRule =
   | "missing-fixture-key"
   | "literal-secret"
   | "eval-typed-equivalent"
+  | "eval-ratio"
   | "residual-placeholder"
   | "missing-step-id"
+  | "duplicate-step-id"
   | "shell-arg-unset"
   | "config";
 
@@ -321,6 +335,11 @@ async function lintFile(
     }
   }
 
+  // 3b. Authored step ids must be unique across the whole step tree
+  //     (control-flow blocks included): results, events and evidence files
+  //     are keyed by id.
+  findings.push(...duplicateIdFindings(record, lineOf));
+
   // 4. Schema, explained per step.
   const schemaFindings = isAction
     ? schemaIssues(ReusableActionSchema, record, true)
@@ -381,6 +400,23 @@ async function lintFile(
         projectRoot = runtime.configPath
           ? dirname(runtime.configPath)
           : dirname(parsed.path);
+        // E12: the share of page evals, against the export targets' limits.
+        const evalRatio = evalStepRatio(parsed.resolved);
+        for (const [targetName, target] of Object.entries(
+          runtime.config?.export?.targets ?? {},
+        )) {
+          if (
+            target.maxEvalRatio === undefined ||
+            !exceedsEvalRatio(evalRatio, target.maxEvalRatio)
+          ) {
+            continue;
+          }
+          findings.push({
+            rule: "eval-ratio",
+            severity: "warning",
+            message: `${formatEvalRatio(evalRatio)} are page eval, over export target "${targetName}" maxEvalRatio ${target.maxEvalRatio} (${Math.round(target.maxEvalRatio * 100)}%): \`cairn export playwright --target ${targetName}\` refuses this spec; typed steps replay, heal and export, an eval does not`,
+          });
+        }
         const auditFiles: Array<{ path: string; text: string }> = [
           { path: specPath, text },
         ];
@@ -785,6 +821,14 @@ const STEP_SCHEMAS: Record<string, ZodTypeAny> = {
   batch: BatchStepSchema,
   eval: EvalStepSchema,
   monitor: MonitorStepSchema,
+  repeat: RepeatStepSchema,
+  if: IfStepSchema,
+  // F15 widget kit.
+  set: SetStepSchema,
+  check: CheckStepSchema,
+  uncheck: UncheckStepSchema,
+  choose: ChooseStepSchema,
+  form: FormStepSchema,
 };
 
 function issuePath(
@@ -960,7 +1004,7 @@ function resolutionFinding(
       rule: "unresolved-var",
       severity: "error",
       ...env,
-      message: `\${vars.${e.variable}} is not defined${at}: add it to environments.<env>.vars in the config, the spec's vars:, or the action's vars:, or pass --var ${e.variable}=…`,
+      message: `\${vars.${e.variable}} is not defined${at}: add it to the config's top-level vars: or environments.<env>.vars, the spec's vars:, or the action's vars:, or pass --var ${e.variable}=…`,
     };
   }
   if (e instanceof UnknownEnvironmentError) {
@@ -1057,6 +1101,7 @@ function coldStartFindings(
   if (
     !hasImports &&
     !hasResume &&
+    !usesLogin(spec) &&
     commands.length > 0 &&
     commands.every((c) => ECHO_ONLY.test(c.run))
   ) {
@@ -1087,7 +1132,7 @@ function coldStartFindings(
           message: warning,
           fix: {
             description:
-              "imports + use: <login action>, session.resume, preconditions.commands, or coldStart: guest",
+              "imports + use: <login action>, use: login (environments.<env>.auth), session.resume, preconditions.commands, or coldStart: guest",
             safe: false,
           },
         },
@@ -1119,18 +1164,19 @@ const EVAL_PATTERNS: EvalPattern[] = [
       ),
     typed: "request",
     suggestion:
-      "the project's login action (use:) or a request: step (browser cookies included; assign: + ${requests.<name>.body.X})",
+      "use: login (config environments.<env>.auth: login, alreadyAuthenticated, after with the captured bearer, hydrate) or the project's login action, or a request: step (assign: + ${requests.<name>.body.X})",
   },
   {
     test: (s) => /\bfetch\s*\(|XMLHttpRequest/.test(s),
     typed: "request",
-    suggestion: "a request: step (method, url, body, expectStatus, assign)",
+    suggestion:
+      "a request: step (method, url, body, expectStatus, assign; credentials: omit, until polling, retry, capture, matrix)",
   },
   {
     test: (s) => /\.click\s*\(\s*\)/.test(s),
     typed: "click",
     suggestion:
-      "a click: step with a role/label/text/testid locator (click.until when the click must take effect)",
+      "a click: step with a role/label/text/testid locator (click.until when the click must take effect, optional: true when the control may be absent, fallback: dispatch or dispatch: true when an overlay swallows the pointer), or choose/check for a radio or checkbox",
   },
   {
     test: (s) =>
@@ -1139,7 +1185,7 @@ const EVAL_PATTERNS: EvalPattern[] = [
       ),
     typed: "fill",
     suggestion:
-      "a fill: step (it re-reads the value and retries when hydration wipes it)",
+      "a fill: step (it re-reads the value and retries when hydration wipes it; mode: set writes through the native setter without focus or keys), or set/form for a custom control (picker, calendar, autocomplete, pills)",
   },
   {
     test: (s) =>
@@ -1148,7 +1194,7 @@ const EVAL_PATTERNS: EvalPattern[] = [
         /setTimeout|new Promise|sleep\s*\(/.test(s)),
     typed: "wait",
     suggestion:
-      "a wait: step (text | notText | selector | url | value) or click.until — bounded and diagnosable",
+      "a wait: step (text | notText | selector | url | value | app, any/all, optional), click.until, repeat with until, or request.until for an API poll — bounded and diagnosable",
   },
   {
     test: (s) =>
@@ -1166,11 +1212,10 @@ function evalFindings(
   lineOf: (path: Array<string | number>) => number | undefined,
 ): LintFinding[] {
   const out: LintFinding[] = [];
-  const steps = Array.isArray(record["steps"]) ? record["steps"] : [];
-  for (const [i, step] of steps.entries()) {
-    if (!step || typeof step !== "object") continue;
-    const body = (step as Record<string, unknown>)["eval"];
+  for (const { step, path } of rawStepTree(record["steps"], ["steps"])) {
+    const body = step["eval"];
     if (!body || typeof body !== "object") continue;
+    const at = issuePath("", path);
     const e = body as Record<string, unknown>;
     let source = typeof e["js"] === "string" ? e["js"] : undefined;
     let from = "eval.js";
@@ -1197,9 +1242,9 @@ function evalFindings(
       out.push({
         rule: "eval-typed-equivalent",
         severity: "warning",
-        where: `steps[${i}].eval`,
-        ...withLine(lineOf(["steps", i, "eval"])),
-        message: `steps[${i}] ${from} does what a typed ${pattern.typed} step does; use ${pattern.suggestion} — typed steps replay, heal and export to Playwright, an eval string does not`,
+        where: `${at}.eval`,
+        ...withLine(lineOf([...path, "eval"])),
+        message: `${at} ${from} does what a typed ${pattern.typed} step does; use ${pattern.suggestion} — typed steps replay, heal and export to Playwright, an eval string does not`,
         fix: { description: `replace with ${pattern.suggestion}`, safe: false },
       });
     }
@@ -1289,8 +1334,7 @@ function shellArgFindings(
     });
   };
   const list = (value: unknown, path: Array<string | number>): void => {
-    if (!Array.isArray(value)) return;
-    value.forEach((item, index) => check(item, [...path, index]));
+    for (const entry of rawStepTree(value, path)) check(entry.step, entry.path);
   };
   list(record["steps"], ["steps"]);
   const teardown = record["teardown"];
@@ -1363,10 +1407,8 @@ function secretFindings(
       });
     }
   });
-  const steps = Array.isArray(record["steps"]) ? record["steps"] : [];
-  for (const [i, step] of steps.entries()) {
-    if (!step || typeof step !== "object") continue;
-    const typed = typedValueOf(step as Record<string, unknown>);
+  for (const { step, path } of rawStepTree(record["steps"], ["steps"])) {
+    const typed = typedValueOf(step);
     if (
       typed &&
       typed.value.length > 0 &&
@@ -1379,9 +1421,9 @@ function secretFindings(
       out.push({
         rule: "literal-secret",
         severity: "warning",
-        where: `steps[${i}].${typed.kind}.value`,
-        ...withLine(lineOf(["steps", i, typed.kind, "value"])),
-        message: `steps[${i}] types a literal into what looks like a password-type field; if it is a credential, write \${secrets.NAME} (config secrets) or \${env.NAME}`,
+        where: `${issuePath("", path)}.${typed.kind}.value`,
+        ...withLine(lineOf([...path, typed.kind, "value"])),
+        message: `${issuePath("", path)} types a literal into what looks like a password-type field; if it is a credential, write \${secrets.NAME} (config secrets) or \${env.NAME}`,
         fix: {
           description:
             "a credential: ${secrets.NAME} or ${env.NAME}; ordinary test data: keep it, or move it to ${vars.X}",
@@ -1389,6 +1431,85 @@ function secretFindings(
         },
       });
     }
+  }
+  return out;
+}
+
+/**
+ * Every step of a raw (as written) step list with its document path,
+ * control-flow blocks included: `repeat.steps`, `if.then`, `if.else`.
+ */
+function rawStepTree(
+  list: unknown,
+  base: Array<string | number>,
+): Array<{ step: Record<string, unknown>; path: Array<string | number> }> {
+  const out: Array<{
+    step: Record<string, unknown>;
+    path: Array<string | number>;
+  }> = [];
+  if (!Array.isArray(list)) return out;
+  list.forEach((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return;
+    const step = item as Record<string, unknown>;
+    const path = [...base, index];
+    out.push({ step, path });
+    const repeat = step["repeat"];
+    if (repeat && typeof repeat === "object") {
+      out.push(
+        ...rawStepTree((repeat as Record<string, unknown>)["steps"], [
+          ...path,
+          "repeat",
+          "steps",
+        ]),
+      );
+    }
+    const branch = step["if"];
+    if (branch && typeof branch === "object") {
+      for (const key of ["then", "else"] as const) {
+        out.push(
+          ...rawStepTree((branch as Record<string, unknown>)[key], [
+            ...path,
+            "if",
+            key,
+          ]),
+        );
+      }
+    }
+  });
+  return out;
+}
+
+/**
+ * An authored id used by more than one step. Inside control-flow blocks it
+ * is an error (two nested loops reusing an id write the same evidence file
+ * stems, and run results / Studio rows become ambiguous); between top-level
+ * steps only, a warning (earlier specs may already do it).
+ */
+function duplicateIdFindings(
+  record: Record<string, unknown>,
+  lineOf: (path: Array<string | number>) => number | undefined,
+): LintFinding[] {
+  const byId = new Map<string, Array<Array<string | number>>>();
+  for (const { step, path } of rawStepTree(record["steps"], ["steps"])) {
+    const id = step["id"];
+    if (typeof id !== "string" || id === "") continue;
+    const paths = byId.get(id) ?? [];
+    paths.push(path);
+    byId.set(id, paths);
+  }
+  const out: LintFinding[] = [];
+  for (const [id, paths] of byId) {
+    if (paths.length < 2) continue;
+    const nested = paths.some((path) => path.length > 2);
+    const where = paths.map((path) => issuePath("", path));
+    out.push({
+      rule: "duplicate-step-id",
+      severity: nested ? "error" : "warning",
+      where: where[1]!,
+      ...withLine(lineOf([...paths[1]!, "id"])),
+      message: `step id ${JSON.stringify(id)} is used by ${where.join(", ")}; ids key step results, events and evidence files — give each step its own id`,
+      fix: { description: "rename all but one of these ids", safe: false },
+    });
   }
   return out;
 }

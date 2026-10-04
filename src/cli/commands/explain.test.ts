@@ -27,6 +27,25 @@ describe("buildExplain", () => {
     expect(clip!.flags.map((f) => f.name)).toContain("--label");
   });
 
+  it("documents the run policy: --bail, exit codes 8 and 9, doctor --orphans", () => {
+    const run = doc.commands.find((c) => c.name === "run")!;
+    expect(run.flags.map((f) => f.name)).toContain("--bail");
+    expect(Object.keys(run.exitCodes)).toEqual(
+      expect.arrayContaining(["0", "1", "2", "3", "4", "6", "7", "8", "9"]),
+    );
+    expect(run.exitCodes["8"]).toContain("critical");
+    expect(run.exitCodes["9"]).toContain("verifyClean");
+    expect(run.exitCodes["4"]).toContain("run.lock");
+    expect(run.notes).toContain("Exit precedence: 8 > 9");
+    const doctor = doc.commands.find((c) => c.name === "doctor")!;
+    expect(doctor.flags.map((f) => f.name)).toEqual(
+      expect.arrayContaining(["--orphans", "--kill", "--yes"]),
+    );
+    expect(doctor.exitCodes["1"]).toContain("orphan");
+    const mcp = doc.commands.find((c) => c.name === "mcp")!;
+    expect(mcp.notes).toContain("stopOnFail, bail");
+  });
+
   it("builds the docs synopsis from every DOC_TOPICS entry", () => {
     const docsCmd = doc.commands.find((c) => c.name === "docs");
     expect(docsCmd).toBeDefined();

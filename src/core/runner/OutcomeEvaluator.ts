@@ -152,13 +152,16 @@ async function dispatch(
     if (isValueVerifier(v)) return await evaluateValue(v, ctx, run);
     if (isTableVerifier(v)) return await evaluateTable(v, backend, ctx, run);
 
-    // An unresolved reference in a network body does not appear by
-    // waiting (earlier outcomes already ran): evaluate once, no polling.
+    // An unresolved reference in a network body or an xlsx operand does not
+    // appear by waiting (earlier outcomes already ran): evaluate once, no
+    // polling.
     if (
       !poll ||
       (isNetworkVerifier(v) &&
         v.network.body !== undefined &&
-        resolveRefsDeep(v.network.body.json, ctx).missing.length > 0)
+        resolveRefsDeep(v.network.body.json, ctx).missing.length > 0) ||
+      (isXlsxVerifier(v) &&
+        resolveRefsDeep({ ...v.xlsx, path: "" }, ctx).missing.length > 0)
     ) {
       return await evaluateOnce(v, backend, ctx, 1);
     }

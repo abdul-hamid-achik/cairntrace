@@ -50,6 +50,7 @@ import { environmentLockKey } from "../cli/invocation/lifecycle";
 import { resolveServicesConfigPath } from "../cli/commands/services/target";
 import { registerRunTools } from "./runTools";
 import { registerCatalogTools } from "./catalogTools";
+import { registerConfigTools } from "./configTools";
 import { registerAuthoringTools } from "./authoringTools";
 import { randomUUID } from "node:crypto";
 import {
@@ -100,6 +101,8 @@ import {
 import { SafeStashIdSchema } from "../core/schema/stash.v1";
 import {
   ServicesDownResultSchema,
+  ServicesLogsResultSchema,
+  ServicesRestartResultSchema,
   ServicesUpResultSchema,
 } from "../core/schema/services.v1";
 import { CAIRN_VERSION as VERSION } from "../cli/version";
@@ -292,6 +295,8 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
   });
   // cairn_catalog + the cairn://catalog resource (A4).
   registerCatalogTools(server);
+  // cairn_config_vars (F7).
+  registerConfigTools(server);
   // cairn_spec_lint / _finish / _promote + the author-flow prompt (A7/A8).
   registerAuthoringTools(server, {
     allowServices,
@@ -1062,7 +1067,11 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
       title: "Validate a cairntrace config file",
       description:
         "Validate the cairntrace.config.yml structure (zod schema) and cross-field rules. " +
-        "Returns ok, errors, keys, and a services summary. Exit code 0 = valid, 4 = invalid.",
+        "Composition is checked too: include files (missing file or include cycle = error; " +
+        "overrides listed in findings), environment extends (unknown or cyclic = error) and " +
+        "${vars.X} references inside vars (undefined or cyclic = error); vars nothing uses " +
+        "are warnings. Returns ok, errors, warnings, findings, includes, keys, and a " +
+        "services summary. Exit code 0 = valid, 4 = invalid.",
       inputSchema: {
         config: z
           .string()
@@ -1157,6 +1166,7 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           structuredContent: ServicesStatusResultSchema.parse(
             result,
           ) as unknown as Record<string, unknown>,
+          ...(result.engineRequirement ? { isError: true } : {}),
         };
       } catch (e) {
         return {
@@ -1202,8 +1212,10 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
         "with cairn_services_down. Waits for a cairn_run of this server that holds the same config. " +
         "Needs a server started as `cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); without it the tool refuses and starts nothing. " +
         "Returns the services-up v1 result (phases, lock, redacted events); exit 4 when no config is found, " +
-        "for an unknown env, no services block, or a lock held for another env; 2 for a boot failure or a " +
-        "config path that does not exist.",
+        "for an unknown env, no services for the env (none at the top level or in the environment), a lock held for another env, " +
+        "or a live cairn run (another process) holding the config's run.lock (runLock names the owner; the lock is held for the boot otherwise); 2 for a boot failure or a " +
+        "config path that does not exist; 8 when a boot failed and its cleanup could not complete a critical " +
+        "teardown entry (the provisioner's down): teardown[] names it, events[] holds the failed boot's events.",
       inputSchema: {
         config: z
           .string()
@@ -1269,7 +1281,9 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
         "down and tmux kill-session when the config lists them; a docker phase no command stops is warned " +
         "about), then the tmux session if it is still running, and removal of the config's `cairn services " +
         "up` owner lock. Works without a lock (a stack a run left alive for reuse); exit 4 with nothing torn " +
-        "down while the lock is held for another env. Returns the services-down v1 result; exit 2 when a " +
+        "down while the lock is held for another env, or while a live cairn run (another process) holds the config's run.lock — " +
+        "that run owns the stack and tears it down itself; runLock names the owner (the lock is held for the teardown otherwise). " +
+        "Returns the services-down v1 result; exit 2 when a " +
         "teardown command failed (the lock is still removed). Needs a server started as " +
         "`cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); without it the tool refuses and runs no teardown.",
       inputSchema: {
@@ -1298,6 +1312,7 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           servicesDown({
             ...(config !== undefined ? { config } : {}),
             ...(env !== undefined ? { env } : {}),
+            by: "mcp",
           }),
         );
         return {
@@ -1315,6 +1330,163 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
             },
           ],
           structuredContent: ServicesDownResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_services_restart",
+    {
+      title: "Restart service windows",
+      description:
+        "Restart tmux service windows of the configured session: Ctrl-C, wait for the pane's process to " +
+        "exit (never a hard kill), clear the history, print a restart marker, resend the window's command and " +
+        "wait for readyOn of the NEW output (text only below the marker, so stale scrollback never counts). " +
+        "Windows restart in the order given; a failure skips the rest. Refuses with exit 4, touching nothing, " +
+        "when the session is not running, a name is not a window of the configured session, or a live cairn run " +
+        "in another process supervises the session or holds the config's run.lock (runLock names the owner). Returns the " +
+        "services-restart v1 result. Runs under the same per-config lock as cairn_run. Needs a server started as " +
+        "`cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); without it the tool refuses.",
+      inputSchema: {
+        windows: z.array(z.string().min(1)).min(1).describe("Window names"),
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+        env: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Environment (default: config defaultEnvironment, else local)",
+          ),
+        stopTimeout: z
+          .string()
+          .optional()
+          .describe("Wait for the old process to exit (default 30s)"),
+        readyTimeout: z
+          .string()
+          .optional()
+          .describe("Wait for the new process to be ready (default 90s)"),
+      },
+    },
+    async ({ windows, config, env, stopTimeout, readyTimeout }, extra) => {
+      if (!allowServices) {
+        return servicesToolRefusal("cairn_services_restart", "restart");
+      }
+      try {
+        const { servicesRestart } = await import(
+          "../cli/commands/services/restart"
+        );
+        const result = await withServicesEnvironment(config, extra.signal, () =>
+          servicesRestart({
+            windows,
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+            ...(stopTimeout !== undefined ? { stopTimeout } : {}),
+            ...(readyTimeout !== undefined ? { readyTimeout } : {}),
+            by: "mcp",
+          }),
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? `services restart: ${result.windows
+                    .map((w) => `${w.window}=ready(${w.durationMs}ms)`)
+                    .join(" ")}`
+                : `services restart failed (exit ${result.exitCode}): ${result.error ?? "unknown error"}`,
+            },
+          ],
+          structuredContent: ServicesRestartResultSchema.parse(
+            result,
+          ) as unknown as Record<string, unknown>,
+          isError: !result.ok,
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text", text: `error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_services_logs",
+    {
+      title: "Read a service window's output",
+      description:
+        "The captured text of a service window (redacted, wrapped lines joined): the last `lines` lines, only " +
+        "the output since the last restart with sinceRestart, or wait for a line matching a regular expression " +
+        "(`wait` + `timeout`; exit 1 on timeout). Read-only. Returns the services-logs v1 result; exit 4 for an " +
+        "unknown window or a session that is not running.",
+      inputSchema: {
+        window: z.string().min(1).describe("Window name"),
+        config: z
+          .string()
+          .optional()
+          .describe(
+            "Path to cairntrace.config.yml (auto-discovers if omitted)",
+          ),
+        env: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Environment (default: config defaultEnvironment, else local)",
+          ),
+        sinceRestart: z
+          .boolean()
+          .optional()
+          .describe("Only the output after the window's last restart"),
+        lines: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Last N lines (default 200)"),
+        wait: z
+          .string()
+          .optional()
+          .describe("Wait until a line matches this regular expression"),
+        timeout: z.string().optional().describe("Budget of wait (default 30s)"),
+      },
+    },
+    async ({ window, config, env, sinceRestart, lines, wait, timeout }) => {
+      try {
+        const { servicesLogs } = await import("../cli/commands/services/logs");
+        const result = await servicesLogs({
+          window,
+          ...(config !== undefined ? { config } : {}),
+          ...(env !== undefined ? { env } : {}),
+          ...(sinceRestart ? { sinceRestart: true } : {}),
+          ...(lines !== undefined ? { lines } : {}),
+          ...(wait !== undefined ? { wait } : {}),
+          ...(timeout !== undefined ? { timeout } : {}),
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.ok
+                ? result.lines.join("\n")
+                : `services logs failed (exit ${result.exitCode}): ${result.error ?? "unknown error"}`,
+            },
+          ],
+          structuredContent: ServicesLogsResultSchema.parse(
             result,
           ) as unknown as Record<string, unknown>,
           isError: !result.ok,
@@ -2887,7 +3059,10 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
         path: z
           .string()
           .min(1)
-          .describe("Spec file or directory of YAML specs"),
+          .optional()
+          .describe(
+            "Spec file or directory of YAML specs (optional with a target that names an input)",
+          ),
         out: z
           .string()
           .optional()
@@ -2924,37 +3099,199 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           .array(z.string())
           .optional()
           .describe("Repeatable key=value overrides for ${vars.X}"),
+        preconditions: z
+          .enum(["inline", "global", "skip", "manifest"])
+          .optional()
+          .describe(
+            "Host commands (preconditions, run: steps, teardown:, fixtures, gates): inline = bounded helper in the generated runtime; global = once in the project's global-setup (project/into only; fixtures and gates call the cairn CLI); skip = list only; manifest = list in .cairn-export.json. Default: standalone files skip, project/into run preconditions per file",
+          ),
+        verifiers: z
+          .enum(["keep", "gate", "drop"])
+          .optional()
+          .describe(
+            "Node / datasource verifiers: keep (default) | gate (run only when the required env is present, else the test ends skipped, never passed) | drop (omit with a diagnostic)",
+          ),
+        gateEnv: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Env var names every gated node verifier requires (verifiers: gate)",
+          ),
+        hostConfig: z
+          .string()
+          .optional()
+          .describe(
+            "With into: adapt the generated code to this existing playwright.config (read statically, never executed): module system, timeouts, testIdAttribute, bypassCSP, testDir/testMatch, tsconfig aliases, the host's prettier",
+          ),
+        mapFile: z
+          .string()
+          .optional()
+          .describe(
+            "With into / project: the export map (export.map.yml) that binds cairn actions to the host's fixtures (destructured in the test signature), page-object methods, or an API-login storageState; unmapped actions become generated page objects over the host's base page. strict: true in the map makes an unmapped action an error. See cairn_docs export",
+          ),
+        target: z
+          .string()
+          .optional()
+          .describe(
+            "A named export.targets.<name> profile of the cairntrace config (into, hostConfig, input, preconditions, verifiers, gateEnv, lang, env, mapFile, maxEvalRatio, allowEvalWithoutBypass, strictLocators, verifyProject); explicit arguments override it",
+          ),
+        maxEvalRatio: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe(
+            "Refuse a spec whose share of page eval steps is above this (0..1); other specs are still exported and the refusals are listed under refused",
+          ),
+        allowEvalWithoutBypass: z
+          .boolean()
+          .optional()
+          .describe(
+            "With hostConfig: export page evals although the host does not set use.bypassCSP: true",
+          ),
+        strictLocators: z
+          .boolean()
+          .optional()
+          .describe(
+            "Emit no .first() on a locator without nth, so an ambiguous locator fails the exported test (Playwright strict mode, like cairn run --backend playwright). Default false: .first() (first-match semantics)",
+          ),
       },
     },
     async ({
-      path: inputPath,
-      out,
-      outDir,
-      lang,
-      stdout,
-      project,
-      into,
-      config,
-      env,
-      var: varFlags,
+      path: inputPathArg,
+      out: outArg,
+      outDir: outDirArg,
+      lang: langArg,
+      stdout: stdoutArg,
+      project: projectArg,
+      into: intoArg,
+      config: configArg,
+      env: envArg,
+      var: varArg,
+      preconditions: preconditionsArg,
+      verifiers: verifiersArg,
+      gateEnv: gateEnvArg,
+      hostConfig: hostConfigArg,
+      mapFile: mapFileArg,
+      target: targetArg,
+      maxEvalRatio: maxEvalRatioArg,
+      allowEvalWithoutBypass: allowEvalArg,
+      strictLocators: strictLocatorsArg,
     }) => {
       // Same code paths as `cairn export playwright`: project/into exports
       // copy upload fixtures and write `.cairn-export.json`; batch `outDir`
       // exports write the README and manifest too.
-      const { parseForExport, writeBatchExport, writeProjectExport } =
-        await import("../cli/commands/export");
+      const {
+        parseForExport,
+        resolveExportModes,
+        writeBatchExport,
+        writeProjectExport,
+      } = await import("../cli/commands/export");
+      const {
+        applyExportTarget,
+        assertHostFlags,
+        assertMapFlags,
+        evalRatioRefusalOf,
+        limitOf,
+      } = await import("../cli/commands/exportHost");
       const { exportPlaywright } = await import(
         "../core/exporters/playwrightExporter"
       );
       const { expandSpecArgs } = await import("../cli/commands/run");
-      const resolvedLang = lang ?? "ts";
-      const runtimeOpts = {
-        ...(config !== undefined ? { config } : {}),
-        ...(env !== undefined ? { env } : {}),
-        ...(varFlags !== undefined ? { var: varFlags } : {}),
-      };
-
       try {
+        // A named target fills what the arguments left out (they win).
+        const applied = await applyExportTarget<
+          import("../cli/commands/export").ExportPlaywrightOptions
+        >(
+          {
+            ...(outArg !== undefined ? { out: outArg } : {}),
+            ...(outDirArg !== undefined ? { outDir: outDirArg } : {}),
+            ...(langArg !== undefined ? { lang: langArg } : {}),
+            ...(stdoutArg !== undefined ? { stdout: stdoutArg } : {}),
+            ...(projectArg !== undefined ? { project: projectArg } : {}),
+            ...(intoArg !== undefined ? { into: intoArg } : {}),
+            ...(configArg !== undefined ? { config: configArg } : {}),
+            ...(envArg !== undefined ? { env: envArg } : {}),
+            ...(varArg !== undefined ? { var: varArg } : {}),
+            ...(preconditionsArg !== undefined
+              ? { preconditions: preconditionsArg }
+              : {}),
+            ...(verifiersArg !== undefined ? { verifiers: verifiersArg } : {}),
+            ...(gateEnvArg !== undefined ? { gateEnv: gateEnvArg } : {}),
+            ...(hostConfigArg !== undefined
+              ? { hostConfig: hostConfigArg }
+              : {}),
+            ...(mapFileArg !== undefined ? { mapFile: mapFileArg } : {}),
+            ...(targetArg !== undefined ? { target: targetArg } : {}),
+            ...(maxEvalRatioArg !== undefined
+              ? { maxEvalRatio: maxEvalRatioArg }
+              : {}),
+            ...(allowEvalArg !== undefined
+              ? { allowEvalWithoutBypass: allowEvalArg }
+              : {}),
+            ...(strictLocatorsArg !== undefined
+              ? { strictLocators: strictLocatorsArg }
+              : {}),
+          },
+          inputPathArg,
+        );
+        const eff = applied.opts;
+        const inputPath = applied.inputPath;
+        if (inputPath === undefined) {
+          return toolError(
+            "a path is required (or a target whose profile names an input)",
+          );
+        }
+        const out = eff.out;
+        const outDir = eff.outDir;
+        const stdout = eff.stdout;
+        const project = eff.project;
+        const into = eff.into;
+        const resolvedLang = eff.lang === "js" ? "js" : "ts";
+        const runtimeOpts = {
+          ...(eff.config !== undefined ? { config: eff.config } : {}),
+          ...(eff.env !== undefined ? { env: eff.env } : {}),
+          ...(eff.var !== undefined ? { var: eff.var } : {}),
+        };
+        const modeOpts = {
+          ...(eff.preconditions !== undefined
+            ? { preconditions: eff.preconditions }
+            : {}),
+          ...(eff.verifiers !== undefined ? { verifiers: eff.verifiers } : {}),
+          ...(eff.gateEnv !== undefined ? { gateEnv: eff.gateEnv } : {}),
+        };
+        // E8 / E12: host profile and eval gate, same fields as the CLI flags.
+        const hostOpts = {
+          ...(eff.hostConfig !== undefined
+            ? { hostConfig: eff.hostConfig }
+            : {}),
+          ...(eff.target !== undefined ? { target: eff.target } : {}),
+          ...(eff.maxEvalRatio !== undefined
+            ? { maxEvalRatio: eff.maxEvalRatio }
+            : {}),
+          ...(eff.allowEvalWithoutBypass !== undefined
+            ? { allowEvalWithoutBypass: eff.allowEvalWithoutBypass }
+            : {}),
+          ...(eff.strictLocators !== undefined
+            ? { strictLocators: eff.strictLocators }
+            : {}),
+          ...(eff.mapFile !== undefined ? { mapFile: eff.mapFile } : {}),
+        };
+        assertHostFlags({ ...hostOpts, ...(into ? { into } : {}) });
+        assertMapFlags({
+          ...hostOpts,
+          ...(into ? { into } : {}),
+          ...(project ? { project } : {}),
+        });
+        limitOf(hostOpts);
+        const modes = resolveExportModes({
+          ...modeOpts,
+          ...(project ? { project } : {}),
+          ...(into ? { into } : {}),
+          ...(outDir ? { outDir } : {}),
+          ...(out ? { out } : {}),
+          ...(stdout ? { stdout } : {}),
+        });
         const paths = await expandSpecArgs([inputPath]);
         if (project || into) {
           if (into && project)
@@ -2974,6 +3311,8 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
             resolvedLang,
             {
               ...runtimeOpts,
+              ...modeOpts,
+              ...hostOpts,
               ...(into ? { into } : { project: true }),
               outDir: dest,
             },
@@ -2989,6 +3328,8 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
               },
             ],
             structuredContent: { ...report },
+            // Specs over maxEvalRatio were refused (the CLI exits 1).
+            ...((report.refused ?? []).length > 0 ? { isError: true } : {}),
           };
         }
         if (paths.length === 0)
@@ -2997,18 +3338,39 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           if (paths.length !== 1) {
             return toolError("stdout requires a single spec file");
           }
-          const { parsed, envTarget } = await parseForExport(
-            paths[0]!,
-            runtimeOpts,
-          );
+          const {
+            parsed,
+            envTarget,
+            widgets,
+            envAuth,
+            appHandles,
+            datasourceEnv,
+            httpDatasources,
+            testIdAttribute,
+          } = await parseForExport(paths[0]!, runtimeOpts);
+          const refusal = evalRatioRefusalOf(parsed, limitOf(hostOpts));
+          if (refusal) return toolError(refusal.message);
           const result = exportPlaywright(parsed.resolved, {
             sourcePath: parsed.path,
             lang: resolvedLang,
+            ...(testIdAttribute ? { testIdAttribute } : {}),
+            ...(eff.strictLocators ? { strictLocators: true } : {}),
+            lateBoundEnv: true,
+            ...(modes.preconditions
+              ? { preconditions: modes.preconditions }
+              : {}),
+            ...(modes.verifiers ? { verifiers: modes.verifiers } : {}),
+            ...(modes.gateEnv.length > 0 ? { gateEnv: modes.gateEnv } : {}),
+            datasourceEnv,
+            httpDatasources,
             // Like `cairn export playwright --stdout`: an imported action's
             // eval.file / upload.path resolve against the action (F13), and
             // the requires guard follows the baked environment.
             stepOrigins: parsed,
             ...(envTarget ? { envTarget } : {}),
+            widgets,
+            ...(envAuth ? { envAuth } : {}),
+            ...(appHandles ? { appHandles } : {}),
           });
           return {
             content: [{ type: "text", text: result.source }],
@@ -3032,14 +3394,19 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           resolvedLang,
           {
             ...runtimeOpts,
+            ...modeOpts,
+            ...hostOpts,
             ...(out ? { out } : {}),
             ...(outDir ? { outDir } : {}),
           },
           inputPath,
         );
-        const failures = (written.report?.errors ?? written.errors)
-          .map((e) => `${e.source}: ${e.message}`)
-          .join("; ");
+        const failures = [
+          ...(written.report?.errors ?? written.errors).map(
+            (e) => `${e.source}: ${e.message}`,
+          ),
+          ...written.refused.map((r) => r.message),
+        ].join("; ");
         if (!written.report) {
           return toolError(`export failed: ${failures || "nothing exported"}`);
         }
@@ -3054,8 +3421,11 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
             },
           ],
           structuredContent: { ...report },
-          // A leaked late-bound placeholder is an exporter defect (CLI exit 2).
-          ...(written.leaked ? { isError: true } : {}),
+          // A leaked late-bound placeholder is an exporter defect (CLI exit 2);
+          // specs over maxEvalRatio were refused (CLI exit 1).
+          ...(written.leaked || written.refused.length > 0
+            ? { isError: true }
+            : {}),
         };
       } catch (e) {
         return {
@@ -3067,6 +3437,231 @@ export function buildMcpServer(options: McpServerOptions = {}): McpServer {
           ],
           isError: true,
         };
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_export_verify",
+    {
+      title: "Verify a Playwright export",
+      description:
+        "Prove a Playwright export (--project / --into / --out-dir with a .cairn-export.json) is faithful, like `cairn export playwright --verify <dir>`. Static gates (no browser): no leaked late-bound sentinels, tsc with the target's own tsconfig, the host's eslint when a config exists, `playwright test --list` count == exported specs, manifest freshness; each reports passed | failed | skipped(reason) and a skipped gate is never a pass. differential:true also runs `cairn run --backend playwright` and the exported test with the SAME CAIRN_RUN_TOKEN against the app that is already running (sequentially, cairn first; specs that are not idempotent need a reset) and compares per-step / per-outcome verdicts, network evidence and duration. mutate inverts one assertion per spec (all: every outcome) in a temp copy and requires the test to fail at that outcome. On a host config with several projects every Playwright run (list, differential, mutants) uses one project: verifyProject, else the one recorded in the manifest, else the first that discovers the exported tests and runs Chromium (report playwrightProject); Playwright still runs its dependencies. Writes .cairn-export-verify.json/.md and the manifest's verify field; returns the urn:cairntrace.dev:export-verify:v1 report (isError when status is not passed: failed = exit 1, error = exit 2, inconclusive = exit 3, nothing proven and never a pass). Tools are the target's local binaries; nothing is installed.",
+      inputSchema: {
+        exportDir: z
+          .string()
+          .min(1)
+          .describe("The export directory (it holds .cairn-export.json)"),
+        differential: z
+          .boolean()
+          .optional()
+          .describe(
+            "Also run cairn run and the exported test with the same run token and compare them (needs the app up)",
+          ),
+        mutate: z
+          .enum(["one", "all"])
+          .optional()
+          .describe(
+            "Invert one assertion per spec (one) or every outcome's (all) and require the exported test to fail",
+          ),
+        strict: z
+          .boolean()
+          .optional()
+          .describe("A skipped gate or inconclusive result fails the verify"),
+        only: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Restrict the differential / mutation to specs whose path or test file contains one of these",
+          ),
+        durationRatio: z
+          .number()
+          .gt(1)
+          .optional()
+          .describe(
+            "Warn when the slower side exceeds the faster by more than this ratio (default 3)",
+          ),
+        config: z.string().optional().describe("cairntrace.config.yml path"),
+        env: z.string().optional().describe("Config environment name"),
+        var: z
+          .array(z.string())
+          .optional()
+          .describe("The key=value overrides the export was written with"),
+        verifyProject: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Multi-project host config: the Playwright project to list, run and mutate under (default: the manifest's, else one that discovers the tests, Chromium first)",
+          ),
+      },
+    },
+    async ({
+      exportDir,
+      differential,
+      mutate,
+      strict,
+      only,
+      durationRatio,
+      config,
+      env,
+      var: varFlags,
+      verifyProject,
+    }) => {
+      const { verifyPlaywrightExport, verifyToMarkdown } = await import(
+        "../cli/commands/exportVerify"
+      );
+      try {
+        const { report } = await verifyPlaywrightExport({
+          exportDir,
+          ...(differential ? { differential } : {}),
+          ...(mutate ? { mutate } : {}),
+          ...(strict ? { strict } : {}),
+          ...(only ? { only } : {}),
+          ...(durationRatio !== undefined ? { durationRatio } : {}),
+          ...(verifyProject !== undefined ? { project: verifyProject } : {}),
+          runtime: {
+            ...(config !== undefined ? { config } : {}),
+            ...(env !== undefined ? { env } : {}),
+            ...(varFlags !== undefined ? { var: varFlags } : {}),
+          },
+        });
+        return {
+          content: [{ type: "text", text: verifyToMarkdown(report) }],
+          structuredContent: { ...report },
+          ...(report.status !== "passed" ? { isError: true } : {}),
+        };
+      } catch (e) {
+        return toolError(`export verify failed: ${(e as Error).message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_import_playwright",
+    {
+      title: "Import a Playwright test",
+      description:
+        "Convert a @playwright/test .spec.ts into a reviewable Cairntrace spec, like `cairn import playwright`. A TypeScript AST walk (never executes the file; resolves the project's own `typescript`, else cairntrace's) maps the statically resolvable calls of one test — its body, enclosing beforeEach hooks, test.step bodies, page-object methods and helper functions (same file or relative imports), custom fixtures read from the test file's `test.extend` imports — to steps, locators and outcomes. Anything it cannot map is a TODO with the reason (never a silent drop); loose mappings are listed under approximations; coverage counts mapped / approximated / unmapped. Typed credentials become ${secrets.X} placeholders. Writes the YAML unless stdout:true, then lints and verifies it and reports what remains (check). See `cairn docs import`.",
+      inputSchema: {
+        path: z.string().min(1).describe("Path to the .spec.ts file"),
+        out: z
+          .string()
+          .optional()
+          .describe("Where to write (default: <source-dir>/<test-title>.yml)"),
+        test: z
+          .string()
+          .optional()
+          .describe(
+            "Import this test (title substring or 1-based index) instead of the first",
+          ),
+        stdout: z
+          .boolean()
+          .optional()
+          .describe("Return the YAML without writing a file"),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Overwrite an existing out file (default: refuse)"),
+        allowEmpty: z
+          .boolean()
+          .optional()
+          .describe(
+            "Write the placeholder draft even when nothing mapped (default: status refused, isError)",
+          ),
+      },
+    },
+    async ({ path: inputPath, out, test, stdout, force, allowEmpty }) => {
+      const { runImportPlaywright, toMarkdown } = await import(
+        "../cli/commands/import"
+      );
+      try {
+        const report = await runImportPlaywright(inputPath, {
+          ...(out ? { out } : {}),
+          ...(test ? { test } : {}),
+          ...(stdout ? { stdout: true } : {}),
+          ...(force ? { force: true } : {}),
+          ...(allowEmpty ? { allowEmpty: true } : {}),
+          includeYaml: true,
+        });
+        return {
+          content: [{ type: "text", text: toMarkdown(report) }],
+          structuredContent: { ...report },
+          ...(report.status === "refused" ? { isError: true } : {}),
+        };
+      } catch (e) {
+        return toolError(`import playwright failed: ${(e as Error).message}`);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cairn_import_playwright_trace",
+    {
+      title: "Import a Playwright trace",
+      description:
+        "Convert a Playwright trace archive (trace.zip from tracing.stop({ path }) or trace: 'on') into a DRAFT Cairntrace spec, like `cairn import playwright-trace`. Reads only the structured action log and the network log (no screenshots, sources or response bodies). Steps: open / click / fill / type / press / select / check / uncheck / hover / focus / wait / request from the recorded actions, with the best locator the trace holds (role+name > label > testid > text > css); test.step titles become step ids. Outcomes are DRAFTS (descriptions start with DRAFT): recorded expect() calls, the final URL and same-origin API calls (method + path pattern + status; no bodies). Values typed into credential-like fields, credential headers and credential-named body keys or query values become ${secrets.X} placeholders, never literals. Writes the YAML unless stdout:true, then lints and verifies it and reports the findings that remain (check). Review the draft before trusting it. See `cairn docs import`.",
+      inputSchema: {
+        path: z.string().min(1).describe("Path to the trace .zip"),
+        out: z
+          .string()
+          .optional()
+          .describe("Where to write (default: ./<name>.yml)"),
+        name: z
+          .string()
+          .optional()
+          .describe("Spec name (default: the trace's test title)"),
+        intent: z
+          .string()
+          .optional()
+          .describe("Spec intent (default: the trace's test title)"),
+        stdout: z
+          .boolean()
+          .optional()
+          .describe("Return the YAML without writing a file"),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Overwrite an existing out file (default: refuse)"),
+        allowEmpty: z
+          .boolean()
+          .optional()
+          .describe(
+            "Write the placeholder draft even when nothing mapped (default: status refused, isError)",
+          ),
+      },
+    },
+    async ({
+      path: inputPath,
+      out,
+      name,
+      intent,
+      stdout,
+      force,
+      allowEmpty,
+    }) => {
+      const { runImportPlaywrightTrace, toMarkdown } = await import(
+        "../cli/commands/import"
+      );
+      try {
+        const report = await runImportPlaywrightTrace(inputPath, {
+          ...(out ? { out } : {}),
+          ...(name ? { name } : {}),
+          ...(intent ? { intent } : {}),
+          ...(stdout ? { stdout: true } : {}),
+          ...(force ? { force: true } : {}),
+          ...(allowEmpty ? { allowEmpty: true } : {}),
+          includeYaml: true,
+        });
+        return {
+          content: [{ type: "text", text: toMarkdown(report) }],
+          structuredContent: { ...report },
+          ...(report.status === "refused" ? { isError: true } : {}),
+        };
+      } catch (e) {
+        return toolError(
+          `import playwright-trace failed: ${(e as Error).message}`,
+        );
       }
     },
   );

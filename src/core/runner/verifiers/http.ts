@@ -1,12 +1,12 @@
 import { createDatasourceSession, type HttpReply } from "../../datasources";
-import { httpCall, joinBaseUrl } from "../../datasources/http";
+import { httpCall } from "../../datasources/http";
+import { joinBaseUrl } from "../../datasources/httpWire";
 import type { HttpVerifier } from "../../schema/verifier.v1";
 import { isRelativeUrl, joinUrl } from "../url";
 import { boundValue, redactHeaders, redactUrl } from "./evidence";
-import { matchPaths, type MatchOutcome } from "./matchers";
 import type { PollRunner } from "./mongo";
-import { describeStatus, matchesStatus } from "./network";
 import { resolveRefsDeep } from "./refs";
+import { judgeHttp } from "./responseJudge";
 import type { VerifierContext, VerifierEvaluation } from "./types";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -113,7 +113,7 @@ export async function evaluateHttp(
           ...signal,
         });
       }
-      return judgeHttp(judged, method, shownUrl, reply);
+      return judgeHttp(judged.expect, method, shownUrl, reply);
     });
     if (spec.assign && reply) {
       ctx.captures ??= {};
@@ -143,62 +143,4 @@ export async function evaluateHttp(
   } finally {
     await session.close();
   }
-}
-
-function judgeHttp(
-  spec: HttpVerifier["http"],
-  method: string,
-  url: string,
-  reply: HttpReply,
-): VerifierEvaluation {
-  const checks: MatchOutcome[] = [];
-  const status = spec.expect?.status;
-  const statusOk =
-    status === undefined
-      ? reply.status >= 200 && reply.status < 300
-      : typeof status === "number"
-        ? reply.status === status
-        : matchesStatus(reply.status, status);
-  checks.push({
-    passed: statusOk,
-    expected: `${method} ${redactUrl(url)} status ${
-      status === undefined
-        ? "2xx"
-        : typeof status === "number"
-          ? `== ${status}`
-          : describeStatus(status)
-    }`,
-    actual: `status ${reply.status}`,
-  });
-  if (spec.expect?.json) {
-    if (!reply.json) {
-      checks.push({
-        passed: false,
-        expected: "a JSON body",
-        actual: reply.truncated
-          ? `body over the parse limit (${reply.bytes} bytes)`
-          : `non-JSON body: ${String(reply.body).slice(0, 120)}`,
-      });
-    } else {
-      const report = matchPaths(reply.body, spec.expect.json);
-      for (const result of report.results) {
-        checks.push({
-          passed: result.passed,
-          expected: result.expected,
-          actual: `${result.path || "$"}=${result.actual}`,
-        });
-      }
-    }
-  }
-  const failing = checks.filter((check) => !check.passed);
-  return {
-    passed: failing.length === 0,
-    expected: checks.map((check) => check.expected).join("; "),
-    actual: [
-      `status ${reply.status}`,
-      ...failing
-        .map((check) => check.actual)
-        .filter((part) => !part.startsWith("status ")),
-    ].join("; "),
-  };
 }

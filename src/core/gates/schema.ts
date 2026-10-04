@@ -19,7 +19,7 @@ import { z } from "zod";
 const DURATION_PATTERN = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/;
 
 /** Milliseconds, or a string like `500ms`, `2s`, `5m`, `1h`. `0` = no deadline. */
-const DurationSchema = z.union([
+export const DurationSchema = z.union([
   z.number().int().nonnegative(),
   z
     .string()
@@ -28,7 +28,7 @@ const DurationSchema = z.union([
       'duration must be milliseconds or a number with ms|s|m|h (e.g. "30s")',
     ),
 ]);
-type Duration = z.infer<typeof DurationSchema>;
+export type Duration = z.infer<typeof DurationSchema>;
 
 const UNIT_MS: Record<string, number> = {
   ms: 1,

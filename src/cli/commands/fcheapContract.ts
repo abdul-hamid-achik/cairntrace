@@ -257,6 +257,10 @@ const PublishOutputSchema = z
     size_bytes: NonNegativeIntegerSchema,
     verification: z.literal("server-sha256"),
     published_at: z.string().datetime({ offset: true }),
+    /** Server commit time (file.cheap 0.37+); absent on older servers. */
+    committed_at: z.string().datetime({ offset: true }).optional(),
+    /** Server-computed deletion time (file.cheap 0.37+). */
+    expires_at: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
 
@@ -390,6 +394,10 @@ export interface FcheapPublishResult {
   sizeBytes: number;
   verification: "server-sha256";
   publishedAt: string;
+  /** Server commit time (RFC 3339), when the receipt carries it. */
+  committedAt?: string;
+  /** Server-computed deletion time (RFC 3339), when the receipt carries it. */
+  expiresAt?: string;
 }
 
 function parseOutput<TSchema extends z.ZodTypeAny>(
@@ -570,5 +578,7 @@ export function parseFcheapPublishOutput(stdout: string): FcheapPublishResult {
     sizeBytes: result.size_bytes,
     verification: result.verification,
     publishedAt: result.published_at,
+    ...(result.committed_at ? { committedAt: result.committed_at } : {}),
+    ...(result.expires_at ? { expiresAt: result.expires_at } : {}),
   };
 }

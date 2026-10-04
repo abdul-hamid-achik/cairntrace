@@ -50,7 +50,11 @@ Runner
         ↓ each step:
               when: predicate?  → maybe skip
               ${requests|captures|runs|fixtures.<name>.…} placeholders spliced
+              repeat: / if: / use.retry → nested steps (parentId, iteration, branch)
+              wait.any|all|optional|app → runner-polled bounded probes
               request: → backend.request when available; bounded page-fetch fallback
+                         (v2: until / retry / capture / matrix; use: login → env auth)
+              set|check|uncheck|choose|form → in-page widget runtime, read back
               run: → host command / node script (own process group, hard deadline)
               expect: / capture: → one bounded backend.evaluate probe per attempt
               runStep(step) on the BrowserBackend  (AgentBrowserAdapter, PlaywrightAdapter or MockBrowserBackend)
@@ -63,7 +67,7 @@ Runner
               run.{json,yaml,md}  report.{html,json}
               agent_context.md  events.ndjson
               outcomes/<id>.md (+ .raw.json sidecar for script, data verifiers, polled outcomes)
-              expects/  captures/  fixtures.json
+              expects/  captures/  requests/  widgets/  evals/  fixtures.json
               snapshots/  screenshots/  console/  network/  spec.resolved.yml
 ```
 
@@ -90,11 +94,19 @@ per-agent code paths.
   redacted, self-contained, print-friendly, and themeable through
   `cairntrace.config.yml` `report.theme` / `report.colors`; do not add a
   separate report theme config file.
-- Exit codes are meaningful: 0 success, 1 outcome-failure, 2 errored,
+- Exit codes are meaningful: 0 success, 1 outcome-failure, 2 errored (also
+  a command-line usage error, on every command: an unknown flag or command, a
+  missing option value or argument, never 1; `--help` / `--version` exit 0),
   3 cold-start gate, 4 lint, 5 heal-no-progress, 6 contract-hash mismatch,
   7 refused by the environment policy (`cairn run` when every spec was
   refused, or any spec under `--strict-requires`; `cairn spec heal` on a
-  refused spec).
+  refused spec), 8 a critical teardown failed (a `services.teardown` entry
+  with `critical: true`, or the `services.provisioner` `down`), 9 dirty state after the run (config
+  `run.verifyClean`). Precedence 8 > 9 > the run's own code; 4 also covers a
+  run refused by the config `run:` policy (live run lock, failed preflight,
+  dirty machine before the run), `cairn services up|down|restart` while a
+  live run holds that lock, or by the engine pin (config
+  `requires.cairntrace` not met, `runtimes.node` missing or out of range).
 - Prefer small adapters over coupling core logic to agent-browser or Playwright.
 - Do **not** introduce per-agent code paths. The CLI + MCP server + artifact
   format are the agent interface.
@@ -184,7 +196,19 @@ per-agent code paths.
   out of page with browser-context cookie sharing and a 30000ms default timeout;
   under Bun, the cookie bridge runs in a subprocess so the parent can kill it
   at `timeoutMs` even if native fetch stalls. Backends without native request
-  support use a bounded page-fetch fallback.
+  support use a bounded page-fetch fallback. Request v2 replaces fetch glue in
+  evals: `credentials: omit` (anonymous; no cookies sent or kept), headers
+  with `${requests.<name>.…}` (a captured bearer) or `${secrets.X}`,
+  `until: { status?, json?, every?, timeoutMs? }` (poll instead of a sleep
+  loop), `retry: { times, on: [5xx|network], delayMs? }`, `capture: { key:
+  path }` (filters `$.tasks[?(@.title == "x")].id`, first match, a miss
+  fails) → `${requests.<name>.captures.<key>}`, and `matrix: { key:
+  [values] }` + `expectStatus` (one request per combination, `${matrix.…}`
+  spliced; fails listing mismatches). Sign in with `use: login`: with no
+  imported `login` action it runs config `environments.<env>.auth`
+  (`alreadyAuthenticated?`, `login`, `after?` follow-ups, `hydrate?`) with
+  provider secrets that never reach artifacts; it satisfies the cold-start
+  contract. See `cairn docs steps` ("Request v2", "Environment Login").
 - When a transient UI state must survive across interactions (a hover that
   reveals a popover you then click), use a `batch` step: ≥2 selector-only
   sub-steps run in one backend invocation (agent-browser `batch --bail`) so
@@ -213,6 +237,81 @@ per-agent code paths.
   `notText` plus optional `timeoutMs`. Cairntrace retries with backoff, at most
   four total clicks. Text conditions use the same normalized,
   case-insensitive semantics as waits.
+- Loops, branches and retries are typed steps, never unrolled step ladders
+  or `eval` loops: `repeat: { max (≤100), until?, steps, indexVar?, onMax? }`
+  (`until` checked before each iteration and after the last; `onMax: fail`
+  by default; `${repeat.index}` / `${repeat.iteration}` /
+  `${repeat.<indexVar>}`), `if: { condition, then, else? }`, `when: { var,
+  equals | in | exists }` (plain names read config/spec/use-site vars, dotted
+  names read runtime values such as `waits.<name>.matched`),
+  `wait: { any | all: [conditions], timeoutMs }`, `wait.optional: true` (+
+  `assign` → `${waits.<name>.matched}`), and `use: { action, retry: { times,
+  until?, delayMs? } }`. Conditions share the `when:` grammar and never wait.
+  Nested steps keep stable ids (`<parent>.<n>`, `<parent>.then.<n>`);
+  events and run.json results carry `parentId` / `iteration` / `branch`
+  (post-order). Heal does not patch nested steps; teardown refuses control
+  flow. See `cairn docs steps` ("Control Flow").
+- Custom form controls are typed widget steps, never eval files that open a
+  picker and hope: `set: { field | locator, value }`, `check` / `uncheck: {
+  field, option? }`, `choose: { field, option }` and `form: { fields: { <key>:
+  value | { value, optional?, dependsOn?, driver? } }, verify?, onFailure:
+  dumpUnanswered }`. `field: <key>` resolves through config
+  `browser.fieldRoot` (CSS templates with `{key}`; visible matches only).
+  A driver is detected by `match(root)` (built-ins vue-multiselect,
+  primevue-autocomplete, primevue-calendar, pills, radio-group,
+  checkbox-group, native-select, native-input; project modules via
+  `browser.widgets: [{ file }]`, which run in the page like eval files), the
+  value is written in the page and READ BACK — the step fails with
+  `widgets/<n>_<id>.json` evidence when it did not commit; a field already
+  holding the value is left alone; `form` re-reads every field at the end.
+  `click` takes `optional: true` (skipped when absent), `dispatch: true` (DOM
+  click) and `fallback: dispatch` (pointer, else DOM click with `detail:
+  pointer blocked by …`); `fill` takes `mode: set` (native setter, no
+  focus/keydown) and `optional: true`. agent-browser uploads that the page
+  cannot read are rebuilt in the page (`via: dataTransfer`). See `cairn docs
+  widgets`.
+- Workbooks are checked with the typed `xlsx` verifier, never a script that
+  unzips XML or installs SheetJS: `sheet` (name, `{ match }`, 0-based index),
+  `contains` (every sheet unless `sheet` is set), `headers: { labelRow,
+  keyRow, strip, present, absent, labels: { key: label }, includesInOrder |
+  withinListInOrder: <list | ${captures.x.headers}> }`, `rows: { afterKeyRow:
+  { count | atLeast | atMost }, match: [{ column, matcher }] }`, `cells: [{
+  ref, equals | matches | numFmt }]`, `validations: [{ column, type?,
+  formulaMatches? }]`. A node verifier that still needs a workbook uses
+  `ctx.xlsx(path)` (same parser: `columns()`, `numFmt()`, validation
+  formulas). See `cairn docs verifiers` ("Workbooks (xlsx)").
+- Eval helpers are not redeclared per file: a source (eval, browser
+  `script` verifier, login `hydrate`) that mentions `__cairn` gets the page
+  prelude (`sleep`, `visible`, `text`, `labelOf`, `nativeSet`, `fire`,
+  `rows`, `waitFor`; namespaced, idempotent, never over a page-owned
+  `window.__cairn`). App internals are read through config
+  `browser.appHandle: { <name>: <page expression> }` as read-only
+  `__cairn.app.<name>`, and waited on with `wait: { app: { path, equals |
+  in | exists } }` (runner-polled; unknown handle fails at once). See `cairn
+  docs steps` ("Page Prelude And App Handles").
+- `eval` is the last resort: it does not heal, its export is opaque page
+  JavaScript, and `cairn spec lint` flags evals that a typed step replaces
+  (`eval-typed-equivalent`). Before writing one, map the pattern:
+
+  | Eval pattern | Typed replacement |
+  | --- | --- |
+  | open a picker, type, click an option, hope it committed | `set` / `choose` / `form` (driver + read-back) |
+  | click a radio or checkbox only when it is not already set | `choose` / `check` / `uncheck` (idempotent) |
+  | click when present ("if present" helpers) | `click.optional: true`, or `wait.optional` + `assign` + `when` |
+  | `el.click()` because a mask or overlay swallows the pointer | `click.fallback: dispatch` / `click.dispatch: true` |
+  | native value setter + `input` / `change` events | `fill.mode: set` |
+  | retry ladders, an unrolled N-step loop | `repeat` / `use: { action, retry }` |
+  | branch on what the page shows | `if` / `when` (+ `wait.any`) |
+  | `fetch` login, a bearer copied between calls, OTP | `use: login` + config `environments.<env>.auth`; request headers `${requests.login.…}` |
+  | `fetch` in a sleep loop until a job finishes | `request.until` (or a verifier with `poll`) |
+  | anonymous / authorization-boundary probes | `credentials: omit` + `matrix` + `expectStatus` |
+  | read or poll a framework store | `browser.appHandle` + `wait.app` |
+  | an eval that throws to assert | `expect` step, or `capture` + the `value` verifier |
+  | unzip a downloaded workbook | the `xlsx` verifier (`ctx.xlsx` in a node verifier) |
+  | helpers redeclared in every eval file | the `__cairn` prelude |
+
+  What is left for `eval` is state setup or an internal-state read no typed
+  step reaches; make it mention `__cairn` instead of redeclaring helpers.
 - High-latency environments can set `environments.<name>.waitScale` (or
   override it with `CAIRN_WAIT_SCALE`) to multiply wait/settle budgets and the
   ~500ms network-idle quiet window without hardcoding remote-only budgets into
@@ -234,6 +333,7 @@ per-agent code paths.
   2. `session: { resume: <checkpoint-name> }` (capture with `cairn checkpoint capture-from-session` or `cairn login`)
   3. `preconditions: { commands: [{ run: "..." }] }`
   4. `coldStart: guest` for an intentionally public/sessionless flow
+  5. `steps: [{ use: login }]` with config `environments.<env>.auth`
 - New specs follow the author-flow recipe (`cairn docs author-flow`, MCP
   prompt `author-flow`): `cairn catalog --query` first (reuse actions and
   vars), a discovery session started by the project's login action
@@ -271,6 +371,33 @@ per-agent code paths.
   `defaultEnvironment`, the `local` fallback) that the config lacks only warn
   (once per `cairn run` invocation, on stderr), so one stale spec cannot abort
   a batch.
+- A config value lives once, never copied per environment: top-level `vars:`
+  (every environment; its own `vars` win by name), `environments.<n>.extends:
+  <env>` (deep merge, chains; cycles/unknown names are errors),
+  `environments.<n>: { alias: <target> }` (the same environment under another
+  name: canonicalized to the target where `--env` is parsed, so suites,
+  `requires.env`, policy, state keys, locks and `CAIRN_ENV` see the target;
+  `envAlias` in run.json / invocation.json; no other key, no chains, never
+  extended or named by a suite), vars built
+  from vars (`apiUrl: "${vars.host}/api"`, resolved once per environment;
+  cycles are errors; a reference to a var the config does not define is a
+  warning, resolved at run time from `--var` / spec `vars:`; a `${vars.X}`
+  inside an env or secret value stays inert), typed vars (lists / objects:
+  an unquoted whole `key: ${vars.x}` keeps the structure — script verifier
+  `fixtures:`, `ctx.vars`, fixture `with:` — strings get compact JSON;
+  `${vars.x.key}` reads inside), and `include: [paths or globs]` for shared
+  `vars` / `fixtures` / `gates` / `datasources` / `suites` files (later wins,
+  the including file wins, overrides are findings). Environments with
+  different var sets split into files with `environments.<n>.include:
+  [config/vars/<n>.yml]` (files hold `vars:` / `include:` only; precedence:
+  top-level vars < extended env < the env's included files < its own inline
+  vars) — never promote per-environment vars to the top level, that leaks
+  the names into every environment and silences the unresolved-var check of
+  `cairn spec verify`. Before adding or renaming
+  a var, ask `cairn config vars [--env] [--used-by <spec>] --json` (MCP
+  `cairn_config_vars`) where it is defined and who uses it; `cairn config
+  validate` warns about dead vars. See `cairn docs services` ("Config
+  Composition").
 - Discovery records URLs as requested: `${secrets.X}` / `${env.X}` /
   `${vars.X}` placeholders and relative paths stay in the exported spec; the
   browser gets the resolved URL, and returned URLs are redacted.
@@ -301,11 +428,120 @@ per-agent code paths.
   For focused authoring guidance, use `cairn docs <topic> --json` or MCP
   `cairn_docs` (`authoring`, `author-flow`, `catalog`, `steps`, `verifiers`,
   `downloads`, `scripts`, `services`, `fixtures`, `artifacts`, `mcp`,
-  `backends`, `discovery`, `export`, `brief`) — don't rely on training-data
-  knowledge of the CLI.
+  `backends`, `discovery`, `export`, `import`, `brief`, `widgets`) — don't rely on
+  training-data knowledge of the CLI.
   Before authoring, ask `cairn catalog --query "<words>" --json` (MCP
   `cairn_catalog`) what the project already has. For Playwright handoff use
   `cairn export playwright` / MCP `cairn_export_playwright` (see `export`).
+  Host commands are explicit: `--preconditions inline|global|skip|manifest`
+  (`inline`: bounded helper, `run:` steps and `teardown:` export; `global`:
+  gates, preconditions and fixtures once in `global-setup` via the cairn CLI;
+  `manifest`: commands listed in `.cairn-export.json`), and node / http
+  verifiers follow `--verifiers keep|gate|drop` (`gate` reports skipped, never
+  passed, when the env is missing; `--gate-env` names it). `value`, `http`,
+  `network` body/count/assign, `file`, `xlsx` (`--project`), `expect.request`
+  and `transform` export too, judged by the runner's own modules (generated
+  into `lib/`, drift-tested). `${env.X:-d}` is read at test run time; no env
+  value set while exporting reaches generated code, the manifest or a report:
+  the config is loaded late-bound too (config vars, `baseUrl`, `auth:` / map
+  `apiLogin`, datasources), a typed config field the export emits that only an
+  env value could fill is refused, and host-command errors scrub secret values
+  before the output tail is cut. `noFailedRequests` is judged by the runner's
+  `judgeNoFailedRequests` (network errors included). `cairn docs export` has the
+  fidelity and risk list — read `coverage` before handing an export off.
+  `cairn export playwright --verify <dir>` / MCP `cairn_export_verify` proves
+  an export faithful: static gates (sentinels, target tsc, the host's eslint,
+  `playwright test --list`, freshness; skipped is never a pass),
+  `--differential` (needs the app up: `cairn run --run-token T` and the
+  exported test with `CAIRN_RUN_TOKEN=T`, both sides run, so specs must be
+  idempotent) and `--mutate` (an inverted assertion must fail; outcome steps
+  read from the TypeScript syntax tree, so host formatting is irrelevant). Report
+  `urn:cairntrace.dev:export-verify:v1`, also in `.cairn-export-verify.json` and
+  the manifest's `verify`; exit 0 pass / 1 failed / 2 environment error / 3
+  inconclusive (nothing proven: neither tsc nor `playwright --list` ran, or the
+  differential / mutation proved nothing) — never report 3 as a pass.
+  On a multi-project host config every Playwright run of the verify uses one
+  project (`--project`; its setup dependencies still run): `--verify-project`
+  / MCP `verifyProject`, else the manifest's `verifyProject` (export flag or
+  `export.targets.<n>.verifyProject`), else the first discovering project
+  that runs Chromium (report `playwrightProject`). The lint gate never hands
+  eslint the vendored runtime; a gated export that ended skipped is still
+  compared on what it judged (a disagreement is a mismatch).
+  Into an existing Playwright tree, `--into <dir> --host-config <playwright.config>`
+  adapts the output to it (the config, tsconfig and package.json are read
+  statically, never executed; options resolve like Playwright — a project's
+  value over the top level, only the projects that discover the tests — and an
+  option it cannot read is named in `host.unread` / `host.notes`, never
+  replaced by a default): CommonJS `__dirname` vs ESM `import.meta.url`,
+  no `test.setTimeout` the host's timeout already covers (unread: every test
+  sets its own budget), `testid` locators against the host's
+  `testIdAttribute` (unread: explicit attribute selectors), page evals
+  (`eval`, `wait: { app }`, browser scripts) refused unless the host sets
+  `bypassCSP` (or `--allow-eval-without-bypass`), tests placed and named for
+  the host's `testDir` / `testMatch` (unread: refused), tsconfig path aliases,
+  ordered and used imports only, camelCase identifiers, the host's local
+  prettier. It RUNS the host's own local tools (prettier with its JavaScript
+  config and plugins; under `--verify` eslint, tsc, `playwright --list`),
+  looked up only up to the host's boundary (`.git`, else the outermost package
+  root below home). Named
+  profiles live in the config's `export.targets.<name>` (`--target <name>`,
+  flags override; `cairn config validate` checks them). `--map <export.map.yml>`
+  (profile `mapFile`, MCP `mapFile`; with `--into` / `--project`) binds cairn
+  actions to the host's own constructs instead of inlining their steps: a
+  `fixture` mapping destructures the host fixture in the test signature (vars map
+  to `test.use` options or are checked as constants), a `method` mapping calls a
+  host page object (`new OrdersPage(page).openOrder(arg)`, args from the action's
+  vars), an `apiLogin` writes a request-only login as a storageState (credentials
+  `process.env` at run time, never in generated code, manifest or reports);
+  unmapped actions become generated page objects over the map's `basePage`
+  (`lib/pages`), and `strict: true` makes an unmapped action an error. The
+  manifest records the map's digest (`--check` / `--verify` regenerate with it;
+  `--verify` typechecks against the host's real types). `--max-eval-ratio <0..1>`
+  refuses an export of a spec that is mostly page `eval`: per spec, the rest is
+  written, exit 1. `--strict-locators` (profile `strictLocators`) emits no
+  `.first()`, so an ambiguous locator fails the exported test like
+  `cairn run --backend playwright` does; the default keeps `.first()`
+  (first-match, like agent-browser), the manifest records the mode and
+  `--verify --differential` names it. `cairn docs export` has the table.
+  Which to reach for: a standalone file or `--project` when nothing exists on
+  the other side; `--into --host-config` when handing specs to a Playwright
+  tree someone else owns (it makes the output pass that tree's tsc / eslint /
+  prettier); `--map` only when the host already has fixtures or page objects
+  the generated code should call instead of inlining (start without it, read
+  `mapped` / `unmapped` in the report, add mappings for what matters);
+  `export.targets` once the same flags are typed twice. Run `--verify` before
+  claiming an export works (static gates are cheap); add `--differential
+  --mutate` when a CI copy will gate merges, with the app up and the specs
+  idempotent. Exit 3 means nothing was proven: install the target's local
+  `tsc` / Playwright or fix the setup, do not report it as green.
+  An existing Playwright test or trace becomes a draft spec with
+  `cairn import playwright <file.spec.ts>` / `cairn import playwright-trace
+  <trace.zip>` (MCP `cairn_import_playwright` / `cairn_import_playwright_trace`;
+  `cairn docs import`): catalog → discover or import → `cairn spec finish` →
+  `cairn spec promote`. The test importer is a TypeScript AST walk (the
+  project's own `typescript` when it has the JavaScript API, else cairntrace's
+  — `typescript` is a runtime dependency; never executes the file) that
+  inlines `test.step`, `beforeEach`, page-object methods (through barrels),
+  helpers, the selector-first page API and `test.extend` fixtures it can read;
+  the report has `coverage { mapped, approximated, unmapped }`, `warnings`,
+  TODOs with reasons, approximations and the lint/verify findings still open
+  (`check`). The trace importer reads the action and network logs only and
+  writes DRAFT outcomes (expects, final URL, API method + path + status). Both
+  refuse to overwrite a file (`--force`) and to write a draft that maps nothing
+  (exit 1, `--allow-empty`). Neither ever writes a credential it can identify
+  as a literal — typed secrets, credential headers, credential-named body
+  values (nested), URL user:password, credential query / fragment values,
+  credential-shaped values (JWTs, long tokens, token path segments) are
+  `${secrets.X}`, and every identified value is scrubbed from the rest of
+  the draft, its ids, TODOs and the report. Names match as whole words
+  (`importCommon.nameWords`: `Compass`, `tokenizer`, `token_count`,
+  `x-session-locale` are not credentials); a hex path segment needs a
+  credential-context segment before it; the final pass skips short weak
+  values (strong ≥ 4 chars, others ≥ 8 or credential-shaped). The benign
+  trace test (`benignTraceEntries`) guards against false positives, the
+  hostile ones against leaks: change both together. Keep that invariant when you touch
+  `src/core/importers/`; the typed values in tests must be built at runtime
+  (`src/testing/traceZip.ts` `hostileTraceEntries` is the regression input).
   For a fragile environment where locators will not replay, use
   `cairn export brief` / MCP `cairn_export_brief` and the live try-then-ask
   session `cairn_accompany_*` (see `brief`). The harness chooses WHERE;
@@ -378,7 +614,8 @@ Key rules:
   Without it `cairn_run` / `cairn_spec_finish` / `cairn_audit` that would
   start them fail with exit 4 before anything starts (`noServices`,
   `reuseServices` and `servicesDryRun` pass), and `cairn_services_up` /
-  `cairn_services_down` refuse. The CLI is not gated.
+  `cairn_services_down` / `cairn_services_restart` refuse (`cairn_services_logs`
+  is read-only and not gated). The CLI is not gated.
 - `secrets.provider: tvault` injects vault secrets into the seed command's env.
   The `tvault:` block supports two modes: `project` (direct) or `group` + `env`
   (inheritance — resolves missing keys from the base environment via tvault's
@@ -387,7 +624,16 @@ Key rules:
   cross-field `.refine()` rules: unique window names, readyOn constraints,
   tvault provider requires tvault block with either `project` or `group`+`env`,
   known gate names, fixture `needs`, datasource entries after each
-  environment's override is merged).
+  environment's override is merged) and its composition (missing include,
+  include / extends / var-reference cycles, unknown extends target — errors;
+  dead vars, empty include globs, var references left for run time and an
+  authored `${vars.X}` in a config field that stays literal
+  (`literal-var-ref`: `environments.<n>.baseUrl`, `webServer`, a metric
+  `command` …; it expands only in specs, actions, fixtures, gates,
+  datasources, suites, http metrics and env `auth`), and a suite whose
+  `requires.env` admits an environment with no `env.<n>` block while a
+  sibling admitted one has one (`suite-env-fallback`) — warnings;
+  include overrides — `findings`).
 - **Readiness gates:** `services.docker.ready`, tmux `windows[].readyOn.gate`
   (in addition to url/text) and `windows[].after` (boot a window only once its
   gates pass), and `webServer.ready` name entries of the top-level `gates:`
@@ -432,11 +678,438 @@ Key rules:
 - **Per-environment overrides:** `environments.<name>` can carry `services:`
   and `secrets:` blocks. `services: false` disables all services for that env
   (e.g. `dev`/`test` where the app is already deployed remotely). A partial
-  `services:` block deep-merges over the top-level one. Inside a partial block,
+  `services:` block deep-merges over the top-level one; without a top-level
+  block it stands alone (only that environment boots services, its
+  provisioner included). Every reader resolves the same effective block
+  (`resolveEffectiveServices` in `src/core/config/runtimeContext.ts`): the
+  run engine, `services up|down|restart|logs|status`, the dry run,
+  `verifyClean`, catalog, `config validate` and Studio — never read
+  `config.services` alone. Inside a partial block,
   `tmux: false` drops only the inherited local tmux windows while keeping the
   docker and seed phases. An env-level `secrets:` block replaces the top-level
   one entirely. This replaces the need for `--no-services` or
   `--services-dry-run` when running against remote envs.
+
+## Replace your Taskfile / wrapper scripts with config
+
+When a project drives `cairn run` through a Taskfile, a `Makefile` or a
+`with-cairn.sh`, move what the wrapper does into `cairntrace.config.yml`.
+The run engine enforces it for the CLI and for MCP `cairn_run` alike, so a bare
+`cairn run` is as safe as the wrapper was.
+
+| The wrapper did | Config |
+| --- | --- |
+| `case $SUITE in …` picks specs | `suites:` + `cairn run --suite <name>` |
+| copies the same vars into every environment | top-level `vars:`, `environments.<n>.extends`, `include:`, `environments.<n>.include:` |
+| refuses to start twice, checks a quota or a secret first | `run.lock`, `run.preflight` |
+| warms a cache before, collects diagnostics after | suite `before` / `after`, `run.finally` |
+| greps for leftover browsers, containers or tmux sessions | `run.verifyClean`, `cairn doctor --orphans` |
+| always destroys the billable thing, even on Ctrl-C | `services.provisioner.down`, `services.teardown` `critical: true` |
+| restarts one service, tails its output | `cairn services restart` / `logs` |
+| curls a number before and after | `metrics:` probes → `cairn stats --metric <name>.delta` |
+| checks the tool versions | `requires: { cairntrace }`, `runtimes.node` |
+| exports env per suite (`MODE=x task …`) | `suites.<n>.processEnv` / `env.<e>.processEnv` |
+| stamps a cohort / round label | `suites.<n>.labels`, `cairn stats --group-by` / `--invocation` |
+| bails, except in one environment | `suites.<n>.bail`, `env.<e>.bail`, `--no-bail` |
+| skips a seed step only in one environment | `suites.<n>.env.<e>.seed.postCommands.skip` |
+| runs a check only for one suite | `run.preflight[].when: { suite, env }` |
+| refuses `task sink` while a suite runs | nothing: `services down` / `up` / `restart` respect `run.lock` |
+| owns a billable box in one environment only | `environments.<e>.services.provisioner` (no top-level `services:` needed) |
+| ssh-es to another machine, runs `cairn` there, copies the results back | `environments.<e>.runner` (a delegated runner; see "Delegated runners") |
+
+```yaml
+version: 1
+project: shop
+vars: { region: eu }
+environments:
+  local: { baseUrl: "http://localhost:3000" }
+  staging: { extends: local, baseUrl: "https://staging.shop.example", vars: { region: us } }
+run:
+  lock: true
+  preflight:
+    - { secret: API_TOKEN }
+    - { command: ./tools/check-quota.sh, expectExit: 0, timeout: 30s }
+  verifyClean: [browsers]
+suites:
+  smoke: { specs: [flows/smoke], bail: true, after: ["./tools/collect-logs.sh"] }
+metrics:
+  - { name: queue_depth, command: ./tools/queue-depth.sh, parse: { json: $.depth } }
+```
+
+`cairn run --suite smoke --env staging` replaces `task e2e:smoke ENV=staging`;
+`--services-dry-run` prints the whole plan (provisioner, tunnels, files, seed
+post-commands and the suite's skips, the secret NAMES a run would inject —
+the vault is never called) without running anything, and `cairn docs
+run-policy` is this table as a docs topic.
+Exit codes tell a script what happened without parsing output: 4 refused before
+anything started, 8 a critical teardown failed, 9 a dirty machine afterwards.
+Do not copy the shell into config; declare the intent. The sections below have
+the details, and `examples/cairntrace.config.yml` is a working config with a
+lock, a preflight, a suite, `extends` and a metrics probe.
+
+## Run policy (config `run:`)
+
+What a wrapper script (a Taskfile, a `with-cairn.sh`, an ownership check, a
+bail-fast watcher) used to do around `cairn run` is config, enforced by the
+shared run engine — so `cairn run` and MCP `cairn_run` are equally safe:
+
+```yaml
+run:
+  lock: { scope: config, staleAfterPidDead: true }   # or lock: true
+  preflight:
+    - { json: docker/posture.json, assert: ".engine.mode == \"durable\" and .engine.workers >= 2" }
+    - { secret: DEPLOY_TOKEN }
+    - { command: "bun tools/check-quota.ts", expectExit: 0, timeout: 30s }
+    - { gate: stack-reachable }
+  verifyClean: [browsers, tmux, docker-project]
+  finally: ["bun tools/collect-diagnostics.ts"]
+services:
+  teardown:
+    - { run: "bun tools/destroy-compute.ts", critical: true, timeout: 10m, onSignal: wait }
+```
+
+- Order: config + secrets → lock → `preflight` → `verifyClean` (before) →
+  services/webServer → specs → teardown → critical-teardown verdict →
+  `finally` → `verifyClean` (after) → lock released. A refusal in the first
+  three is exit 4 and nothing of cairn's started. One policy guards one
+  config: specs from several configs where any declares `run:` (or one
+  config whose environments give them different policies) are refused (exit
+  4, naming each config with a spec that resolves to it: "run each config's
+  specs in an invocation of their own, or pass --config <path>"; `--suite` is
+  no remedy, a suite's specs still load their nearest config), and so is a
+  `run:` whose config does not load — never "no policy". `runtimes.node`
+  follows the same rule.
+- `lock` is `~/.cairntrace/locks/<label>.<hash>.run.lock.json` (pid, start
+  time, redacted argv with `--var` keys only, invocation, env), taken atomically (temp file hard-linked
+  into place) and released on every exit path, signals included. A live foreign
+  owner refuses (exit 4, names pid/age/command); a dead owner (or a recycled
+  pid) is reclaimed with a warning unless `staleAfterPidDead: false`.
+  `cairn services up|down|restart` (CLI + MCP, `src/cli/commands/services/runLock.ts`)
+  refuse with exit 4 while a live owner holds a lock the config declares (any
+  scope, any environment), naming it in `runLock`, and otherwise hold the
+  lock for their duration (`command: "services down"` in the file; the
+  refusal text says "another cairn services down holds"). The run exports
+  `CAIRN_RUN_LOCK` to its processes: a services command started by the owner
+  runs under its lock (`nested`). No `--force`: stop the owner instead.
+- `preflight` stops at the first failure and names it; `assert` is the small
+  language in `src/core/runPolicy/expression.ts` (paths, `== != < <= > >=`,
+  `in [..]`, `exists`, `and`/`or`/`not`, parentheses): a real parser,
+  never `eval`, validated by `cairn config validate`. Secrets are checked for
+  presence only; every message is redacted. `when: { suite, env }` limits a
+  check (as on seed post-commands); a skipped one is noted, failures keep the
+  original index.
+- `verifyClean` only counts cairn-owned or this-project resources: browsers
+  named by the owned-session ledger (`~/.cairntrace/sessions-ledger/`, a pid
+  only while it is still the process cairn learnt: same `ps` start time and
+  command) or agent-browser daemons of cairn run sessions (`<session>.pid` in
+  agent-browser's state dir) working inside the project — never discovery or
+  user sessions, argv substrings or cairn's ancestors — the services tmux
+  session, containers of the compose project (a Docker daemon that is not
+  running is clean, with a warning). It reports survivors (exit 9) and kills
+  nothing; under `--reuse-services` only `browsers` is checked.
+- `finally` commands are non-fatal and see `CAIRN_EXIT_CODE` /
+  `CAIRN_INVOCATION_DIR`. A critical `services.teardown` entry that fails or
+  times out is exit 8 (above every verdict); `onSignal: wait` makes the signal
+  path wait for it up to its timeout.
+- Signal path (`ResourceScope.terminateSync`, synchronous): reporters → every
+  still-running bounded command (preconditions, hooks, preflight, `run:` steps;
+  `killLiveCommandsSync`) → browsers → suite `after` hooks (services up) →
+  webServer/services → `run.finally` → lock released. The hooks run with
+  `CAIRN_EXIT_CODE` 130/143, each bounded by `CAIRN_SIGNAL_HOOK_TIMEOUT_MS`
+  (default 10s): the suite `after` hooks together by three times that, and
+  `run.finally` by three times that again after the services teardown,
+  whose own caps (a provisioner's `down` included) never depend on either.
+  A one-line notice (`cleanup in progress (critical teardown pending); …
+  send SIGKILL to force`) precedes the slow part. The CLI handler
+  (`src/cli/cleanup.ts`) keeps persistent SIGINT/SIGTERM listeners and adds
+  SIGHUP once the cleanup starts: a second Ctrl-C while the synchronous
+  cleanup runs is held (no JS runs until it returns), never the default
+  action that would kill cairn halfway; it always exits 130/143 after.
+  `cairn mcp` keeps its own listeners during `terminateAllSync` and, by
+  design, survives the signal (it exits on stdin EOF or a second SIGTERM).
+- With a `run:` policy or a critical teardown the documents (`--json`, md,
+  MCP `structuredContent`, `cairn_run_status.document`) are held until the
+  verdict: top-level `exitCode` = the process exit code, a passed spec reads
+  `status: errored` (`failure.phase: invocation`), `invocationOutcome`
+  `{exitCode, specsExitCode, error, runPolicy}` explains it; run.json on disk
+  keeps the spec's own result. A signal before the verdict hands the
+  finished iterations' documents over synchronously (`onDocumentSync`;
+  the CLI writes stdout with a bounded `writeSync`) with
+  `invocationOutcome.exitCode` 130/143.
+- `cairn run --bail` (MCP `bail`) stops scheduling after the first failed or
+  errored spec: the rest are `BatchRunResult.skipped[]` (reason `bailed`),
+  never results; running specs finish, teardown runs, exit = the usual
+  precedence over the specs that ran (never lower than without `--bail`).
+- `cairn doctor --orphans [--kill] [--yes] [--only <session|pid,...>] [--json]`
+  lists (and ends) cairn-owned browser survivors whose invocation is gone; only
+  ledger-named processes that are still the learnt process (start time +
+  command) and still look like a browser cairn launches are touched, each
+  re-checked right before the kill; entries whose owner is gone 7 days expire.
+  Studio passes the confirmed set as `--only`.
+- Journal events (additive `events.v1`, invocation journal only):
+  `run.lock.acquired|reclaimed|refused|released`, `preflight.started|passed|failed`,
+  `cleanliness.clean|dirty`, `finally.started|finished`, `invocation.bailed`;
+  `invocation.json` `summary.runPolicy` / `summary.skipped`. Goldens:
+  `src/core/schema/__fixtures__/events/run-policy-*.ndjson`. See `cairn docs
+  services` ("Run Policy").
+
+## Service operations, seed transaction, engine pin (config `services:`, `requires:`)
+
+All optional and additive; a config that uses none behaves as before. Phase
+order: provisioner → tunnels → docker → files → seed → tmux; teardown runs
+the other way (supervision stops, teardown commands, tmux kill, tunnels stop,
+provisioner `down`). See `cairn docs services` and `docs/services.md`.
+
+- `cairn services restart <window...> [--stop-timeout] [--ready-timeout]`:
+  Ctrl-C, wait for the pane's process to exit (never a hard kill), clear
+  history, print a `@@cairn-restart:<id>@@` marker, resend the window's
+  command, wait for `readyOn` of the new generation (text only below the
+  marker). Refuses (exit 4, nothing touched) a window the config does not own,
+  a missing session, a window missing from it, or a session a live run
+  supervises (its `tmux-supervisor.*.json` marker). Every tmux call uses exact
+  targets (`src/core/runner/tmuxTarget.ts`: `=session`, `=session:`,
+  `=session:=window`) and reads panes with `list-panes` (never
+  `display-message`, which answers for another pane); a pane counts as idle
+  only when its shell is also the foreground process group. `cairn services logs <window>
+  [--since-restart] [--wait <regex> --timeout] [--follow]` reads the pane
+  (`capture-pane -J`, redacted). There is deliberately no `services exec`:
+  typed keys race the service and report no exit status; use a `run:` step,
+  `teardown`/`finally`, a fixture, `services.files` or `restart`.
+- Windows: `restart: {policy: on-exit|never, backoff, max}` and
+  `healthcheck.onUnhealthy: restart|warn` are supervised by cairn only while a
+  run is active (`cairn services up` exits after the boot: no supervision).
+  Sessions are created 250x50 (`tmux.columns`/`rows`).
+- `services.tunnels`: own process group, state + owner in
+  `~/.cairntrace/services/<project>.<env>.<config hash>.tunnel.<name>.json`
+  (`tunnelStateKey`), `ready` gate, `restart: always` + `giveUpAfter`, stopped
+  on every exit path (and by `services down`); a copy left by a crashed run is
+  stopped first, one a live cairn process owns never is; only a running
+  tunnel's own process (lstart checked) is signalled.
+- `services.provisioner`: `up`, mandatory `down` (critical, `onSignal: wait`
+  by default; registered before `up` runs, so it runs after a failed boot and
+  on signals; a failed `down` is exit 8, `services down` too), `exports`
+  (each command prints one value) become env for every later phase, hook, spec
+  and verifier (`${exports.X}` in files). Never log export values (events carry
+  names; credential-named values are registered for redaction). A provisioned
+  environment never reuses a tmux session.
+- `services.files`: atomic validated writes (never clobbers an unparseable
+  file; symlinks written through; new files `600` unless `mode`), per-run
+  keyed `hmac-sha256:` fingerprints in `services.files.*` events, never
+  content; `restart: [windows]` restarts windows that were already live.
+- Seed: `phases` (state per project + env + `target` hash in
+  `~/.cairntrace/services/<project>.<env>.<hash>.seed-state.json`),
+  `commit: afterPostCommands`, post-command objects `{name, run, when: {suite,
+  env}, continueOnError, timeout, expectOutput}`, `expectOutput.notMatches`.
+  A resume (phases a failed run completed) is used once: `skipIf` still
+  decides, TTL expires it, and any teardown (or `services down`) drops it.
+  Events `services.seed.phase.*`, `services.seed.postcommand.skip`,
+  `services.seed.commit`.
+- Engine pin: config `requires: {cairntrace: <range>}` is enforced in
+  `loadConfig` (run, verify, catalog, MCP, services up/restart/logs/status:
+  exit 4; `services down` loads with `skipRequires` and warns — a teardown
+  never waits on the pin); `runtimes.node` /
+  `CAIRN_NODE` choose the node binary of node scripts (`src/core/runtimes.ts`,
+  `src/core/runner/nodeScripts.ts`); `cairn doctor [--config]` and `config
+  validate` report both.
+- Journal events (additive `events.v1`): `services.provisioner.start|ready|
+  exports|fail`, `services.tunnel.*`, `services.files.*`, `services.restart.*`
+  and the seed ones above. Goldens: `src/core/schema/__fixtures__/events/
+  services-*.ndjson`. Code: `src/core/servicesOps/` (schema, tunnels, files,
+  seed transaction, logs), the orchestration in `src/core/runner/services.ts`,
+  CLI in `src/cli/commands/services/{restart,logs}.ts`. Tests use a stub tmux
+  (`src/testing/fakeTmux.ts`; it resolves targets like tmux 3.x, prefix
+  matches included, so a non-exact target fails the tests), never a real tmux
+  server, docker or cloud machine.
+
+## Suites and metrics (config `suites:` / `metrics:`)
+
+**Replace Taskfile suites with config.** A Taskfile target that picks specs with
+a `case` on `SUITE`, runs per-environment commands before and after, passes
+per-environment flags and collects numbers around the run is one config block and
+one command. Do not copy the shell; declare it:
+
+```yaml
+suites:
+  checkout:
+    description: Checkout flows
+    specs: [flows/checkout, flows/smoke/login.yml]   # paths, dirs, globs, spec names
+    tags: [critical]                                 # AND on metadata.tags
+    order: [login]                                   # these first, in this order
+    parallel: 2
+    bail: true
+    requires: { env: [local, staging] }
+    vars: { region: eu }
+    env:
+      staging:
+        vars: { region: us }
+        before: ["./tools/warm-cache.sh"]            # once, services up
+        after: ["./tools/collect-diagnostics.sh"]    # once, every exit path
+        hookTimeoutMs: 120000
+        specs: [flows/checkout/smoke]                # replaces `specs` here
+    seed: { postCommands: { skip: ["./tools/seed-extra.sh"] } }
+metrics:
+  - name: queue_depth
+    scope: invocation
+    command: ./tools/queue-depth.sh
+    parse: { json: $.depth }
+  - name: indexed_docs
+    http:
+      url: ${vars.searchUrl}/_stats
+      auth: { bearer: "${secrets.SEARCH_TOKEN}" }
+      json: { path: "$.indices[*].docs.count", reduce: sum }
+```
+
+```bash
+cairn run --suite checkout --env staging
+cairn suites list --json                 # specs each suite resolves to per environment
+cairn stats --metric queue_depth.delta --group-by suite
+```
+
+- `--suite` replaces spec paths (spec paths next to it narrow it to those of its own
+  specs, its hooks/vars/labels kept; a path outside it is exit 2) and finds the config from
+  the working directory (else `--config <path>`; none found is exit 4); `--parallel` beats
+  the suite's `parallel`, `--bail` adds to its `bail` and `--no-bail` (MCP
+  `bail: false`) turns it off (`env.<e>.bail` replaces it per environment),
+  `--var` beats its vars (specs and the hooks' `CAIRN_SUITE_VAR_*` alike),
+  `--tag` narrows it. Every run is labelled with the suite's `labels`, then
+  `suite=<name>`, then `--label` (later wins).
+- `processEnv` (suite and `env.<e>`) is merged into the invocation's scoped
+  env right after the suite vars refresh (after the vault), so preflight, the
+  services phases, hooks, specs and verifiers all see it; an unset `${env.X}`
+  entry is dropped, reserved names (`PATH`, `CAIRN_SUITE*`, `TVAULT_*`, …) are
+  a schema error, only names are logged. `env.<e>.seed.postCommands.skip` adds
+  to the suite's skips. Unknown suite or an
+  unresolvable reference is exit 4; `requires` refusing the environment is exit 7.
+  Suite vars resolve again once the vault's secrets are in (an unset
+  `${env.X}` suite var is not passed; `requires.vars` is checked then); two vars
+  that reach hooks as one `CAIRN_SUITE_VAR_<NAME>` are a validate error.
+- Suite `before` hooks run once after services/webServer are up (a failure is exit 2);
+  `after` hooks run once on every exit path once the before phase began (a
+  signal included, synchronously), with `CAIRN_EXIT_CODE` (the specs' verdict:
+  8/9 settle after the teardown that follows them; 130/143 on a signal) and
+  services still up, non-fatal. Both are bounded by
+  `hookTimeoutMs`, run in the config directory and are journaled as
+  `suite.hook.started|finished` (`suite.started|finished` around them). `--before`
+  / `--after` keep their per-iteration / per-spec meaning.
+- `seed.postCommands.skip` names a named seed post-command (object form) by its
+  `name` and a plain string one by its exact command text; a stray entry is a
+  warning. `suites:` merges through `include:`; `cairn config
+  validate` resolves every suite per environment.
+- Metrics: probes run bounded (`timeout`, default 10s), never fail a run, stop
+  with their scope (`every:` ticks included) and write
+  `<runDir>/diagnostics/metrics.json` (`urn:cairntrace.dev:metrics:v1`) plus flat
+  `<name>.before|after|delta` numerics merged into `diagnostics/report.json` after
+  the `--after` hooks (`cairn stats --metric <name>.delta`). Invocation-scope rows
+  also land in `<journal>/metrics.json` and in every run of the iteration. Secrets
+  resolve per sample and never reach artifacts. Events: `metric.sampled`.
+- Code: `src/core/suites/` (schema, resolver, validate), `src/core/metrics/`
+  (schema, probes, sampler, artifacts), engine wiring in
+  `src/cli/invocation/suite.ts` and `metrics.ts`. Docs: `cairn docs services`
+  ("Suites", "Metrics Probes"), `docs/services.md`, `docs/configuration.md`.
+
+## Delegated runners (config `environments.<n>.runner`)
+
+An environment can run elsewhere: `environments.<n>.runner: { command: [argv…],
+cwd?, env?, timeoutMs?, idleTimeoutMs?, cancelGraceMs? }` (contract
+`urn:cairntrace.dev:delegate:v1`). `cairn run --env <n>` and MCP `cairn_run`
+keep the invocation locally — journal, run directories under the local
+artifact root, exit code, Ctrl-C / Studio Stop and Live Cancel /
+`cairn_run_cancel` — and hand the execution to `command`. Cairntrace knows
+nothing about where it goes; keep it that way (no infrastructure names in
+code, tests, fixtures or docs). **Never take the runner's word for a result**:
+every exit code is checked against the evidence (see Exit below).
+
+- Locally: config + engine pin, `--suite`, the environment policy, scoped
+  secrets, `run.lock` (scoped to that environment by `runLockTarget({
+  environment })`, so it never blocks local environments or `cairn services`;
+  `environments.<n>.run.lock: false` when the runner manages capacity),
+  `run.preflight`, then `run.finally`, JUnit and the document after the runner
+  exited. Never locally: services, webServer, browser, suite hooks, metrics,
+  fixtures, `--before/--after` (passed in the request), `run.verifyClean`,
+  the `runtimes.node` pin. A runner environment may not own a `services:`
+  block (schema refine, also through `extends`); readers that list an
+  environment's services pass `env.runner ? false : env.services`.
+- One environment per delegated invocation: `resolveDelegation` resolves
+  EVERY spec's environment and refuses (exit 4) a mix of a runner environment
+  with any other, in any order, or several configs. `runSpec` throws
+  `DelegatedEnvironmentError` (exit 4) for a runner environment, so no other
+  path (heal, investigate, discovery, accompany) runs one in a local browser.
+- A locally refused spec never runs remotely: the request's `planned` drops
+  its entries (`refused` lists them) and `cairnArgs` carry the explicit
+  runnable list (next to `--suite` it narrows the suite: `applySuite` takes
+  spec paths that are its own; another path is exit 2).
+- The runner gets `CAIRN_DELEGATE_REQUEST` (`DelegateRequestSchema`,
+  `src/core/schema/delegate.v1.ts`; specs relative to the config dir,
+  portable `options`, `cairnArgs` without `--env` and with `--label
+  cairn.delegate=<invocationId>` — v1 conformance: every copied run.json
+  carries that label), `CAIRN_DELEGATE_EVENTS` (a FILE it appends
+  events.v1 NDJSON to — never a pipe: the synchronous signal path keeps reading
+  it while it waits), `CAIRN_INVOCATION_ID/DIR`, `CAIRN_ARTIFACT_ROOT`; its
+  stdout/stderr go to a file copied redacted into `logs/delegate.log`. It is
+  spawned `detached` (own process group).
+- The stream is what `cairn logs --invocation <ref> --follow --relay` prints
+  on the remote side (`DelegateStreamProducer`, `src/core/delegate/
+  remoteStream.ts`): journal lines + `invocation.run.started|finished` +
+  `invocation.summary` (derived run lines have deterministic timestamps);
+  `<ref>` may be `label:<key>=<value>` (waited for at most `--wait-timeout`,
+  default 10m). The relay (`DelegateRelay`, `relay.ts`) validates every
+  line (strict, then lenient for a newer producer), never throws, records
+  bad lines as `delegate.diagnostic` (rate-limited narration), recovers the
+  event after a torn line, drops exact repeats (bounded memory) /
+  heartbeats / `log.opened`, dedups `invocation.run.*` by run state (a
+  settled run never goes back; a different second status is
+  `status-mismatch`), refuses `delegate.*` other than `delegate.progress`
+  and RelativePath fields with `..`/absolute paths, maps remote
+  `invocation.started|finished` to `delegate.remote.*` (finish/summary of
+  another remote invocation do not count), remote `phase.changed` to the
+  local tracker, runs onto the local plan by spec path (a run of a locally
+  refused spec is `refused-run`, not relayed), and writes everything else
+  with `delegated: true` (the optional marker every `RunEventSchema` member
+  accepts). `FileLineTail` keeps at most 1 MiB + 1 of a line. `verify()`
+  checks each run's `<root>/<runId>/run.json`: missing (`missing-run-dir`),
+  `labels["cairn.delegate"]` ≠ the local id (`foreign-run`), a dir that
+  existed before the runner started (`stale-run`), status ≠ the stream's
+  (`status-mismatch`, run.json wins); with coverage (runner exit 0/1) every
+  planned run settled or accounted for by the remote summary (`missing-run`).
+  Only `verified` runs hand their run.json to the document.
+- Exit (`delegateVerdict`, pure): the runner's code is a claim. 0 stands
+  only with every planned run settled by a verified run dir, no
+  contradiction, the remote invocation's own finish/summary (same id)
+  passed, every relayed run passed and no error line in the stream; else
+  2 (evidence missing/wrong), the remote's code, or the runs' code. 1 stands
+  only when a relayed run (or the remote verdict) failed; else 2 (infra
+  failure, never a red test). 2–9/130/143 are never lowered; any other code,
+  a foreign signal, a spawn failure, `timeoutMs`, `idleTimeoutMs` → 2;
+  cancel → 130 (143 SIGTERM); all specs refused locally → 7, nothing
+  spawned. Every override adds an `exit-mismatch` diagnostic.
+  `RunInvocationResult.exitCode` may be 130/143 for a delegated invocation;
+  documents keep a stable code and carry `invocationOutcome.delegate`.
+- Cancel: graceful (`DelegateSession.cancel`; also `timeout` and `idle`) and
+  signal path (`cancelSync`, synchronous: SIGINT to the runner's PID only — its
+  helpers keep working — `cancelGraceMs` default 180000, then SIGTERM and 10s
+  later SIGKILL to its process GROUP; zombie detection via `/proc` on Linux,
+  `ps` elsewhere, an unknown state counts as running, because the event
+  loop cannot reap; it keeps relaying and beating the heartbeat) both record
+  `delegate.cancel.requested|escalated|finished`, then `delegate.finished`;
+  the delegated reporter runs BEFORE `journal.abortSync` so the journal stays
+  live while the runner stops.
+- `invocation.json` `delegate` block, MCP `cairn_run_status.delegate`,
+  Studio's "delegated" tag, `cairn config validate` `delegatedEnvironments`,
+  `cairn stats --invocation <local id>` (matches the `cairn.delegate` label),
+  `cairn logs <runId> --follow` and Studio's run liveness (both follow the
+  local owner, not the remote heartbeat pid). Studio's Live Cancel sends a
+  delegated run SIGINT with no early SIGKILL (`cancelPolicy` in
+  `desktop/lib/cli.js`). `--services-dry-run` / `--select-only` print the
+  masked plan (`DelegatePlanSchema`) and spawn nothing.
+- Code: `src/core/delegate/` (stream, runnerProcess, relay, remoteStream),
+  `src/cli/invocation/delegate.ts` (target, spawn spec, request, plan,
+  session, results) wired by `RunInvocation.runDelegated`. Tests use the
+  reference runner `src/testing/fakeDelegateRunner.ts` (replays a recording
+  of a real mock invocation made with `--label cairn.delegate={{invocationId}}`,
+  copies run dirs, misbehaves on demand: dropped/edited lines, `labelRuns:
+  false`, `reconnectAfter`, `helperProbe`, hangs, signals) and
+  `src/testing/delegateFixtures.ts`; never a real remote machine. Docs:
+  `docs/delegate.md`, `cairn docs delegate`.
 
 ## Logging & output
 
@@ -626,16 +1299,37 @@ bun run verify         # typecheck + lint + format:check + knip + tests (the gat
 src/
   cli/             commands/* — one file per CLI subcommand
   core/
+    importers/     playwrightImporter (facade), playwrightAst (test importer, TS AST),
+                   playwrightTrace (trace importer), zipReader, playwrightLocators,
+                   assertionOutcomes, importCommon (coverage, secret heuristics, YAML)
     parser/        parseSpec (YAML + zod + ${X} substitution + imports + baseUrl)
     runner/        Runner, OutcomeEvaluator, verifiers/, conditions (when:)
                    webServer.ts (single-server lifecycle)
                    services.ts (multi-service lifecycle: docker/seed/tmux)
                    seedState.ts (seed freshness tracking)
                    runStep.ts / teardown.ts / boundedCommand.ts (host commands)
+                   controlFlow.ts (repeat / if / use.retry), waitGroups.ts
+                   (wait.any|all|optional|app), requestStep.ts (request v2),
+                   envAuth.ts (use: login)
+    widgets/       widget kit: in-page runtime + built-in drivers (widgetRuntime.page.js),
+                   host side (execute.ts, runtime.ts)
+    prelude/       window.__cairn page prelude + browser.appHandle accessors
     datasources/   mongo (driver | mongosh | docker exec), temporal, http clients
     gates/         readiness gate schema, probes, evaluation, registry
     fixtures/      fixtures registry: exec/mongo/http adapters, ledger, runtime
     artifacts/     ArtifactWriter, renderers/, evidence, agentContext
+    suites/        config suites: registry — schema, SuiteResolver (paths, globs,
+                   names, tags, order), validate; wired in cli/invocation/suite.ts
+    metrics/       config metrics: probes — schema, probes (command/http), sampler
+                   (before/after/every), artifacts (metrics.json, report.json merge);
+                   wired in cli/invocation/metrics.ts
+    delegate/      delegated runner (environments.<n>.runner): stream.ts (line
+                   parser + file tail), runnerProcess.ts (process group, cancel),
+                   relay.ts (stream → journal, verdict), remoteStream.ts
+                   (`cairn logs --relay`); wired in cli/invocation/delegate.ts
+    runPolicy/     config run: block — expression.ts (assert language), lock.ts,
+                   preflight.ts, cleanliness.ts, finally.ts, sessionLedger.ts,
+                   orphans.ts (doctor --orphans); wired in cli/invocation/runPolicy.ts
     schema/        zod-first schemas (spec.v1, verifier.v1, run.v1, heal.v1, explain.v1,
                    config.v1 (services, healthcheck, stash), docs.v1, ...)
     checkpoint/    CheckpointStore (~/.cairntrace/checkpoints/<name>.json)
@@ -666,6 +1360,14 @@ bin/cairn          bun shebang launcher
 3. Add the dispatcher branch in `src/core/runner/OutcomeEvaluator.ts`.
 4. Update `cairn explain` (CLI command + MCP tool).
 5. Add tests in `src/core/runner/verifiers/verifiers.test.ts`.
+6. A verifier that judges data (not the page) keeps its judging in a pure
+   module and joins the Playwright export through
+   `src/core/exporters/runtimeSources.ts` (never re-implement it there).
+   After changing any module listed in `RUNTIME_SOURCE_FILES`, regenerate the
+   checked-in copy: `CAIRN_UPDATE_GENERATED=1 bun run test
+   src/core/exporters/runtimeSources.test.ts`, then `bunx oxfmt
+   src/core/exporters/runtimeSources.generated.ts`; the drift test fails
+   until you do.
 
 But: prefer the `script` escape hatch if the need only shows up in one spec.
 Only promote to a typed verifier when 3+ real specs would benefit.

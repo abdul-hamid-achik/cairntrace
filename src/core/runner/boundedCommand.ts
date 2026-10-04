@@ -48,6 +48,8 @@ export interface BoundedCommandOptions {
   maxBufferBytes?: number;
   /** Grace for the pipes after the child exited. Default 500ms. */
   drainMs?: number;
+  /** Written to the child's stdin, then closed (stdin is closed empty otherwise). */
+  input?: string;
 }
 
 export interface BoundedCommandResult {
@@ -72,16 +74,47 @@ export interface BoundedCommandResult {
 
 /* Process groups still running, killed if this process exits first. */
 const liveGroups = new Set<number>();
+/* Commands without their own group still running (preconditions, steps). */
+const liveChildren = new Set<number>();
 let exitHookInstalled = false;
 
-function trackGroup(pid: number): void {
-  liveGroups.add(pid);
+function installExitHook(): void {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
   process.on("exit", () => {
-    for (const group of liveGroups) killGroup(group);
-    liveGroups.clear();
+    killLiveCommandsSync();
   });
+}
+
+function trackGroup(pid: number): void {
+  liveGroups.add(pid);
+  installExitHook();
+}
+
+function trackChild(pid: number): void {
+  liveChildren.add(pid);
+  installExitHook();
+}
+
+/**
+ * Kill every bounded command of this process that is still running — the
+ * process tree of each, and the whole group of a command that leads one.
+ * The signal path calls it before the run lock is released, so no
+ * precondition, hook, preflight or `run:` step of a dying run is left
+ * working (reparented to pid 1) while the next run of the config starts.
+ * Synchronous; process-wide (only the exit path calls it).
+ */
+export function killLiveCommandsSync(): void {
+  for (const pid of liveChildren) {
+    try {
+      killProcessTreeSync(pid);
+    } catch {
+      // gone
+    }
+  }
+  liveChildren.clear();
+  for (const group of liveGroups) killGroup(group);
+  liveGroups.clear();
 }
 
 function killGroup(pid: number): void {
@@ -131,7 +164,7 @@ export async function runBoundedCommand(
     child = spawn(file, [...args], {
       cwd: opts.cwd,
       env: opts.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       detached: ownGroup,
     });
   } catch (error) {
@@ -143,6 +176,11 @@ export async function runBoundedCommand(
     };
   }
   const pid = child.pid;
+  if (opts.input !== undefined) {
+    // A child that exits without reading its stdin must not crash us (EPIPE).
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(opts.input);
+  }
   let stdout = "";
   let stderr = "";
   let all = "";
@@ -167,6 +205,7 @@ export async function runBoundedCommand(
   let timedOut = false;
   let cancelled = false;
   if (ownGroup && pid !== undefined) trackGroup(pid);
+  else if (pid !== undefined) trackChild(pid);
   const kill = (): void => {
     if (pid === undefined) return;
     // The tree first (it needs the parent links), then the group: a
@@ -202,6 +241,7 @@ export async function runBoundedCommand(
   running = false;
   clearTimeout(timer);
   opts.signal?.removeEventListener("abort", onAbort);
+  if (pid !== undefined) liveChildren.delete(pid);
   if (ownGroup && pid !== undefined) {
     liveGroups.delete(pid);
     if (opts.killLeftovers) killGroup(pid);

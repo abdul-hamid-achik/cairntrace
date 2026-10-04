@@ -25,7 +25,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import process from "node:process";
 import { z } from "zod";
-import { readWorkbook } from "./workbook.js";
+import { headerColumns, readWorkbook } from "./workbook.js";
 
 export { z };
 
@@ -1226,6 +1226,8 @@ async function openWorkbook(path, dirs) {
       rows: sheet.rows,
       validations: sheet.validations,
       cell: (ref) => sheet.cells.get(String(ref).toUpperCase()),
+      numFmt: (ref) => sheet.numFmt(String(ref)),
+      columns: (options = {}) => headerColumns(sheet.rows, options),
       records: (options = {}) => sheetRecords(sheet.rows, options),
     }),
   );

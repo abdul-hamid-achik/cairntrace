@@ -142,6 +142,42 @@ describe("executeRunInvocation process hygiene", () => {
     expect(process.listenerCount("SIGTERM")).toBe(sigterm);
   }, 30_000);
 
+  it("pins ${run.token} to the runToken option (the same value an exported test reads from CAIRN_RUN_TOKEN)", async () => {
+    await writeFile(
+      join(dir, "token.yml"),
+      PASSING.replace("engine_pass", "engine_token")
+        .replace("/home\n", "/home?t=${run.token}\n")
+        .replace('matches: "/home"', 'matches: "t=pinned_tok.1"'),
+    );
+    const run = (runToken?: string) =>
+      executeRunInvocation(
+        {
+          specs: [join(dir, "token.yml")],
+          options: {
+            mock: true,
+            artifactRoot: join(dir, "runs"),
+            noServices: true,
+            noWebServer: true,
+            ...(runToken ? { runToken } : {}),
+          },
+          cwd: dir,
+        },
+        { origin: "mcp" },
+      );
+    expect(await run("pinned_tok.1")).toMatchObject({
+      kind: "single",
+      exitCode: 0,
+    });
+    // a random token does not match the pinned one
+    expect(await run()).toMatchObject({ kind: "single", exitCode: 1 });
+    // the CLI does not run the options schema: the engine refuses an unsafe token
+    expect(await run("bad token;")).toMatchObject({
+      kind: "errored",
+      exitCode: 2,
+      error: "--run-token must be 1-64 letters, digits, '_', '.' or '-'",
+    });
+  }, 30_000);
+
   it("hands each iteration's document to onDocument and aggregates repeat runs", async () => {
     const seen: string[] = [];
     const result = await executeRunInvocation(

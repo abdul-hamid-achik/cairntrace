@@ -80,6 +80,8 @@ export const StatsResultSchema = z
     groupBy: z.string().min(1),
     /** Label filters applied (AND). */
     filter: z.record(z.string(), z.string()).optional(),
+    /** `--invocation`: only runs of this `cairn run` invocation. */
+    invocation: z.string().min(1).optional(),
     metricName: z.string().optional(),
     scanned: z.number().int().nonnegative(),
     matched: z.number().int().nonnegative(),

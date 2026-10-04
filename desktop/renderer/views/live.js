@@ -165,8 +165,23 @@
    * @param {Record<string, any>} row
    */
   function stepSig(row) {
-    return `${row.status}|${row.durationMs}|${row.error ?? ""}|${row.kind ?? ""}|${row.label ?? ""}|${row.total ?? ""}|${row.expect?.status ?? ""}`;
+    return `${row.status}|${row.durationMs}|${row.error ?? ""}|${row.kind ?? ""}|${row.label ?? ""}|${row.total ?? ""}|${row.expect?.status ?? ""}|${
+      row.superseded ? 1 : 0
+    }|${row.iterations ?? ""}|${row.taken ?? ""}|${row.matched ?? ""}|${row.via ?? ""}|${row.driver ?? ""}|${row.detail ?? ""}|${row.skipReason ?? ""}|${row.widgets?.length ?? 0}:${row.widgets?.at(-1)?.status ?? ""}|${row.requests?.length ?? 0}`;
   }
+
+  /**
+   * A block group's key: its block's execution, iteration and branch.
+   * @param {string} parentKey
+   * @param {number | null | undefined} iteration
+   * @param {string | null | undefined} branch
+   */
+  function groupKey(parentKey, iteration, branch) {
+    return `${parentKey}|${iteration ?? ""}|${branch ?? ""}`;
+  }
+
+  /** widget.field chips shown per live step row (the newest). */
+  const MAX_FIELD_CHIPS = 24;
 
   /**
    * An expect step's verdict under its step row: what was asserted and,
@@ -236,6 +251,9 @@
     const banner = h("div", { class: "phase-banner idle" });
     Studio.paintPhaseBanner(banner, null, "waiting for the first event…");
     const note = h("div", { class: "cell-dim card-note" });
+    // exit 8 (critical teardown failed) / 9 (dirty state): distinct from
+    // failed by glyph, words and border, not only colour
+    const exitSlot = h("div", { class: "ops-exit hidden" });
     const failureBox = h("div", { class: "error-box hidden" });
     // A refused run is not a failure: its own (violet, dashed) box.
     const refusalSlot = h("div", { class: "refusal-slot hidden" });
@@ -355,6 +373,7 @@
         "div",
         { class: "panel-body" },
         note,
+        exitSlot,
         failureBox,
         refusalSlot,
         h(
@@ -379,8 +398,18 @@
       ),
     );
 
-    /** @type {Map<string, { el: HTMLElement, sig: string }>} */
+    /**
+     * Step rows by execution key (a looped step has one per execution); a
+     * block row keeps its groups in `body`, a sibling that survives repaints.
+     * @type {Map<string, { el: HTMLElement, sig: string, body: HTMLElement | null }>}
+     */
     const stepRows = new Map();
+    /**
+     * F14 groups (an iteration, attempt or branch of a block) by
+     * `parentKey|iteration|branch`.
+     * @type {Map<string, { el: HTMLElement, summary: HTMLElement, list: HTMLElement, label: string, members: string[], sig: string }>}
+     */
+    const stepGroups = new Map();
     /** @type {Map<string, { el: HTMLElement, sig: string }>} */
     const outcomeRows = new Map();
     let renderedEvents = 0;
@@ -393,6 +422,13 @@
       if (kind === "app") {
         const done = record.done;
         if (done) {
+          // Exit 8 / 9: the invocation failed after its specs (a critical
+          // teardown, dirty state) while their events still read passed.
+          if (
+            Studio.events.invocationFailureCode(done.exitCode, done.payload) !==
+            null
+          )
+            return "errored";
           if (record.model.status !== "running") return record.model.status;
           // before ok: a batch whose every spec was refused exits 0
           if (CairnPolicy.isRefusedOutcome(done.exitCode, done.payload))
@@ -455,9 +491,11 @@
       }`;
       const spec =
         kind === "app"
-          ? (record.specs ?? [])
-              .map((entry) => entry.split("/").pop())
-              .join(", ")
+          ? record.suite
+            ? `suite ${record.suite}`
+            : (record.specs ?? [])
+                .map((entry) => entry.split("/").pop())
+                .join(", ")
           : (record.model.spec ?? record.spec);
       title.textContent = `${spec || key}${
         record.runId ? ` · ${String(record.runId).slice(0, 24)}` : ""
@@ -529,6 +567,24 @@
               : "started outside Studio (terminal or agent) — streaming the run's events.ndjson";
       }
 
+      const exitCode =
+        kind === "app"
+          ? (Studio.events.invocationFailureCode(
+              record.done?.exitCode,
+              record.done?.payload,
+            ) ??
+            record.done?.exitCode ??
+            null)
+          : null;
+      const exitSig = String(exitCode);
+      if (exitSlot.dataset.sig !== exitSig) {
+        exitSlot.dataset.sig = exitSig;
+        Studio.clear(exitSlot);
+        const exitBadge = Studio.ops.exitBadge(exitCode);
+        if (exitBadge) exitSlot.appendChild(exitBadge);
+        exitSlot.classList.toggle("hidden", !exitBadge);
+      }
+
       // A refusal (exit 7 / run.refused / run.json refusal) gets its own box.
       const refused = status === "refused";
       const refusal = refused ? refusalOf(record) : null;
@@ -597,15 +653,23 @@
               // with the overrides it was started with (the Specs view's
               // "run on" environment, headed, cold start)
               onClick: () =>
-                void actions
-                  .startRun(record.specs, record.overrides ?? undefined)
-                  .catch((error) =>
-                    Studio.toast(
-                      "Run failed to start",
-                      String(error?.message ?? error),
-                      "bad",
-                    ),
+                void (
+                  record.suite
+                    ? actions.startSuite(
+                        record.suite,
+                        record.overrides ?? undefined,
+                      )
+                    : actions.startRun(
+                        record.specs,
+                        record.overrides ?? undefined,
+                      )
+                ).catch((error) =>
+                  Studio.toast(
+                    "Run failed to start",
+                    String(error?.message ?? error),
+                    "bad",
                   ),
+                ),
             }),
           );
         else
@@ -666,62 +730,40 @@
     function paintSteps(record) {
       const model = record.model;
       const total = model.stepTotal;
-      const done = model.steps.filter((row) => row.status !== "running").length;
+      // F14: the count is over top-level steps (the total is theirs)
+      const done = model.steps.filter(
+        (/** @type {any} */ row) => !row.parentId && row.status !== "running",
+      ).length;
+      const topLevel = model.steps.filter(
+        (/** @type {any} */ row) => !row.parentId,
+      ).length;
       stepsTitle.textContent = `Steps (${
-        total ? `${done}/${total}` : model.steps.length
+        total ? `${done}/${total}` : topLevel
       })`;
       const pinned = isNearBottom(stepsList.parentElement ?? stepsList);
+      /** @type {Map<string, any>} */
+      const byKey = new Map();
+      for (const row of model.steps) byKey.set(row.key ?? row.stepId, row);
+      /** @type {Set<string>} */
+      const touchedGroups = new Set();
       for (const row of model.steps) {
+        const rowKey = row.key ?? row.stepId;
         const sig = stepSig(row);
-        let entry = stepRows.get(row.stepId);
+        let entry = stepRows.get(rowKey);
         if (entry && entry.sig === sig) continue;
-        const what = Studio.events.stepWhat(row.kind, row.label);
-        const el = h(
-          "div",
-          { class: `timeline-row step-live step-${row.status}` },
-          h("span", {
-            class: `dot dot-${
-              row.status === "running" ? "running" : fmt.statusTone(row.status)
-            }`,
-          }),
-          h(
-            "span",
-            { class: "label", title: row.stepId },
-            h("span", {
-              class: "step-pos",
-              text: `${row.index}${row.total ? `/${row.total}` : ""}`,
-            }),
-            ` ${what || row.stepId}`,
-            what
-              ? h("span", { class: "cell-dim", text: ` · ${row.stepId}` })
-              : null,
-            row.when
-              ? h("span", { class: "cell-dim", text: ` · when ${row.when}` })
-              : null,
-          ),
-          h("span", {
-            class: "ts",
-            text:
-              row.status === "running"
-                ? "…"
-                : row.status === "skipped"
-                  ? "skipped"
-                  : fmt.formatDuration(row.durationMs),
-          }),
-          row.expect ? expectLine(row.expect) : null,
-          row.error && !(row.expect && row.expect.status === "failed")
-            ? h("div", {
-                class: `step-error inline-error${
-                  row.kind === "run" ? " run-output" : ""
-                }`,
-                text: fmt.truncate(row.error, row.kind === "run" ? 1200 : 600),
-              })
-            : null,
-        );
+        const el = liveStepRow(row);
         if (entry) entry.el.replaceWith(el);
-        else stepsList.appendChild(el);
-        stepRows.set(row.stepId, { el, sig });
+        else {
+          const target = row.parentKey
+            ? groupList(row, byKey.get(row.parentKey))
+            : stepsList;
+          target.appendChild(el);
+        }
+        if (row.parentKey)
+          touchedGroups.add(groupKey(row.parentKey, row.iteration, row.branch));
+        stepRows.set(rowKey, { el, sig, body: entry?.body ?? null });
       }
+      for (const gkey of touchedGroups) paintGroup(gkey, byKey);
       if (!model.steps.length && !stepsList.childElementCount)
         stepsList.appendChild(
           h(
@@ -735,6 +777,257 @@
         stepsList.querySelector(".empty-row")?.remove();
       const scroller = stepsList.parentElement;
       if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
+    }
+
+    /**
+     * The list a nested step row goes into: its block's group for this
+     * iteration / attempt / branch, created under the block's row on first
+     * use. A block row that repaints keeps its groups (they are a sibling).
+     * @param {Record<string, any>} row
+     * @param {Record<string, any> | undefined} parent
+     * @returns {HTMLElement}
+     */
+    function groupList(row, parent) {
+      const parentEntry = stepRows.get(row.parentKey);
+      if (!parentEntry) return stepsList;
+      if (!parentEntry.body) {
+        parentEntry.body = h("div", { class: "step-groups live-groups" });
+        parentEntry.el.after(parentEntry.body);
+      }
+      const gkey = groupKey(row.parentKey, row.iteration, row.branch);
+      let group = stepGroups.get(gkey);
+      if (!group) {
+        const label = Studio.events.groupLabel(
+          { iteration: row.iteration, branch: row.branch },
+          parent?.kind,
+        );
+        const summary = h("summary");
+        const list = h("div", { class: "step-group-body timeline" });
+        const el = h(
+          "details",
+          {
+            class: "step-group",
+            open: true,
+            dataset: { group: label },
+          },
+          summary,
+          list,
+        );
+        parentEntry.body.appendChild(el);
+        group = { el, summary, list, label, members: [], sig: "" };
+        stepGroups.set(gkey, group);
+      }
+      if (!group.members.includes(row.key ?? row.stepId))
+        group.members.push(row.key ?? row.stepId);
+      return group.list;
+    }
+
+    /**
+     * Repaint a group's summary from its rows: running, failed, retried (a
+     * later attempt superseded it), skipped or passed.
+     * @param {string} gkey
+     * @param {Map<string, any>} byKey
+     */
+    function paintGroup(gkey, byKey) {
+      const group = stepGroups.get(gkey);
+      if (!group) return;
+      const rows = group.members
+        .map((/** @type {string} */ member) => byKey.get(member))
+        .filter(Boolean);
+      const status =
+        rows.length && rows.every((row) => row.superseded)
+          ? "retried"
+          : rows.some((row) => row.status === "running")
+            ? "running"
+            : rows.some((row) => row.status === "failed")
+              ? "failed"
+              : rows.length && rows.every((row) => row.status === "skipped")
+                ? "skipped"
+                : "passed";
+      const sig = `${status}|${rows.length}`;
+      if (group.sig === sig) return;
+      group.sig = sig;
+      const tone =
+        status === "retried"
+          ? "warn"
+          : status === "running"
+            ? "running"
+            : fmt.statusTone(status);
+      group.el.className = `step-group step-group-${status}`;
+      group.summary.replaceChildren(
+        h("span", { class: `dot dot-${tone}` }),
+        h("span", { class: "step-group-label mono", text: group.label }),
+        h("span", {
+          class: "cell-dim",
+          text: ` · ${status} · ${rows.length} step${
+            rows.length === 1 ? "" : "s"
+          }`,
+        }),
+      );
+    }
+
+    /**
+     * One live step row: position, kind and label, what a block did, how an
+     * interaction went (F15), widget fields and requests as chips.
+     * @param {Record<string, any>} row
+     * @returns {HTMLElement}
+     */
+    function liveStepRow(row) {
+      const what = Studio.events.stepWhat(row.kind, row.label);
+      const block = Studio.events.blockText(row);
+      const status = row.superseded ? "retried" : row.status;
+      return h(
+        "div",
+        {
+          class: `timeline-row step-live step-${status}${
+            row.parentKey ? " step-nested" : ""
+          }`,
+          dataset: { step: row.stepId },
+        },
+        h("span", {
+          class: `dot dot-${
+            row.status === "running"
+              ? "running"
+              : row.superseded
+                ? "warn"
+                : fmt.statusTone(row.status)
+          }`,
+        }),
+        h(
+          "span",
+          { class: "label", title: row.stepId },
+          h("span", {
+            class: "step-pos",
+            text: `${row.index}${row.total ? `/${row.total}` : ""}`,
+          }),
+          ` ${what || row.stepId}`,
+          what
+            ? h("span", { class: "cell-dim", text: ` · ${row.stepId}` })
+            : null,
+          block ? h("span", { class: "cell-dim", text: ` · ${block}` }) : null,
+          row.when
+            ? h("span", { class: "cell-dim", text: ` · when ${row.when}` })
+            : null,
+          row.skipReason
+            ? h("span", { class: "cell-dim", text: ` · ${row.skipReason}` })
+            : null,
+          row.via && row.via !== "pointer"
+            ? h("span", {
+                class: `cell-dim${
+                  row.via === "dispatch" || row.via === "dataTransfer"
+                    ? " via-fallback"
+                    : ""
+                }`,
+                text: ` · via ${row.via}`,
+              })
+            : null,
+          row.driver
+            ? h("span", { class: "cell-dim", text: ` · ${row.driver}` })
+            : null,
+        ),
+        h("span", {
+          class: "ts",
+          text:
+            row.status === "running"
+              ? "…"
+              : row.superseded
+                ? "retried"
+                : row.status === "skipped"
+                  ? "skipped"
+                  : fmt.formatDuration(row.durationMs),
+        }),
+        row.detail
+          ? h("div", {
+              class: "step-detail-live cell-dim",
+              title: row.detail,
+              text: fmt.truncate(row.detail, 300),
+            })
+          : null,
+        row.widgets?.length ? widgetChips(row) : null,
+        row.requests?.length ? requestChips(row) : null,
+        row.expect ? expectLine(row.expect) : null,
+        row.error && !(row.expect && row.expect.status === "failed")
+          ? h("div", {
+              class: `step-error inline-error${
+                row.kind === "run" ? " run-output" : ""
+              }`,
+              text: fmt.truncate(row.error, row.kind === "run" ? 1200 : 600),
+            })
+          : null,
+      );
+    }
+
+    /**
+     * F15 `widget.field` events as chips: the field key and its status
+     * (never the value), driver and path in the tooltip.
+     * @param {Record<string, any>} row
+     */
+    function widgetChips(row) {
+      const shown = row.widgets.slice(-MAX_FIELD_CHIPS);
+      const hidden =
+        row.widgets.length - shown.length + (row.widgetsDropped ?? 0);
+      return h(
+        "div",
+        { class: "live-chips widget-chips" },
+        hidden > 0
+          ? h("span", { class: "cell-dim", text: `+${hidden} earlier ` })
+          : null,
+        shown.map((/** @type {any} */ field) => {
+          const node = Studio.tag(
+            `${field.field} ${field.status}`,
+            field.status === "failed"
+              ? "bad"
+              : field.status === "skipped"
+                ? "muted"
+                : "ok",
+          );
+          node.title = [
+            field.driver ? `driver ${field.driver}` : null,
+            field.via ? `via ${field.via}` : null,
+            field.durationMs !== null && field.durationMs !== undefined
+              ? fmt.formatDuration(field.durationMs)
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          return node;
+        }),
+      );
+    }
+
+    /**
+     * F18 `artifact.request` events as chips: status, attempts a retry or
+     * an until sent, a matrix's combinations and mismatches.
+     * @param {Record<string, any>} row
+     */
+    function requestChips(row) {
+      return h(
+        "div",
+        { class: "live-chips request-chips" },
+        row.requests.map((/** @type {any} */ request) => {
+          const mismatched = (request.mismatches ?? 0) > 0;
+          const node = Studio.tag(
+            `${request.assign ?? "request"} → ${request.status ?? "?"}${
+              request.attempts ? ` · ${request.attempts} attempts` : ""
+            }${
+              request.combinations
+                ? ` · ${request.combinations} combination(s)${
+                    mismatched ? `, ${request.mismatches} mismatched` : ""
+                  }`
+                : ""
+            }`,
+            mismatched
+              ? "bad"
+              : request.status !== null &&
+                  request.status >= 200 &&
+                  request.status < 400
+                ? "ok"
+                : "warn",
+          );
+          node.title = request.path ?? "";
+          return node;
+        }),
+      );
     }
 
     function paintOutcomes(record) {
@@ -1250,6 +1543,10 @@
     const output = createOutputPanel();
     const eventsSource = output.addSource("events", "events");
     output.el.classList.add("hidden");
+    // What the config `run:` block, `--bail` and `--suite` did, from the
+    // invocation journal's events and settled summary.
+    const policyHost = h("div", { class: "ops-live hidden" });
+    const suiteTag = h("span", { class: "tag hidden" });
     const members = h("div", { class: "group-members" });
     const root = h(
       "section",
@@ -1265,16 +1562,64 @@
         pidTag,
         originSlot,
         livenessSlot,
+        suiteTag,
         elapsed,
         details,
       ),
       banner,
+      policyHost,
       h("div", { class: "group-body" }, argvLine, planned, output.el),
       members,
     );
     let renderedEvents = 0;
     let plannedSig = "";
     let badgeSig = "";
+    let policySig = "";
+
+    /** @param {Record<string, any>} record */
+    function paintPolicy(record) {
+      const model = record?.model ?? null;
+      const summary = record?.journal?.summary ?? null;
+      const suite =
+        record?.journal?.suite ?? model?.policy?.suite?.name ?? null;
+      if (suite) {
+        suiteTag.textContent = `suite ${suite}`;
+        suiteTag.title = "cairn run --suite";
+        suiteTag.className = "tag tag-info";
+      } else suiteTag.className = "tag hidden";
+      const services = (model?.services ?? []).filter(
+        (/** @type {any} */ row) =>
+          row.phase === "teardown" &&
+          row.event === "fail" &&
+          (row.data?.critical || row.data?.provisioner),
+      );
+      const input = { policy: model?.policy ?? null, summary, services };
+      const sig = JSON.stringify([
+        { ...input.policy, metrics: input.policy?.metrics?.length ?? 0 },
+        summary?.runPolicy ?? null,
+        summary?.skipped ?? null,
+        summary?.exitCode ?? null,
+        services.length,
+      ]);
+      if (sig === policySig) return;
+      policySig = sig;
+      Studio.clear(policyHost);
+      const panel = Studio.ops.policyPanel(input);
+      policyHost.classList.toggle("hidden", !panel);
+      if (!panel) return;
+      // open by default when something needs attention
+      const attention = Studio.events
+        .policyBadges({ policy: input.policy, services }, summary)
+        .some((item) => item.tone === "bad");
+      policyHost.appendChild(
+        h(
+          "details",
+          { class: "ops-live-details", open: attention },
+          h("summary", { class: "cell-dim", text: "run policy" }),
+          panel,
+        ),
+      );
+    }
 
     function paint(record) {
       const journal = record?.journal ?? null;
@@ -1352,11 +1697,18 @@
         ? journal.argv.join(" ")
         : "";
       const refusals = record?.model?.refusals ?? [];
+      // --bail: once the journal ended, specs that never started were skipped
+      const bailed = record?.model?.policy?.bailed ?? null;
+      const ended = Boolean(journal?.status) && journal.status !== "running";
+      const skippedByBail =
+        ended && (Boolean(bailed) || Number(journal?.summary?.skipped) > 0);
       const sig = JSON.stringify([
         journal?.planned,
         journal?.runs,
         journal?.current,
         refusals.length,
+        skippedByBail,
+        bailed?.spec ?? null,
       ]);
       if (sig !== plannedSig) {
         plannedSig = sig;
@@ -1373,7 +1725,13 @@
             : Studio.events.plannedRefusal(refusals, entry);
           const itemState =
             run?.status ??
-            (refusedEvent ? "refused" : isCurrent ? "running" : "pending");
+            (refusedEvent
+              ? "refused"
+              : isCurrent
+                ? "running"
+                : skippedByBail
+                  ? "skipped"
+                  : "pending");
           const refusal =
             itemState === "refused"
               ? CairnPolicy.normalizeRefusal(refusedEvent ?? run?.refusal)
@@ -1383,7 +1741,13 @@
               "li",
               {
                 class: `planned-item planned-${itemState}`,
-                title: refusal ? CairnPolicy.refusalText(refusal) : null,
+                title: refusal
+                  ? CairnPolicy.refusalText(refusal)
+                  : itemState === "skipped"
+                    ? `--bail${
+                        bailed?.spec ? `: ${bailed.spec} failed first` : ""
+                      }, so this spec never started`
+                    : null,
               },
               h("span", {
                 class: `dot dot-${
@@ -1395,6 +1759,9 @@
                 }`,
               }),
               h("span", { class: "mono", text: entry.spec }),
+              itemState === "skipped"
+                ? h("span", { class: "cell-dim", text: " skipped · bailed" })
+                : null,
               entry.labels
                 ? h("span", {
                     class: "cell-dim",
@@ -1467,6 +1834,7 @@
         if (record) {
           record.dirty = new Set();
           paint(record);
+          paintPolicy(record);
           paintLogs(record);
         }
         tick(Date.now());

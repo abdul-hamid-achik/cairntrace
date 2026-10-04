@@ -489,6 +489,40 @@ environments:
     expect(ci.result.coldStartSatisfied).toBe(true);
   });
 
+  it("checks wait.app handles against config browser.appHandle (F20)", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nenvironments:\n  local:\n    baseUrl: http://localhost:9\nbrowser:\n  appHandle:\n    store: window.appStore\n",
+    );
+    const specPath = join(dir, "app-wait.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: app_wait
+intent: wait on app state
+coldStart: guest
+steps:
+  - wait: { app: { path: store.ready, equals: true } }
+  - wait:
+      any: [{ text: Saved }, { app: { path: cart.count, exists: true } }]
+      timeoutMs: 5000
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+`,
+    );
+    const { result, exitCode } = await verifySpec(specPath, {
+      config: configPath,
+    });
+    expect(exitCode).toBe(4);
+    expect(result.errors).toEqual([
+      'wait.app: no browser.appHandle named "cart" (configured: store) — add it to the config browser.appHandle',
+    ]);
+  });
+
   it("surfaces implicit-environment warnings without failing", async () => {
     const configPath = join(dir, "cairntrace.config.yml");
     await writeFile(
@@ -544,5 +578,45 @@ environments:
     expect(
       result.warnings.some((w) => w.includes(`the spec's environment "local"`)),
     ).toBe(true);
+  });
+});
+
+describe("verifySpec with environment-scoped include", () => {
+  const FIXTURE = join(
+    import.meta.dirname,
+    "../../../core/config/__fixtures__/composition-env",
+  );
+
+  it("gives the same verdict in every environment as the unsplit config (a var an environment does not define is still unresolved there)", async () => {
+    const verdicts = async (side: "before" | "after") => {
+      const out: Record<string, { status: string; errors: string[] }> = {};
+      for (const env of ["local", "tunnel", "dev", "test"]) {
+        const { result } = await verifySpec(join(FIXTURE, side, "spec.yml"), {
+          config: join(FIXTURE, side, "cairntrace.config.yml"),
+          env,
+        });
+        out[env] = {
+          status: result.status,
+          // paths differ by design (two fixture directories)
+          errors: result.errors.map((e) =>
+            e.replaceAll(join(FIXTURE, side), "<dir>"),
+          ),
+        };
+      }
+      return out;
+    };
+    const before = await verifySpec(join(FIXTURE, "before", "spec.yml"), {
+      config: join(FIXTURE, "before", "cairntrace.config.yml"),
+      env: "dev",
+    });
+    expect(before.result.errors.join("\n")).toContain(
+      "missing vars.sandboxPath",
+    );
+    const split = await verdicts("after");
+    expect(split).toEqual(await verdicts("before"));
+    expect(split.local!.status).not.toBe("invalid");
+    expect(split.tunnel!.status).not.toBe("invalid");
+    expect(split.dev!.status).toBe("invalid");
+    expect(split.test!.status).toBe("invalid");
   });
 });

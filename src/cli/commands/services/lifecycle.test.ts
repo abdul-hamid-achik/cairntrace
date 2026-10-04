@@ -158,32 +158,34 @@ exit 0
 S=${sq(state)}
 printf 'tmux %s\\n' "$*" >> ${sq(calls)}
 sub="$1"; shift
-target=""; sname=""; wname=""; first=""; last=""
+target=""; sname=""; wname=""; first=""; last=""; fmt=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -t) target="$2"; shift 2;;
     -s) sname="$2"; shift 2;;
     -n) wname="$2"; shift 2;;
-    -c|-F|-S) shift 2;;
+    -F) fmt="$2"; shift 2;;
+    -c|-S) shift 2;;
     -d|-p|-J) shift;;
     *) [ -z "$first" ] && first="$1"; last="$1"; shift;;
   esac
 done
 sess="\${target%%:*}"; win="\${target#*:}"
 [ "$win" = "$target" ] && win=""
+sess="\${sess#=}"; win="\${win#=}"
 case "$sub" in
   has-session) [ -f "$S/session-$sess" ] && exit 0; exit 1;;
   kill-session) rm -f "$S/session-$sess"; rm -rf "$S/win-$sess"; exit 0;;
   new-session) touch "$S/session-$sname"; mkdir -p "$S/win-$sname"; echo zsh > "$S/win-$sname/$wname.cmd"; : > "$S/win-$sname/$wname.pane"; exit 0;;
   new-window) mkdir -p "$S/win-$sess"; echo zsh > "$S/win-$sess/$wname.cmd"; : > "$S/win-$sess/$wname.pane"; exit 0;;
   list-windows) [ -f "$S/session-$sess" ] || exit 1; for f in "$S/win-$sess"/*.cmd; do [ -e "$f" ] && basename "$f" .cmd; done; exit 0;;
-  display-message)
+  list-panes)
     [ -f "$S/win-$sess/$win.cmd" ] || exit 1
     c=$(cat "$S/win-$sess/$win.cmd")
     if [ -f "$S/win-$sess/$win.dead" ]; then
       printf '1\\t%s\\t\\n' "$(cat "$S/win-$sess/$win.dead")"; exit 0
     fi
-    case "$last" in *pane_dead*) printf '0\\t\\t%s\\n' "$c";; *) printf '%s\\n' "$c";; esac
+    case "$fmt" in *pane_dead*) printf '0\\t\\t%s\\n' "$c";; *) printf '%s\\n' "$c";; esac
     exit 0;;
   send-keys) echo node > "$S/win-$sess/$win.cmd"; printf '$ %s\\nserver ready\\n' "$first" >> "$S/win-$sess/$win.pane"; exit 0;;
   capture-pane) cat "$S/win-$sess/$win.pane" 2>/dev/null; exit 0;;
@@ -256,7 +258,7 @@ outcomes:
 
 /** The calls a liveness look makes: none of them starts or stops anything. */
 const READ_ONLY_PROBE =
-  /^(docker compose (?:.* )?ps\b|tmux (?:has-session|list-windows|display-message|capture-pane)\b)/;
+  /^(docker compose (?:.* )?ps\b|tmux (?:has-session|list-windows|list-panes|capture-pane)\b)/;
 
 async function callLog(f: Fixture): Promise<string[]> {
   return (await readFile(f.calls, "utf8")).split("\n").filter(Boolean);

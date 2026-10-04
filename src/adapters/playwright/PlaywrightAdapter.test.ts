@@ -248,6 +248,89 @@ describe("PlaywrightAdapter request", () => {
     });
   });
 
+  it("credentials: omit sends no context cookies and keeps no Set-Cookie (cookie bridge)", async () => {
+    const adapter = new PlaywrightAdapter({ requestMode: "cookie-bridge" });
+    const cookies = vi.fn(async () => [
+      {
+        name: "pre",
+        value: "sent",
+        domain: "app.test",
+        path: "/",
+        expires: -1,
+        httpOnly: false,
+        secure: false,
+        sameSite: "Lax" as const,
+      },
+    ]);
+    const addCookies = vi.fn(async () => {});
+    installCookieBridgeContext(adapter, { cookies, addCookies });
+    const fetch = vi.fn(
+      async (_url: string, _init: { headers: Headers }) =>
+        new Response(JSON.stringify({ denied: true }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            "set-cookie": "anon=1; Path=/",
+          },
+        }),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await adapter.request({
+      method: "GET",
+      url: "http://app.test/api/admin",
+      headers: { authorization: "Bearer invalid-value" },
+      credentials: "omit",
+      timeoutMs: 1000,
+    });
+
+    const init = fetch.mock.calls[0]![1];
+    expect(init.headers.get("cookie")).toBeNull();
+    expect(init.headers.get("authorization")).toBe("Bearer invalid-value");
+    expect(cookies).not.toHaveBeenCalled();
+    expect(addCookies).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, status: 401 });
+  });
+
+  it("credentials: omit leaves APIRequestContext (which always sends cookies) for the bridge", async () => {
+    const adapter = new PlaywrightAdapter({ requestMode: "api" });
+    const apiFetch = vi.fn(async () => apiResponse(200, "{}"));
+    const addCookies = vi.fn(async () => {});
+    (
+      adapter as unknown as {
+        context: {
+          request: { fetch: typeof apiFetch };
+          cookies: () => Promise<never[]>;
+          addCookies: typeof addCookies;
+        };
+      }
+    ).context = {
+      request: { fetch: apiFetch },
+      cookies: async () => [],
+      addCookies,
+    };
+    const fetch = vi.fn(
+      async () =>
+        new Response("denied", {
+          status: 403,
+          headers: { "set-cookie": "anon=1; Path=/" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const result = await adapter.request({
+      method: "GET",
+      url: "http://app.test/api/admin",
+      credentials: "omit",
+      timeoutMs: 1000,
+    });
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(addCookies).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, status: 403, body: "denied" });
+  });
+
   it("uses the subprocess cookie bridge without parent-process fetch", async () => {
     const adapter = new PlaywrightAdapter({
       requestMode: "subprocess-cookie-bridge",

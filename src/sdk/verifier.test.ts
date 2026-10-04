@@ -19,6 +19,7 @@ import {
   z,
 } from "./verifier.js";
 import { readWorkbook } from "./workbook.js";
+import { buildXlsxFixture } from "../testing/xlsxFixture";
 import { z as z4 } from "zod/v4";
 
 type Result = {
@@ -724,6 +725,69 @@ describe("ctx.xlsx", () => {
   });
 });
 
+describe("ctx.xlsx workbook model (F17)", () => {
+  it("exposes header columns, number formats and validation formulas", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairn-sdk-xlsx-model-"));
+    try {
+      await writeFile(
+        join(dir, "template.xlsx"),
+        buildXlsxFixture(
+          [
+            {
+              name: "Import Template",
+              rows: [
+                ["Name *", "Email"],
+                ["Staff_Name", "Staff_Email"],
+                ["", { s: 1 }],
+              ],
+              validations: [
+                {
+                  type: "custom",
+                  sqref: "B3:B100",
+                  formula1: "COUNTIF($B$3:$B$100,B3)=1",
+                },
+              ],
+            },
+          ],
+          { xfs: [0, 49] },
+        ),
+      );
+      const verify = defineVerifier({
+        async run(c) {
+          const sheet = (await c.xlsx("template.xlsx")).sheet(
+            "Import Template",
+          )!;
+          return c.result.ok({
+            columns: sheet.columns({ keyRow: 2 }),
+            emailFormat: sheet.numFmt("B3"),
+            nameFormat: sheet.numFmt("A3"),
+            validation: sheet.validations[0],
+          });
+        },
+      });
+      const result = await run(verify, { specDir: dir });
+      expect(result).toMatchObject({
+        ok: true,
+        evidence: {
+          columns: [
+            { index: 0, letter: "A", label: "Name *", key: "Staff_Name" },
+            { index: 1, letter: "B", label: "Email", key: "Staff_Email" },
+          ],
+          emailFormat: { id: 49, code: "@" },
+          nameFormat: { id: 0, code: "General" },
+          validation: {
+            type: "custom",
+            sqref: "B3:B100",
+            formula1: "COUNTIF($B$3:$B$100,B3)=1",
+          },
+        },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("readWorkbook", () => {
   it("keeps an empty styled cell from swallowing the next cell's value", () => {
     const book = readWorkbook(
@@ -740,6 +804,34 @@ describe("readWorkbook", () => {
     ]);
     expect(book.sheets[0]!.cells.get("A1")).toBeUndefined();
     expect(() => readWorkbook(Buffer.from("not a zip"))).toThrow(/not a zip/);
+  });
+
+  it("refuses a sheet whose dense grid would be huge (one stray far-off cell)", () => {
+    const sheet = (far: string) =>
+      zip({
+        "xl/workbook.xml": `<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+        "xl/_rels/workbook.xml.rels": `<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>`,
+        "xl/worksheets/sheet1.xml": `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row>${far}</sheetData></worksheet>`,
+      });
+    const before = process.memoryUsage().rss;
+    expect(() =>
+      readWorkbook(
+        sheet(
+          `<row r="2000"><c r="XFD2000" t="inlineStr"><is><t>far</t></is></c></row>`,
+        ),
+      ),
+    ).toThrow(
+      /sheet "Data" spans 2000 rows × 16384 columns.*too sparse or too large/,
+    );
+    expect(process.memoryUsage().rss - before).toBeLessThan(100 * 1024 * 1024);
+    // A wide but shallow sheet is still read.
+    const wide = readWorkbook(
+      sheet(
+        `<row r="2"><c r="XFD2" t="inlineStr"><is><t>far</t></is></c></row>`,
+      ),
+    );
+    expect(wide.sheets[0]!.rows[1]![16383]).toBe("far");
+    expect(wide.sheets[0]!.rows[0]!).toHaveLength(16384);
   });
 });
 

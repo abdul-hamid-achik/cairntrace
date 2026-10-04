@@ -59,6 +59,8 @@ export const StashReceiptSchema = z
     excluded: z.array(z.string()).optional(),
     /** Secret-scanner findings file.cheap reported (custom.secrets_found). */
     secretsFound: z.number().int().nonnegative().optional(),
+    /** fcheap rejected the run-identity `--meta`; the stash has none. */
+    metaDropped: z.literal(true).optional(),
   })
   .strict();
 
@@ -76,6 +78,8 @@ export const PublishReceiptSchema = z
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
     sizeBytes: z.number().int().nonnegative(),
     publishedAt: z.string().datetime({ offset: true }),
+    /** Server commit time, when the fcheap receipt carries it (0.37+). */
+    committedAt: z.string().datetime({ offset: true }).optional(),
     expiresAt: z.string().datetime({ offset: true }).optional(),
     webUrl: z.string().url().optional(),
     /** Relative paths/dirs the evidence gate left out of the package. */

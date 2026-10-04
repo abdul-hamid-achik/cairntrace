@@ -1,4 +1,5 @@
 import type { OutcomeResult, RunResult, StepResult } from "../../schema/run.v1";
+import { stepResultLabel } from "../stepLabel";
 
 /**
  * Human-readable markdown render of a RunResult. Same in-memory object as the
@@ -23,6 +24,7 @@ export function renderRunMarkdown(r: RunResult): string {
     }`,
     `- duration: ${formatDuration(r.durationMs)} | outcomes: ${passed}/${total} passed`,
     `- run id: ${r.runId}`,
+    ...reasonLines(r),
     "",
     "## Outcomes",
     ...r.outcomes.map(renderOutcomeLine),
@@ -52,6 +54,33 @@ export function renderRunMarkdown(r: RunResult): string {
   return lines.join("\n") + "\n";
 }
 
+/**
+ * Why a run that did not pass did not: `failure.message`, and the
+ * invocation's verdict when it is not the specs' own (exit 8 / 9 after a
+ * passed spec, or a signal). Without these an ERRORED run whose every
+ * outcome and step passed says nothing about why.
+ */
+function reasonLines(r: RunResult): string[] {
+  const lines: string[] = [];
+  const reason = r.status !== "passed" ? r.failure?.message : undefined;
+  if (reason) lines.push(`- reason: ${truncate(oneLine(reason), 300)}`);
+  const outcome = r.invocationOutcome;
+  if (outcome && outcome.exitCode !== outcome.specsExitCode) {
+    const why =
+      outcome.error && outcome.error !== reason
+        ? ` — ${truncate(oneLine(outcome.error), 300)}`
+        : "";
+    lines.push(
+      `- invocation: exit ${outcome.exitCode} (the specs alone: exit ${outcome.specsExitCode})${why}`,
+    );
+  }
+  return lines;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 /** A spec the environment policy refused: nothing ran, no run directory. */
 function renderRefusedMarkdown(r: RunResult): string {
   return [
@@ -78,7 +107,7 @@ function renderStepLine(s: StepResult): string {
   const mark = s.status === "passed" ? "✓" : s.status === "failed" ? "✗" : "·";
   const dur = ` (${formatDuration(s.durationMs)})`;
   const err = s.error ? ` — ${truncate(s.error, 120)}` : "";
-  return `- ${mark} ${s.id}${dur}${err}`;
+  return `- ${mark} ${stepResultLabel(s)}${dur}${err}`;
 }
 
 function formatDuration(ms: number): string {

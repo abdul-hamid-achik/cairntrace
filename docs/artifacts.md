@@ -129,6 +129,16 @@ Runs started by `cairn run` also carry an optional `invocation` link,
 A pinned run carries `"pinned": { "at": "…", "reason": "…" }` (`cairn pin`);
 retention never prunes it.
 
+When the config has a `run:` policy or a critical teardown, the document
+`cairn run --format json` prints (and MCP `cairn_run` returns) waits for the
+final verdict and carries it: `"exitCode"` is the process exit code (8 a
+critical teardown failed, 9 the machine is not clean after the run), a spec
+that passed reads `"status": "errored"` with `failure.phase: "invocation"`,
+and `invocationOutcome` (`exitCode`, `specsExitCode`, `error`, `runPolicy`)
+says why. A BatchRunResult gets the same `exitCode` and `invocationOutcome`
+while its `results[]` keep each spec's status. `run.json` in the run
+directory is never rewritten: it records what the spec did.
+
 A spec the environment policy refused has `"status": "refused"`, a
 `refusal` block (`reason`, `env`, `requires`, `code`) and exit code 7, but
 no run directory: that document only exists as `cairn run --format json`
@@ -358,8 +368,10 @@ time a run starts or settles, so you can poll it:
 | `startedAt`, `endedAt` | ISO timestamps |
 | `current` | `{ index, spec, runId? }` of the run that started last |
 | `runs` | `[{ index, spec, runId, runDir, status, synthetic? }]`; `status` is `running` until the run settles. A refused spec gets no entry (a `run.refused` event in the journal's `events.ndjson` instead); `synthetic: true` marks a spec that errored before its run started (no directory) |
-| `summary` | `{ total, passed, failed, errored, refused?, durationMs, exitCode, iterations?, error? }`: the batch summary that `cairn run` prints, persisted; `refused` only when the environment policy refused a spec |
+| `summary` | `{ total, passed, failed, errored, refused?, skipped?, durationMs, exitCode, iterations?, error?, runPolicy? }`: the batch summary that `cairn run` prints, persisted; `refused` only when the environment policy refused a spec, `skipped` only when `--bail` skipped specs. `exitCode` can be `8` (a critical teardown failed) or `9` (dirty state after the run); those settle as `errored`. `runPolicy` (additive) holds `lock` (`path`, `scope`, `reclaimed?`), `criticalTeardown[]` (`index`, `command`, `exitCode?`, `timedOut?`, `path`), `dirty[]` (`phase`, `kind`, `name?`, `survivors[]`) and `finallyFailed?` |
 | `signal` | `SIGINT` or `SIGTERM` when a signal aborted the invocation |
+
+The config `run:` block and `--bail` add invocation-level events to the journal's `events.ndjson` (all additive in `events.v1`): `run.lock.acquired` / `run.lock.reclaimed` / `run.lock.refused` / `run.lock.released` (lock `path`, `scope`, the owner's pid, age and invocation on a refusal or reclaim), `preflight.started` / `preflight.passed` / `preflight.failed` (1-based `index`, `check` kind, `reason` on a failure, redacted), `cleanliness.clean` / `cleanliness.dirty` (`phase` before or after, `kind`, `name?`, `survivors[]`), `finally.started` / `finally.finished` (`index`, `exitCode`, `timedOut?`, `outputTail?`), `invocation.bailed` (the tripping `spec`, its `exitCode` and how many specs were `skipped`), and a `critical: true` flag in the `data` of a `services.teardown.complete|fail|signal` event for a critical teardown entry. See [Services](/services#run-policy-run-lock-preflight-clean-machine-belts).
 
 A `status: "running"` journal whose `pid` is no longer alive was killed
 without a chance to update itself; treat it as aborted. On SIGINT or SIGTERM,
@@ -392,7 +404,17 @@ cairn logs latest --follow --log precondition  # every logs/precondition-*.log
 cairn logs latest --log outcome-tasks_terminal # one log, printed once
 cairn logs --invocation latest                 # journal summary (--format json|yaml|md)
 cairn logs --invocation latest --follow --log narration
+cairn logs --invocation label:round=7          # the newest journal labelled round=7
+cairn logs --invocation <id> --follow --relay  # the delegated-runner events stream
 ```
+
+`--invocation` takes an id, `latest`, `previous`, a journal path or
+`label:<key>=<value>` (the newest journal whose labels carry it; with
+`--follow` it waits for one to appear, at most `--wait-timeout` — default
+10m, `0` without end — then exits 2). `--relay` prints the journal's events
+plus `invocation.run.started` / `invocation.run.finished` lines derived from
+`invocation.json` and, once it settled, one `invocation.summary` line: the
+stream a [delegated runner](/delegate) appends to `CAIRN_DELEGATE_EVENTS`.
 
 `--follow` streams from the start of the file, picks up new matching log
 files as they appear, and exits 0 once the run's `artifact-manifest.json`
@@ -423,7 +445,7 @@ omitted. For example, a `--before` hook runs before any run directory exists.
 | `CAIRN_BASE_URL` | the environment's `baseUrl` | ✓ | ✓ | ✓ |
 | `CAIRN_CONFIG_DIR` | directory of the resolved `cairntrace.config.yml` | ✓ | ✓ | ✓ |
 | `CAIRN_RUN_ID`, `CAIRN_RUN_DIR` | this run's id and directory | ✓ | — | ✓ |
-| `CAIRN_RUN_TOKEN` | the run's `${run.token}` value | ✓ | — | ✓ |
+| `CAIRN_RUN_TOKEN` | the run's `${run.token}` value (random, or pinned with `cairn run --run-token <t>`) | ✓ | — | ✓ |
 | `CAIRN_RUN_STATUS`, `CAIRN_SPEC_PATH` | verdict and spec path | — | — | ✓ |
 | `CAIRN_PROGRESS_FILE` | per-command progress file ([Progress messages](#progress-messages)) | ✓ | — | — |
 

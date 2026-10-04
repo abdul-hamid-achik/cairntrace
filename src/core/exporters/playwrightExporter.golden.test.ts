@@ -236,4 +236,166 @@ describe("exportPlaywright goldens", () => {
     expect(source).not.toMatch(/__CAIRN_[A-Z_]+__/i);
     checkGolden("late-bound-text", source);
   });
+
+  it("host commands: inline preconditions, run + teardown, capture, poll, env default", () => {
+    const s = spec({
+      version: 1,
+      name: "golden_host_commands",
+      intent:
+        "preconditions, a run step, a capture, a polled outcome and a teardown through the bounded helper",
+      vars: {},
+      preconditions: {
+        env: { APP_TOKEN: "__CAIRN_SECRET_REF__APP_TOKEN__" },
+        commands: [
+          { name: "reset", run: "bun run reset", timeoutMs: 45000 },
+          { run: "psql -c 'select 1' | head -1" },
+        ],
+      },
+      steps: [
+        {
+          id: "seed",
+          run: {
+            node: "../scripts/seed.mjs",
+            args: ["create", "__CAIRN_RUN_TOKEN__"],
+            assign: "seeded",
+            timeoutMs: 30000,
+          },
+        },
+        {
+          id: "open_item",
+          open: "/items?id=${runs.seeded.id}&region=__CAIRN_ENV_DEFAULT__524547494f4e_6575__",
+        },
+        {
+          id: "read_title",
+          capture: {
+            assign: "title",
+            text: { by: "role", role: "heading", name: "Item" },
+          },
+        },
+        {
+          id: "echo_title",
+          fill: { by: "label", name: "Echo", value: "${captures.title}" },
+        },
+      ],
+      outcomes: [
+        {
+          id: "banner",
+          description: "the saved banner shows and stays",
+          verify: {
+            text: { contains: "Saved" },
+            poll: { timeoutMs: 15000, everyMs: 500 },
+          },
+        },
+        {
+          id: "stays",
+          description: "the status stays done",
+          verify: {
+            text: { contains: "Done" },
+            poll: { timeoutMs: 10000, stableMs: 2000 },
+          },
+        },
+      ],
+      teardown: {
+        steps: [{ id: "cleanup", run: "node ../scripts/clean.mjs" }],
+        failRun: true,
+        timeoutMs: 60000,
+      },
+    });
+    const source = exportPlaywright(s, {
+      sourcePath: "/tmp/flows/host.yml",
+      outPath: "/tmp/exports/host.spec.ts",
+      preconditions: "inline",
+      testIdAttribute: "data-answer-key",
+    }).source;
+    expect(source).not.toMatch(/__CAIRN_[A-Z_]+__/i);
+    checkGolden("host-commands", source);
+  });
+
+  it("verifier gate: a node verifier gated on env, a datasource verifier recorded as skipped", () => {
+    const s = spec({
+      version: 1,
+      name: "golden_verifier_gate",
+      intent:
+        "node and datasource verifiers are reported skipped, never passed",
+      steps: [{ id: "go", open: "https://example.com/" }],
+      outcomes: [
+        {
+          id: "page_ok",
+          description: "the page loads",
+          verify: { text: { contains: "Example" } },
+        },
+        {
+          id: "durable",
+          description: "the durable processing finished",
+          verify: {
+            script: {
+              runtime: "node",
+              file: "./verify.mjs",
+              fixtures: { uri: "__CAIRN_SECRET_REF__MONGO_URI__" },
+            },
+          },
+        },
+        {
+          id: "db_row",
+          description: "the row exists",
+          verify: {
+            mongo: {
+              source: "main",
+              collection: "items",
+              filter: {},
+              expect: { count: 1 },
+            },
+          },
+        },
+      ],
+    });
+    const source = exportPlaywright(s, {
+      sourcePath: "/tmp/flows/gate.yml",
+      outPath: "/tmp/exports/gate.spec.ts",
+      verifiers: "gate",
+      gateEnv: ["TEMPORAL_API_BASE"],
+      datasourceEnv: { main: ["MONGO_URI"] },
+    }).source;
+    expect(source).not.toMatch(/__CAIRN_[A-Z_]+__/i);
+    checkGolden("verifier-gate", source);
+  });
+
+  it("strict locators (no .first(); nth and raw selectors unchanged)", () => {
+    const s = spec({
+      version: 1,
+      name: "strict_locators",
+      intent: "Locators fail on ambiguity instead of taking the first match",
+      coldStart: "guest",
+      steps: [
+        { id: "go", open: "https://example.com/form" },
+        { id: "save", click: { by: "role", role: "button", name: "Save" } },
+        {
+          id: "second_save",
+          click: { by: "role", role: "button", name: "Save", nth: 1 },
+        },
+        { id: "email", fill: { by: "label", name: "Email", value: "a@b.c" } },
+        { id: "raw", click: { by: "selector", selector: "#plain" } },
+        { id: "plan", click: { by: "text", text: "Pro plan" } },
+      ],
+      outcomes: [
+        {
+          id: "saved",
+          description: "the toast says Saved",
+          verify: { text: { contains: "Saved" } },
+        },
+        {
+          id: "on_form",
+          description: "still on the form",
+          verify: { url: { startsWith: "https://example.com/form" } },
+        },
+      ],
+    });
+    const source = exportPlaywright(s, {
+      sourcePath: "/tmp/flows/strict.yml",
+      outPath: "/tmp/exports/strict.spec.ts",
+      strictLocators: true,
+    }).source;
+    expect(source).not.toContain(".first()");
+    checkGolden("strict-locators", source);
+  });
 });

@@ -1,4 +1,5 @@
-import { httpCall, joinBaseUrl, type HttpReply } from "../datasources/http";
+import { httpCall } from "../datasources/http";
+import { joinBaseUrl, type HttpReply } from "../datasources/httpWire";
 import { scrubDatasourceText } from "../datasources/redact";
 import { statusMatches } from "../gates/probes";
 import type { HttpStatusMatch } from "../gates/schema";

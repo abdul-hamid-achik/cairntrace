@@ -164,8 +164,34 @@ function repeated(flag, values) {
 }
 
 /**
+ * A config suite name the renderer may pass to `cairn run --suite`: one
+ * printable line, not a flag. (Suite names are config keys; anything the
+ * config accepts that is not printable or starts with `-` is refused here
+ * rather than guessed at.)
+ * @param {unknown} value
+ * @returns {string}
+ */
+function checkSuiteName(value) {
+  const name = String(value ?? "").trim();
+  if (
+    !name ||
+    name.length > 120 ||
+    name.startsWith("-") ||
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f]/.test(name)
+  )
+    throw new Error(
+      `invalid suite name: ${
+        name ? JSON.stringify(name.slice(0, 60)) : "(empty)"
+      }`,
+    );
+  return name;
+}
+
+/**
  * @param {{
  *   specs: string[],
+ *   suite?: string | null,
  *   env?: string | null,
  *   backend?: string | null,
  *   provider?: string | null,
@@ -190,8 +216,14 @@ function repeated(flag, values) {
  */
 function buildRunArgv(options) {
   const specs = (options.specs ?? []).filter(Boolean);
-  if (!specs.length) throw new Error("run requires at least one spec");
-  const argv = ["run", ...specs];
+  // `--suite <name>` stands in for the spec paths (naming both is a usage
+  // error in the CLI); one argv entry joined to its flag.
+  const suite = options.suite ? checkSuiteName(options.suite) : null;
+  if (suite && specs.length)
+    throw new Error("run takes spec paths or a suite, not both");
+  if (!suite && !specs.length)
+    throw new Error("run requires at least one spec");
+  const argv = suite ? ["run", `--suite=${suite}`] : ["run", ...specs];
   if (options.env) argv.push("--env", options.env);
   if (options.backend) argv.push("--backend", options.backend);
   if (options.provider) argv.push("--provider", options.provider);
@@ -413,7 +445,8 @@ function sliceBalanced(text, start) {
 /**
  * Exit-code contract shared with the CLI (AGENTS.md):
  * 0 success, 1 outcome failure, 2 errored, 3 cold-start gate, 4 lint,
- * 5 heal made no progress, 6 contract-hash mismatch.
+ * 5 heal made no progress, 6 contract-hash mismatch, 7 refused by the
+ * environment policy, 8 a critical teardown failed, 9 dirty state after the run.
  * @param {number | null} code
  * @returns {string}
  */
@@ -435,6 +468,10 @@ function describeExitCode(code) {
       return "contract-hash mismatch";
     case 7:
       return "refused by environment policy";
+    case 8:
+      return "critical teardown failed";
+    case 9:
+      return "dirty state after the run";
     case null:
       return "terminated by signal";
     default:
@@ -450,6 +487,13 @@ function describeExitCode(code) {
  * only the direct child leaves those running (and their inherited pipes keep
  * `close` from firing, which is how a "cancelled" run used to hang the app).
  *
+ * A cancel is SIGTERM to the group, SIGKILL 2s later — unless `cancelPolicy`
+ * (asked at cancel time) says otherwise: a delegated run gets SIGINT, like
+ * Ctrl-C, and is never SIGKILLed early, because cairn must wait up to the
+ * runner's `cancelGraceMs` for it to cancel its remote invocation and copy
+ * the results back (cairn bounds that wait itself; `killAfterMs` is only a
+ * safety net).
+ *
  * @param {{
  *   command: string,
  *   argv: string[],
@@ -459,6 +503,7 @@ function describeExitCode(code) {
  *   onLog?: (entry: Record<string, unknown>) => void,
  *   onSpawn?: (pid: number | undefined) => void,
  *   signal?: AbortSignal,
+ *   cancelPolicy?: () => ({ signal: NodeJS.Signals, killAfterMs: number | null } | null),
  * }} options
  * @returns {Promise<{ ok: boolean, exitCode: number | null, signal: string | null, payload: unknown, logs: Array<Record<string, unknown>>, stdout: string, stderr: string, timedOut: boolean, cancelled: boolean }>}
  */
@@ -472,6 +517,7 @@ function execCairn(options) {
     onLog,
     onSpawn,
     signal,
+    cancelPolicy,
   } = options;
   return new Promise((resolve, reject) => {
     /** @type {import("node:child_process").ChildProcessWithoutNullStreams} */
@@ -545,7 +591,25 @@ function execCairn(options) {
 
     const onAbort = () => {
       cancelled = true;
-      escalate();
+      let policy = null;
+      try {
+        policy = cancelPolicy?.() ?? null;
+      } catch {
+        policy = null;
+      }
+      if (!policy) {
+        escalate();
+        return;
+      }
+      killTree(policy.signal);
+      if (policy.killAfterMs !== null && policy.killAfterMs >= 0) {
+        timers.push(
+          setTimeout(() => {
+            killTree("SIGKILL");
+            timers.push(setTimeout(() => finish(exitCode, exitSignal), 3_000));
+          }, policy.killAfterMs),
+        );
+      }
     };
     if (signal) {
       if (signal.aborted) {
@@ -602,7 +666,11 @@ function execCairn(options) {
     child.on("exit", (code, killSignal) => {
       exitCode = code;
       exitSignal = killSignal;
-      if (cancelled) killTree("SIGKILL");
+      if (cancelled) {
+        killTree("SIGKILL");
+        // A grandchild may still hold the pipes: settle from `exit`.
+        timers.push(setTimeout(() => finish(exitCode, exitSignal), 3_000));
+      }
     });
     child.on("close", (code, killSignal) => {
       exitCode = code ?? exitCode;
@@ -650,6 +718,7 @@ module.exports = {
   which,
   resolveCairn,
   repeated,
+  checkSuiteName,
   buildRunArgv,
   buildVerifyArgv,
   buildHealArgv,

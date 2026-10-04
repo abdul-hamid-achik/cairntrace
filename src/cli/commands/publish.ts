@@ -82,7 +82,12 @@ export interface PublishRunResult {
   sha256: string;
   sizeBytes: number;
   publishedAt: string;
-  /** publishedAt + retentionDays (the remote copy's deletion time). */
+  /** Server commit time from the receipt (file.cheap 0.37+), when present. */
+  committedAt?: string;
+  /**
+   * The remote copy's deletion time: the server's `expires_at` when the
+   * receipt carries it, else publishedAt + retentionDays.
+   */
   expiresAt: string;
   /** Console link from the receipt's validated `web_url`, when present. */
   webUrl?: string;
@@ -221,9 +226,12 @@ export async function publishRunDirectory(
       sha256: receipt.sha256,
       sizeBytes: receipt.sizeBytes,
       publishedAt: receipt.publishedAt,
-      expiresAt: new Date(
-        Date.parse(receipt.publishedAt) + retentionDays * 24 * 60 * 60 * 1000,
-      ).toISOString(),
+      ...(receipt.committedAt ? { committedAt: receipt.committedAt } : {}),
+      expiresAt:
+        receipt.expiresAt ??
+        new Date(
+          Date.parse(receipt.publishedAt) + retentionDays * 24 * 60 * 60 * 1000,
+        ).toISOString(),
       ...(webUrl ? { webUrl } : {}),
       excluded: selection.excluded,
       runIndex: runIndexPath !== undefined,

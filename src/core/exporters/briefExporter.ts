@@ -10,13 +10,17 @@ import {
 import type { StepResult } from "../schema/run.v1";
 import {
   clickLocator,
+  fillLocator,
+  isBuiltinLoginUse,
   openPath,
   type ClickUntil,
   type Locator,
   type Outcome,
   type Spec,
   type Step,
-  type WaitCondition,
+  describeAppWait,
+  type RunnerWaitCondition,
+  type WaitStepCondition,
 } from "../schema/spec.v1";
 import {
   isConsoleVerifier,
@@ -211,8 +215,7 @@ function compileStep(step: Step, id: string): BriefStep {
     );
   }
   if ("fill" in step) {
-    const { value, ...loc } = step.fill;
-    return inputAction(id, "fill", loc as Locator, value, "fill");
+    return inputAction(id, "fill", fillLocator(step), step.fill.value, "fill");
   }
   if ("type" in step) {
     const { value, delayMs: _delayMs, ...loc } = step.type;
@@ -342,8 +345,27 @@ function compileStep(step: Step, id: string): BriefStep {
   if ("snapshot" in step) {
     return machine(id, "snapshot is capture-only");
   }
+  if (isBuiltinLoginUse(step)) {
+    return machine(
+      id,
+      "use login is machine-run: Cairntrace signs in through the environment's auth: block (API, secrets from the provider)",
+    );
+  }
   if ("use" in step) {
-    return machine(id, "use: should be expanded by parseSpec before export");
+    return typeof step.use !== "string" && step.use.retry
+      ? machine(
+          id,
+          `use ${step.use.action} with retry is machine-run: cairntrace retries the action's steps as one group`,
+        )
+      : machine(id, "use: should be expanded by parseSpec before export");
+  }
+  if ("repeat" in step || "if" in step) {
+    return machine(
+      id,
+      `${
+        "repeat" in step ? "repeat" : "if"
+      } is control flow: cairntrace runs the block and its nested steps; brief one top-level step at a time`,
+    );
   }
   if ("expect" in step) {
     return machine(
@@ -355,6 +377,18 @@ function compileStep(step: Step, id: string): BriefStep {
     return machine(
       id,
       "capture is machine-only: cairntrace stores the value for ${captures.…}",
+    );
+  }
+  if (
+    "set" in step ||
+    "check" in step ||
+    "uncheck" in step ||
+    "choose" in step ||
+    "form" in step
+  ) {
+    return machine(
+      id,
+      "widget steps are machine-run: cairntrace's widget drivers write each field and read it back (widgets/<n>_<id>.json)",
     );
   }
   return machine(id, "unrecognized step");
@@ -627,8 +661,23 @@ function describeClickUntil(until: ClickUntil | undefined): string {
   return `url ${describeWaitUrl(until.url)}`;
 }
 
-function describeWait(wait: WaitCondition): string {
+function describeWait(wait: WaitStepCondition): string {
+  const optional =
+    "optional" in wait && wait.optional
+      ? " (optional — skip if it never does)"
+      : "";
+  if ("any" in wait) {
+    return `Wait until one of: ${wait.any.map(describeWait).join("; ")}${optional}`;
+  }
+  if ("all" in wait) {
+    return `Wait until all of: ${wait.all.map(describeWait).join("; ")}${optional}`;
+  }
+  return `${describePlainWait(wait)}${optional}`;
+}
+
+function describePlainWait(wait: RunnerWaitCondition): string {
   if ("ms" in wait) return `Wait ${wait.ms}ms`;
+  if ("app" in wait) return `Wait until ${describeAppWait(wait)}`;
   if ("text" in wait) return `Wait until the page shows "${wait.text}"`;
   if ("notText" in wait) return `Wait until "${wait.notText}" is gone`;
   if ("load" in wait) return `Wait for load state ${wait.load}`;
@@ -644,7 +693,9 @@ function describeWait(wait: WaitCondition): string {
   return `Wait until the URL ${describeWaitUrl(wait.url)}`;
 }
 
-function waitApproximations(wait: WaitCondition): string[] {
+function waitApproximations(wait: WaitStepCondition): string[] {
+  if ("any" in wait) return wait.any.flatMap(waitApproximations);
+  if ("all" in wait) return wait.all.flatMap(waitApproximations);
   if ("text" in wait) return [`visible text "${wait.text}"`];
   if ("notText" in wait) return [`text "${wait.notText}" is gone`];
   if ("selector" in wait) return [`CSS ${wait.selector} (brittle)`];
@@ -654,6 +705,7 @@ function waitApproximations(wait: WaitCondition): string[] {
   }
   if ("url" in wait) return [`url ${describeWaitUrl(wait.url)}`];
   if ("load" in wait) return [`load ${wait.load}`];
+  if ("app" in wait) return [describeAppWait(wait)];
   return [`pause ${wait.ms}ms`];
 }
 
@@ -670,6 +722,8 @@ function describeWhen(when: Step["when"]): string {
   if (when.selector) parts.push(`selector ${when.selector} exists`);
   if (when.notSelector) parts.push(`selector ${when.notSelector} is absent`);
   if (when.hasText) parts.push(`hasText ${when.hasText}`);
+  if (when.url) parts.push(`url ${describeWaitUrl(when.url)}`);
+  if (when.var) parts.push(`var ${when.var} matches`);
   return parts.join(" and ") || "the gate holds";
 }
 

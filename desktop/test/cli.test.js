@@ -11,6 +11,7 @@ const path = require("node:path");
 const { after, describe, it } = require("node:test");
 
 const cli = require("../lib/cli");
+const ops = require("../lib/ops");
 const { cleanup, tempDir, write } = require("./helpers");
 
 after(cleanup);
@@ -350,6 +351,51 @@ describe("argv builders ↔ the real CLI", () => {
         config: "/p/c.yml",
       }),
     },
+    // wave 6: suites, config vars, orphans, service windows
+    {
+      command: ["run"],
+      argv: cli.buildRunArgv({
+        specs: [],
+        suite: "smoke",
+        env: "e",
+        parallel: 2,
+        labels: ["k=v"],
+      }),
+    },
+    {
+      command: ["suites", "list"],
+      argv: ops.buildSuitesArgv({ env: "e", config: "/p/c.yml" }),
+    },
+    {
+      command: ["config", "vars"],
+      argv: ops.buildConfigVarsArgv({
+        env: "e",
+        unused: true,
+        config: "/p/c.yml",
+      }),
+    },
+    {
+      command: ["doctor"],
+      argv: ops.buildOrphansArgv({ kill: true, only: ["cairn-orphan-1", 42] }),
+    },
+    {
+      command: ["services", "restart"],
+      argv: ops.buildServicesRestartArgv({
+        window: "web",
+        env: "e",
+        config: "/p/c.yml",
+      }),
+    },
+    {
+      command: ["services", "logs"],
+      argv: ops.buildServicesLogsArgv({
+        window: "web",
+        env: "e",
+        config: "/p/c.yml",
+        sinceRestart: true,
+        lines: 50,
+      }),
+    },
   ];
 
   for (const { command, argv } of cases) {
@@ -369,7 +415,10 @@ describe("argv builders ↔ the real CLI", () => {
       // Global options (--log-level, --log-format, …) live on the program.
       globalFlags ??= registeredFlags([]);
       for (const flag of globalFlags) registered.add(flag);
-      const sent = argv.filter((arg) => arg.startsWith("--"));
+      // a flag joined to its value (`--env=x`) is registered as `--env`
+      const sent = argv
+        .filter((arg) => arg.startsWith("--"))
+        .map((arg) => arg.split("=")[0]);
       const unknown = sent.filter((flag) => !registered.has(flag));
       assert.deepEqual(unknown, [], `${command.join(" ")} rejects these`);
     });
@@ -444,7 +493,9 @@ describe("describeExitCode", () => {
     assert.equal(cli.describeExitCode(6), "contract-hash mismatch");
     assert.equal(cli.describeExitCode(7), "refused by environment policy");
     assert.equal(cli.describeExitCode(null), "terminated by signal");
-    assert.equal(cli.describeExitCode(9), "exit 9");
+    assert.equal(cli.describeExitCode(8), "critical teardown failed");
+    assert.equal(cli.describeExitCode(9), "dirty state after the run");
+    assert.equal(cli.describeExitCode(10), "exit 10");
   });
 });
 
@@ -587,6 +638,34 @@ describe("execCairn", () => {
     assert.equal(result.cancelled, true);
     assert.equal(result.ok, false);
     assert.ok(Date.now() - started < 8_000, "abort did not settle promptly");
+  });
+
+  it("a cancelPolicy sends its own signal and skips the 2s SIGKILL", async () => {
+    const dir = tempDir("cairn-graceful-");
+    const mark = path.join(dir, "signal.txt");
+    const bin = write(
+      dir,
+      "graceful",
+      [
+        "#!/bin/sh",
+        `trap 'echo INT > "${mark}"; sleep 3; exit 130' INT`,
+        "n=0; while [ $n -lt 300 ]; do sleep 0.1; n=$((n+1)); done",
+      ].join("\n"),
+    );
+    fs.chmodSync(bin, 0o755);
+    const controller = new AbortController();
+    const pending = cli.execCairn({
+      command: bin,
+      argv: [],
+      timeoutMs: 0,
+      signal: controller.signal,
+      cancelPolicy: () => ({ signal: "SIGINT", killAfterMs: null }),
+    });
+    setTimeout(() => controller.abort(), 300);
+    const result = await pending;
+    assert.equal(result.cancelled, true);
+    assert.equal(fs.readFileSync(mark, "utf8").trim(), "INT");
+    assert.equal(result.exitCode, 130);
   });
 
   it("reports a spawn failure instead of hanging", async () => {

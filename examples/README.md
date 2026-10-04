@@ -26,8 +26,14 @@ The seed operator is `casey@cairntrace.dev` / `cairn-demo-2026`.
 examples/
 ├── README.md                          (this file)
 ├── cairntrace.config.yml              baseUrl + vars + webServer + services lifecycle,
-│                                      a readiness gate, an http datasource and an
-│                                      exec fixture (demo_product)
+│                                      a readiness gate, an http datasource, an
+│                                      exec fixture (demo_product), widget field
+│                                      roots + an app handle (browser:), the API
+│                                      sign-in `use: login` runs (auth:), top-level
+│                                      vars + an environment that `extends` another,
+│                                      a `run:` policy (lock + preflight), a `smoke`
+│                                      suite, a metrics probe and an export
+│                                      target profile (`demo`)
 ├── docker-compose.yaml                demo Postgres on :5433
 ├── fixtures/
 │   ├── sample-invoice.pdf             public sample PDF (upload fixture)
@@ -54,7 +60,10 @@ examples/
 │   ├── import.html                    workbook download/upload demo
 │   ├── table-actions.html             hover-reveal row actions (batch step demo)
 │   ├── login.html                     sign-in form (session cookie)
-│   └── form-controls.html             focus-reveal combobox, Enter-committed search
+│   ├── form-controls.html             focus-reveal combobox, Enter-committed search
+│   └── widgets.html                   vendor profile: native select, radio and checkbox
+│                                      groups, a vue-multiselect look-alike, a field that
+│                                      mounts later, a masked Save button, a page store
 ├── actions/
 │   ├── open_dashboard.yml             INTENTIONALLY drifted (heal demo)
 │   ├── login_demo_app.yml             sign in as the seeded operator
@@ -70,10 +79,12 @@ examples/
     ├── 03-network.yml                 network verifier (GET /api/inventory → 200)
     ├── 04-script.yml                  script escape hatch (counts DOM items via JS)
     ├── 07-config-driven.yml           config baseUrl + ${vars.expectedRows}
-    ├── 08-conditional-step.yml        when: urlContains step skipping
+    ├── 08-conditional-step.yml        control flow: if/else, repeat until, optional wait, when: var
     ├── 10-artifact-xlsx.yml           download → verifier → xlsx → transform → upload
     ├── 11-batch-hover-click.yml       batch step: hover → click a popover in one invocation
     ├── 12-focus-value.yml             focus + exact live-value wait without eval
+    ├── 13-widgets-form.yml            widget kit (form/choose/check), click optional +
+    │                                  fallback: dispatch, fill mode: set, wait.app, prelude
     ├── platform/                      DB-backed suite (below)
     └── demos/                         INTENTIONALLY failing specs, `_`-prefixed so a
                                        directory run stays green (run by explicit path)
@@ -95,13 +106,15 @@ examples/
 | `29-guest-redirect.yml` | auth wall redirect, `wait.url`, URL outcome on the redirect target |
 | `30-restock-job.yml` | `preconditions.wait` readiness gate, `demo_product` exec fixture (ensured before the browser, deleted after), `expect` + `capture` mid-flow, `expect.request`, `http` verifier on the `demo_api` datasource polled until the async job is done and stays done (`poll.stableMs`), `network` body + count, `value` on a captured table |
 | `31-run-step-teardown.yml` | `run:` step provisioning through a node script (`assign` → `${runs.seeded.*}`), `expect` on the rendered row, `capture` + `value`, `http` without a datasource, spec `teardown:` that always deletes the product |
+| `32-api-login-v2.yml` | `use: login` through the config `auth:` block (probe + API sign-in, cold-start contract), request `retry`, `capture` with a JSONPath filter, `until` polling the restock job until done, `credentials: omit` + `matrix` + `expectStatus` for anonymous callers, `value` on request results |
+| `33-export-workbook.yml` | `capture: table` of the catalog, then the `xlsx` verifier: `headers` (`strip`, `present`, `absent`, `includesInOrder: ${captures.screen.headers}`), `rows` (`afterKeyRow`, `match`), `cells`, `validations` by column label |
 
 Data policy for the platform: fixed, realistic operating data for a fictional
 office-supplies warehouse. No real people; the product names and prices are
 ordinary catalog facts, not random strings. Documents uploaded by specs
 accumulate across runs (assertions use `atLeast`), and the seed re-runs
 whenever the products table is empty. Products created by specs are removed
-again — by the `demo_product` fixture's teardown (30), a spec `teardown:`
+again — by the `demo_product` fixture's teardown (30, 32), a spec `teardown:`
 (22, 31) — so the seeded catalog count stays exact across runs.
 
 The demo app's JSON API for these specs: `POST /api/products` and
@@ -173,6 +186,28 @@ formatting in the YAML are preserved by `--apply`.
    `bun examples/demo-app/db/seed.ts`, `bun examples/demo-app/server.ts`, then
    `cairn run <spec> --no-services --no-web-server`.
 
+   Run the named suite instead of paths, under the config's `run:` policy
+   (one run at a time per config, a preflight check first) with its metrics
+   probe sampled around each spec:
+
+   ```bash
+   ./bin/cairn suites list --config examples/cairntrace.config.yml
+   ./bin/cairn run --suite smoke --env local --config examples/cairntrace.config.yml
+   ./bin/cairn config vars --config examples/cairntrace.config.yml
+   ```
+
+   The probe's numbers land in `<run>/diagnostics/metrics.json` (and as
+   `electronics_products.before|after|delta` in `diagnostics/report.json`).
+
+   Hand the flows to a Playwright project with the config's `demo` export
+   target (inline host commands, gated verifiers), then prove it faithful:
+
+   ```bash
+   ./bin/cairn export playwright --config examples/cairntrace.config.yml --target demo --project --out-dir /tmp/demo-export
+   (cd /tmp/demo-export && npm install)   # --verify uses the project's own tsc / playwright
+   ./bin/cairn export playwright --verify /tmp/demo-export
+   ```
+
 2. **Inspect the artifacts**:
 
    ```bash
@@ -206,9 +241,15 @@ code 1, the markdown summary shows `FAILED`, and
   `count`, `console.errorsMax`, `network` (status, body, count),
   `noFailedRequests`, browser and Node `script`, `file`, `httpJson`, `xlsx`,
   `http` (with and without a datasource, polled with a stability window) and
-  `value` across the two suites.
+  `value` and `table` across the two suites.
 - **Run-time setup** — a readiness gate, an exec fixture, `run:` steps,
   `expect` / `capture` steps and spec `teardown:` in the platform suite.
+- **Config instead of wrapper scripts** — top-level `vars`, `extends`, the
+  `run:` policy (lock, preflight), a `suites:` entry and a `metrics:` probe
+  replace a Taskfile around `cairn run`.
+- **Less eval** — typed control flow (08), the widget kit, click/fill flags,
+  app-handle waits and the page prelude (13), request v2 and the environment
+  sign-in (32), and workbook checks without a script (33).
 - **Artifact pack** — every artifact category gets written (JSON+YAML+MD trio,
   evidence files, events, snapshots, console, network, downloads, transforms,
   evals, verifier `.raw.json` sidecars).

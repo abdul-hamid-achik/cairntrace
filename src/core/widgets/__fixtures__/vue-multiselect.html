@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>vue-multiselect replica</title>
+    <style>
+      body { font: 14px sans-serif; padding: 16px; }
+      .question { margin: 12px 0; }
+      .multiselect { position: relative; min-height: 36px; border: 1px solid #ccc; width: 320px; }
+      .multiselect__select { position: absolute; right: 0; top: 0; width: 30px; height: 34px; cursor: pointer; }
+      .multiselect__tags { padding: 6px 34px 0 6px; min-height: 30px; }
+      .multiselect__tag { display: inline-block; background: #41b883; color: #fff; padding: 2px 18px 2px 6px; margin: 0 4px 4px 0; position: relative; }
+      .multiselect__tag-icon { position: absolute; right: 2px; top: 2px; width: 12px; height: 12px; cursor: pointer; }
+      .multiselect__content-wrapper { position: absolute; left: 0; right: 0; background: #fff; border: 1px solid #ccc; max-height: 200px; overflow: auto; z-index: 5; }
+      .multiselect__content { list-style: none; margin: 0; padding: 0; }
+      .multiselect__option { display: block; padding: 6px; cursor: pointer; }
+      .multiselect__option--highlight { background: #41b883; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <!-- A hidden duplicate of the country field (another tab's copy): never the target. -->
+    <div class="question" data-field-key="form.country" style="display: none">
+      <label class="question-label">Country (hidden copy)</label>
+      <div class="ms-mount" data-kind="country-hidden"></div>
+    </div>
+    <div class="question" data-field-key="form.country">
+      <label class="question-label">Country *</label>
+      <div class="ms-mount" data-kind="country"></div>
+    </div>
+    <div class="question" data-field-key="form.spend">
+      <label class="question-label">Spend *</label>
+      <div class="ms-mount" data-kind="spend"></div>
+    </div>
+    <div class="question" data-field-key="form.owner_contact">
+      <label class="question-label">Business owner contact</label>
+      <div class="ms-mount" data-kind="contact"></div>
+    </div>
+    <div class="question" data-field-key="form.regions">
+      <label class="question-label">Regions</label>
+      <div class="ms-mount" data-kind="regions"></div>
+    </div>
+    <div class="question" data-field-key="form.setup">
+      <label class="question-label">Setup</label>
+      <div class="ms-mount" data-kind="setup"></div>
+    </div>
+    <div class="question" id="entity-question" data-field-key="form.entity" style="display: none">
+      <label class="question-label">Entity code</label>
+      <div class="ms-mount" data-kind="entity"></div>
+    </div>
+
+    <script>
+      // Minimal replica of vue-multiselect 2.x/3.x: persistent nodes patched in
+      // place (like Vue), the same classes, and the same handlers —
+      // caret/placeholder/single mousedown toggles, input focus activates and
+      // blur deactivates, the content wrapper prevents mousedown, option
+      // click selects (clicking the selected option deselects: allowEmpty),
+      // keypress Enter adds the pointer element, keyup Escape closes.
+      const COUNTRIES = [
+        "Argentina", "Australia", "Austria", "Belarus", "Belgium", "Brazil", "Canada", "Chile",
+        "China", "Colombia", "Croatia", "Czechia", "Denmark", "Egypt", "Estonia", "Finland",
+        "France", "Germany", "Greece", "Hungary", "Iceland", "India", "Indonesia", "Ireland",
+        "Israel", "Italy", "Japan", "Kenya", "Latvia", "Lithuania", "Luxembourg", "Malaysia",
+        "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria", "Norway", "Peru",
+        "Philippines", "Poland", "Portugal", "Romania", "Russia", "Saudi Arabia", "Serbia",
+        "Singapore", "Slovakia", "Slovenia", "South Africa", "Spain", "Sweden", "Switzerland",
+        "Thailand", "Turkey", "Ukraine", "United Kingdom", "United States", "Uruguay", "Vietnam",
+      ];
+      window.__models = {};
+      window.__events = [];
+
+      function multiselect(mount, opts) {
+        const state = {
+          isOpen: false,
+          search: "",
+          value: opts.multiple ? [] : null,
+          pointer: 0,
+          loaded: !opts.remote,
+          remoteQuery: "",
+        };
+        const el = document.createElement("div");
+        el.className = "multiselect";
+        el.tabIndex = -1;
+        const caret = document.createElement("div");
+        caret.className = "multiselect__select";
+        const tags = document.createElement("div");
+        tags.className = "multiselect__tags";
+        const tagsWrap = document.createElement("div");
+        tagsWrap.className = "multiselect__tags-wrap";
+        const input = document.createElement("input");
+        input.className = "multiselect__input";
+        input.type = "text";
+        input.autocomplete = "off";
+        input.setAttribute("role", "combobox");
+        const wrapper = document.createElement("div");
+        wrapper.className = "multiselect__content-wrapper";
+        wrapper.tabIndex = -1;
+        const list = document.createElement("ul");
+        list.className = "multiselect__content";
+        list.setAttribute("role", "listbox");
+        wrapper.appendChild(list);
+        tags.appendChild(tagsWrap);
+        tags.appendChild(input);
+        el.appendChild(caret);
+        el.appendChild(tags);
+        el.appendChild(wrapper);
+        mount.appendChild(el);
+        let single = null;
+        let placeholder = null;
+
+        const labelOf = (o) => (typeof o === "string" ? o : o.label);
+        const keyOf = (o) => (typeof o === "string" ? o : o.code);
+        const all = () => (state.loaded ? opts.options : []);
+        const filtered = () => {
+          if (opts.remote) {
+            if (!state.loaded) return [];
+            const q = state.remoteQuery.toLowerCase();
+            return all().filter((o) => labelOf(o).toLowerCase().includes(q));
+          }
+          const q = state.search.toLowerCase();
+          // The spend list filters on its internal code, not on the label.
+          return all().filter((o) => keyOf(o).toLowerCase().includes(q));
+        };
+        const isSelected = (o) =>
+          opts.multiple ? state.value.includes(labelOf(o)) : state.value === labelOf(o);
+        const commit = () => {
+          window.__models[opts.name] = opts.multiple ? state.value.slice() : state.value;
+          window.__events.push(opts.name + ":input");
+          if (opts.onChange) opts.onChange(state.value);
+        };
+        const select = (o) => {
+          const label = labelOf(o);
+          if (isSelected(o)) {
+            // allowEmpty: a second click deselects
+            state.value = opts.multiple ? state.value.filter((v) => v !== label) : null;
+          } else if (opts.multiple) {
+            state.value = state.value.concat([label]);
+          } else {
+            state.value = label;
+          }
+          commit();
+          deactivate();
+        };
+        const activate = () => {
+          if (state.isOpen) return;
+          state.isOpen = true;
+          if (opts.remote && !state.loaded) {
+            setTimeout(() => {
+              state.loaded = true;
+              render();
+            }, 400);
+          }
+          render();
+          input.focus();
+        };
+        const deactivate = () => {
+          if (!state.isOpen) return;
+          state.isOpen = false;
+          state.search = "";
+          input.value = "";
+          render();
+          input.blur();
+        };
+        const toggle = () => (state.isOpen ? deactivate() : activate());
+        let remoteTimer = null;
+
+        const render = () => {
+          el.classList.toggle("multiselect--active", state.isOpen);
+          input.style.cssText = state.isOpen ? "" : "width:0;position:absolute;padding:0;border:0";
+          tagsWrap.style.display = opts.multiple && state.value.length ? "" : "none";
+          tagsWrap.textContent = "";
+          if (opts.multiple) {
+            for (const v of state.value) {
+              const tag = document.createElement("span");
+              tag.className = "multiselect__tag";
+              const span = document.createElement("span");
+              span.textContent = v;
+              const icon = document.createElement("i");
+              icon.className = "multiselect__tag-icon";
+              icon.tabIndex = 1;
+              icon.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                state.value = state.value.filter((x) => x !== v);
+                commit();
+                render();
+              });
+              tag.appendChild(span);
+              tag.appendChild(icon);
+              tagsWrap.appendChild(tag);
+            }
+          }
+          const singleVisible = !opts.multiple && state.value !== null && !state.isOpen;
+          if (singleVisible && !single) {
+            single = document.createElement("span");
+            single.className = "multiselect__single";
+            single.addEventListener("mousedown", (e) => {
+              e.preventDefault();
+              toggle();
+            });
+            tags.appendChild(single);
+          }
+          if (!singleVisible && single) {
+            single.remove();
+            single = null;
+          }
+          if (single) single.textContent = state.value;
+          const placeholderVisible =
+            !state.isOpen && (opts.multiple ? state.value.length === 0 : state.value === null);
+          if (placeholderVisible && !placeholder) {
+            placeholder = document.createElement("span");
+            placeholder.className = "multiselect__placeholder";
+            placeholder.textContent = "Type to search";
+            placeholder.addEventListener("mousedown", (e) => {
+              e.preventDefault();
+              toggle();
+            });
+            tags.appendChild(placeholder);
+          }
+          if (!placeholderVisible && placeholder) {
+            placeholder.remove();
+            placeholder = null;
+          }
+          wrapper.style.display = state.isOpen ? "block" : "none";
+          list.textContent = "";
+          const options = filtered();
+          options.forEach((o, i) => {
+            const li = document.createElement("li");
+            li.className = "multiselect__element";
+            li.id = opts.name + "-" + i;
+            li.setAttribute("role", "option");
+            const span = document.createElement("span");
+            span.className =
+              "multiselect__option" +
+              (i === state.pointer ? " multiselect__option--highlight" : "") +
+              (isSelected(o) ? " multiselect__option--selected" : "");
+            if (opts.ariaDesc) {
+              const desc = document.createElement("div");
+              desc.className = "option__desc";
+              desc.setAttribute("aria-label", labelOf(o));
+              const title = document.createElement("span");
+              title.className = "option__title";
+              title.textContent = labelOf(o);
+              desc.appendChild(title);
+              span.appendChild(desc);
+            } else {
+              const inner = document.createElement("span");
+              inner.textContent = labelOf(o);
+              span.appendChild(inner);
+            }
+            span.addEventListener("click", (e) => {
+              e.stopPropagation();
+              select(o);
+            });
+            span.addEventListener("mouseenter", (e) => {
+              if (e.target === span) state.pointer = i;
+            });
+            li.appendChild(span);
+            list.appendChild(li);
+          });
+          if (state.loaded && options.length === 0 && (state.search || state.remoteQuery)) {
+            const li = document.createElement("li");
+            const span = document.createElement("span");
+            span.className = "multiselect__option";
+            span.textContent = "No elements found. Consider changing the search query.";
+            li.appendChild(span);
+            list.appendChild(li);
+          }
+        };
+
+        caret.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          toggle();
+        });
+        wrapper.addEventListener("mousedown", (e) => e.preventDefault());
+        el.addEventListener("focus", activate);
+        input.addEventListener("focus", activate);
+        input.addEventListener("blur", () => deactivate());
+        input.addEventListener("input", () => {
+          state.search = input.value;
+          state.pointer = 0;
+          if (opts.remote) {
+            clearTimeout(remoteTimer);
+            remoteTimer = setTimeout(() => {
+              state.remoteQuery = state.search;
+              render();
+            }, 300);
+          }
+          render();
+        });
+        input.addEventListener("keypress", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          const o = filtered()[state.pointer];
+          if (o) select(o);
+        });
+        input.addEventListener("keyup", (e) => {
+          if (e.key === "Escape") deactivate();
+        });
+        render();
+        return { el, state };
+      }
+
+      for (const mount of document.querySelectorAll(".ms-mount")) {
+        const kind = mount.dataset.kind;
+        if (kind === "country" || kind === "country-hidden") {
+          multiselect(mount, { name: kind, options: COUNTRIES, ariaDesc: true });
+        } else if (kind === "spend") {
+          multiselect(mount, {
+            name: "spend",
+            options: [
+              { label: "Up to 5k", code: "lte5k" },
+              { label: "Over 5k", code: "gt5k" },
+            ],
+          });
+        } else if (kind === "contact") {
+          multiselect(mount, {
+            name: "contact",
+            remote: true,
+            options: ["Ada Lovelace", "Alan Turing", "Grace Hopper"],
+          });
+        } else if (kind === "regions") {
+          multiselect(mount, { name: "regions", multiple: true, options: ["Americas", "EMEA", "APAC"] });
+        } else if (kind === "setup") {
+          // Setup = Shared entity mounts the company code question a moment later.
+          multiselect(mount, {
+            name: "setup",
+            options: ["Shared entity", "Local entity"],
+            onChange: (value) =>
+              setTimeout(() => {
+                document.getElementById("entity-question").style.display =
+                  value === "Shared entity" ? "" : "none";
+              }, 500),
+          });
+        } else if (kind === "entity") {
+          multiselect(mount, { name: "entity", options: ["C100", "C200", "C300"] });
+        }
+      }
+    </script>
+  </body>
+</html>

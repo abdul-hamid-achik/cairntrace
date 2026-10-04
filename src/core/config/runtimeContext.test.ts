@@ -375,6 +375,128 @@ steps: []
     expect(ctx.services?.tmux).toBeUndefined();
   });
 
+  it("lets an environment drop docker (docker: false) and replace or drop the F10 blocks", async () => {
+    const projectRoot = join(dir, "drop-docker");
+    const flowsDir = join(projectRoot, "flows");
+    await mkdir(flowsDir, { recursive: true });
+    await writeFile(
+      join(projectRoot, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+services:
+  docker:
+    command: docker compose up -d
+  provisioner:
+    up: make up
+    down: make down
+    exports: { REMOTE_HOST: make host }
+  tunnels:
+    - { name: db, command: ssh -N db }
+  files:
+    - { path: app.json, json: { a: 1 } }
+  seed:
+    command: yarn seed
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  remote:
+    baseUrl: http://localhost:8081
+    services:
+      docker: false
+      provisioner:
+        up: make up-remote
+      tunnels:
+        - { name: api, command: ssh -N api }
+      files: false
+  bare:
+    baseUrl: http://localhost:8082
+    services:
+      provisioner: false
+      tunnels: false
+`,
+    );
+    const specPath = join(flowsDir, "spec.yml");
+    await writeFile(
+      specPath,
+      `version: 1
+name: drop_docker
+intent: environments reshape the services block
+outcomes: []
+steps: []
+`,
+    );
+    const remote = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "remote",
+    });
+    expect(remote.services?.docker).toBeUndefined();
+    expect(remote.services?.seed?.command).toBe("yarn seed");
+    // Provisioner keys merge: up is replaced, down and exports stay.
+    expect(remote.services?.provisioner).toMatchObject({
+      up: "make up-remote",
+      down: "make down",
+      exports: { REMOTE_HOST: "make host" },
+    });
+    expect(remote.services?.tunnels?.map((t) => t.name)).toEqual(["api"]);
+    expect(remote.services?.files).toBeUndefined();
+    const bare = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "bare",
+    });
+    expect(bare.services?.docker?.command).toBe("docker compose up -d");
+    expect(bare.services?.provisioner).toBeUndefined();
+    expect(bare.services?.tunnels).toBeUndefined();
+    expect(bare.services?.files).toHaveLength(1);
+    const local = await resolveSpecRuntimeContext(specPath, {
+      envOverride: "local",
+    });
+    expect(local.services?.provisioner?.up).toBe("make up");
+  });
+
+  it("uses an environment's services when the config has no top-level services block", async () => {
+    const projectRoot = join(dir, "env-only-services");
+    await mkdir(projectRoot, { recursive: true });
+    const configPath = join(projectRoot, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+  remote:
+    baseUrl: http://localhost:8081
+    services:
+      provisioner:
+        up: make up
+        down: make down
+      docker:
+        command: docker compose up -d
+  bare:
+    baseUrl: http://localhost:8082
+    services:
+      tmux: false
+  off:
+    baseUrl: http://localhost:8083
+    services: false
+`,
+    );
+    const remote = await resolveProjectRuntimeContext({
+      configPath,
+      envOverride: "remote",
+    });
+    expect(remote.services?.provisioner).toMatchObject({
+      up: "make up",
+      down: "make down",
+    });
+    expect(remote.services?.docker?.command).toBe("docker compose up -d");
+    for (const env of ["local", "bare", "off"]) {
+      const ctx = await resolveProjectRuntimeContext({
+        configPath,
+        envOverride: env,
+      });
+      expect(ctx.services, env).toBeUndefined();
+    }
+  });
+
   it("merges env services override over top-level", async () => {
     const projectRoot = join(dir, "merge-services");
     const flowsDir = join(projectRoot, "flows");
@@ -767,5 +889,79 @@ describe("resolveProjectRuntimeContext", () => {
     await expect(
       resolveProjectRuntimeContext({ cwd: nested, envOverride: "nope" }),
     ).rejects.toBeInstanceOf(UnknownEnvironmentError);
+  });
+});
+
+describe("F7 var references: deferred to run time, env values inert", () => {
+  async function project(name: string, config: string): Promise<string> {
+    const root = join(dir, name);
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "cairntrace.config.yml"), config);
+    const spec = join(root, "flow.yml");
+    await writeFile(
+      spec,
+      "version: 1\nname: flow\nintent: x\noutcomes: []\nsteps: []\n",
+    );
+    return spec;
+  }
+
+  it("resolves a var whose template references a --var at run time, and only warns without it", async () => {
+    const spec = await project(
+      "deferred",
+      `version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:1
+    vars:
+      runTag: "\${vars.ticket}-smoke"
+      typed: "\${vars.count}"
+      where: "\${config.dir}/\${env.CAIRN_TEST_DEFERRED_DIR:-out}/\${vars.ticket}"
+`,
+    );
+    const ctx = await resolveSpecRuntimeContext(spec, {
+      vars: { ticket: "T-1", count: 3 },
+      env: {},
+    });
+    expect(ctx.vars.runTag).toBe("T-1-smoke");
+    expect(ctx.vars.typed).toBe(3);
+    expect(ctx.vars.where).toBe(`${join(dir, "deferred")}/out/T-1`);
+    expect(ctx.warnings).toEqual([]);
+
+    // No --var: the load does not fail; the reference stays text, with a warning.
+    const bare = await resolveSpecRuntimeContext(spec, { env: {} });
+    expect(bare.vars.runTag).toBe("${vars.ticket}-smoke");
+    expect(bare.warnings.join("\n")).toContain(
+      "vars.runTag: ${vars.ticket} is not defined",
+    );
+  });
+
+  it("keeps a ${vars.X} inside an env or secret value inert (never resolved, never a load error, never quoted)", async () => {
+    const spec = await project(
+      "inert",
+      `version: 1
+defaultEnvironment: local
+vars:
+  other: resolved-other
+environments:
+  local:
+    baseUrl: http://localhost:1
+    vars:
+      password: "\${env.CAIRN_TEST_INERT_PW}"
+      label: "\${env.CAIRN_TEST_INERT_LABEL}"
+`,
+    );
+    // Built at runtime: no credential-shaped literal in the source.
+    const secret = `pw-${String(Date.now()).slice(-4)}-\${vars.nope}`;
+    const ctx = await resolveSpecRuntimeContext(spec, {
+      env: {
+        CAIRN_TEST_INERT_PW: secret,
+        CAIRN_TEST_INERT_LABEL: "label-${vars.other}",
+      },
+    });
+    expect(ctx.vars.password).toBe(secret);
+    // A defined name inside an env value is not resolved either.
+    expect(ctx.vars.label).toBe("label-${vars.other}");
+    expect(ctx.warnings).toEqual([]);
   });
 });

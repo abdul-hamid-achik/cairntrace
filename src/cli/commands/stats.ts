@@ -10,6 +10,8 @@ export interface StatsCommandOptions {
   groupBy?: string;
   /** Repeatable `--label key=value` filters (AND). */
   label?: string[];
+  /** Only runs of this invocation id (`_invocations/<id>`, run.json `invocation.id`). */
+  invocation?: string;
   /** Preferred metric field to harvest from outcomes/*.raw.json. */
   metric?: string;
   /** Baseline group key for ratios (default: first sorted group). */
@@ -67,6 +69,7 @@ export async function statsCommand(opts: StatsCommandOptions): Promise<void> {
     artifactRoot,
     groupBy,
     ...(Object.keys(filter).length > 0 ? { filter } : {}),
+    ...(opts.invocation?.trim() ? { invocation: opts.invocation.trim() } : {}),
     ...(opts.metric ? { metricNames: [opts.metric] } : {}),
     ...(opts.baseline ? { baseline: opts.baseline } : {}),
     ...(limit !== undefined ? { limit } : {}),
@@ -96,6 +99,7 @@ export function renderStatsMarkdown(s: StatsResult): string {
         .join(", ")}`,
     );
   }
+  if (s.invocation) lines.push(`- Invocation: \`${s.invocation}\``);
   if (s.metricName) lines.push(`- Domain metric: \`${s.metricName}\``);
   lines.push("");
 

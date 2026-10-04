@@ -1,11 +1,7 @@
-import { createRequire } from "node:module";
+import { CAIRN_ENGINE_VERSION } from "../core/engineVersion";
 
 /**
- * Single source of truth for the CLI's reported version: package.json.
- * Read at runtime via createRequire so it works identically under the bun
- * shebang launcher, vitest, and a future compiled binary — no JSON-import
- * tsconfig flags needed.
+ * Single source of truth for the CLI's reported version: package.json (see
+ * core/engineVersion.ts, which config `requires.cairntrace` checks against).
  */
-export const CAIRN_VERSION: string = (
-  createRequire(import.meta.url)("../../package.json") as { version: string }
-).version;
+export const CAIRN_VERSION: string = CAIRN_ENGINE_VERSION;

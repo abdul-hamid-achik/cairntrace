@@ -63,6 +63,41 @@ describe("describeEvent", () => {
     assert.match(described.label, /skipped \(when: text:Accept cookies\)/);
   });
 
+  it("narrates request attempts and matrix mismatches (F18)", () => {
+    const plain = events.describeEvent({
+      type: "artifact.request",
+      assign: "me",
+      status: 200,
+      path: "requests/me.json",
+    });
+    assert.equal(plain.label, "request me → 200 · requests/me.json");
+    assert.equal(plain.tone, "muted");
+    const polled = events.describeEvent({
+      type: "artifact.request",
+      assign: "tasks",
+      status: 200,
+      attempts: 3,
+      path: "requests/tasks.json",
+    });
+    assert.equal(
+      polled.label,
+      "request tasks → 200 · 3 attempts · requests/tasks.json",
+    );
+    const matrix = events.describeEvent({
+      type: "artifact.request",
+      assign: "denied",
+      status: 401,
+      combinations: 8,
+      mismatches: 2,
+      path: "requests/denied.json",
+    });
+    assert.equal(
+      matrix.label,
+      "request denied → 401 · 8 combination(s), 2 mismatched · requests/denied.json",
+    );
+    assert.equal(matrix.tone, "warn");
+  });
+
   it("maps run.passed / run.failed / run.errored to terminal tones", () => {
     assert.equal(events.describeEvent({ type: "run.passed" }).tone, "ok");
     assert.equal(events.describeEvent({ type: "run.failed" }).tone, "bad");
@@ -684,6 +719,102 @@ describe("golden event fixtures (src/core/schema/__fixtures__/events)", () => {
         ],
       );
     },
+    "run-policy-pass.ndjson": (model) => {
+      assert.equal(model.status, "passed");
+      assert.equal(model.policy.lock.state, "released");
+      assert.equal(model.policy.preflight.total, 3);
+      assert.deepEqual(
+        model.policy.preflight.checks.map((row) => [row.check, row.status]),
+        [
+          ["json", "passed"],
+          ["secret", "passed"],
+          ["command", "passed"],
+        ],
+      );
+      assert.deepEqual(
+        model.policy.cleanliness.map((row) => [row.phase, row.status]),
+        [
+          ["before", "clean"],
+          ["after", "clean"],
+        ],
+      );
+      assert.deepEqual(
+        model.policy.finally.map((row) => [row.index, row.status]),
+        [[1, "passed"]],
+      );
+      assert.deepEqual(events.policyBadges(model, null), []);
+    },
+    "run-policy-dirty-bail.ndjson": (model) => {
+      assert.equal(model.status, "errored");
+      assert.deepEqual(model.policy.bailed, {
+        spec: "<spec>",
+        exitCode: 1,
+        skipped: 2,
+      });
+      assert.equal(model.policy.finally[0].status, "failed");
+      const dirty = model.policy.cleanliness.find(
+        (row) => row.status === "dirty",
+      );
+      assert.equal(dirty.phase, "after");
+      assert.equal(dirty.survivors.length, 1);
+      assert.deepEqual(
+        events.policyBadges(model, null).map((badge) => badge.key),
+        ["dirty-after", "finally-failed", "bailed"],
+      );
+    },
+    "suite-metrics-pass.ndjson": (model) => {
+      assert.equal(model.policy.suite.name, "golden");
+      assert.equal(model.policy.suite.status, "passed");
+      assert.equal(model.policy.suite.bail, true);
+      assert.deepEqual(
+        model.policy.suiteHooks.map((row) => [row.hook, row.status]),
+        [
+          ["before", "passed"],
+          ["after", "passed"],
+        ],
+      );
+      const failed = model.policy.metrics.filter((row) => row.error);
+      assert.equal(failed.length, 2);
+      assert.equal(failed[0].name, "broken");
+      const total = model.policy.metrics.filter((row) => row.name === "total");
+      assert.deepEqual(
+        total.map((row) => [row.scope, row.phase, row.value]),
+        [
+          ["invocation", "before", 9],
+          ["invocation", "after", 9],
+        ],
+      );
+    },
+    "services-ops-pass.ndjson": (model) => {
+      const phases = model.services.map((row) => `${row.phase}.${row.event}`);
+      assert.ok(phases.includes("provisioner.exports"));
+      assert.ok(phases.includes("tunnel.ready"));
+      assert.ok(phases.includes("files.write"));
+      assert.ok(
+        phases.includes("seed.commit") || phases.includes("seed.phase"),
+      );
+    },
+    "services-ops-fail.ndjson": (model) => {
+      const failed = model.services.find(
+        (row) => row.phase === "teardown" && row.event === "fail",
+      );
+      assert.equal(failed.data.critical, true);
+      assert.equal(failed.data.provisioner, true);
+      assert.deepEqual(
+        events.policyBadges(model, null).map((badge) => badge.key),
+        ["critical-teardown"],
+      );
+    },
+    "services-restart.ndjson": (model) => {
+      const phases = model.services.map((row) => `${row.phase}.${row.event}`);
+      assert.deepEqual(phases, [
+        "restart.start",
+        "restart.stop",
+        "restart.ready",
+        "restart.giveup",
+        "tunnel.giveup",
+      ]);
+    },
     "script-progress.ndjson": (model) => {
       assert.equal(model.status, "passed");
       assert.deepEqual(model.preconditions[0].progress, ["3/9 queues idle"]);
@@ -1195,6 +1326,319 @@ describe("evidence sensitivity and traces", () => {
       badge?.lines.some((line) =>
         /not listed in the console: unsupported — .*run-index/.test(line),
       ),
+    );
+  });
+});
+
+// ── wave 6: run policy, suites, metrics, service operations ────────────────
+
+describe("run policy, suite and metric events", () => {
+  const golden = (/** @type {string} */ name) =>
+    fs.readFileSync(
+      path.join(
+        __dirname,
+        "..",
+        "..",
+        "src",
+        "core",
+        "schema",
+        "__fixtures__",
+        "events",
+        name,
+      ),
+      "utf8",
+    )
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) =>
+        JSON.parse(line.replaceAll("<ts>", "2026-10-03T10:00:00.000Z")),
+      );
+
+  it("labels every policy event readably, with a tone that matches its meaning", () => {
+    const labels = new Map(
+      golden("run-policy-dirty-bail.ndjson").map((event) => {
+        const described = events.describeEvent(event);
+        return [event.type, described];
+      }),
+    );
+    assert.equal(labels.get("run.lock.acquired").label, "run lock acquired");
+    assert.equal(labels.get("run.lock.acquired").tone, "ok");
+    assert.match(
+      labels.get("invocation.bailed").label,
+      /bailed after <spec> \(exit 1\) · 2 spec\(s\) skipped/,
+    );
+    assert.equal(labels.get("invocation.bailed").tone, "warn");
+    // a failed finally hook is non-fatal: a warning, not a failure
+    assert.equal(labels.get("finally.finished").tone, "warn");
+    assert.match(labels.get("finally.finished").label, /exit 3.*non-fatal/);
+    // dirty after the run is exit 9 and says so
+    assert.match(
+      labels.get("cleanliness.dirty").label,
+      /^dirty after the run \(exit 9\)/,
+    );
+    assert.equal(labels.get("cleanliness.dirty").tone, "warn");
+    assert.match(labels.get("cleanliness.dirty").detail, /golden-session/);
+  });
+
+  it("describes a refused lock, a failed preflight check and a dirty machine before the run as failures", () => {
+    const refused = events.describeEvent({
+      type: "run.lock.refused",
+      reason: "held",
+      path: "/locks/x",
+      scope: "config",
+      owner: {
+        pid: 4242,
+        ageSeconds: 303,
+        alive: true,
+        origin: "cli",
+        env: "local",
+      },
+      message: "run lock held by pid 4242",
+    });
+    assert.equal(refused.tone, "bad");
+    assert.match(
+      refused.label,
+      /run lock refused · held by pid 4242 \(cli, env "local"\)/,
+    );
+    assert.match(refused.label, /5m/);
+    const preflight = events.describeEvent({
+      type: "preflight.failed",
+      index: 2,
+      check: "json",
+      name: "api-health",
+      durationMs: 40,
+      reason: "status == 200 was false",
+    });
+    assert.equal(preflight.tone, "bad");
+    assert.match(preflight.label, /preflight 2 · json api-health FAILED/);
+    assert.equal(preflight.detail, "status == 200 was false");
+    const before = events.describeEvent({
+      type: "cleanliness.dirty",
+      phase: "before",
+      kind: "browsers",
+      survivors: ["pid 1 agent-browser"],
+    });
+    assert.equal(before.tone, "bad");
+    assert.match(before.label, /dirty before the run \(run refused\)/);
+  });
+
+  it("describes suites and metric samples", () => {
+    const lines = golden("suite-metrics-pass.ndjson").map((event) =>
+      events.describeEvent(event),
+    );
+    assert.equal(
+      lines[0].label,
+      "suite golden started · 2 spec(s) · env local · bail",
+    );
+    assert.match(lines[1].label, /suite golden before hook 1\/1 started/);
+    assert.equal(lines[1].detail, "echo warming");
+    const metric = lines.find((line) => line.label.includes("depth before"));
+    assert.equal(metric.label, "metric depth before = 3");
+    const failed = lines.find(
+      (line) => line.label === "metric broken after failed",
+    );
+    assert.equal(failed.tone, "warn");
+    assert.equal(failed.detail, "command exited 1");
+    assert.equal(lines.at(-1).label, "suite golden finished · exit 0 (passed)");
+  });
+
+  it("names the window, tunnel, phase and exit code of service operations", () => {
+    const lines = golden("services-restart.ndjson").map((event) =>
+      events.describeEvent(event),
+    );
+    assert.deepEqual(
+      lines.map((line) => line.label),
+      [
+        "service restart · web (manual)",
+        "service web stopped · 0ms",
+        "service web restarted · 0ms",
+        "service web gave up after 3 restart(s)",
+        "tunnel db gave up after 5 restart(s)",
+      ],
+    );
+    assert.deepEqual(
+      lines.map((line) => line.tone),
+      ["info", "muted", "ok", "bad", "bad"],
+    );
+    const failing = golden("services-ops-fail.ndjson").map((event) =>
+      events.describeEvent(event),
+    );
+    assert.ok(
+      failing.some(
+        (line) => line.label === "seed phase import FAILED (exit 1)",
+      ),
+    );
+    const teardown = failing.find((line) =>
+      /provisioner down FAILED/.test(line.label),
+    );
+    assert.match(teardown.label, /\(exit 3\) — exit 8/);
+    assert.equal(teardown.tone, "bad");
+    const passing = golden("services-ops-pass.ndjson").map((event) =>
+      events.describeEvent(event),
+    );
+    const exportsLine = passing.find((line) =>
+      line.label.startsWith("provisioner exports"),
+    );
+    assert.equal(exportsLine.label, "provisioner exports · 1 name(s)");
+    // names only: the line never carries a value
+    assert.equal(exportsLine.detail, "OPS_HOST");
+    assert.ok(
+      passing.some(
+        (line) => line.label === "services file written · generated.json",
+      ),
+    );
+    assert.ok(passing.some((line) => line.label === "seed phase import done"));
+    assert.ok(passing.some((line) => line.label === "seed committed"));
+  });
+
+  it("degrades an event without its name to the generic line, and an unknown policy-looking event to type + fields", () => {
+    assert.equal(
+      events.describeEvent({
+        type: "services.restart.start",
+        message: "restarting something",
+      }).label,
+      "services restart start · restarting something",
+    );
+    const unknown = events.describeEvent({
+      type: "preflight.future-kind",
+      detail: "x",
+      count: 3,
+    });
+    assert.equal(unknown.label, "preflight.future-kind · detail=x count=3");
+    assert.equal(unknown.tone, "muted");
+    // a policy event with missing fields still reads, never throws
+    assert.ok(events.describeEvent({ type: "suite.finished" }).label.trim());
+    assert.ok(events.describeEvent({ type: "cleanliness.dirty" }).label.trim());
+    assert.ok(events.describeEvent({ type: "metric.sampled" }).label.trim());
+  });
+
+  it("does not read the specs --bail skipped as refused", () => {
+    const journal = {
+      status: "failed",
+      planned: [{ index: 1 }, { index: 2 }, { index: 3 }],
+      runs: [{ index: 1, status: "failed" }],
+      summary: {
+        total: 3,
+        passed: 0,
+        failed: 1,
+        errored: 0,
+        skipped: 2,
+        exitCode: 1,
+      },
+    };
+    assert.equal(events.invocationRefusedCount(journal, []), 0);
+    assert.equal(events.invocationStatus(journal, []), "failed");
+    // a real refusal next to skipped specs still counts
+    assert.equal(
+      events.invocationRefusedCount(
+        { ...journal, summary: { ...journal.summary, total: 4 } },
+        [],
+      ),
+      1,
+    );
+  });
+
+  it("reduces unknown and malformed policy events without throwing", () => {
+    const model = events.reduceEvents([
+      { type: "preflight.passed" },
+      { type: "cleanliness.dirty", survivors: "nope" },
+      { type: "finally.finished", index: 9 },
+      { type: "suite.hook.finished" },
+      { type: "metric.sampled", value: Number.POSITIVE_INFINITY },
+      { type: "run.lock.released" },
+    ]);
+    assert.equal(model.policy.preflight.checks.length, 1);
+    assert.deepEqual(model.policy.cleanliness[0].survivors, []);
+    assert.equal(model.policy.finally[0].status, "failed");
+    assert.equal(model.policy.metrics[0].value, null);
+    assert.equal(model.policy.lock.state, "released");
+  });
+
+  it("folds a refused lock, a failed preflight and critical teardown into badges", () => {
+    const model = events.reduceEvents([
+      {
+        type: "run.lock.refused",
+        reason: "held",
+        path: "/l",
+        scope: "config",
+        message: "held",
+      },
+      { type: "preflight.started", total: 2 },
+      {
+        type: "preflight.failed",
+        index: 1,
+        check: "gate",
+        reason: "down",
+        durationMs: 1,
+      },
+      {
+        type: "services.teardown.fail",
+        message: "teardown[0] failed",
+        data: { index: 0, exitCode: 3, critical: true },
+      },
+    ]);
+    assert.deepEqual(
+      events.policyBadges(model, null).map((badge) => badge.key),
+      ["critical-teardown", "preflight-failed", "lock-refused"],
+    );
+  });
+
+  it("reads exit 8 and 9 out of a settled journal summary", () => {
+    const model = events.createRunModel();
+    const badges = events.policyBadges(model, {
+      exitCode: 8,
+      skipped: 3,
+      runPolicy: {
+        criticalTeardown: [
+          { index: 0, command: "x", exitCode: 3, path: "teardown" },
+        ],
+        dirty: [{ phase: "after", kind: "tmux", survivors: ["a"] }],
+        finallyFailed: 2,
+      },
+    });
+    assert.deepEqual(
+      badges.map((badge) => badge.key),
+      ["critical-teardown", "dirty-after", "finally-failed", "bailed"],
+    );
+    // never colour alone: every badge has a glyph and words, and 8 differs from 9
+    for (const badge of badges) {
+      assert.ok(badge.glyph.length > 0);
+      assert.ok(badge.label.length > 0);
+    }
+    assert.notEqual(badges[0].glyph, badges[1].glyph);
+    assert.equal(events.exitBadge(8).tone, "bad");
+    assert.equal(events.exitBadge(9).tone, "warn");
+    assert.equal(events.exitBadge(1), null);
+  });
+});
+
+describe("invocationFailureCode", () => {
+  it("is 8 / 9 from the exit code or the document's invocationOutcome, else null", () => {
+    assert.equal(events.invocationFailureCode(8, null), 8);
+    assert.equal(events.invocationFailureCode(9, undefined), 9);
+    assert.equal(
+      events.invocationFailureCode(null, {
+        invocationOutcome: { exitCode: 8 },
+      }),
+      8,
+    );
+    assert.equal(
+      events.invocationFailureCode(undefined, {
+        invocationOutcome: { exitCode: 9, specsExitCode: 0 },
+      }),
+      9,
+    );
+    assert.equal(events.invocationFailureCode(0, { status: "passed" }), null);
+    assert.equal(
+      events.invocationFailureCode(1, { invocationOutcome: null }),
+      null,
+    );
+    // A signal's 130 is no invocation failure of this kind.
+    assert.equal(
+      events.invocationFailureCode(130, {
+        invocationOutcome: { exitCode: 130 },
+      }),
+      null,
     );
   });
 });

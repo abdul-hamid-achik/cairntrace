@@ -113,7 +113,20 @@ export function buildProbeScript(
       !isSemanticLocator(locator) ||
       ("visible" in locator && locator.visible === false),
   };
-  return `(() => {\n  const cfg = ${JSON.stringify(config)};\n${PROBE_BODY}\n})()`;
+  const parts = probeScriptParts();
+  return `${parts.prefix}${JSON.stringify(config)}${parts.suffix}`;
+}
+
+/**
+ * The probe script split around its `cfg` JSON literal, so the Playwright
+ * export can embed the SAME in-page probe and splice a run-time config
+ * (locators carrying late-bound values) between the two halves.
+ */
+export function probeScriptParts(): { prefix: string; suffix: string } {
+  return {
+    prefix: "(() => {\n  const cfg = ",
+    suffix: `;\n${PROBE_BODY}\n})()`,
+  };
 }
 
 export async function runProbe(
@@ -183,7 +196,14 @@ export function singleTarget(
   };
 }
 
-const PROBE_BODY = String.raw`
+/**
+ * In-page locator resolution shared by the probe and the widget runtime
+ * (`src/core/widgets`): defines `norm`, `lower`, `same`, `cap`, `isVisible`,
+ * `textOf`, `roleOf`, `accName` and `resolveLocator(loc, testIdAttribute)`,
+ * which returns `{ found }` (near / hasText applied, hidden matches kept) or
+ * `{ error }` for an invalid selector. Plain JS source.
+ */
+export const LOCATOR_RESOLVER_JS = String.raw`
   const norm = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
   const lower = (s) => norm(s).toLowerCase();
   const same = (a, b, exact) => (exact ? norm(a) === norm(b) : lower(a) === lower(b));
@@ -271,7 +291,16 @@ const PROBE_BODY = String.raw`
     if (tag === "img") return norm(el.getAttribute("alt") || el.getAttribute("title"));
     if (tag === "table") { const c = el.querySelector("caption"); if (c) return textOf(c); }
     if (tag === "fieldset") { const l = el.querySelector("legend"); if (l) return textOf(l); }
-    if (NAME_FROM_CONTENT.includes(roleOf(el))) { const t = textOf(el); if (t) return t; }
+    if (NAME_FROM_CONTENT.includes(roleOf(el))) {
+      const t = textOf(el);
+      if (t) return t;
+      // Name from content includes images' alt text and labelled icons
+      // (<button><img alt="Close"></button>), which innerText leaves out.
+      const inner = Array.from(el.querySelectorAll("img[alt], [aria-label], svg > title"))
+        .map((n) => n.tagName.toLowerCase() === "title" ? n.textContent : (n.getAttribute("alt") || n.getAttribute("aria-label")))
+        .map(norm).filter(Boolean).join(" ");
+      if (inner) return inner;
+    }
     return norm(el.getAttribute("title"));
   };
   const labelNames = (el) => {
@@ -282,42 +311,66 @@ const PROBE_BODY = String.raw`
     for (const l of labelsOf(el)) names.push(l);
     return names.filter(Boolean);
   };
-  const loc = cfg.locator;
-  const all = () => Array.from(document.body ? document.body.querySelectorAll("*") : []);
-  let found;
-  if (loc.by === "selector") {
-    try { found = Array.from(document.querySelectorAll(loc.selector)); }
-    catch (e) { return { error: "invalid selector " + JSON.stringify(loc.selector) + ": " + String(e && e.message || e) }; }
-  } else if (loc.by === "testid") {
-    const attr = cfg.testIdAttribute;
-    found = Array.from(document.querySelectorAll("[" + CSS.escape(attr) + "]"))
-      .filter((el) => el.getAttribute(attr) === loc.testid);
-  } else if (loc.by === "role") {
-    const role = String(loc.role).toLowerCase();
-    found = all().filter((el) => roleOf(el) === role && (loc.name === undefined || same(accName(el), loc.name, loc.exact)));
-  } else if (loc.by === "label") {
-    found = all().filter((el) => labelNames(el).some((n) => same(n, loc.name, loc.exact)));
-  } else {
-    const hits = all().filter((el) => same(textOf(el), loc.text, loc.exact));
-    found = hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
-  }
-  if (loc.hasText) {
-    const needle = lower(loc.hasText);
-    found = found.filter((el) => lower(textOf(el)).includes(needle));
-  }
-  if (loc.near) {
-    const needle = lower(loc.near);
-    const distance = (el) => {
-      let depth = 0;
-      for (let node = el; node; node = node.parentElement, depth++) {
-        if (lower(textOf(node)).includes(needle)) return depth;
-      }
-      return Infinity;
+  const resolveLocator = (loc, testIdAttribute) => {
+    // Semantic locators see into open shadow roots, like the accessibility
+    // tree the backends resolve them through (selector / testid stay on the
+    // light DOM).
+    const all = () => {
+      const out = [];
+      const walk = (scope) => {
+        for (const el of scope.querySelectorAll("*")) {
+          out.push(el);
+          if (el.shadowRoot) walk(el.shadowRoot);
+        }
+      };
+      if (document.body) walk(document.body);
+      return out;
     };
-    const scored = found.map((el) => [el, distance(el)]);
-    const best = Math.min(...scored.map((pair) => pair[1]));
-    found = best === Infinity ? [] : scored.filter((pair) => pair[1] === best).map((pair) => pair[0]);
-  }
+    let found;
+    if (loc.by === "selector") {
+      try { found = Array.from(document.querySelectorAll(loc.selector)); }
+      catch (e) { return { error: "invalid selector " + JSON.stringify(loc.selector) + ": " + String(e && e.message || e) }; }
+    } else if (loc.by === "testid") {
+      const attr = testIdAttribute;
+      found = Array.from(document.querySelectorAll("[" + CSS.escape(attr) + "]"))
+        .filter((el) => el.getAttribute(attr) === loc.testid);
+    } else if (loc.by === "role") {
+      const role = String(loc.role).toLowerCase();
+      found = all().filter((el) => roleOf(el) === role && (loc.name === undefined || same(accName(el), loc.name, loc.exact)));
+    } else if (loc.by === "label") {
+      found = all().filter((el) => labelNames(el).some((n) => same(n, loc.name, loc.exact)));
+    } else {
+      const hits = all().filter((el) => same(textOf(el), loc.text, loc.exact));
+      found = hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
+    }
+    if (loc.hasText) {
+      const needle = lower(loc.hasText);
+      found = found.filter((el) => lower(textOf(el)).includes(needle));
+    }
+    if (loc.near) {
+      const needle = lower(loc.near);
+      const distance = (el) => {
+        let depth = 0;
+        for (let node = el; node; node = node.parentElement, depth++) {
+          if (lower(textOf(node)).includes(needle)) return depth;
+        }
+        return Infinity;
+      };
+      const scored = found.map((el) => [el, distance(el)]);
+      const best = Math.min(...scored.map((pair) => pair[1]));
+      found = best === Infinity ? [] : scored.filter((pair) => pair[1] === best).map((pair) => pair[0]);
+    }
+    return { found };
+  };
+`;
+
+const PROBE_BODY =
+  LOCATOR_RESOLVER_JS +
+  String.raw`
+  const loc = cfg.locator;
+  const resolved = resolveLocator(loc, cfg.testIdAttribute);
+  if (resolved.error) return { error: resolved.error };
+  const found = resolved.found;
   const visibility = found.map(isVisible);
   const pool = cfg.includeHidden ? found : found.filter((_, i) => visibility[i]);
   const describe = (el) => {

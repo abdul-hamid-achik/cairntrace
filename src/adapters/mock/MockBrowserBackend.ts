@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
+  fillLocator,
   openPath,
   type Locator,
   type Step,
@@ -53,7 +54,9 @@ export class MockBrowserBackend implements BrowserBackend {
   public readonly stepLog: Step[] = [];
   public readonly requestLog: BackendRequest[] = [];
   public lastEvaluatedScript = "";
-  public lastEvaluateOptions: { timeoutMs?: number } | undefined;
+  public lastEvaluateOptions:
+    | { timeoutMs?: number; sensitive?: boolean }
+    | undefined;
   public lastRequest: BackendRequest | undefined;
   public waitScale = 1;
   /** Settable browser PID for --monitor / monitor-step tests. */
@@ -142,8 +145,7 @@ export class MockBrowserBackend implements BrowserBackend {
     }
     if ("open" in step) this.url = openPath(step);
     if ("fill" in step) {
-      const { value, ...locator } = step.fill;
-      this.valueByLocator.set(locatorKey(locator as Locator), value);
+      this.valueByLocator.set(locatorKey(fillLocator(step)), step.fill.value);
     }
     if ("type" in step) {
       const { value, delayMs: _delayMs, ...locator } = step.type;
@@ -272,7 +274,7 @@ export class MockBrowserBackend implements BrowserBackend {
 
   async evaluate(
     _js: string,
-    _opts: { timeoutMs?: number } = {},
+    _opts: { timeoutMs?: number; sensitive?: boolean } = {},
   ): Promise<InvocationResult> {
     this.lastEvaluatedScript = _js;
     this.lastEvaluateOptions = _opts;

@@ -410,15 +410,40 @@ describe("exportPlaywrightProject timeout emission", () => {
 
     expect(source).toContain(`async ({ page }) => {`);
     expect(source).not.toContain("testInfo");
+    // noFailedRequests needs the runner's request log (network errors too),
+    // and every network outcome is then judged by the runner's own judge.
+    expect(source).toContain(`const requests = cairnTrackRequests(page);`);
+    expect(source).toContain(`await cairnAssertNetwork(requests, `);
     expect(source).toContain(
-      `const requests: Array<{ url: string; method: string; status?: number }> = [];`,
+      `await cairnAssertNoFailedRequests(requests, { "urlContains": "/api/questions/kit/deliverable/kit-1", "method": "GET" });`,
     );
-    expect(source).toContain(`page.on("response"`);
-    expect(source).toContain(`expect(requests.some(`);
-    expect(source).toContain(`expect(requests.filter(`);
     expect(source?.indexOf("const requests")).toBeLessThan(
-      source?.indexOf("expect(requests.some") ?? -1,
+      source?.indexOf("await cairnAssertNetwork(requests") ?? -1,
     );
+    // E5: each network outcome reports how many requests matched its method +
+    // URL (before the assertion, so it is there even when the assertion fails)
+    // for `--verify=differential`.
+    expect(source).toContain(
+      `test.info().annotations.push({ type: "cairn:network", description: JSON.stringify({ outcome: "request_completed", matched: requests.filter((r: { url: string; method: string }) => r.method.toUpperCase() === "GET" && r.url.includes("/api/questions/kit/deliverable/kit-1")).length }) });`,
+    );
+    expect(source).toContain(`outcome: "request_did_not_fail"`);
+    expect(source?.indexOf('outcome: "request_completed"')).toBeLessThan(
+      source?.indexOf("await cairnAssertNetwork(requests") ?? -1,
+    );
+    // Only network outcomes carry it: a text outcome does not.
+    const textOnly = exportPlaywrightProject([
+      {
+        spec: baseSpec({}),
+        resolved: baseSpec({}),
+        path: "/tmp/project/flows/text_only.yml",
+        contractHashValid: true,
+        origins: [],
+        actionsByName: new Map(),
+      },
+    ]).files.find(
+      (file) => file.relPath === "tests/timeout_project.spec.ts",
+    )?.source;
+    expect(textOnly).not.toContain("cairn:network");
   });
 
   it("shares run tokens and secret redaction values with imported actions", () => {

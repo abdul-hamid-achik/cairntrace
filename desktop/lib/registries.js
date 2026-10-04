@@ -1,8 +1,12 @@
 /**
  * The config registries a spec author reuses, summarized for display:
  * `datasources:` (per environment, with `environments.<n>.datasources`
- * overrides merged the way the runner merges them), `gates:` and
- * `fixtures:`.
+ * overrides merged the way the runner merges them), `gates:`,
+ * `fixtures:`, the F15 widget drivers (`browser.widgets` /
+ * `browser.fieldRoot`, and the F20 `browser.appHandle` names) and the F18
+ * environment auth blocks (`environments.<n>.auth`: which requests run,
+ * by method and path, and the secret NAMES they read — never a body, a
+ * header value or a literal).
  *
  * Built from the config parsed WITHOUT `${env.X}` substitution, so a value
  * that comes from the environment shows as its reference (`${env.MONGO_URI}`,
@@ -20,6 +24,28 @@
 const DATASOURCE_KINDS = new Set(["mongo", "temporal", "http"]);
 const GATE_KINDS = ["tcp", "http", "command", "gate", "all", "any"];
 const FIXTURE_VERBS = ["ensure", "reset", "verify", "teardown"];
+/**
+ * F15 built-in widget drivers in default detection order — the runner's
+ * `BUILTIN_WIDGET_DRIVERS` (src/core/schema/shared.ts; a test keeps them
+ * in step).
+ */
+const BUILTIN_WIDGET_DRIVERS = [
+  "vue-multiselect",
+  "primevue-autocomplete",
+  "primevue-calendar",
+  "pills",
+  "radio-group",
+  "checkbox-group",
+  "native-select",
+  "native-input",
+];
+/** The native drivers the runner appends when `browser.widgets` omits them. */
+const NATIVE_WIDGET_DRIVERS = [
+  "radio-group",
+  "checkbox-group",
+  "native-select",
+  "native-input",
+];
 /** Rows per registry. */
 const MAX_ENTRIES = 300;
 
@@ -49,7 +75,7 @@ const REFERENCE =
 
 /** A variable name that says it holds a credential. */
 const SECRET_NAME =
-  /pass(?:word|wd|phrase)?|(?:^|[._-])pwd?(?:$|[._-])|secret|token|api[-_]?key|apikey|credential|cookie|private[-_]?key|bearer|auth/i;
+  /pass(?:word|wd|phrase)?|(?:^|[._-])pwd?(?:$|[._-])|secret|token|api[-_]?key|apikey|credential|cookie|private[-_]?key|bearer|jwt|auth/i;
 
 const MASK = "••••••";
 
@@ -614,6 +640,152 @@ function summarizeFixtures(doc) {
 }
 
 /**
+ * F15 widget drivers the runner tries, in order (`browser.widgets`, else
+ * every built-in; the native drivers appended when not listed), the
+ * `browser.fieldRoot` templates (else the defaults), and the F20
+ * `browser.appHandle` names (their expressions stay in the config).
+ * @param {Record<string, any>} doc
+ */
+function summarizeWidgets(doc) {
+  const browser = isRecord(doc.browser) ? doc.browser : {};
+  const listed = Array.isArray(browser.widgets) ? browser.widgets : null;
+  /** @type {Array<{ name: string, source: "built-in" | "project", file: string | null, appended: boolean }>} */
+  const drivers = [];
+  if (listed) {
+    for (const entry of listed.slice(0, MAX_ENTRIES)) {
+      if (!isRecord(entry)) continue;
+      const use = str(entry.use);
+      const file = str(entry.file);
+      if (use)
+        drivers.push({
+          name: use,
+          source: "built-in",
+          file: null,
+          appended: false,
+        });
+      else if (file)
+        drivers.push({
+          name: file.split(/[\\/]/).pop() ?? file,
+          source: "project",
+          file: scrubText(file, 200),
+          appended: false,
+        });
+    }
+    for (const name of NATIVE_WIDGET_DRIVERS)
+      if (!drivers.some((driver) => driver.name === name))
+        drivers.push({ name, source: "built-in", file: null, appended: true });
+  } else
+    for (const name of BUILTIN_WIDGET_DRIVERS)
+      drivers.push({ name, source: "built-in", file: null, appended: false });
+  const roots = (
+    Array.isArray(browser.fieldRoot)
+      ? browser.fieldRoot
+      : typeof browser.fieldRoot === "string"
+        ? [browser.fieldRoot]
+        : []
+  )
+    .filter((item) => typeof item === "string")
+    .slice(0, 20)
+    .map((item) => scrubText(item, 200));
+  const testId = str(browser.testIdAttribute) ?? "data-testid";
+  const handles = isRecord(browser.appHandle)
+    ? Object.keys(browser.appHandle).slice(0, MAX_ENTRIES)
+    : [];
+  return {
+    declared: Boolean(listed || roots.length || handles.length),
+    driversDefaulted: !listed,
+    drivers,
+    fieldRoot: roots.length ? roots : [`[${testId}="{key}"]`, '[name="{key}"]'],
+    fieldRootDefaulted: !roots.length,
+    appHandles: handles,
+  };
+}
+
+/** `${secrets.NAME}` references (names only). */
+const SECRET_REF = /\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g;
+
+/**
+ * A request URL of an auth block as display text: a placeholder kept (its
+ * default redacted), userinfo masked, the query string dropped.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function authPath(value) {
+  const text = str(value);
+  if (!text) return "?";
+  return (
+    redactReference(text) ??
+    redactUrl(text) ??
+    text.replace(/[?#].*$/s, "").slice(0, 200)
+  );
+}
+
+/**
+ * One request of an auth block: method (or its default) and path.
+ * @param {unknown} node
+ * @param {string} method the schema's default method
+ */
+function authCall(node, method) {
+  const entry = isRecord(node) ? node : {};
+  return {
+    method: (str(entry.method) ?? method).toUpperCase().slice(0, 10),
+    path: authPath(entry.url),
+  };
+}
+
+/**
+ * F18 `environments.<n>.auth`, per environment that declares one: the
+ * `alreadyAuthenticated` probe, the login request, the follow-ups (with
+ * the var their `when` reads), the hydrate script's kind, and the
+ * `${secrets.X}` names it reads. Bodies, header values and literals never
+ * leave the config.
+ * @param {Record<string, any>} doc
+ */
+function summarizeAuth(doc) {
+  const envs = isRecord(doc.environments) ? doc.environments : {};
+  /** @type {Array<Record<string, any>>} */
+  const out = [];
+  for (const [env, value] of Object.entries(envs)) {
+    if (out.length >= MAX_ENTRIES) break;
+    const auth = isRecord(value) && isRecord(value.auth) ? value.auth : null;
+    if (!auth) continue;
+    let text = "";
+    try {
+      text = JSON.stringify(auth);
+    } catch {
+      text = "";
+    }
+    const secrets = [
+      ...new Set([...text.matchAll(SECRET_REF)].map((match) => match[1])),
+    ].toSorted();
+    const after = Array.isArray(auth.after) ? auth.after : [];
+    const hydrate = isRecord(auth.hydrate) ? auth.hydrate : null;
+    out.push({
+      env,
+      login: isRecord(auth.login) ? authCall(auth.login, "POST") : null,
+      alreadyAuthenticated: isRecord(auth.alreadyAuthenticated)
+        ? authCall(auth.alreadyAuthenticated, "GET")
+        : null,
+      after: after.slice(0, 20).map((entry, index) => {
+        const item = isRecord(entry) ? entry : {};
+        return {
+          id: str(item.id) ?? `after[${index}]`,
+          ...authCall(item.request, "GET"),
+          when: isRecord(item.when) ? (str(item.when.var) ?? null) : null,
+        };
+      }),
+      hydrate: hydrate
+        ? str(hydrate.file)
+          ? `file ${String(hydrate.file).split(/[\\/]/).pop()}`
+          : "inline script"
+        : null,
+      secrets: secrets.slice(0, 50),
+    });
+  }
+  return out;
+}
+
+/**
  * Every registry, for `project:inspect` (Environment and Catalog views).
  * @param {unknown} doc the config parsed without `${env.X}` substitution
  */
@@ -623,11 +795,15 @@ function summarizeRegistries(doc) {
       datasources: { topLevel: [], environments: [] },
       gates: [],
       fixtures: [],
+      widgets: summarizeWidgets({}),
+      auth: [],
     };
   return {
     datasources: summarizeDatasources(doc),
     gates: summarizeGates(doc),
     fixtures: summarizeFixtures(doc),
+    widgets: summarizeWidgets(doc),
+    auth: summarizeAuth(doc),
   };
 }
 
@@ -653,6 +829,9 @@ module.exports = {
   summarizeDatasources,
   summarizeGates,
   summarizeFixtures,
+  summarizeWidgets,
+  summarizeAuth,
+  BUILTIN_WIDGET_DRIVERS,
   describeDatasource,
   describeGate,
   mergeDatasource,

@@ -104,6 +104,11 @@ compatibility.
 When the installed fcheap supports it (0.36+), the run identity is stored as
 manifest metadata: `--meta run_id= status= spec= env= backend= cairn_version=`.
 Older versions get a plain save. Set `stash.meta: false` to turn this off.
+Values are cut to file.cheap's 256-byte limit on a character boundary (a
+multi-byte spec name never splits). If file.cheap still refuses the metadata,
+the save is retried once without it: the evidence is stored, a warning says the
+metadata was dropped, and the receipt and `artifact.stash` event carry
+`metaDropped: true`.
 
 ### `list`
 
@@ -158,12 +163,19 @@ stash:
   autoStash: on-failure     # always | on-failure | never (default)
   tags: [regression]        # a spec's `stash: { tags: [...] }` adds to these
   include: [text, screenshots]
-  failTtl: 30d              # failed/errored runs (default: ttl, else never expires)
+  failTtl: 30d              # failed/errored runs (default: ttl, else 90d; `never` keeps them)
   passTtl: 7d               # passed runs (default 7d)
   # ttl: 14d                # both, unless passTtl/failTtl is set
   labelsAsTags: false       # default; see below
   meta: true                # default; needs fcheap 0.36+
 ```
+
+Evidence of failed runs expires after 90 days by default (`failTtl` unset, no
+`ttl`), so an unattended `on-failure` stash cannot grow without bound. Pin the
+run you want to keep (`cairn pin <run> --stash` saves it with the `keep` tag
+and no TTL), or set `failTtl: never` to keep every failed-run stash until you
+delete it. `passTtl` is unchanged (7d). Stashes made before this default keep
+their existing expiry.
 
 A spec adds its own tags with a top-level `stash: { tags: [payments] }` key.
 
@@ -178,7 +190,7 @@ attempt is recorded in the run:
 
 - success: `stash-receipt.json` (`stashId`, `status`, `contentHash`,
   `fileCount`, `sizeBytes`, `ttl`, `expiresAt`, `tags`, `excluded`,
-  `secretsFound`, `action`), an `artifact.stash` event, and a refreshed
+  `secretsFound`, `metaDropped`, `action`), an `artifact.stash` event, and a refreshed
   `artifact-manifest.json`;
 - failure: an `artifact.stash` event with `status: "error"` and a reason code
   (`fcheap-missing`, `save-failed`, `auth`, `too-large`, `timeout`,
@@ -248,8 +260,12 @@ is sent, the outcome and receipt say why in `runIndexSkipped`
 (`unsupported`, `too-large`, `build-failed`).
 
 On success the run gains `publish-receipt.json`
-(`{version, artifactRef, sha256, sizeBytes, publishedAt, expiresAt, webUrl?,
-excluded?, runIndexSkipped?}`) and an `artifact.publish` event. A failure exits `2` and records an
+(`{version, artifactRef, sha256, sizeBytes, publishedAt, committedAt?, expiresAt,
+webUrl?, excluded?, runIndexSkipped?}`) and an `artifact.publish` event.
+`committedAt` and `expiresAt` are the server's values when the fcheap receipt
+carries them (file.cheap 0.37+); otherwise `expiresAt` is `publishedAt` plus
+the requested retention. `webUrl` is the console link when the service returns
+one; Studio shows it as "Open in file.cheap". A failure exits `2` and records an
 `artifact.publish` event with a reason code; fcheap's stderr is never
 surfaced. The local run is never deleted by `cairn publish`.
 `retention.publish.enabled` publishes pruned runs automatically with the same

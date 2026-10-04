@@ -34,7 +34,7 @@ const PASSWORD_SELECTOR =
 export function looksLikePasswordField(locator: unknown): boolean {
   if (!locator || typeof locator !== "object") return false;
   const l = locator as Record<string, unknown>;
-  for (const key of ["name", "label", "text", "testid", "testId"]) {
+  for (const key of ["name", "label", "text", "testid", "testId", "field"]) {
     const value = l[key];
     if (typeof value !== "string") continue;
     const words = spaced(value);
@@ -117,12 +117,14 @@ export function placeholderSecrets<T>(
 }
 
 /** The locator + typed value of a fill/type step (undefined for others). */
-export function typedValueOf(
-  step: Record<string, unknown>,
-):
-  | { kind: "fill" | "type"; locator: Record<string, unknown>; value: string }
+export function typedValueOf(step: Record<string, unknown>):
+  | {
+      kind: "fill" | "type" | "set";
+      locator: Record<string, unknown>;
+      value: string;
+    }
   | undefined {
-  for (const kind of ["fill", "type"] as const) {
+  for (const kind of ["fill", "type", "set"] as const) {
     const body = step[kind];
     if (body && typeof body === "object") {
       const { value, ...locator } = body as Record<string, unknown>;

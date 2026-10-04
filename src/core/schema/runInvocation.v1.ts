@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { InvocationSummarySchema } from "./events.v1";
+import { InvocationDelegateSchema, InvocationSummarySchema } from "./events.v1";
 import { IsoTimestampSchema } from "./shared";
 
 /**
@@ -146,6 +146,13 @@ export const RunInvocationOptionsShape = {
     .describe(
       "Resolve which specs WOULD run (SelectionResult v1) without launching a browser",
     ),
+  suite: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Run the config `suites:` entry of this name instead of explicit spec paths: its specs (paths, directories, globs, spec names, tags) in its order, the environment's vars, once-per-run before/after hooks, parallel and bail. Spec paths next to it narrow it to those of its own specs (its hooks, vars and labels still apply; a path that is not one of them is a usage error, exit 2); --tag still narrows it",
+    ),
   tag: z
     .array(z.string())
     .optional()
@@ -199,6 +206,12 @@ export const RunInvocationOptionsShape = {
     .boolean()
     .optional()
     .describe("With repeat/matrix: stop at the first run that does not pass"),
+  bail: z
+    .boolean()
+    .optional()
+    .describe(
+      "Stop scheduling the remaining specs after the first failed or errored one: they are reported as skipped (reason bailed), running specs finish, teardown runs as usual, and the exit code is that of the first failure. false (CLI --no-bail) runs every spec even when the suite's bail says otherwise; omitted, the suite's bail applies",
+    ),
   strictRequires: z
     .boolean()
     .optional()
@@ -210,6 +223,13 @@ export const RunInvocationOptionsShape = {
     .optional()
     .describe(
       "Let fixture ensure/reset/teardown write on an environment whose policy trait is shared or protected (otherwise they are dry-run there unless the spec's fixture reference says write: true); policy.mutations: deny keeps them dry-run regardless",
+    ),
+  runToken: z
+    .string()
+    .regex(/^[A-Za-z0-9_.-]{1,64}$/)
+    .optional()
+    .describe(
+      "Pin the per-run uniqueness token (${run.token} / CAIRN_RUN_TOKEN) instead of minting a random one: the same value an exported Playwright test reads from CAIRN_RUN_TOKEN, so both sides write the same unique values (cairn export playwright --verify=differential). Letters, digits, `_`, `.`, `-`; at most 64 characters",
     ),
 } as const;
 
@@ -302,6 +322,8 @@ export const RunInvocationStatusResultSchema = z
     error: z.string().optional(),
     /** The settled document (RunResult / BatchRunResult / SelectionResult …). */
     document: z.record(z.string(), z.unknown()).optional(),
+    /** The journal's `delegate` block: the invocation runs on a delegated runner. Additive. */
+    delegate: InvocationDelegateSchema.optional(),
   })
   .strict();
 export type RunInvocationStatusResult = z.infer<

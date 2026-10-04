@@ -1,12 +1,10 @@
+import { httpCall, httpDatasourceSecrets } from "./http";
 import {
   datasourceHeaders,
-  httpCall,
-  httpDatasourceSecrets,
-  isAbsoluteUrl,
+  datasourceOriginViolation,
   joinBaseUrl,
-  urlOrigin,
   type HttpReply,
-} from "./http";
+} from "./httpWire";
 import {
   DatasourceError,
   openMongoSource,
@@ -26,7 +24,7 @@ export type {
   MongoSourceDescriptor,
   MongoWriteRequest,
 } from "./mongo";
-export type { HttpReply } from "./http";
+export type { HttpReply } from "./httpWire";
 export type { EnvironmentDatasourceSet } from "./resolve";
 export { ejsonToPlain } from "./ejson";
 
@@ -54,7 +52,7 @@ export interface HttpSource {
 export interface DatasourceSessionOptions {
   /** Run environment: `${secrets.X}` / `${env.X}` and CLI binaries. */
   env?: Record<string, string | undefined>;
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, unknown>;
   /** Test seam: the optional `mongodb` driver. */
   loadMongoDriver?: () => Promise<MongoDriverModule | undefined>;
   /**
@@ -153,18 +151,13 @@ export function createDatasourceSession(
           // Datasource credentials only ever go to the datasource's origin:
           // an absolute URL (written or spliced from ${captures.*}) must
           // stay on baseUrl's origin.
-          if (isAbsoluteUrl(req.path)) {
-            const origin = urlOrigin(ds.baseUrl);
-            if (origin === undefined || urlOrigin(req.path) !== origin) {
-              throw new DatasourceError(
-                `datasource ${name}: refused a call to ${
-                  urlOrigin(req.path) ?? "an unparseable URL"
-                } — an absolute URL must stay on baseUrl's origin ${
-                  origin ? displayUrl(origin) : "(unparseable baseUrl)"
-                }; use a path relative to baseUrl, or drop source: to call another host without the datasource's credentials`,
-                { permanent: true },
-              );
-            }
+          const violation = datasourceOriginViolation(
+            name,
+            ds.baseUrl,
+            req.path,
+          );
+          if (violation !== undefined) {
+            throw new DatasourceError(violation, { permanent: true });
           }
           return httpCall(
             {

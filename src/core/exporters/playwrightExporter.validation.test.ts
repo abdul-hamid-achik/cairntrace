@@ -47,7 +47,7 @@ const STRICT_OPTIONS: ts.CompilerOptions = {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.ESNext,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
-  lib: ["lib.es2023.d.ts", "lib.dom.d.ts", "lib.dom.iterable.d.ts"],
+  lib: ["lib.es2022.d.ts", "lib.dom.d.ts", "lib.dom.iterable.d.ts"],
   types: ["node"],
   strict: true,
   noUnusedLocals: true,
@@ -376,5 +376,275 @@ describe("export → import round-trip floor", () => {
     // The text outcome must survive as a contains matcher.
     const outcomeJson = JSON.stringify(imported.spec.outcomes ?? []);
     expect(outcomeJson).toContain("Saved");
+  });
+});
+
+describe("--verifiers modes type-check a standalone file with a node verifier", () => {
+  const dir = join(TMP_DIR, "verifier-modes");
+  for (const mode of ["keep", "gate", "drop"] as const) {
+    it(mode, () => {
+      mkdirSync(join(dir, "verifiers"), { recursive: true });
+      writeFileSync(
+        join(dir, "verifiers", "check.ts"),
+        "export async function verify(): Promise<{ ok: boolean }> { return { ok: true }; }\n",
+      );
+      const authored = SpecSchema.parse({
+        version: 1,
+        name: `verifier_${mode}`,
+        intent: "a node verifier with a binding it reads",
+        steps: [
+          {
+            id: "create",
+            request: { method: "POST", url: "/api/x", assign: "created" },
+          },
+        ],
+        outcomes: [
+          {
+            id: "node",
+            description: "the node verifier passes",
+            verify: {
+              script: {
+                runtime: "node",
+                file: "./verifiers/check.ts",
+                fixtures: {
+                  id: "${requests.created.body.id}",
+                  uri: "__CAIRN_SECRET_REF__MONGO_URI__",
+                },
+              },
+            },
+          },
+        ],
+      }) as Spec;
+      const file = join(dir, `verifier_${mode}.spec.ts`);
+      writeFileSync(
+        file,
+        exportPlaywright(authored, {
+          sourcePath: join(dir, "spec.yml"),
+          outPath: file,
+          verifiers: mode,
+        }).source,
+      );
+      expect(
+        diagnosticsFor([file], new Set([file.replaceAll("\\", "/")])),
+      ).toEqual([]);
+    });
+  }
+});
+
+describe("export v2 projects type-check (strict + noUnusedLocals)", () => {
+  const authored = SpecSchema.parse({
+    version: 1,
+    name: "v2_project",
+    intent: "host commands, capture, poll, fixtures and gates compile strictly",
+    preconditions: {
+      wait: ["app_ready"],
+      env: { TOKEN: "__CAIRN_SECRET_REF__API_TOKEN__" },
+      commands: [
+        { name: "reset", run: "bun run reset" },
+        { run: "psql -c 'select 1' | head -1" },
+      ],
+    },
+    fixtures: [{ use: "thing", with: { sku: "S-__CAIRN_RUN_TOKEN__" } }],
+    steps: [
+      {
+        id: "seed",
+        run: {
+          node: "../scripts/seed.mjs",
+          args: ["create"],
+          assign: "seeded",
+        },
+      },
+      {
+        id: "open",
+        open: "/p?sku=${fixtures.thing.sku}&id=${runs.seeded.id}&r=__CAIRN_ENV_DEFAULT__52454749_6575__",
+      },
+      {
+        id: "read",
+        capture: { assign: "title", text: { by: "role", role: "heading" } },
+      },
+      { id: "again", open: "/q?t=${captures.title}" },
+    ],
+    outcomes: [
+      {
+        id: "stays",
+        description: "stays done",
+        verify: {
+          text: { contains: "done" },
+          poll: { timeoutMs: 5000, stableMs: 1000 },
+        },
+      },
+      {
+        id: "soon",
+        description: "shows soon",
+        verify: {
+          text: { contains: "soon" },
+          poll: { timeoutMs: 5000 },
+        },
+      },
+      {
+        id: "grid",
+        description: "the table lists the rows",
+        verify: {
+          table: {
+            locator: { by: "role", role: "table" },
+            rows: { atLeast: 1, noBlank: true },
+            headers: { includes: ["Name"] },
+            contains: [{ Name: "Acme" }, "Globex"],
+            timeoutMs: 2000,
+          },
+          poll: { timeoutMs: 3000 },
+        },
+      },
+      {
+        id: "db",
+        description: "the row exists",
+        verify: {
+          mongo: {
+            source: "main",
+            collection: "c",
+            filter: {},
+            expect: { count: 1 },
+          },
+        },
+      },
+    ],
+    teardown: {
+      steps: [{ id: "clean", run: "node ../scripts/clean.mjs" }],
+      failRun: true,
+    },
+  }) as Spec;
+
+  for (const [label, options] of [
+    ["inline + gate", { preconditions: "inline", verifiers: "gate" }],
+    [
+      "global + gate",
+      {
+        preconditions: "global",
+        verifiers: "gate",
+        configPath: "/proj/cairntrace.config.yml",
+        envName: "local",
+        fixtureScopes: { thing: "run" },
+      },
+    ],
+    ["manifest + drop", { preconditions: "manifest", verifiers: "drop" }],
+    ["skip", { preconditions: "skip" }],
+    ["default", {}],
+  ] as const) {
+    it(label, () => {
+      const projectDir = join(TMP_DIR, `v2-${label.replaceAll(/\W+/g, "-")}`);
+      const parsed: ParseResult = {
+        spec: authored,
+        resolved: authored,
+        path: "/proj/flows/v2_project.yml",
+        contractHashValid: true,
+        origins: [],
+        actionsByName: new Map(),
+      };
+      const result = exportPlaywrightProject([parsed], {
+        projectRoot: "/proj",
+        outDir: projectDir,
+        datasourceEnv: { main: ["MONGO_URI"] },
+        lateBoundEnv: true,
+        ...options,
+      });
+      const written = new Set<string>();
+      for (const file of result.files) {
+        const abs = join(projectDir, file.relPath);
+        mkdirSync(dirname(abs), { recursive: true });
+        writeFileSync(abs, file.source);
+        if (abs.endsWith(".ts")) written.add(abs.replaceAll("\\", "/"));
+      }
+      expect(result.files.map((file) => file.source).join("\n")).not.toMatch(
+        /__CAIRN_[A-Z_]+__/i,
+      );
+      expect(diagnosticsFor([...written], written)).toEqual([]);
+    });
+  }
+});
+
+describe("an action with run and capture steps returns what a caller splices", () => {
+  it("compiles, returns { runs, captures } and the caller binds them (inline)", () => {
+    const projectDir = join(TMP_DIR, "action-run-capture");
+    const action = {
+      version: 1 as const,
+      name: "provision",
+      steps: [
+        {
+          id: "seed",
+          run: { shell: "node seed.mjs create", assign: "seeded" },
+        },
+        {
+          id: "read",
+          capture: { assign: "title", text: { by: "role", role: "heading" } },
+        },
+      ],
+    } as unknown as LoadedAction["action"];
+    const authored = SpecSchema.parse({
+      version: 1,
+      name: "uses_provision",
+      intent: "a caller splices an action's run output and capture",
+      imports: ["../actions/provision.yml"],
+      steps: [
+        { id: "go", use: "provision" },
+        { id: "next", open: "/x?id=${runs.seeded.id}&t=${captures.title}" },
+      ],
+      outcomes: [
+        {
+          id: "ok",
+          description: "shown",
+          verify: { text: { contains: "done" } },
+        },
+      ],
+    }) as Spec;
+    const parsed: ParseResult = {
+      spec: authored,
+      resolved: authored,
+      path: join(projectDir, "src", "flows", "uses_provision.yml"),
+      contractHashValid: true,
+      origins: [],
+      actionsByName: new Map([
+        [
+          "provision",
+          {
+            path: join(projectDir, "src", "actions", "provision.yml"),
+            rawSource: "",
+            actionDefaults: {},
+            action,
+          },
+        ],
+      ]),
+    };
+    const result = exportPlaywrightProject([parsed], {
+      projectRoot: join(projectDir, "src"),
+      outDir: projectDir,
+      preconditions: "inline",
+    });
+    const written = new Set<string>();
+    for (const file of result.files) {
+      const abs = join(projectDir, file.relPath);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, file.source);
+      if (abs.endsWith(".ts")) written.add(abs.replaceAll("\\", "/"));
+    }
+    const actionSource = readFileSync(
+      join(projectDir, "actions", "provision.ts"),
+      "utf8",
+    );
+    expect(actionSource).toContain(
+      'import { cairnCommand, cairnLastJson, cairnTestContext } from "../preconditions";',
+    );
+    expect(actionSource).toContain(
+      'return { requests: {}, evals: {}, artifacts: {}, runs: { "seeded": cairnRuns_seeded }, captures: { "title": cairnCaptures_title } };',
+    );
+    expect(actionSource).toContain("Promise<CairnActionBindings>");
+    const test = readFileSync(
+      join(projectDir, "tests", "uses_provision.spec.ts"),
+      "utf8",
+    );
+    expect(test).toContain('cairnRuns_seeded = cairnAction1.runs["seeded"];');
+    expect(test).toContain(
+      'cairnCaptures_title = cairnAction1.captures["title"];',
+    );
+    expect(diagnosticsFor([...written], written)).toEqual([]);
   });
 });

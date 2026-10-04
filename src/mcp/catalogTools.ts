@@ -26,8 +26,8 @@ export function registerCatalogTools(server: McpServer): void {
         "reusable actions (description, inputs with defaults, used-by, last green run), " +
         "config vars per environment (masked when secret-like, with their YAML comment), " +
         "script verifiers with their fixtures contract (unknown keys flagged), environments " +
-        "with policy/services/secrets provider, flows with their last run, and checkpoints " +
-        "with scope and health. Before authoring a spec, call it with `query` set to the " +
+        "with policy/services/secrets provider, flows with their last run, checkpoints " +
+        "with scope and health, and config suites with the specs each resolves to per environment. Before authoring a spec, call it with `query` set to the " +
         "task's keywords (e.g. 'log in edit website field'): rows are ranked (name > " +
         "description > comments), explained, and capped at 10 per kind. Without `query` " +
         `or \`limit\`, at most ${MCP_CATALOG_DEFAULT_LIMIT} rows per kind are returned; ` +

@@ -1,0 +1,14 @@
+{"ts":"<ts>","type":"suite.started","name":"golden","env":"local","specs":2,"bail":true}
+{"ts":"<ts>","type":"suite.hook.started","name":"golden","hook":"before","index":1,"total":1,"command":"echo warming","timeoutMs":600000,"logPath":"logs/hook-suite-before-01.log"}
+{"ts":"<ts>","type":"suite.hook.finished","name":"golden","hook":"before","index":1,"ok":true,"exitCode":0,"durationMs":0,"outputTail":"<output>"}
+{"ts":"<ts>","type":"metric.sampled","name":"total","scope":"invocation","phase":"before","value":9,"durationMs":0}
+{"ts":"<ts>","type":"metric.sampled","name":"depth","scope":"spec","phase":"before","value":3,"durationMs":0}
+{"ts":"<ts>","type":"metric.sampled","name":"depth","scope":"spec","phase":"after","value":3,"durationMs":0,"runId":"<runId>"}
+{"ts":"<ts>","type":"metric.sampled","name":"broken","scope":"spec","phase":"after","error":"command exited 1","durationMs":0,"runId":"<runId>"}
+{"ts":"<ts>","type":"metric.sampled","name":"depth","scope":"spec","phase":"before","value":3,"durationMs":0}
+{"ts":"<ts>","type":"metric.sampled","name":"depth","scope":"spec","phase":"after","value":3,"durationMs":0,"runId":"<runId>"}
+{"ts":"<ts>","type":"metric.sampled","name":"broken","scope":"spec","phase":"after","error":"command exited 1","durationMs":0,"runId":"<runId>"}
+{"ts":"<ts>","type":"metric.sampled","name":"total","scope":"invocation","phase":"after","value":9,"durationMs":0}
+{"ts":"<ts>","type":"suite.hook.started","name":"golden","hook":"after","index":1,"total":1,"command":"echo cleaning $CAIRN_EXIT_CODE","timeoutMs":600000,"logPath":"logs/hook-suite-after-01.log"}
+{"ts":"<ts>","type":"suite.hook.finished","name":"golden","hook":"after","index":1,"ok":true,"exitCode":0,"durationMs":0,"outputTail":"<output>"}
+{"ts":"<ts>","type":"suite.finished","name":"golden","exitCode":0}

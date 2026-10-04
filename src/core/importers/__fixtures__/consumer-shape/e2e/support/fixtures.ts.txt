@@ -1,0 +1,22 @@
+import { Browser, Page, test as base } from "@playwright/test";
+
+type TestFixtures = {
+  accountId: string;
+  accountPage: (kind: string, opts?: { login?: boolean }) => Promise<Page>;
+};
+
+async function newPage(browser: Browser): Promise<Page> {
+  const context = await browser.newContext();
+  return await context.newPage();
+}
+
+export const test = base.extend<TestFixtures>({
+  accountId: ["A100", { option: true }],
+  accountPage: async ({ browser, accountId }, use) => {
+    await use(async (kind: string) => {
+      const page = await newPage(browser);
+      await page.goto(`/accounts/${accountId}/${kind}`);
+      return page;
+    });
+  },
+});

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Cairntrace Demo — Vendor profile</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; }
+      header { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1.5rem; }
+      .question { margin: 1.1rem 0; }
+      .question-label { display: block; font-weight: 600; margin-bottom: 0.35rem; }
+      .choice { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1rem; font-weight: 400; }
+      select, input[type="date"], input[type="text"] { padding: 0.35rem; font: inherit; }
+      input[type="text"] { width: 32ch; }
+      /* vue-multiselect look-alike (same classes and handlers as the 2.x/3.x component). */
+      .multiselect { position: relative; min-height: 36px; border: 1px solid #bbb; border-radius: 4px; width: 280px; }
+      .multiselect__select { position: absolute; right: 0; top: 0; width: 30px; height: 34px; cursor: pointer; }
+      .multiselect__select::after { content: "\25BE"; position: absolute; right: 10px; top: 8px; color: #555; }
+      .multiselect__tags { padding: 7px 34px 0 8px; min-height: 29px; }
+      .multiselect__placeholder { color: #777; }
+      .multiselect__content-wrapper { position: absolute; left: 0; right: 0; background: #fff; border: 1px solid #bbb; max-height: 200px; overflow: auto; z-index: 5; }
+      .multiselect__content { list-style: none; margin: 0; padding: 0; }
+      .multiselect__option { display: block; padding: 6px 8px; cursor: pointer; }
+      .multiselect__option--highlight { background: #2f6f4f; color: #fff; }
+      .footer { position: relative; margin-top: 1.5rem; display: inline-block; }
+      .footer button { font: inherit; padding: 0.45rem 1.2rem; }
+      /* A transparent mask the closed help dialog leaves behind: it swallows
+         pointer clicks on the Save button, so only a DOM click reaches it. */
+      .dialog-mask { position: absolute; inset: -6px; background: transparent; }
+      #save-status { margin-top: 1rem; font-weight: 600; }
+      .error { color: #a12b2b; }
+      table { border-collapse: collapse; width: 100%; margin-top: 0.75rem; }
+      th, td { text-align: left; padding: 0.4rem 0.75rem; border-bottom: 1px solid #eee; }
+      th { background: #f8f8f8; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Vendor profile</h1>
+      <p>Custom form controls for the widget steps (<code>set</code>, <code>check</code>, <code>choose</code>, <code>form</code>). No network calls.</p>
+    </header>
+    <main>
+      <div class="question" data-field-key="vendor.region">
+        <label class="question-label" for="region">Region *</label>
+        <select id="region">
+          <option value="">Choose a region</option>
+          <option value="north">North</option>
+          <option value="south">South</option>
+          <option value="east">East</option>
+          <option value="west">West</option>
+        </select>
+      </div>
+
+      <!-- Mounts a moment after a region is chosen (form `dependsOn`). -->
+      <div class="question" id="window-question" data-field-key="vendor.delivery_window" hidden>
+        <span class="question-label">Delivery window *</span>
+        <label class="choice"><input type="radio" name="delivery_window" value="am" /> Morning</label>
+        <label class="choice"><input type="radio" name="delivery_window" value="pm" /> Afternoon</label>
+      </div>
+
+      <div class="question" data-field-key="vendor.preferred">
+        <span class="question-label">Preferred vendor? *</span>
+        <label class="choice"><input type="radio" name="preferred" value="y" /> Yes</label>
+        <label class="choice"><input type="radio" name="preferred" value="n" /> No</label>
+      </div>
+
+      <div class="question" data-field-key="vendor.categories">
+        <span class="question-label">Categories supplied</span>
+        <label class="choice"><input type="checkbox" value="office" /> Office supplies</label>
+        <label class="choice"><input type="checkbox" value="electronics" /> Electronics</label>
+        <label class="choice"><input type="checkbox" value="kitchen" /> Kitchen</label>
+      </div>
+
+      <div class="question" data-field-key="vendor.account_manager">
+        <span class="question-label">Account manager *</span>
+        <div class="ms-mount"></div>
+      </div>
+
+      <div class="question" data-field-key="vendor.first_order">
+        <label class="question-label" for="first-order">First order date</label>
+        <input id="first-order" type="date" />
+      </div>
+
+      <div class="question">
+        <label class="question-label" for="notes">Notes</label>
+        <input id="notes" type="text" autocomplete="off" />
+      </div>
+
+      <div class="question" data-field-key="vendor.terms">
+        <label class="choice"><input type="checkbox" value="confirmed" /> I confirm these details are correct *</label>
+      </div>
+
+      <div class="footer">
+        <button type="button" id="save">Save profile</button>
+        <div class="dialog-mask" aria-hidden="true"></div>
+      </div>
+      <p id="save-status" role="status" aria-live="polite"></p>
+      <table aria-label="Saved profile" hidden>
+        <thead>
+          <tr><th>Field</th><th>Value</th></tr>
+        </thead>
+        <tbody id="saved-rows"></tbody>
+      </table>
+    </main>
+    <script>
+      // The page's own state, read by `browser.appHandle` in
+      // examples/cairntrace.config.yml (`__cairn.app.vendor`).
+      window.demoVendorStore = { saved: false, saves: 0, profile: {} };
+
+      const region = document.getElementById("region");
+      region.addEventListener("change", () => {
+        setTimeout(() => {
+          document.getElementById("window-question").hidden = region.value === "";
+        }, 300);
+      });
+
+      // Minimal vue-multiselect (single select): persistent nodes patched in
+      // place, caret/placeholder/single mousedown toggles, input focus opens,
+      // blur closes, option click selects, Enter selects the highlighted one.
+      function multiselect(mount, options) {
+        const state = { isOpen: false, search: "", value: null, pointer: 0 };
+        const el = document.createElement("div");
+        el.className = "multiselect";
+        el.tabIndex = -1;
+        const caret = document.createElement("div");
+        caret.className = "multiselect__select";
+        const tags = document.createElement("div");
+        tags.className = "multiselect__tags";
+        const input = document.createElement("input");
+        input.className = "multiselect__input";
+        input.type = "text";
+        input.autocomplete = "off";
+        input.setAttribute("role", "combobox");
+        input.setAttribute("aria-label", "Account manager");
+        const wrapper = document.createElement("div");
+        wrapper.className = "multiselect__content-wrapper";
+        wrapper.tabIndex = -1;
+        const list = document.createElement("ul");
+        list.className = "multiselect__content";
+        list.setAttribute("role", "listbox");
+        wrapper.appendChild(list);
+        tags.appendChild(input);
+        el.appendChild(caret);
+        el.appendChild(tags);
+        el.appendChild(wrapper);
+        mount.appendChild(el);
+        let single = null;
+        let placeholder = null;
+
+        const filtered = () =>
+          options.filter((o) => o.toLowerCase().includes(state.search.toLowerCase()));
+        const select = (o) => {
+          state.value = state.value === o ? null : o;
+          window.demoVendorStore.profile.account_manager = state.value;
+          deactivate();
+        };
+        const activate = () => {
+          if (state.isOpen) return;
+          state.isOpen = true;
+          render();
+          input.focus();
+        };
+        const deactivate = () => {
+          if (!state.isOpen) return;
+          state.isOpen = false;
+          state.search = "";
+          input.value = "";
+          render();
+          input.blur();
+        };
+        const toggle = () => (state.isOpen ? deactivate() : activate());
+        const onMouseToggle = (e) => {
+          e.preventDefault();
+          toggle();
+        };
+
+        const render = () => {
+          el.classList.toggle("multiselect--active", state.isOpen);
+          input.style.cssText = state.isOpen ? "" : "width:0;position:absolute;padding:0;border:0";
+          const singleVisible = state.value !== null && !state.isOpen;
+          if (singleVisible && !single) {
+            single = document.createElement("span");
+            single.className = "multiselect__single";
+            single.addEventListener("mousedown", onMouseToggle);
+            tags.appendChild(single);
+          }
+          if (!singleVisible && single) {
+            single.remove();
+            single = null;
+          }
+          if (single) single.textContent = state.value;
+          const placeholderVisible = !state.isOpen && state.value === null;
+          if (placeholderVisible && !placeholder) {
+            placeholder = document.createElement("span");
+            placeholder.className = "multiselect__placeholder";
+            placeholder.textContent = "Select a person";
+            placeholder.addEventListener("mousedown", onMouseToggle);
+            tags.appendChild(placeholder);
+          }
+          if (!placeholderVisible && placeholder) {
+            placeholder.remove();
+            placeholder = null;
+          }
+          wrapper.style.display = state.isOpen ? "block" : "none";
+          list.textContent = "";
+          filtered().forEach((o, i) => {
+            const li = document.createElement("li");
+            li.className = "multiselect__element";
+            li.setAttribute("role", "option");
+            const span = document.createElement("span");
+            span.className =
+              "multiselect__option" +
+              (i === state.pointer ? " multiselect__option--highlight" : "") +
+              (state.value === o ? " multiselect__option--selected" : "");
+            const inner = document.createElement("span");
+            inner.textContent = o;
+            span.appendChild(inner);
+            span.addEventListener("click", (e) => {
+              e.stopPropagation();
+              select(o);
+            });
+            span.addEventListener("mouseenter", () => {
+              state.pointer = i;
+            });
+            li.appendChild(span);
+            list.appendChild(li);
+          });
+        };
+
+        caret.addEventListener("mousedown", (e) => {
+          e.stopPropagation();
+          onMouseToggle(e);
+        });
+        wrapper.addEventListener("mousedown", (e) => e.preventDefault());
+        el.addEventListener("focus", activate);
+        input.addEventListener("focus", activate);
+        input.addEventListener("blur", () => deactivate());
+        input.addEventListener("input", () => {
+          state.search = input.value;
+          state.pointer = 0;
+          render();
+        });
+        input.addEventListener("keypress", (e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          const o = filtered()[state.pointer];
+          if (o) select(o);
+        });
+        input.addEventListener("keyup", (e) => {
+          if (e.key === "Escape") deactivate();
+        });
+        render();
+        return state;
+      }
+
+      const manager = multiselect(document.querySelector(".ms-mount"), [
+        "Casey Rivera",
+        "Jordan Lee",
+        "Sam Patel",
+        "Robin Okafor",
+      ]);
+
+      const checkedLabel = (selector) =>
+        [...document.querySelectorAll(selector)]
+          .filter((input) => input.checked)
+          .map((input) => input.parentElement.textContent.trim());
+
+      document.getElementById("save").addEventListener("click", () => {
+        const status = document.getElementById("save-status");
+        const profile = {
+          region: region.value ? region.options[region.selectedIndex].text : "",
+          delivery_window: checkedLabel('input[name="delivery_window"]').join(""),
+          preferred: checkedLabel('input[name="preferred"]').join(""),
+          categories: checkedLabel('[data-field-key="vendor.categories"] input').join(", "),
+          account_manager: manager.value ?? "",
+          first_order: document.getElementById("first-order").value,
+          notes: document.getElementById("notes").value,
+        };
+        const confirmed = document.querySelector('[data-field-key="vendor.terms"] input').checked;
+        if (!profile.region || !profile.delivery_window || !profile.preferred || !profile.account_manager || !confirmed) {
+          status.textContent = "Answer every required field";
+          status.className = "error";
+          return;
+        }
+        status.textContent = "Saving…";
+        status.className = "";
+        setTimeout(() => {
+          const store = window.demoVendorStore;
+          store.profile = profile;
+          store.saves += 1;
+          store.saved = true;
+          const rows = document.getElementById("saved-rows");
+          rows.textContent = "";
+          for (const [key, value] of Object.entries(profile)) {
+            const tr = document.createElement("tr");
+            const field = document.createElement("td");
+            field.textContent = key;
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            tr.appendChild(field);
+            tr.appendChild(cell);
+            rows.appendChild(tr);
+          }
+          document.querySelector('table[aria-label="Saved profile"]').hidden = false;
+          status.textContent = "Profile saved";
+        }, 400);
+      });
+    </script>
+  </body>
+</html>

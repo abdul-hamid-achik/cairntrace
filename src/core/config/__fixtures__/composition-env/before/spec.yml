@@ -1,0 +1,10 @@
+version: 1
+name: env_scoped_vars
+intent: a spec that reads a var only some environments define
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      console: { errorsMax: 0 }
+steps:
+  - open: "${vars.host}/${vars.sandboxPath}"

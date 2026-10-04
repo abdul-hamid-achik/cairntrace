@@ -5,6 +5,7 @@ import {
   type DatasourcesConfig,
   type EnvironmentDatasources,
 } from "./schema";
+import { lookupVar, renderVarValue } from "../config/varValue";
 
 /**
  * The datasources of one environment: the top-level `datasources:` with
@@ -97,7 +98,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export interface DatasourcePlaceholderScope {
   /** Run environment (process env + injected secrets). */
   env?: Record<string, string | undefined>;
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, unknown>;
 }
 
 export class DatasourcePlaceholderError extends Error {
@@ -129,16 +130,20 @@ export function resolveDatasourcePlaceholders<T extends Datasource>(
   const vars = scope.vars ?? {};
   const resolveString = (text: string): string =>
     text.replace(
-      /\$\{(secrets|env|vars)\.([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
-      (_match, ns: string, key: string, fallback: string | undefined) => {
+      /\$\{(secrets|env|vars)\.([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+)*)(?::-([^}]*))?\}/g,
+      (match, ns: string, key: string, fallback: string | undefined) => {
         if (ns === "vars") {
-          const value = vars[key];
-          if (value === undefined) {
+          // F7: `${vars.name.key}` reads inside a typed var; a list or
+          // object renders as compact JSON (datasource fields are strings).
+          const hit = lookupVar(vars, key);
+          if (!hit.found) {
             if (fallback !== undefined) return fallback;
             throw new DatasourcePlaceholderError(name, `vars.${key}`);
           }
-          return String(value);
+          return renderVarValue(hit.value);
         }
+        // Env and secret names never contain dots.
+        if (key.includes(".")) return match;
         const value = env[key];
         if (value === undefined || value === "") {
           if (fallback !== undefined) return fallback;

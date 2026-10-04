@@ -1,4 +1,11 @@
 import { DatasourceError } from "./mongo";
+import {
+  buildHttpReply,
+  authorizationHeader,
+  followRedirects,
+  prepareHttpRequest,
+  type HttpReply,
+} from "./httpWire";
 import { scrubDatasourceText } from "./redact";
 import { datasourceSecretValues } from "./resolve";
 import type { HttpDatasource } from "./schema";
@@ -7,6 +14,8 @@ import type { HttpDatasource } from "./schema";
  * Node-side HTTP for `kind: http` / `kind: temporal` datasources and the
  * `http` verifier. No browser cookies: this is for service APIs, not for
  * the signed-in app session (that is `httpJson` / the `request` step).
+ * URL joining, request / reply shaping and the redirect policy live in
+ * ./httpWire (shared with the Playwright export).
  */
 
 export interface HttpCall {
@@ -17,16 +26,6 @@ export interface HttpCall {
   /** Epoch ms after which the request is aborted. */
   deadline: number;
   signal?: AbortSignal;
-}
-
-export interface HttpReply {
-  status: number;
-  headers: Record<string, string>;
-  /** Parsed JSON when the body is JSON, else the (bounded) text. */
-  body: unknown;
-  json: boolean;
-  bytes: number;
-  truncated: boolean;
 }
 
 /**
@@ -43,58 +42,6 @@ export class HttpCallError extends DatasourceError {
     super(message, { permanent });
     this.name = "HttpCallError";
   }
-}
-
-const MAX_BODY_BYTES = 4 * 1024 * 1024;
-const MAX_REDIRECTS = 5;
-const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
-
-export function authorizationHeader(
-  auth: { basic?: string; bearer?: string } | undefined,
-): string | undefined {
-  if (!auth) return undefined;
-  if (auth.bearer) return `Bearer ${auth.bearer}`;
-  if (auth.basic) {
-    // `user:password` is encoded; a value without ":" is taken as already
-    // base64-encoded credentials.
-    return `Basic ${
-      auth.basic.includes(":")
-        ? Buffer.from(auth.basic, "utf8").toString("base64")
-        : auth.basic
-    }`;
-  }
-  return undefined;
-}
-
-const ABSOLUTE_URL = /^[a-z][a-z0-9+.-]*:\/\//i;
-
-export function isAbsoluteUrl(url: string): boolean {
-  return ABSOLUTE_URL.test(url);
-}
-
-/** `base` + `path` with exactly one slash between them; absolute URLs win. */
-export function joinBaseUrl(base: string, path: string): string {
-  if (isAbsoluteUrl(path)) return path;
-  return `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
-}
-
-/** `scheme://host:port` of a URL, or undefined when it does not parse. */
-export function urlOrigin(url: string): string | undefined {
-  try {
-    const origin = new URL(url).origin;
-    return origin === "null" ? undefined : origin;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Headers an `http` datasource adds to every call. */
-export function datasourceHeaders(ds: HttpDatasource): Record<string, string> {
-  const authorization = authorizationHeader(ds.auth);
-  return {
-    ...ds.headers,
-    ...(authorization ? { Authorization: authorization } : {}),
-  };
 }
 
 export function httpDatasourceSecrets(ds: HttpDatasource): string[] {
@@ -117,32 +64,34 @@ export async function httpCall(
   }
   const signals = [AbortSignal.timeout(remaining)];
   if (call.signal) signals.push(call.signal);
-  const headers: Record<string, string> = {
-    accept: "application/json, text/plain;q=0.9, */*;q=0.8",
-    ...call.headers,
-  };
-  let body: string | undefined;
-  if (call.body !== undefined) {
-    if (typeof call.body === "string") {
-      body = call.body;
-    } else {
-      body = JSON.stringify(call.body);
-      if (
-        !Object.keys(headers).some((h) => h.toLowerCase() === "content-type")
-      ) {
-        headers["content-type"] = "application/json";
-      }
-    }
-  }
+  const { headers, body } = prepareHttpRequest(call.headers, call.body);
+  const signal = AbortSignal.any(signals);
   let response: Response;
   try {
-    response = await fetchFollowingRedirects(
+    const followed = await followRedirects(
+      async (hop) => {
+        const res = await fetch(hop.url, {
+          method: hop.method,
+          headers: hop.headers,
+          ...(hop.body !== undefined ? { body: hop.body } : {}),
+          signal,
+          redirect: "manual",
+        });
+        return {
+          response: res,
+          status: res.status,
+          location: res.headers.get("location"),
+        };
+      },
+      async (hopReply) => {
+        await hopReply.response.body?.cancel().catch(() => undefined);
+      },
       call.url,
       call.method ?? "GET",
       headers,
       body,
-      AbortSignal.any(signals),
     );
+    response = followed.response;
   } catch (error) {
     const reason =
       (error as Error).name === "TimeoutError"
@@ -156,103 +105,11 @@ export async function httpCall(
     );
   }
   const raw = await response.text().catch(() => "");
-  const bytes = Buffer.byteLength(raw, "utf8");
-  const truncated = bytes > MAX_BODY_BYTES;
-  const text = truncated ? raw.slice(0, MAX_BODY_BYTES) : raw;
-  let parsed: unknown = text;
-  let json = false;
-  if (!truncated && text.trim().length > 0) {
-    try {
-      parsed = JSON.parse(text);
-      json = true;
-    } catch {
-      parsed = text;
-    }
-  }
   const replyHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
     replyHeaders[key] = value;
   });
-  return {
-    status: response.status,
-    headers: replyHeaders,
-    body: parsed,
-    json,
-    bytes,
-    truncated,
-  };
-}
-
-/**
- * Redirects are followed by hand (at most 5 hops) so credentials never leave
- * the origin they were configured for: a same-origin hop keeps every header;
- * a cross-origin hop drops all caller headers (datasource auth, API keys,
- * spec headers) and is only taken when no body would be re-sent there —
- * otherwise the 3xx reply is returned as-is.
- */
-async function fetchFollowingRedirects(
-  url: string,
-  method: string,
-  headers: Record<string, string>,
-  body: string | undefined,
-  signal: AbortSignal,
-): Promise<Response> {
-  let currentUrl = url;
-  let currentMethod = method;
-  let currentHeaders = headers;
-  let currentBody = body;
-  for (let hop = 0; ; hop++) {
-    const response = await fetch(currentUrl, {
-      method: currentMethod,
-      headers: currentHeaders,
-      ...(currentBody !== undefined ? { body: currentBody } : {}),
-      signal,
-      redirect: "manual",
-    });
-    const location = response.headers.get("location");
-    if (
-      !REDIRECT_STATUSES.has(response.status) ||
-      !location ||
-      hop >= MAX_REDIRECTS
-    ) {
-      return response;
-    }
-    let next: URL;
-    try {
-      next = new URL(location, currentUrl);
-    } catch {
-      return response;
-    }
-    if (next.protocol !== "http:" && next.protocol !== "https:") {
-      return response;
-    }
-    const keepsMethod = response.status === 307 || response.status === 308;
-    const nextMethod =
-      keepsMethod || currentMethod === "GET" || currentMethod === "HEAD"
-        ? currentMethod
-        : "GET";
-    const nextBody = keepsMethod ? currentBody : undefined;
-    const crossOrigin = next.origin !== new URL(currentUrl).origin;
-    if (crossOrigin && nextBody !== undefined) return response;
-    await response.body?.cancel().catch(() => undefined);
-    let nextHeaders = currentHeaders;
-    if (crossOrigin) {
-      nextHeaders = {};
-      for (const [key, value] of Object.entries(currentHeaders)) {
-        if (key.toLowerCase() === "accept") nextHeaders[key] = value;
-      }
-    } else if (nextBody === undefined && currentBody !== undefined) {
-      nextHeaders = Object.fromEntries(
-        Object.entries(currentHeaders).filter(
-          ([key]) => key.toLowerCase() !== "content-type",
-        ),
-      );
-    }
-    currentUrl = next.href;
-    currentMethod = nextMethod;
-    currentHeaders = nextHeaders;
-    currentBody = nextBody;
-  }
+  return buildHttpReply(response.status, replyHeaders, raw);
 }
 
 /**

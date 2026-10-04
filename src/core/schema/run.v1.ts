@@ -3,6 +3,7 @@ import {
   AbsolutePathSchema,
   BackendSchema,
   ContractHashSchema,
+  DELEGATE_CONTRACT,
   ExitCodeSchema,
   IsoTimestampSchema,
   OutcomeStatusSchema,
@@ -48,6 +49,49 @@ export const StepResultSchema = z
         ref: z.string().optional(),
       })
       .strict()
+      .optional(),
+    /*
+     * F14 control flow (all absent for the steps of a flat spec). Nested
+     * executions are recorded in post-order: a block's steps come before the
+     * block's own result, so the first failed entry is the innermost failure.
+     */
+    /** Id of the enclosing repeat / if / retried use step. */
+    parentId: z.string().min(1).optional(),
+    /** 1-based iteration (repeat) or attempt (retry) of the innermost loop. */
+    iteration: z.number().int().positive().optional(),
+    /** The if branch this execution ran in. */
+    branch: z.enum(["then", "else"]).optional(),
+    /** repeat: iterations that ran; retried use: attempts that ran. */
+    iterations: z.number().int().nonnegative().optional(),
+    /** if step: the branch that ran (`none`: false without else). */
+    taken: z.enum(["then", "else", "none"]).optional(),
+    /** Optional / grouped wait: whether its condition held. */
+    matched: z.boolean().optional(),
+    /**
+     * F15: the interaction path the step took (click `pointer` | `dispatch`,
+     * fill `set`, upload `setInputFiles` | `dataTransfer`, a widget driver's
+     * write path).
+     */
+    via: z.string().min(1).optional(),
+    /** F15: the widget driver of a single-field set / check / choose step. */
+    driver: z.string().min(1).optional(),
+    /** F15: why that path was taken (`pointer blocked by div.p-dialog-mask`). */
+    detail: z.string().min(1).optional(),
+    /** F15: why a step that ran was skipped (`absent`). */
+    skipReason: z.string().min(1).optional(),
+    /**
+     * Retried use: the attempts that failed and were retried (their step
+     * results are dropped from `steps`; their artifacts move to this step).
+     */
+    retries: z
+      .array(
+        z
+          .object({
+            attempt: z.number().int().positive(),
+            error: z.string(),
+          })
+          .strict(),
+      )
       .optional(),
   })
   .strict();
@@ -149,6 +193,99 @@ export const RunInvocationRefSchema = z
   })
   .strict();
 export type RunInvocationRef = z.infer<typeof RunInvocationRefSchema>;
+
+/**
+ * What the config `run:` block did, when it did anything notable: the lock,
+ * critical teardown entries that failed (exit 8), what survived the run
+ * (exit 9) and `finally` commands that failed. The journal summary's
+ * `runPolicy`, and `invocationOutcome.runPolicy` of a printed document.
+ */
+export const InvocationRunPolicySchema = z
+  .object({
+    lock: z
+      .object({
+        path: z.string().min(1),
+        scope: z.enum(["project", "config"]),
+        reclaimed: z.literal(true).optional(),
+      })
+      .strict()
+      .optional(),
+    criticalTeardown: z
+      .array(
+        z
+          .object({
+            index: z.number().int().nonnegative(),
+            command: z.string(),
+            exitCode: z.number().int().optional(),
+            timedOut: z.boolean().optional(),
+            signal: z.string().optional(),
+            error: z.string().optional(),
+            path: z.enum(["teardown", "signal"]),
+          })
+          .strict(),
+      )
+      .optional(),
+    dirty: z
+      .array(
+        z
+          .object({
+            phase: z.enum(["before", "after"]),
+            kind: z.enum(["browsers", "tmux", "docker-project"]),
+            name: z.string().min(1).optional(),
+            survivors: z.array(z.string()),
+          })
+          .strict(),
+      )
+      .optional(),
+    finallyFailed: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InvocationRunPolicy = z.infer<typeof InvocationRunPolicySchema>;
+
+/**
+ * How the whole invocation settled, on a document `cairn run` prints (and
+ * MCP `cairn_run` returns) when the invocation's lifecycle can change the
+ * exit code after the specs ran: a config `run:` policy, or a critical
+ * `services.teardown` entry / provisioner `down`. Such a document is held
+ * until that verdict, so its top-level `exitCode` IS the process exit code
+ * (8 critical teardown failed, 9 dirty machine after the run, precedence
+ * 8 > 9 > the specs' own code). A SIGINT / SIGTERM that ends cairn before
+ * the verdict hands over the documents that finished with `exitCode` 130 /
+ * 143 (the top-level `exitCode` stays the specs'). Additive.
+ */
+export const InvocationOutcomeSchema = z
+  .object({
+    /**
+     * The invocation's exit code (the process exit code): a stable exit
+     * code, or 130 / 143 when SIGINT / SIGTERM ended cairn first.
+     */
+    exitCode: z.union([ExitCodeSchema, z.literal(130), z.literal(143)]),
+    /** The code the specs alone produced, before the teardown verdict. */
+    specsExitCode: ExitCodeSchema,
+    /** Why `exitCode` differs from `specsExitCode` (redacted). */
+    error: z.string().min(1).optional(),
+    /** What the config `run:` block did (see the journal summary). */
+    runPolicy: InvocationRunPolicySchema.optional(),
+    /**
+     * The invocation ran on a delegated runner (`environments.<n>.runner`):
+     * `exitCode` is the runner's, unless a diagnostic overrode it (an
+     * invalid code, a missing run directory, a false pass). Additive.
+     */
+    delegate: z
+      .object({
+        contract: z.literal(DELEGATE_CONTRACT),
+        remoteInvocationId: z.string().min(1).optional(),
+        /** The runner's own exit code (absent when a signal ended it). */
+        runnerExitCode: z.number().int().optional(),
+        runnerSignal: z.string().min(1).optional(),
+        /** `delegate.diagnostic` events of the invocation journal. */
+        diagnostics: z.number().int().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type InvocationOutcome = z.infer<typeof InvocationOutcomeSchema>;
 
 export const RunFailureSchema = z
   .object({
@@ -338,6 +475,11 @@ export const RunResultSchema = z
     synthetic: z.literal(true).optional(),
     spec: RunSpecRefSchema,
     environment: z.string().min(1),
+    /**
+     * The `environments.<name>: { alias }` name `--env` used, when it named
+     * one: `environment` is then the alias target. Additive.
+     */
+    envAlias: z.string().min(1).optional(),
     backend: BackendSchema,
     coldStart: z.boolean(),
     /**
@@ -374,7 +516,21 @@ export const RunResultSchema = z
     outcomes: z.array(OutcomeResultSchema),
     steps: z.array(StepResultSchema),
     artifacts: RunArtifactsSchema,
+    /**
+     * The spec's exit code — on a document `cairn run` prints for an
+     * invocation with a `run:` policy or a critical teardown, the
+     * invocation's (see `invocationOutcome`).
+     */
     exitCode: ExitCodeSchema,
+    /**
+     * Present on a printed document whose invocation could change the exit
+     * code after the spec ran (config `run:` policy, critical teardown). A
+     * spec that passed while the invocation settled on 8 or 9 reads
+     * `status: "errored"` with `failure.phase: "invocation"`;
+     * `invocationOutcome.specsExitCode` keeps the spec's own code (run.json
+     * in the run directory is never rewritten). Additive.
+     */
+    invocationOutcome: InvocationOutcomeSchema.optional(),
     nextActions: z.array(NextActionSchema).optional(),
   })
   .strict();

@@ -37,8 +37,18 @@ secrets:
 
 When `secrets.provider: tvault` is set, `cairn run` resolves only explicit
 `keys`, `required`, and names referenced as `${env.NAME}` or `${secrets.NAME}`
-in the root spec or its imported actions. It never exports a whole vault
-project to discover values. The
+in the root spec or its imported actions — plus the `${secrets.NAME}` names of
+the environment's `auth:` block when the flow has a `use: login` step. It
+never exports a whole vault project to discover values. Every `${secrets.NAME}`
+value a spec, an action or the `auth:` block resolves is redacted from every
+artifact, whatever the key is called. Values the secrets provider injects are
+always redacted; a value that reaches the spec any other way (an exported
+shell variable) is redacted when it is at least 6 characters long. A shorter
+value (a test OTP `000`, a tenant id `1`) would otherwise be replaced
+inside every artifact string, timestamps and step ids included; it is still
+masked wherever it sits under a credential-like key (a `password` or `token`
+field, an `Authorization` header). List a short value under the spec's
+`redaction.values` to redact it everywhere anyway. The
 selected values are invocation-scoped (not copied into Cairntrace's global
 environment), registered with the artifact redactor, and made available to
 spec substitution, preconditions, hooks, and seed commands. Existing shell

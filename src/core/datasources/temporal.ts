@@ -1,10 +1,5 @@
-import {
-  authorizationHeader,
-  HttpCallError,
-  httpCallWithRetry,
-  joinBaseUrl,
-  type HttpReply,
-} from "./http";
+import { HttpCallError, httpCallWithRetry } from "./http";
+import { authorizationHeader, joinBaseUrl, type HttpReply } from "./httpWire";
 import { DatasourceError } from "./mongo";
 import { displayUrl } from "./redact";
 import { datasourceSecretValues } from "./resolve";

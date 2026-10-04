@@ -17,6 +17,7 @@ import { PhaseTracker } from "./phaseTracker";
 import {
   InvocationJournalReadSchema,
   isServicesEventType,
+  type InvocationDelegate,
   type InvocationJournalFile,
   type InvocationPlannedRun,
   type InvocationStatus,
@@ -80,7 +81,11 @@ export interface InvocationJournalOptions {
   client?: string;
   configPath?: string;
   env?: string;
+  /** The alias name `--env` used, when `env` is its target. */
+  envAlias?: string;
   labels?: Record<string, string>;
+  /** `cairn run --suite`: the config suite the specs came from. */
+  suite?: string;
   parallel: number;
   planned: InvocationPlannedRun[];
   redactor?: ArtifactRedactor;
@@ -92,7 +97,7 @@ export interface InvocationJournalOptions {
   invocationId?: string;
 }
 
-type LogKind = "hook" | "services" | "narration";
+type LogKind = "hook" | "services" | "narration" | "delegate";
 
 /**
  * The journal of one `cairn run` process at
@@ -148,7 +153,9 @@ export class InvocationJournal {
       ...(opts.client ? { client: opts.client } : {}),
       ...(opts.configPath ? { configPath: opts.configPath } : {}),
       ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.envAlias ? { envAlias: opts.envAlias } : {}),
       ...(labels ? { labels } : {}),
+      ...(opts.suite ? { suite: opts.suite } : {}),
       parallel: Math.max(1, opts.parallel),
       planned: opts.planned,
       status: "running",
@@ -314,7 +321,7 @@ export class InvocationJournal {
   }
 
   /** `logs/services-<source>.log` for docker / seed / teardown command output. */
-  servicesLog(source: "docker" | "seed" | "teardown"): LiveLog {
+  servicesLog(source: "docker" | "seed" | "teardown" | "provisioner"): LiveLog {
     return this.openLog(`services-${source}.log`, "services", source);
   }
 
@@ -337,6 +344,28 @@ export class InvocationJournal {
     }
   }
 
+  /**
+   * `logs/delegate.log`: a delegated runner's stdout and stderr, redacted
+   * line by line as cairn copies them from the runner's raw output file.
+   */
+  delegateLog(): LiveLog {
+    return this.openLog("delegate.log", "delegate", "runner");
+  }
+
+  /**
+   * Merge `patch` into invocation.json's `delegate` block and rewrite the
+   * file (also after the journal settled: the runner's last facts land on
+   * the signal path, right before the process exits).
+   */
+  setDelegate(patch: Partial<InvocationDelegate>): void {
+    // The first call names the contract and the command.
+    this.state.delegate = {
+      ...this.state.delegate,
+      ...patch,
+    } as InvocationDelegate;
+    this.writeState();
+  }
+
   /** One batch-level narration line in `logs/narration.log`. */
   narrate(message: string): void {
     const log = this.openLog("narration.log", "narration", "invocation");
@@ -356,6 +385,16 @@ export class InvocationJournal {
   /** The run directory of planned run `index` exists. */
   runStarted(index: number, spec: string, runId: string, runDir: string): void {
     if (this.settled) return;
+    // A run that already settled never goes back to running (a delegated
+    // runner that re-streams its run lines).
+    const existing = this.state.runs.find((run) => run.index === index);
+    if (
+      existing?.runId === runId &&
+      existing.status !== undefined &&
+      existing.status !== "running"
+    ) {
+      return;
+    }
     this.state.current = { index, spec, runId };
     this.upsertRun({ index, spec, runId, runDir, status: "running" });
     this.writeState();

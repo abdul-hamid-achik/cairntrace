@@ -1,17 +1,30 @@
-import { basename, relative } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 import type { BrowserBackend } from "../../adapters/browserBackend";
 import {
   generateInvocationId,
   InvocationJournal,
+  redactArgv,
 } from "../../core/artifacts/invocationJournal";
 import {
   createLiveArtifactRedactor,
   registerSecretValues,
 } from "../../core/artifacts/redaction";
 import { recordSeedRun } from "../../core/fixtures/ledger";
+import { RUN_LOCK_ENV, RunLockRefusedError } from "../../core/runPolicy/lock";
+import { SuiteError } from "../../core/suites/resolve";
+import { suiteVarEnvName } from "../../core/suites/schema";
+import {
+  recordLedgerSession,
+  type LedgerHandle,
+} from "../../core/runPolicy/sessionLedger";
 import { FixtureHost } from "../../core/fixtures/runtime";
-import { cairnContextEnv } from "../../core/processEnv";
+import {
+  cairnContextEnv,
+  targetChildEnvWithSelectedTvaultKeys,
+} from "../../core/processEnv";
 import { runPool } from "../../core/runner/pool";
+import { killLiveCommandsSync } from "../../core/runner/boundedCommand";
+import { signalBudget, type SignalBudget } from "../../core/runPolicy/finally";
 import {
   generateRunToken,
   runSpec,
@@ -19,19 +32,29 @@ import {
 } from "../../core/runner/Runner";
 import {
   ServicesCancelledError,
+  type CriticalTeardownFailure,
   type ServicesHandle,
 } from "../../core/runner/services";
 import type { WebServerHandle } from "../../core/runner/webServer";
+import type { ArtifactRedactor } from "../../core/artifacts/ArtifactWriter";
+import type { InvocationSummary } from "../../core/schema/events.v1";
 import type { BrowserConfig } from "../../core/schema/config.v1";
-import type { RunResult } from "../../core/schema/run.v1";
-import type { BatchRunResult } from "../../core/schema/runBatch.v1";
+import {
+  buildRunNextActions,
+  type InvocationOutcome,
+  type RunResult,
+} from "../../core/schema/run.v1";
+import type {
+  BatchRunResult,
+  BatchSkippedSpec,
+} from "../../core/schema/runBatch.v1";
 import type {
   RunInvocationKind,
   RunInvocationOptions,
   RunInvocationOrigin,
 } from "../../core/schema/runInvocation.v1";
 import type { SelectionResult } from "../../core/schema/selection.v1";
-import type { ExitCode } from "../../core/schema/shared";
+import type { Backend, ExitCode } from "../../core/schema/shared";
 import { parseLabelFlags } from "../../core/stats/runStats";
 import { writeAbortedBatchSummary } from "../abortedBatch";
 import { createBackend } from "../backendFactory";
@@ -82,6 +105,14 @@ import {
   startServicesPlan,
 } from "./lifecycle";
 import {
+  describeCriticalTeardown,
+  resolveRunPolicy,
+  RunPolicyResolutionError,
+  RunPolicySession,
+  summarizeRunPolicy,
+  type RunPolicyDeps,
+} from "./runPolicy";
+import {
   backendOpts,
   parseHookTimeoutMs,
   parseVarFlags,
@@ -107,6 +138,47 @@ import {
   synthesizeErroredResult,
   synthesizeInvocationErroredResult,
 } from "./results";
+import {
+  EngineMetrics,
+  resolveRunMetrics,
+  type InvocationMetrics,
+} from "./metrics";
+import {
+  buildDelegatePlan,
+  buildDelegateRequest,
+  DelegateSession,
+  delegatedResults,
+  DelegationError,
+  journalDirOf,
+  readSettledRun,
+  refusedPlanEntries,
+  renderDelegatePlan,
+  resolveDelegation,
+  resolveRunnerSpawn,
+  withDelegatedOutcome,
+  type DelegateSettled,
+  type DelegationTarget,
+  type RunnerSpawnSpec,
+} from "./delegate";
+import {
+  delegateVerdict,
+  type DelegatedExitCode,
+  type RelayedRun,
+} from "../../core/delegate/relay";
+import {
+  DEFAULT_CANCEL_GRACE_MS,
+  DELEGATE_CONTRACT,
+  type DelegatePlan,
+} from "../../core/schema/delegate.v1";
+import type { InvocationPlannedRun } from "../../core/schema/events.v1";
+import {
+  type AppliedSuite,
+  applySuite,
+  refreshSuiteVars,
+  runSuiteAfterHooksSync,
+  runSuiteHooks,
+  type SuiteHooksOutcome,
+} from "./suite";
 import {
   buildSelectionResult,
   DRAFT_SKIP_REASON,
@@ -194,6 +266,18 @@ export interface RunNarration {
   specFinish?(
     ctx: SpecRunContext & { result?: RunResult; error?: string },
   ): void;
+  /**
+   * A delegated runner reported a run settled (`result`: its run.json,
+   * when the runner already copied it under the local artifact root).
+   */
+  delegatedRunFinish?(
+    ctx: SpecRunContext & {
+      status: "passed" | "failed" | "errored";
+      runId: string;
+      durationMs?: number;
+      result?: RunResult;
+    },
+  ): void;
   batchEnd?(summary: {
     total: number;
     passed: number;
@@ -252,17 +336,29 @@ export interface RunInvocationIO {
   allowServicesBoot?: boolean;
   /**
    * Each iteration's document, in order, at the moment `cairn run` prints
-   * it (before services teardown). Awaited, so a slow consumer (a piped
-   * stdout) holds the engine exactly like the CLI drain did.
+   * it: before services teardown, or — when a config `run:` policy or a
+   * critical teardown can still change the exit code — after the verdict,
+   * carrying `invocationOutcome` and the settled `exitCode`. Awaited, so a
+   * slow consumer (a piped stdout) holds the engine exactly like the CLI
+   * drain did.
    */
   onDocument?: (
     document: RunDocument,
     meta: RunDocumentMeta,
   ) => void | Promise<void>;
   /**
+   * SIGINT / SIGTERM while documents are held: the ones of the iterations
+   * that finished, with `invocationOutcome.exitCode` 130 / 143, from the
+   * synchronous signal path (no continuation runs after it). Write them
+   * synchronously; without it they go to `onDocument` unawaited.
+   */
+  onDocumentSync?: (document: RunDocument, meta: RunDocumentMeta) => void;
+  /**
    * Serialize invocations that boot the same services/webServer
    * environment (config + env). Resolves with a release function.
    */
+  /** Where the run policy looks at the machine (tests only). */
+  runPolicyDeps?: RunPolicyDeps;
   environmentLock?: (
     key: string,
     options: {
@@ -286,6 +382,8 @@ export interface ServicesPlanDocument {
   servicesDryRun: true;
   /** Redacted plan lines (empty when no services block applies). */
   plan: string[];
+  /** A runner environment: what would be spawned (masked). */
+  delegate?: DelegatePlan;
 }
 
 export interface RunInvocationResult {
@@ -305,7 +403,8 @@ export interface RunInvocationResult {
     | ServicesPlanDocument;
   /** Per-iteration documents in order (what the CLI printed). */
   documents: RunDocument[];
-  exitCode: ExitCode;
+  /** 130 / 143 only for a delegated invocation the runner settled that way. */
+  exitCode: ExitCode | 130 | 143;
   /** Invocation-level failure (errored kind). */
   error?: string;
   /**
@@ -342,13 +441,78 @@ export interface RunInvocationHandle {
 
 type SignalName = "SIGINT" | "SIGTERM";
 type AbortReporter = (signal: SignalName) => void;
+/** Synchronous cleanup the signal path still runs (bounded by `budget`). */
+type SignalHook = (signal: SignalName, budget: SignalBudget) => void;
+
+/** The code cairn exits with on a signal (what `CAIRN_EXIT_CODE` says then). */
+function signalExitCode(signal: SignalName): 130 | 143 {
+  return signal === "SIGINT" ? 130 : 143;
+}
+
+/** A services environment the signal path tears down. */
+interface TrackedServices {
+  terminateSync(): void;
+  /** A critical entry (or the provisioner's `down`) has not run yet. */
+  criticalPending?(): boolean;
+}
 
 /** Per-invocation registry of the resources the signal path must kill. */
 class ResourceScope {
   private readonly backends = new Set<BrowserBackend>();
   private readonly servers = new Set<{ terminateSync(): void }>();
-  private readonly services = new Set<{ terminateSync(): void }>();
+  private readonly services = new Set<TrackedServices>();
   private readonly reporters = new Set<AbortReporter>();
+  private readonly locks = new Set<{ releaseLockSync(): void }>();
+  private readonly ledgers = new Set<LedgerHandle>();
+  /** Suite `after` hooks: while services are still up. */
+  private readonly beforeTeardownHooks = new Set<SignalHook>();
+  /** `run.finally`: after services and the webServer are down. */
+  private readonly afterTeardownHooks = new Set<SignalHook>();
+
+  trackSignalHook(
+    stage: "before-teardown" | "after-teardown",
+    hook: SignalHook,
+  ): () => void {
+    const set =
+      stage === "before-teardown"
+        ? this.beforeTeardownHooks
+        : this.afterTeardownHooks;
+    set.add(hook);
+    return () => {
+      set.delete(hook);
+    };
+  }
+
+  private runSignalHooks(
+    set: Set<SignalHook>,
+    signal: SignalName,
+    budget: SignalBudget,
+  ): void {
+    const hooks = [...set];
+    set.clear();
+    for (const hook of hooks) {
+      try {
+        hook(signal, budget);
+      } catch {
+        // Cleanup must never block the exit path.
+      }
+    }
+  }
+
+  trackLedger(handle: LedgerHandle): () => void {
+    this.ledgers.add(handle);
+    return () => {
+      this.ledgers.delete(handle);
+    };
+  }
+
+  /** The run lock is released last on the signal path. */
+  trackLock(session: { releaseLockSync(): void }): () => void {
+    this.locks.add(session);
+    return () => {
+      this.locks.delete(session);
+    };
+  }
 
   trackBackend(backend: BrowserBackend): () => void {
     this.backends.add(backend);
@@ -364,7 +528,7 @@ class ResourceScope {
     };
   }
 
-  trackServices(handle: { terminateSync(): void }): () => void {
+  trackServices(handle: TrackedServices): () => void {
     this.services.add(handle);
     return () => {
       this.services.delete(handle);
@@ -391,8 +555,41 @@ class ResourceScope {
     this.backends.clear();
   }
 
-  /** Reporters once, then backends, the webServer and services. */
-  terminateSync(signal: SignalName): void {
+  /**
+   * What is left after the browsers: suite `after` hooks, the webServer /
+   * services teardown, `run.finally`. `critical` when a services teardown
+   * still owes a critical entry (a provisioner's `down`).
+   */
+  private pendingCleanup(): "critical" | "teardown" | undefined {
+    for (const handle of this.services) {
+      try {
+        if (handle.criticalPending?.()) return "critical";
+      } catch {
+        // A probe never blocks the exit path.
+      }
+    }
+    return this.beforeTeardownHooks.size > 0 ||
+      this.servers.size > 0 ||
+      this.services.size > 0 ||
+      this.afterTeardownHooks.size > 0
+      ? "teardown"
+      : undefined;
+  }
+
+  /**
+   * Reporters once; every command still running (preconditions, hooks,
+   * preflight, `run:` steps); browsers; the suite's `after` hooks (services
+   * still up); the webServer and services; `run.finally`; and the run lock
+   * last — so the next run of the config never starts while something of
+   * this one is still working. The suite's `after` hooks share one bounded
+   * budget and `run.finally` gets its own after the services teardown, so
+   * slow `after` hooks never cost it its run; the services teardown (a
+   * provisioner's critical `down` included) has its own caps and never
+   * depends on either. `notice` gets one line before the slow part: the
+   * hosts (cleanup.ts's handler, `cairn mcp`) hold further signals until
+   * this returns, so a second Ctrl-C does not cut it short.
+   */
+  terminateSync(signal: SignalName, notice?: (message: string) => void): void {
     // Clear first so re-entry cannot write duplicate summaries.
     const reporters = [...this.reporters];
     this.reporters.clear();
@@ -403,7 +600,37 @@ class ResourceScope {
         // A partial-summary failure must not prevent browser/service cleanup.
       }
     }
+    try {
+      killLiveCommandsSync();
+    } catch {
+      // Cleanup must never block the exit path.
+    }
+    const budget = signalBudget();
     this.killBackendsSync();
+    // The daemons are dead: ledger entries with no survivor go.
+    for (const ledger of this.ledgers) {
+      try {
+        ledger.finish();
+      } catch {
+        // Cleanup must never block the exit path.
+      }
+    }
+    this.ledgers.clear();
+    const pending = this.pendingCleanup();
+    if (pending && notice) {
+      try {
+        notice(
+          `cleanup in progress (${
+            pending === "critical"
+              ? "critical teardown pending"
+              : "teardown pending"
+          }); further Ctrl-C is ignored until it ends, send SIGKILL to force`,
+        );
+      } catch {
+        // Narration never blocks the exit path.
+      }
+    }
+    this.runSignalHooks(this.beforeTeardownHooks, signal, budget);
     for (const set of [this.servers, this.services]) {
       for (const handle of set) {
         try {
@@ -414,6 +641,16 @@ class ResourceScope {
       }
       set.clear();
     }
+    // `run.finally`: a window of its own, whatever the hooks before took.
+    this.runSignalHooks(this.afterTeardownHooks, signal, signalBudget());
+    for (const lock of this.locks) {
+      try {
+        lock.releaseLockSync();
+      } catch {
+        // Cleanup must never block the exit path.
+      }
+    }
+    this.locks.clear();
   }
 }
 
@@ -685,7 +922,8 @@ class RunInvocation {
   readonly id: string;
   readonly handle: RunInvocationHandle;
   private readonly cwd: string;
-  private readonly opts: RunInvocationOptions;
+  /** The request's options; `--suite` replaces them with the suite's defaults applied. */
+  private opts: RunInvocationOptions;
   private readonly logger: RunLogger;
   private readonly runLog: RunLogger;
   private readonly narration: RunNarration;
@@ -699,6 +937,40 @@ class RunInvocation {
   private artifactRoot: string | undefined;
   private aborted = false;
   private terminated = false;
+  /** The config `run:` block of this invocation (F8), once resolved. */
+  private policy: RunPolicySession | undefined;
+  /** `--suite` (F9): the resolved suite, once applied. */
+  private suite: AppliedSuite | undefined;
+  /** `suite.started` was journaled and `suite.finished` not yet. */
+  private suiteOpen = false;
+  private suiteHooksFailed = 0;
+  /** Config `metrics:` probes (F11), once resolved. */
+  private metrics: EngineMetrics | undefined;
+  /** The delegated runner of a `runner:` environment, once spawned. */
+  private delegateSession: DelegateSession | undefined;
+  /** `--bail`: set by the first failed or errored spec. */
+  private readonly bailState: {
+    tripped: boolean;
+    trigger?: { spec: string; exitCode: ExitCode };
+  } = { tripped: false };
+  /** Specs `--bail` never started, across iterations. */
+  private readonly skippedSpecs: BatchSkippedSpec[] = [];
+  /** The project config directory, for the browser-session ledger. */
+  private projectDir: string | undefined;
+  /** Critical teardown entries that failed (exit 8). */
+  private criticalFailures: CriticalTeardownFailure[] = [];
+  /** Exit 8 / 9 messages of the run policy. */
+  private readonly policyErrors: string[] = [];
+  /**
+   * The exit code can still change after the specs (a config `run:` policy
+   * or a critical teardown): documents are held until it settled, so what
+   * is printed / returned agrees with the process exit code.
+   */
+  private holdDocuments = false;
+  private readonly heldDocuments: Array<{
+    document: RunDocument;
+    meta: RunDocumentMeta;
+  }> = [];
   /**
    * Fires on a graceful cancel only (never on the CLI's terminateSync signal
    * path, which exits right after): kills running hooks and a booting
@@ -746,6 +1018,8 @@ class RunInvocation {
     if (io.signal?.aborted) this.aborted = true;
     else io.signal?.addEventListener("abort", onAbort, { once: true });
     const result = this.run().finally(() => {
+      // Safety net for a path that skipped the explicit release (a crash).
+      this.policy?.releaseLockSync();
       io.signal?.removeEventListener("abort", onAbort);
       this.markStarted({
         ...(this.journal ? { journalDir: this.journal.dir } : {}),
@@ -777,10 +1051,16 @@ class RunInvocation {
   private abortGracefully(): void {
     if (this.aborted || this.terminated) return;
     this.aborted = true;
-    this.note(
-      "warn",
-      "cancel requested: stopping browser sessions and skipping the remaining specs",
-    );
+    if (this.delegateSession) {
+      // A delegated runner cancels its remote invocation (SIGINT, grace,
+      // SIGTERM, SIGKILL); the relay keeps going until it exits.
+      this.delegateSession.cancel("cancel");
+    } else {
+      this.note(
+        "warn",
+        "cancel requested: stopping browser sessions and skipping the remaining specs",
+      );
+    }
     // In-flight browser calls fail fast through cancellableBackend; killing
     // the daemons unblocks a call that is already waiting on one.
     this.resources.killBackendsSync();
@@ -792,7 +1072,7 @@ class RunInvocation {
     if (this.terminated) return;
     this.terminated = true;
     this.aborted = true;
-    this.resources.terminateSync(signal);
+    this.resources.terminateSync(signal, (message) => this.signalNote(message));
   }
 
   /** A backend for one spec run, tracked for the signal path. */
@@ -800,16 +1080,82 @@ class RunInvocation {
     backend: BrowserBackend;
     untrack: () => void;
     real: BrowserBackend;
+    /** Call after `backend.close()`: settles the browser-session ledger entry. */
+    finishLedger: () => void;
   } {
     const real = createBackend(options);
-    const untrack = this.resources.trackBackend(real);
+    const untrackBackend = this.resources.trackBackend(real);
     const backend = this.io.signal
       ? cancellableBackend(real, this.io.signal)
       : real;
-    return { backend, untrack, real };
+    const ledger = this.recordBrowserSession(real, options);
+    // The browser pid is only known while the session lives: learn it once
+    // more right before the backend closes.
+    const untrack = (): void => {
+      ledger.learn();
+      untrackBackend();
+    };
+    return { backend, untrack, real, finishLedger: ledger.finish };
+  }
+
+  /**
+   * Record the browser session in the owned-session ledger (`cairn doctor
+   * --orphans`, `run.verifyClean: [browsers]`). The pid is learnt while the
+   * session runs (agent-browser also has a pid file the scan reads).
+   */
+  private recordBrowserSession(
+    real: BrowserBackend,
+    options: Parameters<typeof createBackend>[0],
+  ): { learn: () => void; finish: () => void } {
+    const choice = options.mock ? "mock" : (options.backend ?? "agent-browser");
+    if (choice === "mock")
+      return { learn: () => undefined, finish: () => undefined };
+    const handle = recordLedgerSession({
+      session: options.session ?? this.sessionRoot,
+      backend: choice,
+      invocationId: this.id,
+      projectDir: this.projectDir ?? this.cwd,
+      ...(this.io.runPolicyDeps?.ledgerRoot
+        ? { root: this.io.runPolicyDeps.ledgerRoot }
+        : {}),
+      ...(this.io.runPolicyDeps?.probe
+        ? { probe: this.io.runPolicyDeps.probe }
+        : {}),
+    });
+    const untrackLedger = this.resources.trackLedger(handle);
+    const learn = (): void => {
+      try {
+        const pid = real.browserPid?.();
+        if (pid !== undefined) handle.setPids([pid]);
+      } catch {
+        // best-effort
+      }
+    };
+    const timer = setInterval(learn, 2_000);
+    timer.unref?.();
+    return {
+      learn,
+      finish: () => {
+        clearInterval(timer);
+        untrackLedger();
+        handle.finish(this.io.runPolicyDeps?.probe);
+      },
+    };
   }
 
   /* ----- results ----- */
+
+  /** Hand a spec document to the caller now, or hold it until settlement. */
+  private async emitDocument(
+    document: RunDocument,
+    meta: RunDocumentMeta,
+  ): Promise<void> {
+    if (this.holdDocuments) {
+      this.heldDocuments.push({ document, meta });
+      return;
+    }
+    await this.io.onDocument?.(document, meta);
+  }
 
   private base(): Pick<
     RunInvocationResult,
@@ -834,7 +1180,11 @@ class RunInvocation {
     extra: { document?: RunDocument; documents?: RunDocument[] } = {},
   ): RunInvocationResult {
     const journal = this.activeJournal;
+    // The run lock goes before the journal settles, so `run.lock.released`
+    // lands ahead of `invocation.finished`.
+    this.policy?.releaseLock();
     if (journal) {
+      this.emitSuiteFinished(code);
       journal.narrate(`error: ${message}`);
       journal.finish(this.aborted ? "aborted" : "errored", {
         total: 0,
@@ -847,6 +1197,7 @@ class RunInvocation {
         ),
         exitCode: code,
         error: message,
+        ...this.policySummary(),
       });
       this.activeJournal = undefined;
     }
@@ -928,11 +1279,264 @@ class RunInvocation {
     });
   }
 
+  /**
+   * `--bail`: the first failed or errored spec stops the scheduling of the
+   * rest. A refused spec (environment policy) and a cancel do not trip it.
+   */
+  private tripBail(
+    opts: RunInvocationOptions,
+    specPath: string,
+    result: RunResult,
+  ): void {
+    if (!opts.bail || this.bailState.tripped || this.aborted) return;
+    if (result.status !== "failed" && result.status !== "errored") return;
+    this.bailState.tripped = true;
+    this.bailState.trigger = { spec: specPath, exitCode: result.exitCode };
+    this.note(
+      "warn",
+      `--bail: ${result.spec.name} ${result.status}; no further spec will start`,
+    );
+  }
+
+  /** Journal `suite.finished` once (the exit code the invocation settled on). */
+  private emitSuiteFinished(code: number): void {
+    if (!this.suiteOpen || !this.suite) return;
+    this.suiteOpen = false;
+    this.activeJournal?.appendEvent({
+      ts: new Date().toISOString(),
+      type: "suite.finished",
+      name: this.suite.resolved.name,
+      exitCode: code,
+      ...(this.suiteHooksFailed > 0
+        ? { hooksFailed: this.suiteHooksFailed }
+        : {}),
+    });
+  }
+
+  /**
+   * `--suite`: say which seed post-commands the suite skipped, and warn about
+   * a `seed.postCommands.skip` entry that matched none (a typo would
+   * otherwise run the command silently).
+   */
+  private noteSeedSkips(
+    plan: Awaited<ReturnType<typeof resolveServicesPlan>>,
+  ): void {
+    const wanted = this.suite?.resolved.seedSkip ?? [];
+    if (!plan || wanted.length === 0) return;
+    const skipped = new Set(
+      (plan.skippedPostCommands ?? []).map((c) => c.trim()),
+    );
+    if (skipped.size > 0) {
+      this.note(
+        "info",
+        `suite ${this.suite!.resolved.name}: skipping ${skipped.size} seed postCommand(s)`,
+      );
+    }
+    for (const entry of wanted) {
+      if (!skipped.has(entry.trim())) {
+        this.note(
+          "warn",
+          `suite ${this.suite!.resolved.name}: seed.postCommands.skip entry matches no seed postCommand: ${this.redactNote(entry)}`,
+        );
+      }
+    }
+  }
+
+  private redactNote(text: string): string {
+    return this.activeJournal?.redactText(text) ?? text;
+  }
+
+  /* ----- run policy (F8) ----- */
+
+  /** `runPolicy` of the journal summary, when the policy did anything notable. */
+  private policySummary(): Pick<InvocationSummary, "runPolicy"> {
+    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    return runPolicy ? { runPolicy } : {};
+  }
+
+  /**
+   * Resolve the invocation's `run:` policy and run its gates before
+   * anything starts: the lock, the preflight checks and the clean-machine
+   * assertion. Returns the refusal message (exit 4), or undefined to go on.
+   * The lock stays held on success; every exit path releases it.
+   */
+  private async startRunPolicy(
+    specs: readonly string[],
+    scopedSecrets: ScopedSecrets,
+    redactor: ArtifactRedactor,
+    /**
+     * A delegated environment: the lock is that environment's own, and
+     * `verifyClean` does not apply (nothing of the run is local).
+     */
+    delegated?: { env: string },
+  ): Promise<string | undefined> {
+    let resolved: Awaited<ReturnType<typeof resolveRunPolicy>>;
+    try {
+      resolved = await resolveRunPolicy(
+        specs,
+        this.opts,
+        scopedSecrets,
+        this.cwd,
+      );
+    } catch (e) {
+      if (e instanceof RunPolicyResolutionError)
+        return redactor.text(e.message);
+      throw e;
+    }
+    if (
+      resolved &&
+      delegated &&
+      (resolved.policy.verifyClean?.length ?? 0) > 0
+    ) {
+      this.note(
+        "info",
+        `run.verifyClean is not checked locally for the delegated environment "${delegated.env}" (nothing of the run is local; the remote cairn applies its own)`,
+      );
+      const { verifyClean: _skipped, ...policy } = resolved.policy;
+      resolved = { ...resolved, policy };
+    }
+    if (!resolved) return undefined;
+    const session = new RunPolicySession(resolved, {
+      invocationId: this.id,
+      origin: this.io.origin,
+      argv:
+        this.request.argv ??
+        runOptionsToArgv(this.request.specs, this.request.options),
+      cwd: this.cwd,
+      scopedSecrets,
+      redactor,
+      journal: this.journal,
+      note: (kind, message) => this.note(kind, message),
+      signal: this.cancelController.signal,
+      reuseServices: this.opts.reuseServices === true,
+      ...(this.io.runPolicyDeps ? { deps: this.io.runPolicyDeps } : {}),
+      redactArgv: (argv) => redactArgv(argv, redactor),
+      ...(this.suite ? { suite: this.suite.resolved.name } : {}),
+      ...(delegated ? { lockEnvironment: delegated.env } : {}),
+    });
+    this.policy = session;
+    this.resources.trackLock(session);
+    try {
+      await session.acquireLock();
+    } catch (e) {
+      if (e instanceof RunLockRefusedError) return redactor.text(e.message);
+      throw e;
+    }
+    // A `cairn services …` command started by this run (a hook, a `run:`
+    // step, the provisioner) runs under this lock instead of refusing.
+    const held = session.lockHandle;
+    if (held) {
+      scopedSecrets.env[RUN_LOCK_ENV] = held.path;
+      scopedSecrets.childEnv[RUN_LOCK_ENV] = held.path;
+    }
+    const failed = await session.preflight();
+    if (failed) return failed;
+    const dirty = await session.checkClean("before");
+    if (dirty.length > 0) {
+      return `refusing to start: the machine is not clean before the run (run.verifyClean): ${session.describeDirty(dirty)}`;
+    }
+    // From here on `finally` runs on every exit path, a signal's included.
+    this.resources.trackSignalHook("after-teardown", (signal, budget) =>
+      session.runFinallySync(signalExitCode(signal), budget, (message) =>
+        this.signalNote(message),
+      ),
+    );
+    return undefined;
+  }
+
+  /** Narration on the signal path (stderr only: the journal is settled). */
+  private signalNote(message: string): void {
+    this.runLog.warn(message);
+  }
+
+  /**
+   * After the services/webServer teardown: a critical teardown failure is
+   * exit 8, then the `finally` belts run, then the clean-machine check
+   * (exit 9 unless 8 already applies). Returns the exit code the run settles
+   * on and the messages to report.
+   */
+  private async settlePolicy(
+    code: ExitCode,
+    critical: readonly CriticalTeardownFailure[],
+  ): Promise<{ exitCode: ExitCode; errors: string[] }> {
+    const policy = this.policy;
+    const errors: string[] = [];
+    let exitCode = code;
+    // A critical teardown entry needs no `run:` block: it is the entry's own
+    // flag.
+    if (critical.length > 0) {
+      this.criticalFailures = [...critical];
+      exitCode = 8;
+      const message = `critical teardown failed: ${describeCriticalTeardown(critical)}`;
+      errors.push(message);
+      this.note("warn", message);
+    }
+    if (!policy) {
+      this.policyErrors.push(...errors);
+      return { exitCode, errors };
+    }
+    await policy.runFinally(exitCode);
+    const dirty = await policy.checkClean("after");
+    if (dirty.length > 0) {
+      const message = `state is not clean after the run (run.verifyClean): ${policy.describeDirty(dirty)}`;
+      errors.push(message);
+      this.note("warn", message);
+      if (exitCode !== 8) exitCode = 9;
+    }
+    this.policyErrors.push(...errors);
+    return { exitCode, errors };
+  }
+
+  /** {@link settlePolicy} for a lifecycle that failed to boot. */
+  private async settleBoot(
+    error: unknown,
+    svcHandle: ServicesHandle | undefined,
+  ): Promise<{ code: ExitCode | undefined; suffix: string }> {
+    const base = configErrorExitCode(error);
+    const critical =
+      svcHandle?.criticalTeardownFailures?.() ??
+      (error as { criticalTeardownFailures?: CriticalTeardownFailure[] })
+        .criticalTeardownFailures ??
+      [];
+    const settled = await this.settlePolicy(base, critical);
+    return {
+      code: settled.exitCode === base ? undefined : settled.exitCode,
+      suffix: settled.errors.length > 0 ? `; ${settled.errors.join("; ")}` : "",
+    };
+  }
+
   /* ----- the invocation ----- */
 
   private async run(): Promise<RunInvocationResult> {
+    let specs = this.request.specs;
+    // `--suite` (F9): the config's suite supplies the specs and the option
+    // defaults; everything below then runs as if they had been typed.
+    if (this.opts.suite !== undefined) {
+      try {
+        const applied = await applySuite({
+          specs,
+          options: this.opts,
+          cwd: this.cwd,
+          callerEnv:
+            this.request.callerEnv ??
+            (process.env as Record<string, string | undefined>),
+        });
+        this.suite = applied;
+        this.opts = applied.options;
+        specs = applied.resolved.specs;
+        for (const warning of applied.warnings) this.note("warn", warning);
+        if (applied.resolved.skippedDrafts.length > 0) {
+          this.note(
+            "info",
+            `suite ${applied.resolved.name}: skipped ${applied.resolved.skippedDrafts.length} draft(s) starting with _`,
+          );
+        }
+      } catch (e) {
+        if (e instanceof SuiteError) return this.fail(e.message, e.exitCode);
+        return this.fail((e as Error).message, 2);
+      }
+    }
     const { opts, cwd } = this;
-    const specs = this.request.specs;
     const parallel = Math.max(1, opts.parallel ?? 1);
     let hookTimeoutMs: number;
     try {
@@ -943,6 +1547,15 @@ class RunInvocation {
       );
     } catch (e) {
       return this.fail((e as Error).message, 2);
+    }
+    if (
+      opts.runToken !== undefined &&
+      !/^[A-Za-z0-9_.-]{1,64}$/.test(opts.runToken)
+    ) {
+      return this.fail(
+        "--run-token must be 1-64 letters, digits, '_', '.' or '-'",
+        2,
+      );
     }
 
     let expandedSpecs: string[];
@@ -971,7 +1584,7 @@ class RunInvocation {
       return this.fail(
         skippedDrafts.length > 0
           ? `no specs to run: everything under ${specs.join(", ")} is a draft (a _ folder or file); name one to run it`
-          : "at least one spec path is required",
+          : "at least one spec path is required (or --suite <name>)",
         2,
       );
     }
@@ -993,6 +1606,17 @@ class RunInvocation {
     }
     const multiRun = opts.repeat !== undefined || opts.matrix !== undefined;
 
+    // `environments.<n>.runner`: the invocation runs elsewhere; this
+    // process keeps the journal, the run directories, the exit code and the
+    // cancel (see ./delegate.ts).
+    let delegation: DelegationTarget | undefined;
+    try {
+      delegation = await resolveDelegation(expandedSpecs, opts, cwd);
+    } catch (e) {
+      if (e instanceof DelegationError) return this.fail(e.message, e.exitCode);
+      throw e;
+    }
+
     // `--select-only`: resolve which specs WOULD run WITHOUT launching a
     // browser, services, or webServer. Emits SelectionResult v1. Applies
     // `--tag` and/or `--since-codemap` filters with skip reasons.
@@ -1013,7 +1637,24 @@ class RunInvocation {
       );
       // The environment policy is part of "would it run": a refused spec is
       // listed under `skipped` with its reason, never as selected.
-      const selection = await this.withPolicySkips(built);
+      const { selection, refusals: selectionRefusals } =
+        await this.withPolicySkips(built);
+      if (delegation && selection.selected.length > 0) {
+        const plan = await this.delegatePlanFor(
+          delegation,
+          [
+            ...selection.selected.map((spec) => spec.path),
+            ...selectionRefusals.keys(),
+          ],
+          selectionRefusals,
+          iterations,
+          multiRun,
+          this.request.callerEnv ??
+            (process.env as Record<string, string | undefined>),
+        );
+        this.printDelegatePlan(plan);
+        selection.delegate = plan;
+      }
       return {
         ...this.base(),
         kind: "selection",
@@ -1144,15 +1785,86 @@ class RunInvocation {
                 info: (m) => this.note("info", m),
               },
               cwd,
+              runnable,
+              // A delegated environment's node scripts run elsewhere.
+              delegation ? { skipNodePin: true } : {},
             )
           : noSecretsScope(callerEnv);
     } catch (e) {
       return this.fail((e as Error).message, configErrorExitCode(e));
     }
 
+    // `--suite`: the suite's vars resolve again now that the vault's
+    // secrets are in (a `${env.X}` the vault provides was empty before),
+    // and `requires.vars` is checked against them.
+    if (this.suite) {
+      try {
+        const refreshed = await refreshSuiteVars(
+          this.suite,
+          scopedSecrets.env,
+          // A services dry-run never read the vault.
+          opts.servicesDryRun ? { checkRequiredVars: false } : {},
+        );
+        opts.var = refreshed.var.length > 0 ? refreshed.var : undefined;
+        opts.label = refreshed.label;
+        for (const key of opts.servicesDryRun ? [] : refreshed.dropped) {
+          this.note(
+            "warn",
+            `suite ${this.suite.resolved.name}: var ${key} uses an \${env.X} that is not set (not even by the vault); it is not passed, so the config's ${key} (if any) applies`,
+          );
+        }
+        for (const key of opts.servicesDryRun
+          ? []
+          : refreshed.droppedProcessEnv) {
+          this.note(
+            "warn",
+            `suite ${this.suite.resolved.name}: processEnv ${key} uses an \${env.X} that is not set (not even by the vault); it is not exported`,
+          );
+        }
+        // `processEnv`: every later process of the run (preflight, services,
+        // hooks, specs, verifiers) gets it, and `${env.X}` in the config and
+        // specs resolves against it. Names only are narrated.
+        const exported = Object.keys(refreshed.processEnv);
+        if (exported.length > 0) {
+          Object.assign(scopedSecrets.env, refreshed.processEnv);
+          Object.assign(scopedSecrets.childEnv, refreshed.processEnv);
+          this.note(
+            "info",
+            `suite ${this.suite.resolved.name}: process env ${exported.join(", ")}`,
+          );
+        }
+      } catch (e) {
+        if (e instanceof SuiteError) return this.fail(e.message, e.exitCode);
+        return this.fail((e as Error).message, configErrorExitCode(e));
+      }
+    }
+
     // A services dry-run is a planning command, not a spec run with no-op
     // services. Resolve and return the effective lifecycle, then stop before
     // the web server, hooks, browser backend, run directory, or preconditions.
+    if (opts.servicesDryRun && delegation) {
+      this.narration.servicesDryRunStarting?.();
+      const plan = await this.delegatePlanFor(
+        delegation,
+        expandedSpecs,
+        refusals,
+        iterations,
+        multiRun,
+        scopedSecrets.env,
+      );
+      const text = this.printDelegatePlan(plan);
+      return {
+        ...this.base(),
+        kind: "services-dry-run",
+        document: {
+          servicesDryRun: true,
+          plan: text.trimEnd().split("\n"),
+          delegate: plan,
+        },
+        documents: [],
+        exitCode: 0,
+      };
+    }
     if (opts.servicesDryRun) {
       this.narration.servicesDryRunStarting?.();
       try {
@@ -1161,13 +1873,24 @@ class RunInvocation {
           opts,
           scopedSecrets,
           cwd,
+          this.suite?.resolved.seedSkip,
+          this.suite?.resolved.name,
         );
+        this.noteSeedSkips(plan);
+        const processEnv = Object.keys(this.suite?.resolved.processEnv ?? {});
         const text = plan
-          ? renderServicesDryRunPlan(plan, scopedSecrets)
+          ? renderServicesDryRunPlan(
+              processEnv.length > 0 ? { ...plan, processEnv } : plan,
+              scopedSecrets,
+            )
           : undefined;
         if (text !== undefined) {
           if (this.narration.servicesPlan) this.narration.servicesPlan(text);
           else this.runLog.info(text.trimEnd());
+        } else if (!opts.noServices) {
+          this.runLog.info(
+            "services dry-run: no services for this environment (no `services:` block at the top level or in the environment, or `services: false`)",
+          );
         }
         return {
           ...this.base(),
@@ -1209,7 +1932,9 @@ class RunInvocation {
     registerSecretValues(specRedaction.values ?? []);
     const journal = InvocationJournal.create({
       artifactRoot: invocationContext.artifactRoot,
-      argv: this.request.argv ?? runOptionsToArgv(specs, opts),
+      argv:
+        this.request.argv ??
+        runOptionsToArgv(this.request.specs, this.request.options),
       cwd,
       origin: this.io.origin,
       ...(this.io.client ? { client: this.io.client } : {}),
@@ -1219,7 +1944,11 @@ class RunInvocation {
       ...(invocationContext.environment
         ? { env: invocationContext.environment }
         : {}),
+      ...(invocationContext.envAlias
+        ? { envAlias: invocationContext.envAlias }
+        : {}),
       labels: parseLabelFlags(opts.label),
+      ...(this.suite ? { suite: this.suite.resolved.name } : {}),
       parallel,
       planned: planInvocationRuns(expandedSpecs, iterations, multiRun),
       redactor: createLiveArtifactRedactor(
@@ -1239,7 +1968,74 @@ class RunInvocation {
     const untrackJournal = journal
       ? this.resources.trackReporter((signal) => journal.abortSync(signal))
       : undefined;
-    journal?.narrate(summarizeStartingSpecs(specs, cwd));
+    journal?.narrate(
+      this.suite
+        ? `starting suite "${this.suite.resolved.name}" (env ${this.suite.resolved.env}): ${specs.length} spec(s)`
+        : summarizeStartingSpecs(specs, cwd),
+    );
+    if (journal && this.suite) {
+      const resolved = this.suite.resolved;
+      this.suiteOpen = true;
+      journal.appendEvent({
+        ts: new Date().toISOString(),
+        type: "suite.started",
+        name: resolved.name,
+        env: resolved.env,
+        specs: specs.length,
+        ...(opts.parallel !== undefined && opts.parallel > 1
+          ? { parallel: opts.parallel }
+          : {}),
+        ...(opts.bail ? { bail: true as const } : {}),
+      });
+    }
+    this.projectDir = invocationContext.configPath
+      ? dirname(invocationContext.configPath)
+      : undefined;
+    const lifecycleCtx = {
+      specs: expandedSpecs,
+      refusals,
+      parallel,
+      ...(invocationContext.environment
+        ? { environment: invocationContext.environment }
+        : {}),
+      redactor: createLiveArtifactRedactor(
+        specRedaction,
+        scopedSecrets.env,
+        scopedSecrets.secretValues,
+      ),
+    };
+
+    if (delegation) {
+      return this.runDelegated({
+        target: delegation,
+        journal,
+        untrackJournal,
+        runnable,
+        refusals,
+        scopedSecrets,
+        lifecycleCtx,
+        iterations,
+        multiRun,
+        parallel,
+        startedAtMs: invocationStartedAtMs,
+        firstSpec,
+      });
+    }
+
+    // F8 run policy: the lock first (before anything starts), then the
+    // preflight checks and the clean-machine assertion. A refusal here is
+    // exit 4 and nothing of ours was started.
+    if (runnable.length > 0) {
+      const refusal = await this.startRunPolicy(
+        runnable,
+        scopedSecrets,
+        lifecycleCtx.redactor,
+      );
+      if (refusal) {
+        untrackJournal?.();
+        return this.lifecycleFailure(refusal, 4, lifecycleCtx);
+      }
+    }
 
     // Bring up the configured services environment (docker/seed/tmux) FIRST:
     // the webServer is usually an app process that depends on that infra,
@@ -1253,8 +2049,16 @@ class RunInvocation {
     const bootsLifecycle = runnable.length > 0;
     try {
       const plan = bootsLifecycle
-        ? await resolveServicesPlan(firstSpec, opts, scopedSecrets, cwd)
+        ? await resolveServicesPlan(
+            firstSpec,
+            opts,
+            scopedSecrets,
+            cwd,
+            this.suite?.resolved.seedSkip,
+            this.suite?.resolved.name,
+          )
         : undefined;
+      this.noteSeedSkips(plan);
       servicesProject = plan?.project;
       assertServicesBootAllowed(plan, this.io.allowServicesBoot);
       if (
@@ -1289,8 +2093,11 @@ class RunInvocation {
         svcHandle = await startServicesPlan(
           plan,
           scopedSecrets,
-          (terminateSync) => {
-            untrackSvc = this.resources.trackServices({ terminateSync });
+          (terminateSync, criticalPending) => {
+            untrackSvc = this.resources.trackServices({
+              terminateSync,
+              ...(criticalPending ? { criticalPending } : {}),
+            });
           },
           {
             ...(journal ? { journal } : {}),
@@ -1302,6 +2109,12 @@ class RunInvocation {
             signal: this.cancelController.signal,
           },
         );
+        // F10: what the provisioner exported reaches every later phase,
+        // hook, spec and verifier as env.
+        if (svcHandle.exportedEnv) {
+          Object.assign(scopedSecrets.env, svcHandle.exportedEnv);
+          Object.assign(scopedSecrets.childEnv, svcHandle.exportedEnv);
+        }
       }
       if (this.aborted) {
         // Booted before the cancel landed: stop it like the normal teardown.
@@ -1315,31 +2128,25 @@ class RunInvocation {
       untrackSvc?.();
       releaseEnvironment?.();
       untrackJournal?.();
+      // F8: belts and the clean-machine check run after a failed boot too;
+      // a critical teardown that failed in the cleanup outranks the boot error.
+      const boot = await this.settleBoot(e, svcHandle);
       // A boot the cancel killed reports like any cancel before the specs;
       // other errors (a cancelled lock wait, a boot failure) keep their own.
       if (e instanceof ServicesCancelledError) {
-        return this.fail(CANCELLED_BEFORE_SPECS, 2);
+        return this.fail(CANCELLED_BEFORE_SPECS + boot.suffix, boot.code ?? 2);
       }
       if (this.aborted) {
-        return this.fail((e as Error).message, configErrorExitCode(e));
+        return this.fail(
+          (e as Error).message + boot.suffix,
+          boot.code ?? configErrorExitCode(e),
+        );
       }
       // A services lock refusal (exit 4) or a boot failure (exit 2).
       return this.lifecycleFailure(
-        (e as Error).message,
-        configErrorExitCode(e),
-        {
-          specs: expandedSpecs,
-          refusals,
-          parallel,
-          ...(invocationContext.environment
-            ? { environment: invocationContext.environment }
-            : {}),
-          redactor: createLiveArtifactRedactor(
-            specRedaction,
-            scopedSecrets.env,
-            scopedSecrets.secretValues,
-          ),
-        },
+        (e as Error).message + boot.suffix,
+        boot.code ?? configErrorExitCode(e),
+        lifecycleCtx,
       );
     }
 
@@ -1395,24 +2202,15 @@ class RunInvocation {
       }
       releaseEnvironment?.();
       untrackJournal?.();
-      if (this.aborted) return this.fail(CANCELLED_BEFORE_SPECS, 2);
+      const boot = await this.settleBoot(e, svcHandle);
+      if (this.aborted) {
+        return this.fail(CANCELLED_BEFORE_SPECS + boot.suffix, boot.code ?? 2);
+      }
       // A webServer boot/readiness/setup failure (exit 2).
       return this.lifecycleFailure(
-        (e as Error).message,
-        configErrorExitCode(e),
-        {
-          specs: expandedSpecs,
-          refusals,
-          parallel,
-          ...(invocationContext.environment
-            ? { environment: invocationContext.environment }
-            : {}),
-          redactor: createLiveArtifactRedactor(
-            specRedaction,
-            scopedSecrets.env,
-            scopedSecrets.secretValues,
-          ),
-        },
+        (e as Error).message + boot.suffix,
+        boot.code ?? configErrorExitCode(e),
+        lifecycleCtx,
       );
     } finally {
       this.cancelController.signal.removeEventListener(
@@ -1434,10 +2232,99 @@ class RunInvocation {
     await observeSeed(fixtureHost, svcHandle, servicesProject);
     // Non-secret context (CAIRN_ENV, CAIRN_BASE_URL, CAIRN_CONFIG_DIR) for the
     // --before/--after hooks; per-run ids are layered on per run.
+    // Metrics probes (F11) and suite hooks (F9) get the same context.
+    const runMetrics = bootsLifecycle
+      ? await resolveRunMetrics(firstSpec, opts, scopedSecrets, cwd)
+      : undefined;
     const hookContext: HookContext =
-      (opts.before?.length ?? 0) + (opts.after?.length ?? 0) > 0
+      (opts.before?.length ?? 0) + (opts.after?.length ?? 0) > 0 ||
+      this.suite !== undefined ||
+      runMetrics !== undefined
         ? await resolveHookContext(firstSpec, opts, scopedSecrets, cwd)
         : {};
+    if (runMetrics) {
+      this.metrics = new EngineMetrics({
+        resolved: runMetrics,
+        invocationId: this.id,
+        journal,
+        redactor: lifecycleCtx.redactor,
+        note: (kind, message) => this.note(kind, message),
+        signal: this.cancelController.signal,
+        context: cairnContextEnv(hookContext),
+      });
+    }
+    const suiteHookOpts = (phase: "before" | "after", code?: number) => {
+      const suite = this.suite!;
+      const env: NodeJS.ProcessEnv = {
+        ...scopedSecrets.childEnv,
+        ...cairnContextEnv(hookContext),
+        CAIRN_SUITE: suite.resolved.name,
+        ...(journal ? { CAIRN_INVOCATION_DIR: journal.dir } : {}),
+        ...(code !== undefined ? { CAIRN_EXIT_CODE: String(code) } : {}),
+        ...Object.fromEntries(
+          Object.entries(suite.resolved.vars).map(([key, value]) => [
+            suiteVarEnvName(key),
+            value,
+          ]),
+        ),
+      };
+      return {
+        suite: suite.resolved.name,
+        phase,
+        commands:
+          phase === "before" ? suite.resolved.before : suite.resolved.after,
+        timeoutMs: suite.resolved.hookTimeoutMs ?? hookTimeoutMs,
+        cwd: suite.configDir,
+        env: targetChildEnvWithSelectedTvaultKeys(
+          env,
+          scopedSecrets.selectedKeys ?? [],
+        ),
+        journal,
+        redact: (text: string) => lifecycleCtx.redactor.text(text),
+        fatal: phase === "before",
+        note: (kind: "info" | "warn", message: string) =>
+          this.note(kind, message),
+      };
+    };
+    let suiteBeforeStarted = false;
+    // Suite `after` hooks on the signal path: what the async path has not
+    // finished (a signal stops cairn before an async continuation runs).
+    let suiteAfterDone = 0;
+    let suiteAfterFinished = false;
+    const untrackSuiteSignal =
+      this.suite && this.suite.resolved.after.length > 0
+        ? this.resources.trackSignalHook(
+            "before-teardown",
+            (signal, budget) => {
+              if (!suiteBeforeStarted || suiteAfterFinished) return;
+              suiteAfterFinished = true;
+              const hook = suiteHookOpts("after", signalExitCode(signal));
+              this.suiteHooksFailed += runSuiteAfterHooksSync({
+                suite: hook.suite,
+                commands: hook.commands,
+                timeoutMs: hook.timeoutMs,
+                cwd: hook.cwd,
+                env: hook.env,
+                journal: hook.journal,
+                redact: hook.redact,
+                note: (_kind, message) => this.signalNote(message),
+                from: suiteAfterDone + 1,
+                budget,
+              });
+            },
+          )
+        : undefined;
+
+    // The verdict can still change after the specs: hold the documents.
+    this.holdDocuments =
+      this.policy !== undefined || svcHandle?.hasCriticalTeardown?.() === true;
+    // A signal ends cairn before that verdict: what finished is handed over
+    // then (exit 130 / 143), never dropped.
+    const untrackHeldDocuments = this.holdDocuments
+      ? this.resources.trackReporter((signal) =>
+          this.flushHeldDocumentsSync(signal),
+        )
+      : undefined;
 
     // Resolve one final exit status only after lifecycle teardown.
     let exitCode: ExitCode = 2;
@@ -1446,10 +2333,32 @@ class RunInvocation {
     let crash: string | undefined;
     let beforeHookError: string | undefined;
     try {
+      // The suite's before hooks run once, after services and the webServer
+      // are up (their failure stops the run like a failed --before hook).
+      // A cancel that landed before this point started nothing: no after
+      // hooks either.
+      if (this.suite && !this.aborted) {
+        suiteBeforeStarted = true;
+        const outcome = await runSuiteHooks({
+          ...suiteHookOpts("before"),
+          signal: this.cancelController.signal,
+        });
+        this.suiteHooksFailed += outcome.failed;
+        if (outcome.failed > 0 && !this.aborted) {
+          beforeHookError = outcome.firstFailure;
+          summaryRows.push({
+            it: iterations[0]!,
+            exitCode: 2,
+            results: [],
+            note: "suite before hook",
+          });
+          exitCode = 2;
+        }
+      }
       // Services/webServer are shared; each iteration (one pass with a single
       // run when no --repeat/--matrix) re-runs the --before hooks, then the specs.
       for (const it of iterations) {
-        if (this.aborted) break;
+        if (this.aborted || beforeHookError !== undefined) break;
         const iteration: IterationOptions = multiRun
           ? {
               opts: {
@@ -1529,7 +2438,14 @@ class RunInvocation {
           fixtureHost,
         };
         let outcome: IterationOutcome;
+        // Invocation-scope metrics (F11) bracket this iteration's specs.
+        const iterationMetrics: InvocationMetrics | undefined =
+          this.metrics?.forIteration(
+            iterSecrets,
+            multiRun ? it.index : undefined,
+          );
         try {
+          await iterationMetrics?.start();
           outcome =
             expandedSpecs.length === 1 && parallel === 1
               ? await this.runSingle(firstSpec, inputs)
@@ -1539,9 +2455,22 @@ class RunInvocation {
           this.note("warn", crash);
           outcome = { exitCode: 2 };
         }
+        try {
+          await iterationMetrics?.finish(results);
+        } catch (e) {
+          this.note("warn", `metrics: ${(e as Error).message}`);
+          await iterationMetrics?.dispose();
+        }
         if (outcome.document) documents.push(outcome.document);
         summaryRows.push({ it, exitCode: outcome.exitCode, results });
         exitCode = mergeExitCodes(exitCode, outcome.exitCode, it.index === 1);
+        if (this.bailState.tripped && it.index < iterations.length) {
+          this.note(
+            "warn",
+            `--bail: not starting run ${it.index + 1}/${iterations.length} (${this.bailState.trigger?.spec ?? "a spec"} did not pass)`,
+          );
+          break;
+        }
         if (
           outcome.exitCode !== 0 &&
           opts.stopOnFail &&
@@ -1555,6 +2484,32 @@ class RunInvocation {
         }
       }
     } finally {
+      // No sampler outlives the invocation.
+      await this.metrics?.disposeAll();
+      // The suite's after hooks run on every exit path once its before phase
+      // began (a cancel included: cleanup must run, so they get no signal),
+      // while services and the webServer are still up.
+      if (
+        this.suite &&
+        suiteBeforeStarted &&
+        !suiteAfterFinished &&
+        this.suite.resolved.after.length > 0
+      ) {
+        try {
+          const outcome: SuiteHooksOutcome = await runSuiteHooks({
+            ...suiteHookOpts("after", exitCode),
+            onDone: (index) => {
+              suiteAfterDone = index;
+            },
+          });
+          this.suiteHooksFailed += outcome.failed;
+        } catch (e) {
+          this.suiteHooksFailed += 1;
+          this.note("warn", `suite after hooks: ${(e as Error).message}`);
+        }
+        suiteAfterFinished = true;
+      }
+      untrackSuiteSignal?.();
       if (multiRun && summaryRows.length > 0) {
         if (this.narration.iterationsSummary) {
           this.narration.iterationsSummary(summaryRows, iterations.length);
@@ -1596,13 +2551,31 @@ class RunInvocation {
       releaseEnvironment?.();
     }
 
+    // F8: a critical teardown that failed is exit 8, the `finally` belts
+    // run, and the clean-machine check may turn the exit into 9. The lock is
+    // released last, before the journal settles.
+    const specsExitCode = exitCode;
+    const settledPolicy = await this.settlePolicy(
+      exitCode,
+      svcHandle?.criticalTeardownFailures?.() ?? [],
+    );
+    exitCode = settledPolicy.exitCode;
+    this.policy?.releaseLock();
+
     // Persist the batch summary (stdout only had it until now) and settle.
     if (journal) {
+      this.emitSuiteFinished(exitCode);
+      const invocationError = [
+        ...(beforeHookError !== undefined ? [beforeHookError] : []),
+        ...settledPolicy.errors,
+      ].join("; ");
       const summary = buildInvocationSummary(summaryRows, {
         exitCode,
         durationMs: Date.now() - invocationStartedAtMs,
         multiRun,
-        ...(beforeHookError !== undefined ? { error: beforeHookError } : {}),
+        ...(invocationError ? { error: invocationError } : {}),
+        skipped: this.skippedSpecs.length,
+        ...this.policySummary(),
       });
       // Exit 7 (every spec refused, or --strict-requires) did not run what
       // was asked: "failed", not an infrastructure error.
@@ -1622,9 +2595,40 @@ class RunInvocation {
     }
     untrackJournal?.();
     this.activeJournal = undefined;
+    untrackHeldDocuments?.();
+
+    // Held documents: now that the verdict is in, hand them over with the
+    // invocation's exit code (and why it differs from the specs' own).
+    const settledOutcome = this.holdDocuments
+      ? this.invocationOutcome(
+          specsExitCode,
+          exitCode,
+          settledPolicy.errors,
+          lifecycleCtx.redactor,
+        )
+      : undefined;
+    const settled = new Map<RunDocument, RunDocument>();
+    if (settledOutcome) {
+      for (const held of this.heldDocuments) {
+        const document = withInvocationOutcome(held.document, settledOutcome);
+        settled.set(held.document, document);
+        await this.io.onDocument?.(document, held.meta);
+      }
+      this.heldDocuments.length = 0;
+    }
+    const finalDocuments = documents.map(
+      (doc) =>
+        settled.get(doc) ??
+        (settledOutcome ? withInvocationOutcome(doc, settledOutcome) : doc),
+    );
 
     if (beforeHookError !== undefined) {
-      return this.fail(beforeHookError, 2, { documents });
+      // A critical teardown failure or a dirty machine outranks the hook.
+      return this.fail(
+        [beforeHookError, ...settledPolicy.errors].join("; "),
+        exitCode === 8 || exitCode === 9 ? exitCode : 2,
+        { documents: finalDocuments },
+      );
     }
 
     if (multiRun) {
@@ -1638,15 +2642,19 @@ class RunInvocation {
           version: "1",
           parallel,
           totalDurationMs: Math.max(0, Date.now() - invocationStartedAtMs),
-          summary: batchSummary(results),
+          summary: batchSummary(results, this.skippedSpecs.length),
           results,
+          ...(this.skippedSpecs.length > 0
+            ? { skipped: [...this.skippedSpecs] }
+            : {}),
           exitCode,
+          ...(settledOutcome ? { invocationOutcome: settledOutcome } : {}),
         },
-        documents,
+        documents: finalDocuments,
         exitCode,
       };
     }
-    const document = documents[0];
+    const document = finalDocuments[0];
     if (!document) {
       return {
         ...this.base(),
@@ -1656,7 +2664,7 @@ class RunInvocation {
           (this.aborted
             ? CANCELLED_BEFORE_SPECS
             : "the run produced no result"),
-        documents,
+        documents: finalDocuments,
         exitCode,
       };
     }
@@ -1668,8 +2676,62 @@ class RunInvocation {
           ? "batch"
           : "single",
       document,
-      documents,
+      documents: finalDocuments,
       exitCode,
+    };
+  }
+
+  /**
+   * The signal path: the documents still held (the iterations that finished
+   * before SIGINT / SIGTERM) are handed over now, synchronously, with
+   * `invocationOutcome.exitCode` 130 / 143 — cairn exits before the verdict
+   * they waited for. `onDocumentSync` when the host has one (the CLI writes
+   * stdout synchronously), else a fire-and-forget `onDocument`.
+   */
+  private flushHeldDocumentsSync(signal: SignalName): void {
+    const held = this.heldDocuments.splice(0);
+    if (held.length === 0) return;
+    const specsExitCode = held.reduce<ExitCode>(
+      (code, entry, index) =>
+        mergeExitCodes(code, entry.document.exitCode, index === 0),
+      0,
+    );
+    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const outcome: InvocationOutcome = {
+      exitCode: signalExitCode(signal),
+      specsExitCode,
+      error: `interrupted by ${signal} before the invocation settled`,
+      ...(runPolicy ? { runPolicy } : {}),
+    };
+    for (const entry of held) {
+      const document = withInvocationOutcome(entry.document, outcome);
+      try {
+        if (this.io.onDocumentSync) {
+          this.io.onDocumentSync(document, entry.meta);
+        } else {
+          void Promise.resolve(
+            this.io.onDocument?.(document, entry.meta),
+          ).catch(() => undefined);
+        }
+      } catch {
+        // The process is exiting; a document that cannot be written is lost.
+      }
+    }
+  }
+
+  /** `invocationOutcome` of the documents of a held invocation. */
+  private invocationOutcome(
+    specsExitCode: ExitCode,
+    exitCode: ExitCode,
+    errors: readonly string[],
+    redactor: { text: (input: string) => string },
+  ): InvocationOutcome {
+    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    return {
+      exitCode,
+      specsExitCode,
+      ...(errors.length > 0 ? { error: redactor.text(errors.join("; ")) } : {}),
+      ...(runPolicy ? { runPolicy } : {}),
     };
   }
 
@@ -1678,9 +2740,8 @@ class RunInvocation {
    * stamp, could not write JUnit): the document alone reads as passed.
    */
   private postRunError(): { error?: string } {
-    return this.postRunErrors.length > 0
-      ? { error: this.postRunErrors.join("; ") }
-      : {};
+    const errors = [...this.policyErrors, ...this.postRunErrors];
+    return errors.length > 0 ? { error: errors.join("; ") } : {};
   }
 
   /**
@@ -1707,9 +2768,10 @@ class RunInvocation {
   }
 
   /** `--select-only`: move policy-refused specs from `selected` to `skipped`. */
-  private async withPolicySkips(
-    selection: SelectionResult,
-  ): Promise<SelectionResult> {
+  private async withPolicySkips(selection: SelectionResult): Promise<{
+    selection: SelectionResult;
+    refusals: ReadonlyMap<string, RefusedSpec>;
+  }> {
     const refusals = await evaluateSpecPolicies(
       selection.selected.map((s) => s.path),
       this.opts,
@@ -1717,19 +2779,623 @@ class RunInvocation {
         (process.env as Record<string, string | undefined>),
       this.cwd,
     );
-    if (refusals.size === 0) return selection;
+    if (refusals.size === 0) return { selection, refusals };
     return {
-      ...selection,
-      selected: selection.selected.filter((s) => !refusals.has(s.path)),
-      skipped: [
-        ...selection.skipped,
-        ...selection.selected.flatMap((s) => {
-          const refused = refusals.get(s.path);
-          return refused
-            ? [{ name: s.name, path: s.path, reason: describeRefusal(refused) }]
-            : [];
+      refusals,
+      selection: {
+        ...selection,
+        selected: selection.selected.filter((s) => !refusals.has(s.path)),
+        skipped: [
+          ...selection.skipped,
+          ...selection.selected.flatMap((s) => {
+            const refused = refusals.get(s.path);
+            return refused
+              ? [
+                  {
+                    name: s.name,
+                    path: s.path,
+                    reason: describeRefusal(refused),
+                  },
+                ]
+              : [];
+          }),
+        ],
+      },
+    };
+  }
+
+  /* ----- delegated runner (environments.<n>.runner) ----- */
+
+  /**
+   * What a delegated invocation would spawn (`--services-dry-run`,
+   * `--select-only`): the runner argv and the request, masked. A runner
+   * reference that does not resolve yet (a secret the dry run never read)
+   * shows unresolved, with a warning.
+   */
+  private async delegatePlanFor(
+    target: DelegationTarget,
+    /** Every spec of the invocation, refused ones included. */
+    specs: readonly string[],
+    refusals: ReadonlyMap<string, RefusedSpec>,
+    iterations: readonly RunIteration[],
+    multiRun: boolean,
+    env: Record<string, string | undefined>,
+  ): Promise<DelegatePlan> {
+    const redactor = createLiveArtifactRedactor(undefined, env);
+    let spawn: RunnerSpawnSpec;
+    try {
+      spawn = resolveRunnerSpawn(target, env, redactor);
+    } catch (e) {
+      this.note(
+        "warn",
+        `environments.${target.envName}.runner: ${(e as Error).message} (the plan shows the unresolved command)`,
+      );
+      spawn = {
+        command: [...target.runner.command],
+        displayCommand: [...target.runner.command],
+        cwd: target.runner.cwd
+          ? resolve(target.configDir, target.runner.cwd)
+          : target.configDir,
+        env: {},
+        envNames: Object.keys(target.runner.env ?? {}).toSorted(),
+        ...(target.runner.timeoutMs !== undefined
+          ? { timeoutMs: target.runner.timeoutMs }
+          : {}),
+        ...(target.runner.idleTimeoutMs !== undefined
+          ? { idleTimeoutMs: target.runner.idleTimeoutMs }
+          : {}),
+        cancelGraceMs: target.runner.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS,
+      };
+    }
+    const artifactRoot = await resolveBatchArtifactRoot(
+      specs[0] ?? target.configPath,
+      this.opts,
+      this.cwd,
+    );
+    const planned = planInvocationRuns(specs, iterations, multiRun);
+    const request = buildDelegateRequest({
+      invocationId: this.id,
+      target,
+      ...(this.suite ? { suite: this.suite.resolved.name } : {}),
+      specs: specs.filter((spec) => !refusals.has(spec)),
+      planned,
+      refused: refusedPlanEntries(planned, refusals),
+      rawOptions: this.request.options,
+      resolvedOptions: this.opts,
+      artifactRoot,
+      journalDir: journalDirOf(artifactRoot, this.id),
+      eventsPath: "<CAIRN_DELEGATE_EVENTS: a temporary file cairn creates>",
+      spawn,
+    });
+    return buildDelegatePlan(target, spawn, request, redactor);
+  }
+
+  /** The plan text on stderr (the dry-run sink); returns it. */
+  private printDelegatePlan(plan: DelegatePlan): string {
+    const text = renderDelegatePlan(plan);
+    if (this.narration.servicesPlan) this.narration.servicesPlan(text);
+    else this.runLog.info(text.trimEnd());
+    return text;
+  }
+
+  /** Local-only features a delegated invocation does not run, said once. */
+  private noteDelegatedScope(target: DelegationTarget): void {
+    const suite = this.suite?.resolved;
+    if (suite && (suite.before.length > 0 || suite.after.length > 0)) {
+      this.note(
+        "info",
+        `suite ${suite.name}: its before/after hooks run with the remote invocation, not locally (environment "${target.envName}" has a runner)`,
+      );
+    }
+    if ((this.opts.before?.length ?? 0) + (this.opts.after?.length ?? 0) > 0) {
+      this.note(
+        "info",
+        "--before/--after hooks do not run locally for a delegated environment: the runner gets them in its request (options.before / options.after)",
+      );
+    }
+    if (this.opts.stampIfGreen || this.opts.autoAnnotate) {
+      this.note(
+        "warn",
+        "--stamp-if-green / --auto-annotate are not applied to a delegated invocation (its runs execute elsewhere)",
+      );
+    }
+  }
+
+  /**
+   * `environments.<n>.runner`: the run policy's lock (that environment's
+   * own) and preflight run here, then the runner executes the invocation
+   * elsewhere while this process relays its events stream into the
+   * journal, maps its runs onto the plan, and — once it exited — verifies
+   * the run directories it placed, settles the exit code, runs
+   * `run.finally` and hands over the result documents read from those run
+   * directories. No services, webServer, browser, suite hooks, metrics or
+   * verifyClean run locally.
+   */
+  private async runDelegated(input: {
+    target: DelegationTarget;
+    journal: InvocationJournal | undefined;
+    untrackJournal: (() => void) | undefined;
+    runnable: string[];
+    refusals: ReadonlyMap<string, RefusedSpec>;
+    scopedSecrets: ScopedSecrets;
+    lifecycleCtx: {
+      specs: readonly string[];
+      refusals: ReadonlyMap<string, RefusedSpec>;
+      parallel: number;
+      environment?: string;
+      redactor: ArtifactRedactor;
+    };
+    iterations: readonly RunIteration[];
+    multiRun: boolean;
+    parallel: number;
+    startedAtMs: number;
+    firstSpec: string;
+  }): Promise<RunInvocationResult> {
+    const { opts, cwd } = this;
+    const { target, journal, scopedSecrets } = input;
+    if (!journal) {
+      input.untrackJournal?.();
+      return this.fail(
+        `the invocation journal could not be written under ${this.artifactRoot ?? "the artifact root"}: a delegated invocation needs it (the runner's run directories go there too)`,
+        2,
+      );
+    }
+    // The signal path cancels (and waits for) the runner before the journal
+    // is marked aborted, so the journal stays live while the runner stops.
+    input.untrackJournal?.();
+    let onSignal: ((signal: SignalName) => void) | undefined;
+    let interruptedBy: SignalName | undefined;
+    const untrackSignal = this.resources.trackReporter((signal) => {
+      interruptedBy = signal;
+      try {
+        onSignal?.(signal);
+      } finally {
+        journal.abortSync(signal);
+      }
+    });
+    this.noteDelegatedScope(target);
+    const labels = parseLabelFlags(opts.label);
+    const backend: Backend = opts.mock
+      ? "mock"
+      : (opts.backend ?? "agent-browser");
+    const planned = journal.snapshot.planned;
+    const refused: RunResult[] = [];
+    for (const entry of planned) {
+      const refusal = input.refusals.get(entry.spec);
+      if (!refusal) continue;
+      journalRefused(journal, refusal, entry.index);
+      refused.push(synthesizeRefusedResult(refusal, { labels, backend }, cwd));
+    }
+    const settleBase = {
+      journal,
+      untrackSignal,
+      startedAtMs: input.startedAtMs,
+      multiRun: input.multiRun,
+      parallel: input.parallel,
+      planned,
+      redactor: input.lifecycleCtx.redactor,
+    };
+    // Every spec refused by the environment policy: nothing to delegate.
+    if (input.runnable.length === 0) {
+      return this.settleDelegated({
+        ...settleBase,
+        results: refused,
+        exitCode: 7,
+        specsExitCode: 7,
+        errors: [],
+      });
+    }
+    const refusal = await this.startRunPolicy(
+      input.runnable,
+      scopedSecrets,
+      input.lifecycleCtx.redactor,
+      { env: target.envName },
+    );
+    if (refusal) {
+      untrackSignal();
+      return this.lifecycleFailure(refusal, 4, input.lifecycleCtx);
+    }
+    const hookContext = await resolveHookContext(
+      input.firstSpec,
+      opts,
+      scopedSecrets,
+      cwd,
+    );
+    // A cancel before the runner exists spawns nothing. From here to the
+    // spawn nothing awaits, so a later cancel reaches the session.
+    if (this.aborted) {
+      untrackSignal();
+      await this.settlePolicy(2, []);
+      return this.fail(CANCELLED_BEFORE_SPECS, 2);
+    }
+    let spawn: RunnerSpawnSpec;
+    try {
+      spawn = resolveRunnerSpawn(
+        target,
+        scopedSecrets.env,
+        input.lifecycleCtx.redactor,
+      );
+    } catch (e) {
+      untrackSignal();
+      await this.settlePolicy(4, []);
+      return this.lifecycleFailure(
+        `environments.${target.envName}.runner: ${(e as Error).message}`,
+        4,
+        input.lifecycleCtx,
+      );
+    }
+    const artifactRoot = this.artifactRoot!;
+    const total = planned.length;
+    const refusedEntries = refusedPlanEntries(planned, input.refusals);
+    const refusedIndexes = new Set(refusedEntries.map((entry) => entry.index));
+    const mode: SpecRunContext["mode"] =
+      total === 1 && input.parallel === 1 ? "single" : "batch";
+    const specContext = (run: RelayedRun): SpecRunContext => ({
+      mode,
+      specPath: run.spec,
+      idx: Math.max(0, run.index - 1),
+      total,
+      parallel: input.parallel,
+      iteration: 1,
+      planIndex: run.index,
+      plannedTotal: total,
+    });
+    const session = new DelegateSession({
+      invocationId: this.id,
+      journal,
+      artifactRoot,
+      planned,
+      refusedIndexes,
+      configDir: target.configDir,
+      spawn,
+      request: ({ eventsPath }) =>
+        buildDelegateRequest({
+          invocationId: this.id,
+          target,
+          ...(this.suite ? { suite: this.suite.resolved.name } : {}),
+          specs: input.runnable,
+          planned,
+          refused: refusedEntries,
+          rawOptions: this.request.options,
+          resolvedOptions: opts,
+          artifactRoot,
+          journalDir: journal.dir,
+          eventsPath,
+          spawn,
         }),
-      ],
+      redactor: input.lifecycleCtx.redactor,
+      childEnv: targetChildEnvWithSelectedTvaultKeys(
+        scopedSecrets.childEnv,
+        scopedSecrets.selectedKeys ?? [],
+      ),
+      context: hookContext,
+      hooks: {
+        note: (kind, message) => this.note(kind, message),
+        signalNote: (message) => this.signalNote(message),
+        onRunStarted: (run) => {
+          journal.narrate(
+            `[${run.index}/${total}] ${run.spec} — starting… (delegated)`,
+          );
+          this.narration.specStart?.(specContext(run));
+        },
+        onRunFinished: (run) => {
+          const result = run.synthetic ? undefined : readSettledRun(run.runDir);
+          this.narration.delegatedRunFinish?.({
+            ...specContext(run),
+            status: run.status ?? "errored",
+            runId: run.runId,
+            ...(run.durationMs !== undefined
+              ? { durationMs: run.durationMs }
+              : {}),
+            ...(result ? { result: { ...result, runDir: run.runDir } } : {}),
+          });
+          journal.narrate(
+            `${completionMark(run.status ?? "errored", false)} [${run.index}/${total}] ${basename(run.spec)} ${run.status ?? "errored"}${
+              run.durationMs !== undefined
+                ? ` (${formatMs(run.durationMs)})`
+                : ""
+            }${run.synthetic ? " (no run directory)" : ` ${run.runDir}`}`,
+          );
+        },
+        onProgress: (message) => this.note("info", `runner: ${message}`),
+        onDiagnostic: (diagnostic) =>
+          this.note(
+            "warn",
+            `delegated runner ${diagnostic.code}: ${diagnostic.message}`,
+          ),
+        onOutputLine: (line) => this.logger.scope("runner").debug(line),
+      },
+    });
+    this.delegateSession = session;
+    const verdictInput = (settled: {
+      exit: DelegateSettled["exit"];
+      cancelled: boolean;
+      timedOut: boolean;
+      idle: boolean;
+      verification: DelegateSettled["verification"];
+    }) =>
+      delegateVerdict({
+        exit: settled.exit,
+        cancelled: settled.cancelled,
+        timedOut: settled.timedOut,
+        idle: settled.idle,
+        runs: session.relay.runList(),
+        planned: Math.max(0, total - refusedIndexes.size),
+        verification: {
+          missing: settled.verification.missing.length,
+          unfinished: settled.verification.unfinished.length,
+          foreign: settled.verification.foreign.length,
+          unsettled: settled.verification.unsettled.length,
+        },
+        diagnostics: session.relay.diagnostics,
+        ...(session.relay.remoteStatus || session.relay.remoteSummary
+          ? {
+              remote: {
+                ...(session.relay.remoteStatus
+                  ? { status: session.relay.remoteStatus }
+                  : {}),
+                ...(session.relay.remoteSummary
+                  ? { summary: session.relay.remoteSummary }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(spawn.timeoutMs !== undefined
+          ? { timeoutMs: spawn.timeoutMs }
+          : {}),
+        ...(spawn.idleTimeoutMs !== undefined
+          ? { idleTimeoutMs: spawn.idleTimeoutMs }
+          : {}),
+      });
+    const outcomeDelegate = (
+      exit: DelegateSettled["exit"],
+    ): NonNullable<InvocationOutcome["delegate"]> => ({
+      contract: DELEGATE_CONTRACT,
+      ...(session.relay.remoteInvocationId
+        ? { remoteInvocationId: session.relay.remoteInvocationId }
+        : {}),
+      ...(exit.exitCode !== undefined ? { runnerExitCode: exit.exitCode } : {}),
+      ...(exit.signal ? { runnerSignal: exit.signal } : {}),
+      diagnostics: session.relay.diagnostics.length,
+    });
+    // SIGINT / SIGTERM: cancel the runner synchronously (the relay keeps
+    // going while it stops), then hand over the documents of the runs it
+    // reported, with invocationOutcome.exitCode 130 / 143.
+    onSignal = (signal) => {
+      session.cancelSync(signal);
+      const verdict = verdictInput({
+        exit: {},
+        cancelled: true,
+        timedOut: false,
+        idle: false,
+        verification: session.relay.verify(),
+      });
+      const results = delegatedResults({
+        runs: session.relay.runList(),
+        refused,
+        specs: input.runnable,
+        exitCode: signalExitCode(signal),
+        cancelled: true,
+        labels,
+        backend,
+        environment: target.envName,
+        cwd,
+      });
+      const document = this.delegatedDocument(results, {
+        exitCode: signalExitCode(signal),
+        specsExitCode: verdict.specsExitCode,
+        error: `interrupted by ${signal}: the delegated runner was cancelled`,
+        delegate: outcomeDelegate({}),
+        planned,
+        parallel: input.parallel,
+        multiRun: input.multiRun,
+        durationMs: Date.now() - input.startedAtMs,
+      });
+      try {
+        if (this.io.onDocumentSync) {
+          this.io.onDocumentSync(document.document, document.meta);
+        } else {
+          void Promise.resolve(
+            this.io.onDocument?.(document.document, document.meta),
+          ).catch(() => undefined);
+        }
+      } catch {
+        // The process is exiting; a document that cannot be written is lost.
+      }
+    };
+    this.narration.specsStart?.({ mode, total, parallel: input.parallel });
+    let settled: DelegateSettled;
+    try {
+      settled = await session.run();
+    } finally {
+      session.cleanup();
+    }
+    if (settled.terminated) {
+      // The signal path already settled the journal and the documents.
+      untrackSignal();
+      return {
+        ...this.base(),
+        aborted: true,
+        kind: "errored",
+        error: `the delegated invocation was interrupted by ${interruptedBy ?? "a signal"}`,
+        documents: [],
+        exitCode: signalExitCode(interruptedBy ?? "SIGINT"),
+      };
+    }
+    const verdict = verdictInput(settled);
+    for (const diagnostic of verdict.diagnostics) {
+      session.relay.diagnose(diagnostic);
+    }
+    journal.setDelegate({
+      diagnostics: session.relay.diagnostics.length,
+      ...(settled.cancelled ? { cancelled: true as const } : {}),
+      ...(settled.timedOut ? { timedOut: true as const } : {}),
+      ...(settled.idle ? { idle: true as const } : {}),
+    });
+    let exitCode = verdict.exitCode;
+    const errors = [...verdict.errors];
+    // --strict-requires: a refused spec fails an otherwise green invocation.
+    if (exitCode === 0 && opts.strictRequires && refused.length > 0) {
+      exitCode = 7;
+      errors.push(
+        `--strict-requires: ${refused.length} spec(s) refused by the environment policy`,
+      );
+    }
+    const results = delegatedResults({
+      runs: session.relay.runList(),
+      refused,
+      specs: input.runnable,
+      exitCode,
+      ...(errors.length > 0 ? { error: errors.join("; ") } : {}),
+      cancelled: settled.cancelled,
+      labels,
+      backend,
+      environment: target.envName,
+      cwd,
+    });
+    return this.settleDelegated({
+      ...settleBase,
+      results,
+      exitCode,
+      specsExitCode: verdict.specsExitCode,
+      errors,
+      delegate: outcomeDelegate(settled.exit),
+      ...(session.relay.remoteSummary
+        ? { remoteSummary: session.relay.remoteSummary }
+        : {}),
+    });
+  }
+
+  /** The single RunResult or the BatchRunResult of a delegated invocation. */
+  private delegatedDocument(
+    results: RunResult[],
+    input: {
+      exitCode: DelegatedExitCode;
+      specsExitCode: ExitCode;
+      error?: string;
+      delegate?: NonNullable<InvocationOutcome["delegate"]>;
+      planned: readonly InvocationPlannedRun[];
+      parallel: number;
+      multiRun: boolean;
+      durationMs: number;
+    },
+  ): { document: RunDocument; meta: RunDocumentMeta } {
+    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const outcome: InvocationOutcome = {
+      exitCode: input.exitCode,
+      specsExitCode: input.specsExitCode,
+      ...(input.error ? { error: input.error } : {}),
+      ...(runPolicy ? { runPolicy } : {}),
+      ...(input.delegate ? { delegate: input.delegate } : {}),
+    };
+    const single =
+      input.planned.length === 1 &&
+      input.parallel === 1 &&
+      !input.multiRun &&
+      results.length === 1;
+    const raw: RunDocument = single
+      ? results[0]!
+      : {
+          $schema: "urn:cairntrace.dev:run-batch:v1",
+          version: "1",
+          parallel: input.parallel,
+          totalDurationMs: Math.max(0, input.durationMs),
+          summary: batchSummary(results),
+          results,
+          exitCode:
+            input.exitCode === 130 || input.exitCode === 143
+              ? input.specsExitCode
+              : input.exitCode,
+        };
+    return {
+      document: withDelegatedOutcome(raw, outcome),
+      meta: { kind: single ? "single" : "batch", iteration: 1 },
+    };
+  }
+
+  /**
+   * After the runner (or with nothing to delegate): JUnit, the batch
+   * narration, `run.finally`, the lock, the journal summary and the result
+   * document, in that order.
+   */
+  private async settleDelegated(input: {
+    journal: InvocationJournal;
+    untrackSignal: () => void;
+    results: RunResult[];
+    exitCode: DelegatedExitCode;
+    specsExitCode: ExitCode;
+    errors: string[];
+    delegate?: NonNullable<InvocationOutcome["delegate"]>;
+    remoteSummary?: InvocationSummary;
+    startedAtMs: number;
+    multiRun: boolean;
+    parallel: number;
+    planned: readonly InvocationPlannedRun[];
+    redactor: ArtifactRedactor;
+  }): Promise<RunInvocationResult> {
+    const { opts, cwd } = this;
+    const { journal, results, exitCode } = input;
+    await writeJUnitIfRequested(opts, results, this.runLog, cwd);
+    const summary = batchSummary(results);
+    const durationMs = Math.max(0, Date.now() - input.startedAtMs);
+    this.narration.batchEnd?.({ ...summary, durationMs });
+    if (this.policy) await this.policy.runFinally(exitCode);
+    this.policy?.releaseLock();
+    this.emitSuiteFinished(exitCode);
+    const error =
+      input.errors.length > 0
+        ? input.redactor.text(input.errors.join("; "))
+        : undefined;
+    const remote = input.remoteSummary;
+    const status =
+      this.aborted || exitCode === 130 || exitCode === 143
+        ? "aborted"
+        : exitCode === 0
+          ? "passed"
+          : exitCode === 1 || exitCode === 7
+            ? "failed"
+            : "errored";
+    journal.narrate(
+      `finished: ${status}, ${summary.passed}/${summary.total} passed, ${summary.failed} failed, ${summary.errored} errored${
+        summary.refused ? `, ${summary.refused} refused` : ""
+      } in ${formatMs(durationMs)} (exit ${exitCode}, delegated)`,
+    );
+    journal.finish(status, {
+      total: summary.total,
+      passed: summary.passed,
+      failed: summary.failed,
+      errored: summary.errored,
+      ...(summary.refused ? { refused: summary.refused } : {}),
+      ...(remote?.skipped ? { skipped: remote.skipped } : {}),
+      durationMs,
+      exitCode,
+      ...(input.multiRun && remote?.iterations
+        ? { iterations: remote.iterations }
+        : {}),
+      ...(error ? { error } : {}),
+      ...this.policySummary(),
+    });
+    input.untrackSignal();
+    this.activeJournal = undefined;
+    const { document, meta } = this.delegatedDocument(results, {
+      exitCode,
+      specsExitCode: input.specsExitCode,
+      ...(error ? { error } : {}),
+      ...(input.delegate ? { delegate: input.delegate } : {}),
+      planned: input.planned,
+      parallel: input.parallel,
+      multiRun: input.multiRun,
+      durationMs,
+    });
+    await this.io.onDocument?.(document, meta);
+    return {
+      ...this.base(),
+      ...(error ? { error } : this.postRunError()),
+      ...(exitCode === 130 || exitCode === 143 ? { aborted: true } : {}),
+      kind: meta.kind === "single" ? "single" : "batch",
+      document,
+      documents: [document],
+      exitCode,
     };
   }
 
@@ -1850,13 +3516,13 @@ class RunInvocation {
       ) {
         return { exitCode: 2, document: result };
       }
-      await this.io.onDocument?.(result, {
+      await this.emitDocument(result, {
         kind: "single",
         iteration: inputs.index,
       });
       return { exitCode: 7, document: result };
     }
-    const { backend, untrack } = this.createTrackedBackend({
+    const { backend, untrack, finishLedger } = this.createTrackedBackend({
       ...backendOpts(opts, inputs.browser),
       session: this.sessionRoot,
     });
@@ -1872,7 +3538,8 @@ class RunInvocation {
     };
     const listener = this.specListener(ctx);
     // Minted here (not inside runSpec) so --after hooks see the same token.
-    const runToken = generateRunToken();
+    const runToken = opts.runToken ?? generateRunToken();
+    const specMetrics = this.metrics?.forSpec(scopedSecrets, runToken);
     let activeRunDir: string | undefined;
     let startedRun: { runId: string; runDir: string } | undefined;
     const signalAwareListener =
@@ -1895,6 +3562,7 @@ class RunInvocation {
 
     let exitCode: ExitCode = 2;
     try {
+      await specMetrics?.start();
       const result = await runSpec({
         ...this.runSpecOptions(specPath, inputs),
         backend,
@@ -1912,8 +3580,11 @@ class RunInvocation {
       exitCode = result.exitCode;
       sink.push(result);
       this.runDirs.push(result.runDir);
+      // One spec per iteration: a failure still ends --bail's later iterations.
+      this.tripBail(opts, specPath, result);
       if (invocation)
         journalRunFinished(invocation, planIndex, specPath, result);
+      await specMetrics?.finish(result);
       if (!this.aborted) {
         await runAfterHooksForResult(
           result,
@@ -1928,6 +3599,9 @@ class RunInvocation {
           (kind, message) => this.note(kind, message),
         );
       }
+      // After the hooks: a collector that rewrote diagnostics/report.json is
+      // merged into, never overwritten.
+      await specMetrics?.mergeReport();
       if (
         !this.aborted &&
         !(await stampIfGreen(opts, [result], this.postRunLog))
@@ -1955,7 +3629,7 @@ class RunInvocation {
         });
       }
 
-      await this.io.onDocument?.(result, {
+      await this.emitDocument(result, {
         kind: "single",
         iteration: inputs.index,
       });
@@ -1972,6 +3646,7 @@ class RunInvocation {
       );
       sink.push(result);
       exitCode = result.exitCode;
+      if (result.status !== "refused") this.tripBail(opts, specPath, result);
       if (invocation) {
         const refusal = refusalOf(result, specPath);
         if (refusal) {
@@ -1997,7 +3672,7 @@ class RunInvocation {
       ) {
         return { exitCode: 2, document: result };
       }
-      await this.io.onDocument?.(result, {
+      await this.emitDocument(result, {
         kind: "single",
         iteration: inputs.index,
         errored: true,
@@ -2005,8 +3680,10 @@ class RunInvocation {
       return { exitCode, document: result };
     } finally {
       untrackSignalArtifactReporter?.();
+      await specMetrics?.dispose();
       untrack();
       await backend.close().catch(() => undefined);
+      finishLedger();
     }
   }
 
@@ -2075,11 +3752,17 @@ class RunInvocation {
     // session root is unique per invocation (MCP runs share one process).
     const plannedTotal = invocation?.journal.plannedTotal ?? specs.length;
     let results: RunResult[];
+    // --bail: specs that never started because an earlier one did not pass.
+    const bailed: Array<{ idx: number; spec: string }> = [];
     try {
-      results = await runPool(
+      const pooled = await runPool<string, RunResult | undefined>(
         specs,
         parallel,
         async (specPath, idx, workerIndex) => {
+          if (opts.bail && this.bailState.tripped) {
+            bailed.push({ idx, spec: specPath });
+            return undefined;
+          }
           const refused = inputs.refusals.get(specPath);
           if (refused) {
             // Policy refusal: no backend, no run directory; the batch keeps
@@ -2135,12 +3818,13 @@ class RunInvocation {
             planIndex: planIndex || (inputs.index - 1) * specs.length + idx + 1,
             plannedTotal,
           };
-          const { backend, untrack } = this.createTrackedBackend({
+          const { backend, untrack, finishLedger } = this.createTrackedBackend({
             ...backendOpts(opts, inputs.browser),
             session: `${this.sessionRoot}-w${workerIndex}-s${idx}`,
           });
           const specListener = this.specListener(ctx);
-          const runToken = generateRunToken();
+          const runToken = opts.runToken ?? generateRunToken();
+          const specMetrics = this.metrics?.forSpec(scopedSecrets, runToken);
           let activeRunDir: string | undefined;
           let startedRun: { runId: string; runDir: string } | undefined;
           const signalAwareListener =
@@ -2160,6 +3844,7 @@ class RunInvocation {
           if (invocation) journalRunStarting(invocation, planIndex, specPath);
           this.narration.specStart?.(ctx);
           try {
+            await specMetrics?.start();
             const r = await runSpec({
               ...this.runSpecOptions(specPath, inputs),
               backend,
@@ -2178,8 +3863,10 @@ class RunInvocation {
             completedByIndex[idx] = r;
             sink.push(r);
             this.runDirs.push(r.runDir);
+            this.tripBail(opts, specPath, r);
             if (invocation)
               journalRunFinished(invocation, planIndex, specPath, r);
+            await specMetrics?.finish(r);
             if (!this.aborted) {
               await runAfterHooksForResult(
                 r,
@@ -2194,6 +3881,7 @@ class RunInvocation {
                 (kind, message) => this.note(kind, message),
               );
             }
+            await specMetrics?.mergeReport();
             this.narration.specFinish?.({ ...ctx, result: r });
             if (!this.aborted) {
               await runPostRunIntegrations(r, specPath, opts, {
@@ -2227,6 +3915,7 @@ class RunInvocation {
             );
             completedByIndex[idx] = errored;
             sink.push(errored);
+            if (!refusal) this.tripBail(opts, specPath, errored);
             if (invocation) {
               if (refusal) {
                 journalRefused(invocation.journal, refusal, planIndex);
@@ -2243,14 +3932,42 @@ class RunInvocation {
             return errored;
           } finally {
             if (activeRunDir) activeRunDirs.delete(activeRunDir);
+            await specMetrics?.dispose();
             untrack();
             await backend.close().catch(() => undefined);
+            finishLedger();
           }
         },
+      );
+      results = pooled.filter(
+        (result): result is RunResult => result !== undefined,
       );
     } catch (error) {
       untrackAbortReporter();
       throw error;
+    }
+    const skipped: BatchSkippedSpec[] = bailed
+      .toSorted((a, b) => a.idx - b.idx)
+      .map(({ spec }) => ({
+        spec,
+        reason: "bailed" as const,
+        bailedBy: this.bailState.trigger?.spec ?? "an earlier spec",
+      }));
+    if (skipped.length > 0) {
+      this.skippedSpecs.push(...skipped);
+      this.note(
+        "warn",
+        `--bail: skipped ${skipped.length} spec(s) after ${this.bailState.trigger?.spec ?? "a failure"}: ${skipped
+          .map((entry) => basename(entry.spec))
+          .join(", ")}`,
+      );
+      invocation?.journal.appendEvent({
+        ts: new Date().toISOString(),
+        type: "invocation.bailed",
+        spec: this.bailState.trigger?.spec ?? "unknown",
+        exitCode: this.bailState.trigger?.exitCode ?? 1,
+        skipped: skipped.length,
+      });
     }
 
     // Keep the signal-time reporter registered through stamping, JUnit, and
@@ -2258,7 +3975,10 @@ class RunInvocation {
     // window must still preserve a durable batch summary.
     try {
       const totalDurationMs = Date.now() - tStart;
-      const summary = batchSummary(results);
+      const summary = batchSummary(results, skipped.length);
+      // --bail only skips what had not started: the exit code follows the
+      // usual precedence over the specs that ran (a spec that failed while
+      // the bailing one errored still makes it 1, as without --bail).
       const exitCode = batchExitCode(results, opts.strictRequires);
 
       this.narration.batchEnd?.({ ...summary, durationMs: totalDurationMs });
@@ -2270,6 +3990,7 @@ class RunInvocation {
         totalDurationMs,
         summary,
         results,
+        ...(skipped.length > 0 ? { skipped } : {}),
         exitCode,
       };
 
@@ -2284,7 +4005,7 @@ class RunInvocation {
       ) {
         return { exitCode: 2, document: batch };
       }
-      await this.io.onDocument?.(batch, {
+      await this.emitDocument(batch, {
         kind: "batch",
         iteration: inputs.index,
       });
@@ -2319,9 +4040,62 @@ async function observeSeed(
   }
 }
 
+/**
+ * A document with the invocation's settled verdict: the top-level
+ * `exitCode` becomes the invocation's when the lifecycle changed it (8 / 9
+ * outrank the specs' own code), and a RunResult whose spec passed reads
+ * `errored` with the reason as `failure` (`invocationOutcome.specsExitCode`
+ * keeps what the spec alone did; run.json on disk is never rewritten). A
+ * signal's 130 / 143 changes nothing but `invocationOutcome`.
+ */
+export function withInvocationOutcome(
+  document: RunDocument,
+  outcome: InvocationOutcome,
+): RunDocument {
+  const lifecycleCode =
+    outcome.exitCode === 8 || outcome.exitCode === 9
+      ? outcome.exitCode
+      : undefined;
+  if (document.$schema === "urn:cairntrace.dev:run-batch:v1") {
+    return {
+      ...document,
+      ...(lifecycleCode !== undefined && document.exitCode !== lifecycleCode
+        ? { exitCode: lifecycleCode }
+        : {}),
+      invocationOutcome: outcome,
+    };
+  }
+  const run = document as RunResult;
+  if (lifecycleCode === undefined || run.exitCode === lifecycleCode) {
+    return { ...run, invocationOutcome: outcome };
+  }
+  const message =
+    outcome.error ??
+    (lifecycleCode === 8
+      ? "a critical teardown failed"
+      : "the machine is not clean after the run");
+  const passed = run.status === "passed";
+  const next: RunResult = {
+    ...run,
+    exitCode: lifecycleCode,
+    invocationOutcome: outcome,
+    ...(passed
+      ? {
+          status: "errored" as const,
+          summary: `the spec passed, then the invocation failed (exit ${lifecycleCode}): ${message}`,
+          failure: { phase: "invocation", message },
+        }
+      : {}),
+  };
+  return passed && run.nextActions !== undefined
+    ? { ...next, nextActions: buildRunNextActions(next) }
+    : next;
+}
+
 /** BatchRunResult summary; `refused` only when a spec was refused. */
 function batchSummary(
   results: readonly RunResult[],
+  skipped = 0,
 ): BatchRunResult["summary"] {
   const count = (status: RunResult["status"]): number =>
     results.filter((r) => r.status === status).length;
@@ -2332,6 +4106,7 @@ function batchSummary(
     failed: count("failed"),
     errored: count("errored"),
     ...(refused > 0 ? { refused } : {}),
+    ...(skipped > 0 ? { skipped } : {}),
   };
 }
 

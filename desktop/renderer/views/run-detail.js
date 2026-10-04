@@ -50,6 +50,16 @@
       when: (detail) => (detail?.eventsModel?.hooks ?? []).length > 0,
     },
     {
+      id: "policy",
+      label: "Run policy",
+      when: (detail) => Boolean(detail?.runPolicy),
+    },
+    {
+      id: "metrics",
+      label: "Metrics",
+      when: (detail) => (detail?.metrics?.metrics ?? []).length > 0,
+    },
+    {
       id: "services",
       label: "Services",
       when: (detail) =>
@@ -238,6 +248,8 @@
 
     const badges = runBadges(detail);
     if (badges) root.appendChild(badges);
+    const callout = policyCallout(detail, root, runRef);
+    if (callout) root.appendChild(callout);
     if (run?.spec?.name || run?.spec?.path) {
       const historyHost = h("div", { class: "history-host" });
       root.appendChild(historyHost);
@@ -353,8 +365,13 @@
    */
   function tabCount(tabId, detail) {
     switch (tabId) {
-      case "steps":
-        return detail?.steps?.length ? detail.steps.length : null;
+      case "steps": {
+        // top-level steps (F14 nested executions sit under their block)
+        const top = (detail?.steps ?? []).filter(
+          (/** @type {any} */ step) => !step?.parentId,
+        ).length;
+        return top || null;
+      }
       case "outcomes":
         return detail?.outcomes?.length ? detail.outcomes.length : null;
       case "artifacts":
@@ -369,6 +386,8 @@
         return fixtureRows(detail).length || null;
       case "hooks":
         return detail?.eventsModel?.hooks?.length || null;
+      case "metrics":
+        return detail?.metrics?.metrics?.length || null;
       case "logs":
         return (
           (detail?.logs?.length ?? 0) + (detail?.hasRunLog ? 1 : 0) || null
@@ -614,6 +633,49 @@
           ),
         ),
       );
+    },
+
+    policy(detail) {
+      const info = detail.runPolicy;
+      const panel = Studio.ops.policyPanel({
+        policy: info?.policy,
+        summary: info?.summary,
+        services: info?.services,
+      });
+      return h(
+        "div",
+        null,
+        h("p", {
+          class: "cell-dim",
+          style: { marginTop: "0" },
+          text: `What the config run: block did to invocation ${
+            info?.invocationId ?? "?"
+          }${
+            info?.suite ? ` (suite ${info.suite})` : ""
+          }: the run lock, preflight checks, verifyClean findings, finally hooks and critical teardown. They describe the whole invocation; this run is one of its specs.`,
+        }),
+        panel ??
+          h("p", {
+            class: "cell-dim",
+            text: "the run policy left nothing to show",
+          }),
+      );
+    },
+
+    async metrics(detail) {
+      const spec = detail.run?.spec?.name ?? null;
+      /** @type {any} */
+      let history = null;
+      try {
+        history = await api.call("metrics:history", { spec });
+      } catch {
+        // an older Studio main or an unreadable root: the table stands alone
+      }
+      return Studio.ops.metricsView(detail.metrics, {
+        history,
+        currentRunId: detail.runId,
+        onOpen: (runId) => Studio.navigate("run", { runRef: runId }),
+      });
     },
 
     hooks(detail) {
@@ -865,11 +927,21 @@
             `${(run.outcomes ?? []).filter((o) => o.status === "passed").length}`,
             `${(run.outcomes ?? []).length} total`,
           ),
-          statCard(
-            "Steps",
-            `${(run.steps ?? []).length}`,
-            `${(run.steps ?? []).filter((s) => s.status === "passed").length} passed`,
-          ),
+          // F14: the spec's top-level steps; nested executions are noted
+          (() => {
+            const all = run.steps ?? [];
+            const top = all.filter((/** @type {any} */ s) => !s.parentId);
+            const nested = all.length - top.length;
+            return statCard(
+              "Steps",
+              `${top.length}`,
+              `${top.filter((/** @type {any} */ s) => s.status === "passed").length} passed${
+                nested
+                  ? ` · ${nested} nested run${nested === 1 ? "" : "s"}`
+                  : ""
+              }`,
+            );
+          })(),
           statCard(
             "Duration",
             fmt.formatDuration(run.durationMs),
@@ -928,111 +1000,23 @@
         style: { marginTop: "14px" },
       });
       const model = detail.eventsModel ?? null;
-      const rows = steps.map((step, index) => {
-        const id = step.id ?? `step_${index + 1}`;
-        const live =
-          model && model.stepIndex?.[id] !== undefined
-            ? model.steps[model.stepIndex[id]]
-            : null;
-        const expects = stepExpects(detail, id);
-        const captures = stepCaptures(detail, step);
-        // A runner that labels capture steps `step`: the capture file says.
-        const kind =
-          (!live?.kind || live.kind === "step") && captures.length
-            ? "capture"
-            : (live?.kind ?? null);
-        const what = live
-          ? kind === "capture" && (!live.label || live.label === "step")
-            ? `capture → ${captures.map((entry) => entry.assign).join(", ")}`
-            : Studio.events.stepWhat(kind, live.label)
-          : "";
-        const failedExpect = expects.some((entry) => entry.status === "failed");
-        // A run step's error carries its output tail: keep its lines.
-        const multiline =
-          live?.kind === "run" || /\n/.test(String(step.error ?? ""));
-        return h(
-          "div",
-          { class: "step-row", dataset: { step: id } },
-          h("span", { class: `dot dot-${fmt.statusTone(step.status)}` }),
-          h("span", { class: "step-id", text: id }),
-          h("span", {
-            class: "step-meta",
-            text: fmt.formatDuration(step.durationMs),
-          }),
-          h(
-            "div",
-            { style: { minWidth: "0" } },
-            what
-              ? h(
-                  "div",
-                  { class: "step-what" },
-                  kind ? Studio.tag(kind, "muted") : null,
-                  h("span", {
-                    class: "cell-dim mono",
-                    text: ` ${fmt.truncate(what, 200)}`,
-                  }),
-                )
-              : null,
-            step.resolved
-              ? h("span", {
-                  class: "cell-dim",
-                  text: `resolved ${step.resolved.role}${
-                    step.resolved.name ? ` "${step.resolved.name}"` : ""
-                  }${step.resolved.ref ? ` @${step.resolved.ref}` : ""}`,
-                })
-              : null,
-            // a failed expect's verdict block says it better than its error
-            step.error && failedExpect
-              ? null
-              : step.error && multiline
-                ? Studio.codeBlock(fmt.truncate(step.error, 4000), {
-                    tight: true,
-                    className: "step-error-output",
-                  })
-                : step.error
-                  ? h("div", {
-                      class: "step-error",
-                      text: fmt.truncate(step.error, 400),
-                    })
-                  : null,
-            expects.map((entry) => expectBlock(entry)),
-            captures.map((entry) => captureBlock(entry)),
-            (step.artifacts ?? []).length
-              ? h(
-                  "div",
-                  {
-                    class: "toolbar",
-                    style: { margin: "4px 0 0", gap: "5px" },
-                  },
-                  step.artifacts.map((artifact) =>
-                    h("button", {
-                      class: "btn btn-sm btn-ghost mono",
-                      type: "button",
-                      text: artifact.split("/").pop(),
-                      onClick: async () => {
-                        Studio.clear(viewer);
-                        viewer.appendChild(Studio.loading());
-                        viewer.appendChild(
-                          await Studio.artifactViewer(detail.runDir, artifact),
-                        );
-                        viewer.scrollIntoView({
-                          behavior: "smooth",
-                          block: "nearest",
-                        });
-                      },
-                    }),
-                  ),
-                )
-              : null,
-          ),
-        );
-      });
+      // F14: repeat iterations, if branches and retried attempts nest under
+      // their block (run.json records them post-order).
+      const tree = Studio.events.resultStepTree(steps, (id) =>
+        model && model.stepIndex?.[id] !== undefined
+          ? (model.steps[model.stepIndex[id]]?.kind ?? null)
+          : null,
+      );
       return h(
         "div",
         h(
           "div",
           { class: "panel" },
-          h("div", { class: "panel-body tight" }, rows),
+          h(
+            "div",
+            { class: "panel-body tight" },
+            tree.map((node) => stepNodeView(node, detail, viewer)),
+          ),
         ),
         viewer,
       );
@@ -1632,13 +1616,817 @@
     );
   }
 
+  // ── Steps: rows, F14 groups, F15 / F18 evidence ─────────────────────────
+
   /**
-   * Expect verdicts of one step: its files, else its events.
+   * One step result and, for a block (repeat / if / retried use), its nested
+   * executions grouped by iteration, attempt or branch.
+   * @param {Record<string, any>} node a `resultStepTree` node
    * @param {any} detail
-   * @param {string} stepId
+   * @param {HTMLElement} viewer
+   * @returns {HTMLElement}
+   */
+  function stepNodeView(node, detail, viewer) {
+    const row = stepRowView(node.item, detail, viewer);
+    if (!node.groups.length) return row;
+    return h(
+      "div",
+      { class: "step-block", dataset: { block: node.item.id ?? "" } },
+      row,
+      h(
+        "div",
+        { class: "step-groups" },
+        node.groups.map((/** @type {any} */ group) =>
+          stepGroupView(group, node, detail, viewer),
+        ),
+      ),
+    );
+  }
+
+  /**
+   * A collapsible group of a block's nested steps: `iteration 2`, `then`,
+   * `attempt 1 · retried`. Open when it failed or is the block's only one.
+   * @param {Record<string, any>} group
+   * @param {Record<string, any>} node the block
+   * @param {any} detail
+   * @param {HTMLElement} viewer
+   * @returns {HTMLElement}
+   */
+  function stepGroupView(group, node, detail, viewer) {
+    const tone =
+      group.status === "retried" ? "warn" : fmt.statusTone(group.status);
+    const count = group.nodes.length;
+    return h(
+      "details",
+      {
+        class: `step-group step-group-${group.status}`,
+        open:
+          group.status === "failed" ||
+          group.status === "running" ||
+          node.groups.length === 1,
+        dataset: {
+          group: group.label,
+          ...(group.iteration !== null && group.iteration !== undefined
+            ? { iteration: String(group.iteration) }
+            : {}),
+          ...(group.branch ? { branch: group.branch } : {}),
+        },
+      },
+      h(
+        "summary",
+        null,
+        h("span", { class: `dot dot-${tone}` }),
+        h("span", { class: "step-group-label mono", text: group.label }),
+        Studio.tag(group.status, tone),
+        h("span", {
+          class: "cell-dim",
+          text: group.superseded
+            ? "a later attempt ran its steps again"
+            : `${count} step${count === 1 ? "" : "s"}`,
+        }),
+      ),
+      group.error
+        ? h("div", {
+            class: "step-error step-group-error",
+            text: fmt.truncate(group.error, 600),
+          })
+        : null,
+      count
+        ? h(
+            "div",
+            { class: "step-group-body" },
+            group.nodes.map((/** @type {any} */ child) =>
+              stepNodeView(child, detail, viewer),
+            ),
+          )
+        : null,
+    );
+  }
+
+  /**
+   * One run.json step result as a row: kind and label, what a block did,
+   * the interaction path (F15), its expects / captures / widget fields /
+   * requests, and its artifact buttons.
+   * @param {Record<string, any>} step
+   * @param {any} detail
+   * @param {HTMLElement} viewer
+   * @returns {HTMLElement}
+   */
+  function stepRowView(step, detail, viewer) {
+    const model = detail.eventsModel ?? null;
+    const id = step.id ?? "step";
+    const live =
+      model && model.stepIndex?.[id] !== undefined
+        ? model.steps[model.stepIndex[id]]
+        : null;
+    const expects = stepExpects(detail, id, step);
+    const captures = stepCaptures(detail, step);
+    const widgets = stepWidgets(detail, step);
+    const requests = stepRequests(detail, step);
+    // A runner that labels capture steps `step`: the capture file says.
+    const kind =
+      (!live?.kind || live.kind === "step") && captures.length
+        ? "capture"
+        : (live?.kind ?? null);
+    const what = live
+      ? kind === "capture" && (!live.label || live.label === "step")
+        ? `capture → ${captures.map((entry) => entry.assign).join(", ")}`
+        : Studio.events.stepWhat(kind, live.label)
+      : "";
+    const failedExpect = expects.some((entry) => entry.status === "failed");
+    // A run step's error carries its output tail: keep its lines.
+    const multiline =
+      live?.kind === "run" || /\n/.test(String(step.error ?? ""));
+    const block = Studio.events.blockText(step);
+    const login = isLoginStep(live, step);
+    return h(
+      "div",
+      {
+        class: `step-row${step.parentId ? " step-nested" : ""}`,
+        dataset: {
+          step: id,
+          ...(step.iteration !== undefined
+            ? { iteration: String(step.iteration) }
+            : {}),
+          ...(step.branch ? { branch: String(step.branch) } : {}),
+        },
+      },
+      h("span", { class: `dot dot-${fmt.statusTone(step.status)}` }),
+      h("span", { class: "step-id", text: id }),
+      h("span", {
+        class: "step-meta",
+        text: fmt.formatDuration(step.durationMs),
+      }),
+      h(
+        "div",
+        { style: { minWidth: "0" } },
+        what
+          ? h(
+              "div",
+              { class: "step-what" },
+              kind ? Studio.tag(kind, "muted") : null,
+              h("span", {
+                class: "cell-dim mono",
+                text: ` ${fmt.truncate(what, 200)}`,
+              }),
+              block
+                ? h("span", {
+                    class: "tag tag-info step-block-tag",
+                    title: blockTitle(step),
+                    text: block,
+                  })
+                : null,
+            )
+          : block
+            ? h("div", { class: "step-what" }, Studio.tag(block, "info"))
+            : null,
+        step.resolved
+          ? h("span", {
+              class: "cell-dim",
+              text: `resolved ${step.resolved.role}${
+                step.resolved.name ? ` "${step.resolved.name}"` : ""
+              }${step.resolved.ref ? ` @${step.resolved.ref}` : ""}`,
+            })
+          : null,
+        interactionNote(step, live),
+        // a failed expect's verdict block says it better than its error
+        step.error && failedExpect
+          ? null
+          : step.error && multiline
+            ? Studio.codeBlock(fmt.truncate(step.error, 4000), {
+                tight: true,
+                className: "step-error-output",
+              })
+            : step.error
+              ? h("div", {
+                  class: "step-error",
+                  text: fmt.truncate(step.error, 400),
+                })
+              : null,
+        expects.map((entry) => expectBlock(entry)),
+        captures.map((entry) => captureBlock(entry)),
+        widgets.map((entry) => widgetBlock(entry)),
+        login
+          ? loginBlock(requests)
+          : requests.map((entry) => requestBlock(entry)),
+        (step.artifacts ?? []).length
+          ? h(
+              "div",
+              {
+                class: "toolbar",
+                style: { margin: "4px 0 0", gap: "5px" },
+              },
+              step.artifacts.map((/** @type {string} */ artifact) =>
+                h("button", {
+                  class: "btn btn-sm btn-ghost mono",
+                  type: "button",
+                  text: artifact.split("/").pop(),
+                  onClick: async () => {
+                    Studio.clear(viewer);
+                    viewer.appendChild(Studio.loading());
+                    viewer.appendChild(
+                      await Studio.artifactViewer(detail.runDir, artifact),
+                    );
+                    viewer.scrollIntoView({
+                      behavior: "smooth",
+                      block: "nearest",
+                    });
+                  },
+                }),
+              ),
+            )
+          : null,
+      ),
+    );
+  }
+
+  /**
+   * The tooltip of a block's summary tag.
+   * @param {Record<string, any>} step
+   * @returns {string}
+   */
+  function blockTitle(step) {
+    const parts = [];
+    if (typeof step.iterations === "number")
+      parts.push(
+        Array.isArray(step.retries)
+          ? `${step.iterations} attempt(s); ${step.retries.length} retried`
+          : `${step.iterations} iteration(s) or attempt(s) ran`,
+      );
+    if (step.taken)
+      parts.push(
+        step.taken === "none"
+          ? "the condition was false and there is no else"
+          : `the ${step.taken} branch ran`,
+      );
+    if (step.matched === false)
+      parts.push("the optional / grouped wait did not hold (not a failure)");
+    return parts.join("; ");
+  }
+
+  /** F15 interaction paths worth a reader's attention, as tag text. */
+  const VIA_LABELS = /** @type {Record<string, string>} */ ({
+    dispatch: "dispatched click",
+    dataTransfer: "upload rebuilt in page",
+    set: "native setter",
+    already: "already set",
+  });
+
+  /**
+   * How an F15 interaction got done: the path (`via dispatch`, a widget
+   * driver's `picker`), the driver, why (`pointer blocked by …`), or why a
+   * step that ran was skipped (`absent`, an optional target).
+   * @param {Record<string, any>} step a run.json result
+   * @param {Record<string, any> | null} live its event row
+   * @returns {HTMLElement | null}
+   */
+  function interactionNote(step, live) {
+    // a nested result is one execution of many: only its own fields count
+    const row = step.parentId ? null : live;
+    const via = step.via ?? row?.via ?? null;
+    const driver = step.driver ?? row?.driver ?? null;
+    const why = step.detail ?? row?.detail ?? null;
+    const skipped = step.skipReason ?? row?.skipReason ?? null;
+    if (!via && !driver && !why && !skipped) return null;
+    const fallback = via === "dispatch" || via === "dataTransfer";
+    return h(
+      "div",
+      { class: "step-interaction" },
+      skipped
+        ? (() => {
+            const node = Studio.tag(`skipped · ${skipped}`, "muted");
+            node.title =
+              skipped === "absent"
+                ? "optional: the target was not on the page, so the step was skipped"
+                : skipped;
+            return node;
+          })()
+        : null,
+      via
+        ? (() => {
+            const node = Studio.tag(
+              `via ${VIA_LABELS[via] ?? via}`,
+              fallback ? "warn" : "info",
+            );
+            node.title = `interaction path: ${via}`;
+            return node;
+          })()
+        : null,
+      driver ? Studio.tag(`driver ${driver}`, "muted") : null,
+      why
+        ? h("span", {
+            class: "cell-dim step-interaction-why",
+            title: why,
+            text: fmt.truncate(why, 300),
+          })
+        : null,
+    );
+  }
+
+  /**
+   * The widgets/ evidence of one step execution (by its artifacts, so a
+   * repeated form shows its own iteration's file).
+   * @param {any} detail
+   * @param {Record<string, any>} step
    * @returns {Array<Record<string, any>>}
    */
-  function stepExpects(detail, stepId) {
+  function stepWidgets(detail, step) {
+    const paths = new Set(
+      (step.artifacts ?? []).filter((/** @type {string} */ entry) =>
+        entry.startsWith("widgets/"),
+      ),
+    );
+    return (detail?.widgets ?? []).filter((/** @type {any} */ entry) =>
+      paths.has(entry.path),
+    );
+  }
+
+  /**
+   * The requests/ envelopes one step execution wrote, in its artifact order.
+   * @param {any} detail
+   * @param {Record<string, any>} step
+   * @returns {Array<Record<string, any>>}
+   */
+  function stepRequests(detail, step) {
+    const byPath = new Map(
+      (detail?.requests ?? []).map((/** @type {any} */ entry) => [
+        entry.path,
+        entry,
+      ]),
+    );
+    return (step.artifacts ?? [])
+      .filter((/** @type {string} */ entry) => entry.startsWith("requests/"))
+      .map((/** @type {string} */ entry) => byPath.get(entry))
+      .filter(Boolean);
+  }
+
+  /**
+   * Is this the built-in `use: login` (environment auth)? Its requests are
+   * shown by method, path and status only.
+   * @param {Record<string, any> | null} live
+   * @param {Record<string, any>} step
+   * @returns {boolean}
+   */
+  function isLoginStep(live, step) {
+    const label = String(live?.label ?? "");
+    const detailText = String(step.detail ?? live?.detail ?? "");
+    return (
+      (live?.kind === "use" && /^use login\b/.test(label)) ||
+      /^(logged in|already authenticated)\b/.test(detailText)
+    );
+  }
+
+  /**
+   * A request URL's path (no host, no query): what the auth summary names.
+   * @param {string | null} url
+   * @returns {string}
+   */
+  function urlPath(url) {
+    if (!url) return "?";
+    const match = /^[a-z][a-z0-9+.-]*:\/\/[^/]*(\/[^?#]*)?/i.exec(url);
+    return match ? (match[1] ?? "/") : url;
+  }
+
+  /**
+   * What one request of `use: login` was for, from the name it records.
+   * @param {string} assign
+   * @returns {string}
+   */
+  function loginRole(assign) {
+    if (assign === "login_check") return "already authenticated?";
+    return assign === "login" ? "login" : "follow-up";
+  }
+
+  /**
+   * F18 environment auth (`use: login`): which requests ran and what they
+   * answered — never a body, a header, a capture or a token.
+   * @param {Array<Record<string, any>>} requests
+   * @returns {HTMLElement | null}
+   */
+  function loginBlock(requests) {
+    if (!requests.length) return null;
+    return h(
+      "div",
+      { class: "request-entry login-entry" },
+      h(
+        "div",
+        { class: "expect-head" },
+        Studio.tag("environment auth", "info"),
+        h("span", {
+          class: "cell-dim",
+          text: "credentials and issued tokens are never shown",
+        }),
+      ),
+      h(
+        "table",
+        { class: "grid request-table login-table" },
+        h(
+          "thead",
+          h(
+            "tr",
+            ["request", "call", "status", "attempts"].map((label) =>
+              h("th", { text: label }),
+            ),
+          ),
+        ),
+        h(
+          "tbody",
+          requests.map((entry) =>
+            h(
+              "tr",
+              { dataset: { request: entry.assign } },
+              h("td", { class: "mono", text: loginRole(entry.assign) }),
+              h("td", {
+                class: "mono",
+                text: `${entry.method ?? "?"} ${urlPath(entry.url)}`,
+              }),
+              h("td", null, statusTag(entry.status)),
+              h("td", {
+                class: "num",
+                text: entry.attempts ? String(entry.attempts) : "1",
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /**
+   * An HTTP status as a tag (2xx ok, 4xx warn, 5xx / 0 bad), unless the
+   * caller knows better (a matrix combination that missed expectStatus).
+   * @param {number | null | undefined} status
+   * @param {string | null} [tone]
+   * @returns {HTMLElement}
+   */
+  function statusTag(status, tone = null) {
+    if (status === null || status === undefined)
+      return Studio.tag("?", tone ?? "muted");
+    return Studio.tag(
+      status === 0 ? "no answer" : String(status),
+      tone ??
+        (status >= 200 && status < 400
+          ? "ok"
+          : status >= 500 || status === 0
+            ? "bad"
+            : "warn"),
+    );
+  }
+
+  /**
+   * F18 request evidence: the call, its status, how many attempts a retry or
+   * an until sent, the captures it bound (masked by name), and a matrix's
+   * status per combination.
+   * @param {Record<string, any>} entry a `readRequests` entry
+   * @returns {HTMLElement}
+   */
+  function requestBlock(entry) {
+    const matrix = entry.matrix;
+    return h(
+      "div",
+      {
+        class: `request-entry${
+          matrix?.mismatched ? " request-mismatched" : ""
+        }`,
+        dataset: { request: entry.assign },
+      },
+      h(
+        "div",
+        { class: "expect-head" },
+        Studio.tag("request", "info"),
+        h("span", { class: "mono", text: `\${requests.${entry.assign}}` }),
+        matrix
+          ? null
+          : h("span", {
+              class: "mono cell-dim",
+              title: entry.url ?? "",
+              text: `${entry.method ?? "?"} ${fmt.truncate(entry.url ?? "?", 120)}`,
+            }),
+        matrix ? null : statusTag(entry.status),
+        entry.attempts
+          ? (() => {
+              const node = Studio.tag(`${entry.attempts} attempts`, "warn");
+              node.title =
+                "a retry or an until sent the request again; the last answer is kept";
+              return node;
+            })()
+          : null,
+        matrix
+          ? Studio.tag(
+              `${matrix.total} combination${matrix.total === 1 ? "" : "s"}${
+                matrix.mismatched ? ` · ${matrix.mismatched} mismatched` : ""
+              }`,
+              matrix.mismatched ? "bad" : "ok",
+            )
+          : null,
+        entry.readable
+          ? null
+          : h("span", { class: "cell-dim", text: "unreadable file" }),
+      ),
+      entry.captures?.length
+        ? Studio.outputsList(
+            entry.captures.map(
+              (/** @type {[string, string]} */ [key, value]) => [
+                `\${requests.${entry.assign}.captures.${key}}`,
+                value,
+              ],
+            ),
+          )
+        : null,
+      matrix ? matrixTable(matrix) : null,
+    );
+  }
+
+  /**
+   * A request matrix: one row per combination with its status.
+   * @param {Record<string, any>} matrix
+   * @returns {HTMLElement}
+   */
+  function matrixTable(matrix) {
+    return h(
+      "div",
+      { class: "data-table-wrap" },
+      h(
+        "div",
+        { class: "data-table-scroll" },
+        h(
+          "table",
+          { class: "grid data-table matrix-table" },
+          h(
+            "thead",
+            h(
+              "tr",
+              ["", "combination", "call", "status"].map((label) =>
+                h("th", { text: label }),
+              ),
+            ),
+          ),
+          h(
+            "tbody",
+            matrix.rows.map((/** @type {any} */ row) =>
+              h(
+                "tr",
+                {
+                  class: row.matched ? "matrix-matched" : "matrix-mismatched",
+                },
+                h(
+                  "td",
+                  null,
+                  h("span", { class: `dot dot-${row.matched ? "ok" : "bad"}` }),
+                ),
+                h("td", { class: "mono", title: row.values, text: row.values }),
+                h("td", {
+                  class: "mono",
+                  title: row.url ?? "",
+                  text: `${row.method} ${urlPath(row.url)}`,
+                }),
+                h(
+                  "td",
+                  null,
+                  // the verdict is expectStatus', not the status class'
+                  statusTag(row.status, row.matched ? "ok" : "bad"),
+                  row.error
+                    ? h("span", { class: "cell-dim", text: ` ${row.error}` })
+                    : null,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      matrix.total > matrix.rows.length
+        ? h("div", {
+            class: "cell-dim data-note",
+            text: `showing ${matrix.rows.length} of ${matrix.total} combinations (see the request file)`,
+          })
+        : null,
+    );
+  }
+
+  /** Field status → tag tone. */
+  const FIELD_TONES = /** @type {Record<string, string>} */ ({
+    committed: "ok",
+    written: "ok",
+    already: "info",
+    skipped: "muted",
+    failed: "bad",
+  });
+
+  /**
+   * F15 widget evidence of one set / check / choose / form step: per field
+   * the value asked for, the value the page committed (and, for a form,
+   * what it still showed after every field was set), the driver and path,
+   * failures, and the unanswered-fields dump a failed form asked for.
+   * @param {Record<string, any>} entry a `readWidgets` entry
+   * @returns {HTMLElement}
+   */
+  function widgetBlock(entry) {
+    const failed = entry.fields.filter(
+      (/** @type {any} */ field) => field.status === "failed",
+    );
+    const hasFinal = entry.fields.some(
+      (/** @type {any} */ field) => field.final,
+    );
+    const dump = entry.unanswered;
+    return h(
+      "div",
+      {
+        class: `widget-entry widget-${entry.status}`,
+        dataset: { widget: entry.path },
+      },
+      h(
+        "div",
+        { class: "expect-head" },
+        Studio.tag(entry.kind ?? "widget", "info"),
+        Studio.tag(entry.status, fmt.statusTone(entry.status)),
+        h("span", {
+          class: "cell-dim",
+          text: `${entry.fieldsTotal} field${
+            entry.fieldsTotal === 1 ? "" : "s"
+          }${
+            entry.fieldsTotal > entry.fields.length
+              ? ` (showing ${entry.fields.length})`
+              : ""
+          }`,
+        }),
+        entry.readable
+          ? null
+          : h("span", { class: "cell-dim", text: "unreadable file" }),
+      ),
+      entry.fields.length
+        ? h(
+            "div",
+            { class: "data-table-scroll" },
+            h(
+              "table",
+              { class: "grid data-table widget-fields" },
+              h(
+                "thead",
+                h(
+                  "tr",
+                  [
+                    "field",
+                    "status",
+                    "driver",
+                    "expected",
+                    "committed",
+                    ...(hasFinal ? ["after the form"] : []),
+                  ].map((label) => h("th", { text: label })),
+                ),
+              ),
+              h(
+                "tbody",
+                entry.fields.map((/** @type {any} */ field) =>
+                  h(
+                    "tr",
+                    {
+                      class: `widget-field widget-field-${field.status}`,
+                      dataset: { field: field.field },
+                      title: [
+                        field.root ? `root ${field.root}` : null,
+                        field.rootText ? `shows "${field.rootText}"` : null,
+                        field.reason,
+                        ...(field.notes ?? []),
+                      ]
+                        .filter(Boolean)
+                        .join("\n"),
+                    },
+                    h("td", { class: "mono", text: field.field }),
+                    h(
+                      "td",
+                      null,
+                      Studio.tag(
+                        field.status,
+                        FIELD_TONES[field.status] ?? "muted",
+                      ),
+                    ),
+                    h("td", {
+                      class: "mono cell-dim",
+                      text: `${field.driver ?? "—"}${
+                        field.via ? ` · ${field.via}` : ""
+                      }`,
+                    }),
+                    h("td", {
+                      class: "mono",
+                      title: field.expected ?? "",
+                      text: field.expected ?? "—",
+                    }),
+                    h("td", {
+                      class: "mono",
+                      title: field.actual ?? "",
+                      text: field.actual ?? "—",
+                    }),
+                    hasFinal
+                      ? h("td", {
+                          class: `mono${
+                            field.final?.matches === false ? " step-error" : ""
+                          }`,
+                          title: field.final
+                            ? `${field.final.status}${
+                                field.final.matches === false
+                                  ? ": lost its value after later fields"
+                                  : ""
+                              }`
+                            : "",
+                          text: field.final
+                            ? field.final.status === "absent"
+                              ? "gone"
+                              : (field.final.actual ?? field.final.status)
+                            : "—",
+                        })
+                      : null,
+                  ),
+                ),
+              ),
+            ),
+          )
+        : null,
+      failed.map((/** @type {any} */ field) =>
+        field.error
+          ? h("div", {
+              class: "step-error widget-error",
+              text: `field ${field.field}: ${field.error}`,
+            })
+          : null,
+      ),
+      entry.error && !failed.some((/** @type {any} */ field) => field.error)
+        ? h("div", { class: "step-error widget-error", text: entry.error })
+        : null,
+      dump
+        ? h(
+            "div",
+            { class: "widget-unanswered" },
+            h("div", {
+              class: "section-title",
+              text: `Unanswered fields · ${dump.listed}${
+                dump.total !== null ? ` of ${dump.total} on the page` : ""
+              }`,
+            }),
+            dump.error
+              ? h("div", { class: "step-error", text: dump.error })
+              : null,
+            dump.fields.length
+              ? h(
+                  "table",
+                  { class: "grid data-table widget-unanswered-table" },
+                  h(
+                    "thead",
+                    h(
+                      "tr",
+                      ["field", "label", "driver", "required"].map((label) =>
+                        h("th", { text: label }),
+                      ),
+                    ),
+                  ),
+                  h(
+                    "tbody",
+                    dump.fields.map((/** @type {any} */ field) =>
+                      h(
+                        "tr",
+                        { dataset: { unanswered: field.key } },
+                        h("td", { class: "mono", text: field.key }),
+                        h("td", { text: field.label ?? "" }),
+                        h("td", {
+                          class: "mono cell-dim",
+                          text: field.driver ?? "—",
+                        }),
+                        h("td", {
+                          text: field.required ? "required" : "",
+                          class: field.required ? "step-error" : "cell-dim",
+                        }),
+                      ),
+                    ),
+                  ),
+                )
+              : h("p", {
+                  class: "cell-dim",
+                  text: "every field on the page has a value",
+                }),
+          )
+        : null,
+    );
+  }
+
+  /**
+   * Expect verdicts of one step: its files, else its events. A looped step
+   * (F14) is matched by the files its execution wrote, so each iteration
+   * shows its own verdict.
+   * @param {any} detail
+   * @param {string} stepId
+   * @param {Record<string, any>} [step] the run.json result
+   * @returns {Array<Record<string, any>>}
+   */
+  function stepExpects(detail, stepId, step) {
+    const own = new Set(
+      (step?.artifacts ?? []).filter((/** @type {string} */ entry) =>
+        entry.startsWith("expects/"),
+      ),
+    );
+    if (own.size)
+      return (detail?.expects ?? []).filter((/** @type {any} */ entry) =>
+        own.has(entry.path),
+      );
+    if (step?.parentId) return [];
     const files = (detail?.expects ?? []).filter(
       (/** @type {any} */ entry) => entry.stepId === stepId,
     );
@@ -1812,6 +2600,61 @@
   }
 
   /**
+   * Exit 8 (a critical teardown failed) and exit 9 (dirty state after the
+   * run) are not this run's verdict, so a green run can still carry them:
+   * say so above the tabs, in words and a glyph, with the shape of the box
+   * (solid heavy border for 8, dashed for 9) as well as its colour.
+   * @param {any} detail
+   * @param {HTMLElement} root
+   * @param {string} runRef
+   * @returns {HTMLElement | null}
+   */
+  function policyCallout(detail, root, runRef) {
+    const info = detail?.runPolicy;
+    if (!info) return null;
+    const items = Studio.events
+      .policyBadges(
+        { policy: info.policy, services: info.services },
+        info.summary,
+      )
+      .filter(
+        (item) =>
+          item.key === "critical-teardown" || item.key === "dirty-after",
+      );
+    if (!items.length) return null;
+    return h(
+      "div",
+      { class: "ops-callouts" },
+      items.map((item) =>
+        h(
+          "div",
+          {
+            class: `ops-callout ops-callout-${item.key}`,
+            role: "status",
+            dataset: { callout: item.key },
+          },
+          h("span", {
+            class: "ops-glyph",
+            ariaHidden: "true",
+            text: item.glyph,
+          }),
+          h("strong", { text: item.label }),
+          h("span", { class: "cell-dim", text: item.title }),
+          h("button", {
+            class: "btn btn-sm btn-ghost",
+            type: "button",
+            text: "Open run policy",
+            onClick: () => {
+              activeTab = "policy";
+              paint(root, runRef);
+            },
+          }),
+        ),
+      ),
+    );
+  }
+
+  /**
    * Stash + retention badges for the header.
    * @param {any} detail
    */
@@ -1874,6 +2717,35 @@
             .join(", ")}`,
           text: `fixtures dry-run · ${dryRun.length}`,
         }),
+      );
+    if (detail?.runPolicy)
+      for (const item of Studio.events.policyBadges(
+        {
+          policy: detail.runPolicy.policy,
+          services: detail.runPolicy.services,
+        },
+        detail.runPolicy.summary,
+      ))
+        tags.push(Studio.ops.badge(item));
+    const metricFailures = (detail?.metrics?.metrics ?? []).filter(
+      (/** @type {any} */ row) => row.failures > 0,
+    );
+    if (metricFailures.length)
+      tags.push(
+        h(
+          "span",
+          {
+            class: "tag tag-warn",
+            title: metricFailures
+              .map(
+                (/** @type {any} */ row) =>
+                  `${row.name}: ${row.error ?? "a sample failed"}`,
+              )
+              .join("\n"),
+          },
+          h("span", { class: "ops-glyph", ariaHidden: "true", text: "⚠" }),
+          `metric sample failed · ${metricFailures.length}`,
+        ),
       );
     if (detail?.run?.invocation?.id)
       tags.push(
@@ -2396,7 +3268,11 @@
               Studio.keyValue([
                 ["kind", step.kind ?? "—"],
                 ["label", step.label ?? "—"],
+                // F14: a nested step names its block, iteration or branch
+                ...(step.place ? [["where", step.place]] : []),
                 ["duration", fmt.formatDuration(step.durationMs)],
+                ...(step.via ? [["via", step.via]] : []),
+                ...(step.detail ? [["why", step.detail]] : []),
                 ["url", step.url ?? diag?.url ?? "—"],
                 ...(diag?.title ? [["title", diag.title]] : []),
                 ...(diag?.readyState ? [["readyState", diag.readyState]] : []),
@@ -2409,6 +3285,9 @@
                   })
                 : null,
               diag ? diagnosticsSummary(diag) : null,
+              // F15 / F18: the failing step's widget fields and requests
+              stepWidgets(detail, step).map((entry) => widgetBlock(entry)),
+              stepRequests(detail, step).map((entry) => requestBlock(entry)),
               step.diagnosticsPath
                 ? h("button", {
                     class: "btn btn-sm btn-ghost",

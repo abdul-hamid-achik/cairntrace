@@ -1,6 +1,6 @@
 {
   "name": "@thelacanians/cairntrace",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "Behavioral browser-spec layer for agent-in-session use",
   "type": "module",
   "license": "MIT",
@@ -78,6 +78,7 @@
     "picocolors": "^1.1.1",
     "playwright": "^1.61.1",
     "react": "19.2.8",
+    "typescript": "^5.9.3",
     "yaml": "^2.9.0",
     "zod": "^3.25.76"
   },
@@ -92,7 +93,6 @@
     "oxfmt": "^0.4.0",
     "oxlint": "^1.75.0",
     "postgres": "^3.4.9",
-    "typescript": "^5.9.3",
     "vitepress": "^1.6.4",
     "vitest": "^2.1.9"
   },

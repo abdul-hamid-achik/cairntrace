@@ -10,6 +10,7 @@ import {
   VerifierSchema,
 } from "./verifier.v1";
 import { SpecFixturesSchema } from "../fixtures/schema";
+import { BUILTIN_LOGIN_ACTION, RequestTargetSchema } from "./request.v1";
 export { ClipPointSchema };
 export type { ClipPoint };
 
@@ -111,12 +112,24 @@ export const LocatorSchema = z.union([
 ]);
 export type Locator = z.infer<typeof LocatorSchema>;
 
+/**
+ * F15 fill flags. `mode: set` writes through the native value setter and
+ * fires input/change only (no focus, no keydown — an autocomplete or address
+ * overlay that opens on typing stays closed); `optional: true` skips the step
+ * (recorded as skipped) when the control is absent.
+ */
+const fillTargetExtras = {
+  value: z.string(),
+  mode: z.enum(["fill", "set"]).optional(),
+  optional: z.boolean().optional(),
+};
+
 const fillTargetSchema = z.union([
-  RoleLocatorSchema.extend({ value: z.string() }).strict(),
-  LabelLocatorSchema.extend({ value: z.string() }).strict(),
-  TextLocatorSchema.extend({ value: z.string() }).strict(),
-  SelectorLocatorSchema.extend({ value: z.string() }).strict(),
-  TestIdLocatorSchema.extend({ value: z.string() }).strict(),
+  RoleLocatorSchema.extend(fillTargetExtras).strict(),
+  LabelLocatorSchema.extend(fillTargetExtras).strict(),
+  TextLocatorSchema.extend(fillTargetExtras).strict(),
+  SelectorLocatorSchema.extend(fillTargetExtras).strict(),
+  TestIdLocatorSchema.extend(fillTargetExtras).strict(),
 ]);
 
 const uploadTargetSchema = z.union([
@@ -162,43 +175,11 @@ const transformTargetSchema = z
   .strict();
 
 /**
- * Typed authenticated API call (the promotion of the fetch+cookie glue that
- * kept reappearing in `script` verifiers). Backends with a native request
- * primitive execute it out of page while sharing the browser context's cookie
- * jar. The Playwright Bun bridge runs in an isolated subprocess so the parent
- * can enforce `timeoutMs` even if native fetch stalls; older backends fall back
- * to a timeout-bounded page fetch with `credentials: "include"`. Relative
- * `url` resolves against config `baseUrl` when present, otherwise against the
- * current page origin.
- *
- * `assign` names the captured response: the full envelope is written to
- * `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`),
- * and later steps/fixtures can splice response fields with
- * `${requests.<name>.body.<field>}` / `${requests.<name>.status}` — e.g.
- * fetch a QR token via API, then `fill` it into the scanner UI.
+ * Typed API call: see `RequestTargetSchema` (schema/request.v1.ts, shared
+ * with the environment `auth:` block) for the v1 fields and the v2 ones —
+ * `credentials`, `until`, `retry`, `capture`, `matrix`.
  */
-const requestTargetSchema = z
-  .object({
-    method: z
-      .enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
-      .default("GET"),
-    url: z.string().min(1),
-    headers: z.record(z.string(), z.string()).optional(),
-    /** Objects are JSON-encoded (content-type: application/json unless overridden); strings are sent raw. */
-    body: z.unknown().optional(),
-    /** Per-request hard deadline. Defaults to 30000ms. */
-    timeoutMs: z.number().int().positive().optional(),
-    /** Fail the step unless the response status is (one of) these. Omit to accept any completed response. */
-    expectStatus: z
-      .union([z.number().int(), z.array(z.number().int()).nonempty()])
-      .optional(),
-    assign: z
-      .string()
-      .min(1)
-      .regex(/^[a-z][A-Za-z0-9_]*$/)
-      .optional(),
-  })
-  .strict();
+const requestTargetSchema = RequestTargetSchema;
 
 /* ----- wait conditions ----- */
 
@@ -241,69 +222,291 @@ export const WaitUrlMatcherSchema = z
   );
 export type WaitUrlMatcher = z.infer<typeof WaitUrlMatcherSchema>;
 
+const WaitMsSchema = z
+  .object({
+    /** Pause with no predicate. Use after a create so a search index can catch up. */
+    ms: z.number().int().positive().max(300_000),
+  })
+  .strict();
+const WaitTextSchema = z
+  .object({
+    text: z.string().min(1),
+    /** Default false; rendered text matching also normalizes whitespace. */
+    caseSensitive: z.boolean().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+const WaitNotTextSchema = z
+  .object({
+    notText: z.string().min(1),
+    /** Default false; rendered text matching also normalizes whitespace. */
+    caseSensitive: z.boolean().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+const WaitLoadSchema = z
+  .object({
+    load: z.enum(["networkidle", "load", "domcontentloaded"]),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+const WaitSelectorSchema = z
+  .object({
+    selector: z.string().min(1),
+    state: z.enum(["attached", "visible", "hidden", "detached"]).optional(),
+    /**
+     * Keep only matches whose visible text contains this string
+     * (whitespace-normalized, case-insensitive). Use instead of
+     * `wait.text` when the same copy also lives in a card concat or
+     * header before the actual control exists.
+     */
+    hasText: z.string().min(1).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+const WaitValueSchema = z
+  .object({
+    value: z.union([
+      RoleLocatorSchema.extend({ equals: z.string() }).strict(),
+      LabelLocatorSchema.extend({ equals: z.string() }).strict(),
+      TextLocatorSchema.extend({ equals: z.string() }).strict(),
+      SelectorLocatorSchema.extend({ equals: z.string() }).strict(),
+      TestIdLocatorSchema.extend({ equals: z.string() }).strict(),
+    ]),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+const WaitUrlSchema = z
+  .object({
+    url: WaitUrlMatcherSchema,
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+
 export const WaitConditionSchema = z.union([
-  z
-    .object({
-      /** Pause with no predicate. Use after a create so a search index can catch up. */
-      ms: z.number().int().positive().max(300_000),
-    })
-    .strict(),
-  z
-    .object({
-      text: z.string().min(1),
-      /** Default false; rendered text matching also normalizes whitespace. */
-      caseSensitive: z.boolean().optional(),
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      notText: z.string().min(1),
-      /** Default false; rendered text matching also normalizes whitespace. */
-      caseSensitive: z.boolean().optional(),
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      load: z.enum(["networkidle", "load", "domcontentloaded"]),
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      selector: z.string().min(1),
-      state: z.enum(["attached", "visible", "hidden", "detached"]).optional(),
-      /**
-       * Keep only matches whose visible text contains this string
-       * (whitespace-normalized, case-insensitive). Use instead of
-       * `wait.text` when the same copy also lives in a card concat or
-       * header before the actual control exists.
-       */
-      hasText: z.string().min(1).optional(),
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      value: z.union([
-        RoleLocatorSchema.extend({ equals: z.string() }).strict(),
-        LabelLocatorSchema.extend({ equals: z.string() }).strict(),
-        TextLocatorSchema.extend({ equals: z.string() }).strict(),
-        SelectorLocatorSchema.extend({ equals: z.string() }).strict(),
-        TestIdLocatorSchema.extend({ equals: z.string() }).strict(),
-      ]),
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      url: WaitUrlMatcherSchema,
-      timeoutMs: z.number().int().positive().optional(),
-    })
-    .strict(),
+  WaitMsSchema,
+  WaitTextSchema,
+  WaitNotTextSchema,
+  WaitLoadSchema,
+  WaitSelectorSchema,
+  WaitValueSchema,
+  WaitUrlSchema,
 ]);
 export type WaitCondition = z.infer<typeof WaitConditionSchema>;
+
+/**
+ * F20: wait until a config `browser.appHandle` value holds. `path` starts
+ * with the handle name and walks properties (`store.auth.user.id`,
+ * `store.items[0].status`; a dot segment may hold `/`, as in a namespaced
+ * getter `store.getters.auth/isLoggedIn`). Exactly one of `equals` (deep
+ * JSON equality), `in` (one of) or `exists`. Always polled by the runner
+ * with bounded probes (like `optional` waits), so a miss never stops the
+ * browser; the value itself never leaves the page (only a short preview
+ * for the failure message).
+ */
+export const WaitAppConditionSchema = z
+  .object({
+    path: z
+      .string()
+      .regex(
+        /^[A-Za-z][A-Za-z0-9_]*(?:\.[^.[\]\s]+|\[\d+\])*$/,
+        "wait.app.path: <handle>.<property>… (e.g. store.user.id)",
+      ),
+    equals: z.unknown().optional(),
+    in: z.array(z.unknown()).nonempty().optional(),
+    exists: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (app) =>
+      [
+        Object.hasOwn(app, "equals") && app.equals !== undefined,
+        app.in !== undefined,
+        app.exists !== undefined,
+      ].filter(Boolean).length === 1,
+    { message: "wait.app needs exactly one of equals | in | exists" },
+  );
+export const WaitAppSchema = z
+  .object({
+    app: WaitAppConditionSchema,
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type WaitAppCondition = z.infer<typeof WaitAppSchema>;
+
+/** A condition the runner can poll: a backend condition or an app check. */
+export type RunnerWaitCondition = WaitCondition | WaitAppCondition;
+
+/** `app store.user.id equals 7` — labels, narration, failure messages. */
+export function describeAppWait(cond: WaitAppCondition): string {
+  const { path } = cond.app;
+  if (cond.app.exists !== undefined) {
+    return `app ${path} ${cond.app.exists ? "exists" : "does not exist"}`;
+  }
+  if (cond.app.in !== undefined) {
+    return `app ${path} in ${JSON.stringify(cond.app.in)}`;
+  }
+  return `app ${path} equals ${JSON.stringify(cond.app.equals)}`;
+}
+
+/**
+ * Handle names `wait: { app }` steps read (groups included), in step order
+ * and without duplicates — `cairn spec verify` checks them against config
+ * `browser.appHandle`.
+ */
+export function appWaitHandleNames(steps: readonly Step[]): string[] {
+  const names = new Set<string>();
+  for (const step of walkSteps(steps)) {
+    if (!("wait" in step)) continue;
+    const wait = step.wait;
+    const conditions: RunnerWaitCondition[] =
+      "any" in wait ? wait.any : "all" in wait ? wait.all : [wait];
+    for (const cond of conditions) {
+      if (!("app" in cond)) continue;
+      names.add(cond.app.path.replace(/\[\d+\]/g, "").split(".")[0] ?? "");
+    }
+  }
+  return [...names];
+}
+
+/** True for `wait: { app: … }` (and an app member of a wait group). */
+export function isAppWaitCondition(
+  wait: RunnerWaitCondition | WaitStepCondition,
+): wait is WaitAppCondition {
+  return "app" in wait;
+}
+
+/**
+ * F14: keys a `wait` STEP adds to its condition (not batch sub-steps, not
+ * discovery waits).
+ *   - `optional: true` never fails the step: a condition that does not hold
+ *     within `timeoutMs` passes the step with `matched: false`.
+ *   - `assign: <name>` exposes the result as `${waits.<name>.matched}`
+ *     (`true`/`false`) and, for `wait.any`, `${waits.<name>.index}` (0-based
+ *     index of the condition that held first). A `when` / `if` reads it with
+ *     `{ var: waits.<name>.matched, equals: true }`.
+ * Optional and grouped waits are polled by the runner (bounded probes per
+ * condition and attempt) instead of a native backend wait, so a miss never
+ * stops a browser.
+ */
+const waitStepExtras = {
+  optional: z.boolean().optional(),
+  assign: z
+    .string()
+    .min(1)
+    .regex(/^[a-z][A-Za-z0-9_]*$/)
+    .optional(),
+};
+
+/** Most conditions one `wait.any` / `wait.all` group may poll together. */
+export const WAIT_GROUP_MAX_CONDITIONS = 10;
+
+const waitGroupMembers = z
+  .array(z.union([...WaitConditionSchema.options, WaitAppSchema]))
+  .min(1)
+  .max(WAIT_GROUP_MAX_CONDITIONS);
+
+function refineWaitGroupMembers(
+  key: "any" | "all",
+  members: readonly RunnerWaitCondition[],
+  ctx: z.RefinementCtx,
+): void {
+  members.forEach((member, index) => {
+    if ("timeoutMs" in member && member.timeoutMs !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key, index, "timeoutMs"],
+        message: `wait.${key}: set timeoutMs on the group, not on its conditions`,
+      });
+    }
+  });
+}
+
+/** F14: the first condition that holds within timeoutMs passes the step. */
+export const WaitAnySchema = z
+  .object({
+    any: waitGroupMembers,
+    /** Budget of the whole group (default 30000 × waitScale). */
+    timeoutMs: z.number().int().positive().optional(),
+    ...waitStepExtras,
+  })
+  .strict()
+  .superRefine((group, ctx) => refineWaitGroupMembers("any", group.any, ctx));
+
+/** F14: every condition must hold at the same poll within timeoutMs. */
+export const WaitAllSchema = z
+  .object({
+    all: waitGroupMembers,
+    /** Budget of the whole group (default 30000 × waitScale). */
+    timeoutMs: z.number().int().positive().optional(),
+    ...waitStepExtras,
+  })
+  .strict()
+  .superRefine((group, ctx) => refineWaitGroupMembers("all", group.all, ctx));
+
+/** What a `wait:` step accepts: a condition (+ optional/assign) or a group. */
+export const WaitStepConditionSchema = z.union([
+  WaitMsSchema,
+  WaitTextSchema.extend(waitStepExtras),
+  WaitNotTextSchema.extend(waitStepExtras),
+  WaitLoadSchema.extend(waitStepExtras),
+  WaitSelectorSchema.extend(waitStepExtras),
+  WaitValueSchema.extend(waitStepExtras),
+  WaitUrlSchema.extend(waitStepExtras),
+  WaitAppSchema.extend(waitStepExtras),
+  WaitAnySchema,
+  WaitAllSchema,
+]);
+export type WaitStepCondition = z.infer<typeof WaitStepConditionSchema>;
+export type WaitGroup =
+  | z.infer<typeof WaitAnySchema>
+  | z.infer<typeof WaitAllSchema>;
+
+/** True for `wait.any` / `wait.all`. */
+export function isWaitGroup(wait: WaitStepCondition): wait is WaitGroup {
+  return "any" in wait || "all" in wait;
+}
+
+/**
+ * True when the runner (not the backend) drives this wait: a group, an
+ * optional condition (a native backend wait that times out may stop the
+ * browser, which an optional miss must never do), or an app wait (F20, no
+ * backend knows app handles).
+ */
+export function isRunnerDrivenWait(wait: WaitStepCondition): boolean {
+  return (
+    isWaitGroup(wait) ||
+    isAppWaitCondition(wait) ||
+    ("optional" in wait && wait.optional === true)
+  );
+}
+
+/** The plain condition of a wait step (F14 step keys removed). */
+export function plainWaitCondition(
+  wait: Exclude<WaitStepCondition, WaitGroup>,
+): RunnerWaitCondition {
+  if ("ms" in wait) return wait;
+  const { optional: _optional, assign: _assign, ...condition } = wait;
+  return condition as RunnerWaitCondition;
+}
+
+/**
+ * The condition a backend executes for a `wait` step. Groups, optional and
+ * app waits never reach a backend: the runner polls them (see
+ * isRunnerDrivenWait).
+ */
+export function backendWaitCondition(wait: WaitStepCondition): WaitCondition {
+  if (isRunnerDrivenWait(wait) || isWaitGroup(wait)) {
+    throw new Error(
+      "wait.any / wait.all / optional / app waits are polled by the runner before adapter dispatch",
+    );
+  }
+  const plain = plainWaitCondition(wait);
+  if (isAppWaitCondition(plain)) {
+    throw new Error("wait.app is polled by the runner before adapter dispatch");
+  }
+  return plain;
+}
 
 /**
  * Post-click condition used by `click.until`. The runner re-issues the click
@@ -348,35 +551,75 @@ export type ClickUntil = z.infer<typeof ClickUntilSchema>;
 
 /* ----- step variants (discriminated by which key is present) ----- */
 
+/** A scalar a `var` predicate compares with (values compare as strings). */
+const VarScalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+
+/**
+ * Name a `var` predicate reads: a config/spec/use-site var (`mode`) or a
+ * dotted runtime value (`waits.banner.matched`, `repeat.index`,
+ * `captures.order.id`, `runs.seed.count`, `requests.login.status`,
+ * `evals.state.value`, `fixtures.buyer.id`).
+ */
+export const VarRefSchema = z
+  .string()
+  .min(1)
+  .regex(
+    /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)*$/,
+    "var: a var name, or a dotted runtime value such as waits.<name>.matched",
+  );
+
+const WHEN_PREDICATE_KEYS = [
+  "urlContains",
+  "urlNotContains",
+  "urlMatches",
+  "url",
+  "text",
+  "notText",
+  "selector",
+  "notSelector",
+  "var",
+] as const;
+
 export const WhenObjectSchema = z
   .object({
     urlContains: z.string().min(1).optional(),
     urlNotContains: z.string().min(1).optional(),
     urlMatches: z.string().min(1).optional(),
+    /** F14: the wait.url matcher (`includes` | `equals` | `pattern`). */
+    url: WaitUrlMatcherSchema.optional(),
     text: z.string().min(1).optional(),
     notText: z.string().min(1).optional(),
     selector: z.string().min(1).optional(),
     notSelector: z.string().min(1).optional(),
     hasText: z.string().min(1).optional(),
+    /**
+     * F14: a var predicate — `{ var: mode, equals: fast }`,
+     * `{ var: region, in: [eu, us] }`, `{ var: featureFlag, exists: true }`.
+     * A plain name reads the vars of the file that declares the step (config,
+     * spec, and the `use:` call's vars inside an action); a dotted name reads
+     * a runtime value (see VarRefSchema). Values compare as strings; `exists`
+     * holds for a set, non-empty value.
+     */
+    var: VarRefSchema.optional(),
+    equals: VarScalarSchema.optional(),
+    in: z.array(VarScalarSchema).min(1).optional(),
+    exists: z.boolean().optional(),
+    /**
+     * Set by the parser, never authored (parseSpec refuses an authored one):
+     * the plain var's value in the scope of the file that declares the step
+     * (absent when that scope does not define it). It stays in this schema
+     * because resolved steps are re-validated (the mock backend's strict
+     * step check).
+     */
+    resolved: z.string().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    const keys = (
-      [
-        "urlContains",
-        "urlNotContains",
-        "urlMatches",
-        "text",
-        "notText",
-        "selector",
-        "notSelector",
-      ] as const
-    ).filter((key) => value[key] !== undefined);
+    const keys = WHEN_PREDICATE_KEYS.filter((key) => value[key] !== undefined);
     if (keys.length !== 1) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          "when: exactly one of urlContains|urlNotContains|urlMatches|text|notText|selector|notSelector",
+        message: `when: exactly one of ${WHEN_PREDICATE_KEYS.join("|")}`,
       });
     }
     if (value.hasText !== undefined && keys[0] !== "selector") {
@@ -386,8 +629,38 @@ export const WhenObjectSchema = z
         message: "hasText is only valid with selector",
       });
     }
+    const comparisons = (["equals", "in", "exists"] as const).filter(
+      (key) => value[key] !== undefined,
+    );
+    if (value.var !== undefined && comparisons.length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["var"],
+        message: "when.var needs exactly one of equals | in | exists",
+      });
+    }
+    if (value.var === undefined) {
+      for (const key of [...comparisons, "resolved" as const]) {
+        if (value[key] === undefined) continue;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is only valid with var`,
+        });
+      }
+    }
   });
 export type WhenObject = z.infer<typeof WhenObjectSchema>;
+
+/**
+ * F14: the one condition grammar shared by `when:`, `repeat.until`,
+ * `if.condition` and `use.retry.until` — the string DSL (`text:Saved`,
+ * `urlContains:/done`, …) or the object form (urlContains | urlNotContains |
+ * urlMatches | url | text | notText | selector (+hasText) | notSelector |
+ * var). A condition is checked once, at that moment; it never waits.
+ */
+export const ConditionSchema = z.union([z.string().min(1), WhenObjectSchema]);
+export type Condition = z.infer<typeof ConditionSchema>;
 
 export const NetworkPostconditionSchema = z
   .object({
@@ -407,6 +680,7 @@ export type NetworkPostcondition = z.infer<typeof NetworkPostconditionSchema>;
 
 const stepCommon = {
   id: z.string().min(1).optional(),
+  /** Skip the step unless this condition holds (see ConditionSchema). */
   when: z.union([z.string(), WhenObjectSchema]).optional(),
   /**
    * A bounded response expected from this action. The runner arms the
@@ -464,12 +738,26 @@ export function openPath(step: OpenStep): string {
   return typeof step.open === "string" ? step.open : step.open.path;
 }
 
+/**
+ * Runner-owned click flags (F15): `optional: true` skips the click (recorded
+ * as skipped) when no visible target exists; `dispatch: true` fires a DOM
+ * click on the element (no pointer, no actionability wait); `fallback:
+ * dispatch` tries the pointer click first and falls back to the DOM click
+ * when the pointer is blocked (the blocking element is recorded).
+ */
+const clickTargetExtras = {
+  until: ClickUntilSchema.optional(),
+  optional: z.boolean().optional(),
+  dispatch: z.boolean().optional(),
+  fallback: z.literal("dispatch").optional(),
+};
+
 const clickTargetSchema = z.union([
-  RoleLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
-  LabelLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
-  TextLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
-  SelectorLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
-  TestIdLocatorSchema.extend({ until: ClickUntilSchema.optional() }).strict(),
+  RoleLocatorSchema.extend(clickTargetExtras).strict(),
+  LabelLocatorSchema.extend(clickTargetExtras).strict(),
+  TextLocatorSchema.extend(clickTargetExtras).strict(),
+  SelectorLocatorSchema.extend(clickTargetExtras).strict(),
+  TestIdLocatorSchema.extend(clickTargetExtras).strict(),
 ]);
 
 export const ClickStepSchema = z
@@ -482,9 +770,15 @@ export const ClickStepSchema = z
   .strict();
 export type ClickStep = z.infer<typeof ClickStepSchema>;
 
-/** Locator portion of a click step, excluding the runner-owned `until`. */
+/** Locator portion of a click step, excluding the runner-owned flags. */
 export function clickLocator(step: ClickStep): Locator {
-  const { until: _until, ...locator } = step.click;
+  const {
+    until: _until,
+    optional: _optional,
+    dispatch: _dispatch,
+    fallback: _fallback,
+    ...locator
+  } = step.click;
   return locator as Locator;
 }
 
@@ -512,6 +806,23 @@ export const FillStepSchema = z
   })
   .strict();
 export type FillStep = z.infer<typeof FillStepSchema>;
+
+/** Locator portion of a fill step (value and the F15 mode/optional flags removed). */
+export function fillLocator(step: FillStep): Locator {
+  const {
+    value: _value,
+    mode: _mode,
+    optional: _optional,
+    ...locator
+  } = step.fill;
+  return locator as Locator;
+}
+
+/** The fill step a backend receives: the F15 runner-owned flags removed. */
+export function withoutFillFlags(step: FillStep): FillStep {
+  const { mode: _mode, optional: _optional, ...fill } = step.fill;
+  return { ...step, fill: fill as FillStep["fill"] };
+}
 
 /**
  * `type` — type text character-by-character into a field.
@@ -660,7 +971,7 @@ export const EvalStepSchema = z
 export type EvalStep = z.infer<typeof EvalStepSchema>;
 
 export const WaitStepSchema = z
-  .object({ ...stepCommon, wait: WaitConditionSchema })
+  .object({ ...stepCommon, wait: WaitStepConditionSchema })
   .strict();
 export type WaitStep = z.infer<typeof WaitStepSchema>;
 
@@ -721,6 +1032,25 @@ export const SnapshotStepSchema = z
   .strict();
 export type SnapshotStep = z.infer<typeof SnapshotStepSchema>;
 
+/** Most extra attempts one `use.retry` may make. */
+export const USE_RETRY_MAX_TIMES = 10;
+
+/**
+ * F14: `use: { action, vars, retry: { times, until?, delayMs? } }` runs the
+ * action's steps as one group and runs the whole group again when one of its
+ * steps fails, or when `until` does not hold after they all passed — at most
+ * `times` more attempts (so `times + 1` in all). An exhausted retry fails
+ * the step with the last attempt's error. `delayMs` pauses between attempts.
+ */
+export const UseRetrySchema = z
+  .object({
+    times: z.number().int().min(1).max(USE_RETRY_MAX_TIMES),
+    until: ConditionSchema.optional(),
+    delayMs: z.number().int().min(0).max(60_000).optional(),
+  })
+  .strict();
+export type UseRetry = z.infer<typeof UseRetrySchema>;
+
 /** Reusable action invocation, e.g. `use: login_admin`. */
 export const UseActionCallSchema = z
   .object({
@@ -731,6 +1061,7 @@ export const UseActionCallSchema = z
     vars: z
       .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
       .optional(),
+    retry: UseRetrySchema.optional(),
   })
   .strict();
 export type UseActionCall = z.infer<typeof UseActionCallSchema>;
@@ -751,6 +1082,46 @@ export function useActionVars(
   step: UseStep,
 ): Record<string, string | number | boolean> | undefined {
   return typeof step.use === "string" ? undefined : step.use.vars;
+}
+
+/**
+ * F18: in a RESOLVED spec, `use: login` (or `use: { action: login, vars }`)
+ * that no imported action named `login` expanded: the built-in action that
+ * runs the environment's `auth:` block (config `environments.<name>.auth`).
+ * An imported `login` action always wins (the parser inlines it).
+ */
+export function isBuiltinLoginUse(step: Step): boolean {
+  return (
+    "use" in step &&
+    useActionName(step) === BUILTIN_LOGIN_ACTION &&
+    !Array.isArray((step as { steps?: unknown }).steps)
+  );
+}
+
+/** The F14 `retry` of a `use:` call, when it has one. */
+export function useRetry(step: UseStep): UseRetry | undefined {
+  return typeof step.use === "string" ? undefined : step.use.retry;
+}
+
+/**
+ * A `use:` with `retry` after parseSpec expanded it: the action's resolved
+ * steps travel with the call (`steps`) so the runner can retry them as one
+ * group. Only `ParseResult.resolved` carries this shape; specs on disk never
+ * author `steps:` next to `use:`.
+ */
+export type RetryUseStep = UseStep & {
+  use: UseActionCall & { retry: UseRetry };
+  steps: Step[];
+};
+
+/** True for a resolved `use:` + `retry` group (see RetryUseStep). */
+export function isRetryUseStep(step: Step): step is RetryUseStep {
+  return (
+    "use" in step &&
+    typeof step.use !== "string" &&
+    step.use.retry !== undefined &&
+    Array.isArray((step as { steps?: unknown }).steps)
+  );
 }
 
 /* ----- batch (composite single-invocation step) ----- */
@@ -1115,6 +1486,269 @@ export const CaptureStepSchema = z
   .strict();
 export type CaptureStep = z.infer<typeof CaptureStepSchema>;
 
+/* ----- F15 widget kit (set / check / uncheck / choose / form) ----- */
+
+/**
+ * A value a widget step writes: text or a number (input, select, picker,
+ * date — ISO `YYYY-MM-DD` or `today` for a calendar), a boolean (a single
+ * checkbox), a list (multi-select, checkbox group, pills), or
+ * `{ query, option? }` for a searchable picker: type `query`, pick the
+ * option labelled `option` (default: the query).
+ */
+export const WidgetValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.array(z.union([z.string(), z.number()])),
+  z
+    .object({
+      query: z.string().min(1),
+      option: z.string().min(1).optional(),
+    })
+    .strict(),
+]);
+export type WidgetValue = z.infer<typeof WidgetValueSchema>;
+
+/** A driver name: built-in, or the `name` a custom driver module exports. */
+export const WidgetDriverNameSchema = z
+  .string()
+  .min(1)
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/,
+    "driver: a built-in or custom driver name",
+  );
+
+const fieldKeySchema = z.string().min(1);
+const widgetOptionSchema = z.union([z.string().min(1), z.number()]);
+
+const widgetTargetCommon = {
+  /** Force a driver instead of auto-detecting one with `match(root)`. */
+  driver: WidgetDriverNameSchema.optional(),
+  /** Skip (recorded as skipped) when the field is absent. */
+  optional: z.boolean().optional(),
+  /** Budget for mounting + writing + reading back (default 10000 × waitScale). */
+  timeoutMs: z.number().int().positive().optional(),
+};
+
+/**
+ * `{ field: <key> }` (resolved through config `browser.fieldRoot`) or any
+ * locator (`by: role | label | text | selector | testid`), plus `extras`.
+ */
+function widgetTargetSchema<T extends z.ZodRawShape>(extras: T) {
+  const shape = { ...widgetTargetCommon, ...extras };
+  return z.union([
+    z.object({ field: fieldKeySchema, ...shape }).strict(),
+    RoleLocatorSchema.extend(shape).strict(),
+    LabelLocatorSchema.extend(shape).strict(),
+    TextLocatorSchema.extend(shape).strict(),
+    SelectorLocatorSchema.extend(shape).strict(),
+    TestIdLocatorSchema.extend(shape).strict(),
+  ]);
+}
+
+/**
+ * `set: { field | locator, value, driver? }` — detect the widget driver
+ * (`match(root)`), write the value, then READ IT BACK: the step fails with
+ * evidence (`widgets/<n>_<id>.json`) when the committed value differs.
+ * A field that already holds the value is left alone (idempotent).
+ */
+export const SetStepSchema = z
+  .object({
+    ...stepCommon,
+    set: widgetTargetSchema({ value: WidgetValueSchema }),
+  })
+  .strict();
+export type SetStep = z.infer<typeof SetStepSchema>;
+
+/**
+ * `check: { field | locator, option? }` — tick a checkbox (or the `option`
+ * of a checkbox group / radio group). Idempotent: an option already checked
+ * is never clicked; read back like `set`.
+ */
+export const CheckStepSchema = z
+  .object({
+    ...stepCommon,
+    check: widgetTargetSchema({ option: widgetOptionSchema.optional() }),
+  })
+  .strict();
+export type CheckStep = z.infer<typeof CheckStepSchema>;
+
+/** `uncheck: { field | locator, option? }` — the inverse of `check`. */
+export const UncheckStepSchema = z
+  .object({
+    ...stepCommon,
+    uncheck: widgetTargetSchema({ option: widgetOptionSchema.optional() }),
+  })
+  .strict();
+export type UncheckStep = z.infer<typeof UncheckStepSchema>;
+
+/**
+ * `choose: { field | locator, option }` — single choice: a radio group, a
+ * select, a single vue-multiselect / autocomplete. Read back like `set`.
+ */
+export const ChooseStepSchema = z
+  .object({
+    ...stepCommon,
+    choose: widgetTargetSchema({ option: widgetOptionSchema }),
+  })
+  .strict();
+export type ChooseStep = z.infer<typeof ChooseStepSchema>;
+
+/** Most fields one `form` step may hold. */
+export const FORM_MAX_FIELDS = 100;
+
+/** A form field with options (plain values are shorthand for `{ value }`). */
+export const FormFieldObjectSchema = z
+  .object({
+    value: WidgetValueSchema,
+    /** Skip when the field is not on the page (after a short presence check). */
+    optional: z.boolean().optional(),
+    /**
+     * Earlier field key(s) this one appears after: the field gets the full
+     * mount wait once they are written, and is skipped when one of them was.
+     */
+    dependsOn: z
+      .union([fieldKeySchema, z.array(fieldKeySchema).min(1)])
+      .optional(),
+    driver: WidgetDriverNameSchema.optional(),
+    timeoutMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type FormFieldObject = z.infer<typeof FormFieldObjectSchema>;
+export const FormFieldSchema = z.union([
+  FormFieldObjectSchema,
+  WidgetValueSchema,
+]);
+export type FormField = z.infer<typeof FormFieldSchema>;
+
+/**
+ * `form: { fields: { <key>: value | { value, optional?, dependsOn?, driver? } },
+ * verify?: committed | none, onFailure?: dumpUnanswered }` — set fields in
+ * declared order through `browser.fieldRoot`, each read back (`verify:
+ * committed`, default) and re-read once more at the end, so a later field
+ * that wiped an earlier one fails the step. Per-field evidence goes to
+ * `widgets/<n>_<id>.json`; `onFailure: dumpUnanswered` adds the page's
+ * empty fields to it.
+ */
+export const FormStepSchema = z
+  .object({
+    ...stepCommon,
+    form: z
+      .object({
+        fields: z.record(fieldKeySchema, FormFieldSchema),
+        verify: z.enum(["committed", "none"]).optional(),
+        onFailure: z
+          .union([
+            z.literal("dumpUnanswered"),
+            z.object({ dumpUnanswered: z.boolean().optional() }).strict(),
+          ])
+          .optional(),
+        /** Per-field budget (default 10000 × waitScale); a field's own wins. */
+        timeoutMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .superRefine((form, ctx) => {
+        const keys = Object.keys(form.fields);
+        if (keys.length === 0) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["fields"],
+            message: "form.fields needs at least one field",
+          });
+        }
+        if (keys.length > FORM_MAX_FIELDS) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["fields"],
+            message: `form.fields holds at most ${FORM_MAX_FIELDS} fields`,
+          });
+        }
+        keys.forEach((key, index) => {
+          if (/^\d+$/.test(key)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["fields", key],
+              message:
+                "form field keys must not be integers (JavaScript reorders them); quote a prefix into the key or use separate set steps",
+            });
+          }
+          const field = form.fields[key];
+          const deps = formFieldDependsOn(field);
+          for (const dep of deps) {
+            const at = keys.indexOf(dep);
+            if (at < 0 || at >= index) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: ["fields", key, "dependsOn"],
+                message: `dependsOn ${JSON.stringify(dep)} must name an earlier field of this form`,
+              });
+            }
+          }
+        });
+      }),
+  })
+  .strict();
+export type FormStep = z.infer<typeof FormStepSchema>;
+
+/** True for a `{ value, … }` form field (not a bare value). */
+export function isFormFieldObject(
+  field: FormField | undefined,
+): field is FormFieldObject {
+  return (
+    field !== null &&
+    typeof field === "object" &&
+    !Array.isArray(field) &&
+    "value" in field
+  );
+}
+
+/** The `dependsOn` keys of a form field, as a list. */
+export function formFieldDependsOn(field: FormField | undefined): string[] {
+  if (!isFormFieldObject(field) || field.dependsOn === undefined) return [];
+  return Array.isArray(field.dependsOn) ? field.dependsOn : [field.dependsOn];
+}
+
+/** Widget step kinds (F15). */
+export type WidgetStep =
+  | SetStep
+  | CheckStep
+  | UncheckStep
+  | ChooseStep
+  | FormStep;
+
+export function isWidgetStep(step: Step): step is WidgetStep {
+  return (
+    "set" in step ||
+    "check" in step ||
+    "uncheck" in step ||
+    "choose" in step ||
+    "form" in step
+  );
+}
+
+/** The single-field target of set / check / uncheck / choose. */
+export type WidgetTarget =
+  | SetStep["set"]
+  | CheckStep["check"]
+  | UncheckStep["uncheck"]
+  | ChooseStep["choose"];
+
+/** `{ field }` or the locator part of a widget target (flags removed). */
+export function widgetTargetRef(
+  target: WidgetTarget,
+): { field: string } | { locator: Locator } {
+  if ("field" in target) return { field: target.field };
+  const {
+    driver: _driver,
+    optional: _optional,
+    timeoutMs: _timeoutMs,
+    ...rest
+  } = target as Record<string, unknown>;
+  delete rest["value"];
+  delete rest["option"];
+  return { locator: rest as Locator };
+}
+
 const browserActionKeys = [
   "open",
   "click",
@@ -1130,31 +1764,130 @@ const browserActionKeys = [
   "batch",
 ] as const;
 
-export const StepSchema = z
-  .union([
-    OpenStepSchema,
-    ClickStepSchema,
-    HoverStepSchema,
-    FocusStepSchema,
-    FillStepSchema,
-    TypeStepSchema,
-    SelectStepSchema,
-    UploadStepSchema,
-    DownloadStepSchema,
-    TransformStepSchema,
-    WaitStepSchema,
-    RequestStepSchema,
-    PressStepSchema,
-    ScrollStepSchema,
-    SnapshotStepSchema,
-    UseStepSchema,
-    BatchStepSchema,
-    EvalStepSchema,
-    MonitorStepSchema,
-    RunStepSchema,
-    ExpectStepSchema,
-    CaptureStepSchema,
-  ])
+/** Every step kind except the F14 control-flow blocks (repeat / if). */
+const LeafStepSchema = z.union([
+  OpenStepSchema,
+  ClickStepSchema,
+  HoverStepSchema,
+  FocusStepSchema,
+  FillStepSchema,
+  TypeStepSchema,
+  SelectStepSchema,
+  UploadStepSchema,
+  DownloadStepSchema,
+  TransformStepSchema,
+  WaitStepSchema,
+  RequestStepSchema,
+  PressStepSchema,
+  ScrollStepSchema,
+  SnapshotStepSchema,
+  UseStepSchema,
+  BatchStepSchema,
+  EvalStepSchema,
+  MonitorStepSchema,
+  RunStepSchema,
+  ExpectStepSchema,
+  CaptureStepSchema,
+  // F15 widget kit.
+  SetStepSchema,
+  CheckStepSchema,
+  UncheckStepSchema,
+  ChooseStepSchema,
+  FormStepSchema,
+]);
+export type LeafStep = z.infer<typeof LeafStepSchema>;
+
+/* ----- control flow (F14) ----- */
+
+/** Most iterations one `repeat` may run. */
+export const REPEAT_MAX_ITERATIONS = 100;
+
+/** Fields every step shares, control-flow blocks included. */
+interface StepCommonFields {
+  id?: string;
+  when?: string | WhenObject;
+  postcondition?: Postcondition;
+}
+
+/**
+ * `repeat: { max, until?, steps, indexVar?, onMax? }` runs `steps` up to
+ * `max` (≤ 100) times. `until` is checked before every iteration and once
+ * more after the last: the loop stops as soon as it holds. Reaching `max`
+ * with an `until` that never held fails the step (`onMax: fail`, default) or
+ * passes it (`onMax: continue`); without `until` the loop simply runs `max`
+ * times. A failing nested step fails the repeat (and the run). Nested steps
+ * see `${repeat.index}` (0-based) and `${repeat.iteration}` (1-based) of the
+ * innermost loop, plus `${repeat.<indexVar>}` (0-based) of every enclosing
+ * loop that names one.
+ */
+export interface RepeatStep extends StepCommonFields {
+  repeat: {
+    max: number;
+    until?: Condition;
+    steps: Step[];
+    indexVar?: string;
+    onMax?: "fail" | "continue";
+  };
+}
+
+/**
+ * `if: { condition, then, else? }` checks `condition` once (same grammar as
+ * `when:`) and runs `then` or `else`. Without `else` a false condition runs
+ * nothing and passes the step.
+ */
+export interface IfStep extends StepCommonFields {
+  if: {
+    condition: Condition;
+    then: Step[];
+    else?: Step[];
+  };
+}
+
+/** Every step a spec, an action or a control-flow block may hold. */
+export type Step = LeafStep | RepeatStep | IfStep;
+
+/** Names `${repeat.*}` reserves for itself. */
+const RESERVED_REPEAT_NAMES = new Set(["index", "iteration"]);
+
+const nestedStepsSchema = z.array(z.lazy(() => StepSchema)).min(1);
+
+export const RepeatStepSchema: z.ZodType<RepeatStep, z.ZodTypeDef, unknown> = z
+  .object({
+    ...stepCommon,
+    repeat: z
+      .object({
+        max: z.number().int().min(1).max(REPEAT_MAX_ITERATIONS),
+        until: ConditionSchema.optional(),
+        steps: nestedStepsSchema,
+        indexVar: z
+          .string()
+          .regex(/^[a-z][A-Za-z0-9_]*$/)
+          .refine((name) => !RESERVED_REPEAT_NAMES.has(name), {
+            message: "indexVar: index and iteration are reserved",
+          })
+          .optional(),
+        onMax: z.enum(["fail", "continue"]).optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const IfStepSchema: z.ZodType<IfStep, z.ZodTypeDef, unknown> = z
+  .object({
+    ...stepCommon,
+    if: z
+      .object({
+        condition: ConditionSchema,
+        // oxlint-disable-next-line unicorn/no-thenable -- `if.then` is a step list, never a function
+        then: nestedStepsSchema,
+        else: nestedStepsSchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const StepSchema: z.ZodType<Step, z.ZodTypeDef, unknown> = z
+  .union([LeafStepSchema, RepeatStepSchema, IfStepSchema])
   .superRefine((step, ctx) => {
     if (
       step.postcondition !== undefined &&
@@ -1166,8 +1899,90 @@ export const StepSchema = z
         message: "postcondition.network is only valid on a browser action step",
       });
     }
+    if ("click" in step) {
+      const click = step.click;
+      if (click.dispatch === true && click.fallback !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["click", "fallback"],
+          message: "click: use dispatch: true or fallback: dispatch, not both",
+        });
+      }
+      if (
+        click.until !== undefined &&
+        (click.dispatch === true || click.fallback !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["click", "until"],
+          message: "click.until cannot be combined with dispatch / fallback",
+        });
+      }
+      if (
+        step.postcondition !== undefined &&
+        (click.dispatch === true || click.fallback !== undefined)
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["postcondition"],
+          message:
+            "postcondition.network cannot be combined with click dispatch / fallback",
+        });
+      }
+    }
+    if (
+      "fill" in step &&
+      step.fill.mode === "set" &&
+      step.postcondition !== undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["postcondition"],
+        message: "postcondition.network cannot be combined with fill mode: set",
+      });
+    }
   });
-export type Step = z.infer<typeof StepSchema>;
+
+/** True for the F14 control-flow steps (repeat / if / a resolved retry use). */
+export function isControlFlowStep(
+  step: Step,
+): step is RepeatStep | IfStep | RetryUseStep {
+  return "repeat" in step || "if" in step || isRetryUseStep(step);
+}
+
+/**
+ * The nested step lists of a control-flow step, with the label each list
+ * uses in nested step ids and paths (`steps`, `then`, `else`, `use`).
+ */
+export function nestedStepLists(
+  step: Step,
+): Array<{ key: "steps" | "then" | "else" | "use"; steps: Step[] }> {
+  if ("repeat" in step) return [{ key: "steps", steps: step.repeat.steps }];
+  if ("if" in step) {
+    return [
+      { key: "then", steps: step.if.then },
+      ...(step.if.else ? [{ key: "else" as const, steps: step.if.else }] : []),
+    ];
+  }
+  if (isRetryUseStep(step)) return [{ key: "use", steps: step.steps }];
+  return [];
+}
+
+/**
+ * Every step of a tree in document order (control-flow blocks first, then
+ * their nested steps), without expanding `use:`.
+ */
+export function walkSteps(steps: readonly Step[]): Step[] {
+  const out: Step[] = [];
+  const visit = (list: readonly Step[]): void => {
+    for (const step of list) {
+      out.push(step);
+      for (const nested of nestedStepLists(step)) visit(nested.steps);
+    }
+  };
+  visit(steps);
+  return out;
+}
 
 /* ----- outcome (the contract) ----- */
 
@@ -1278,6 +2093,15 @@ const TEARDOWN_UNSUPPORTED_KINDS = [
   "monitor",
   "expect",
   "capture",
+  // F14: control flow belongs to the steps; cleanup runs every item once.
+  "repeat",
+  "if",
+  // F15: widget steps write read-back evidence; cleanup does not verify.
+  "set",
+  "check",
+  "uncheck",
+  "choose",
+  "form",
 ] as const;
 export type Teardown = z.infer<typeof TeardownSchema>;
 

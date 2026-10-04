@@ -2872,3 +2872,550 @@ table.grid.datasources-table td.ds-target {
 .attempts-tag {
   font-family: var(--mono);
 }
+
+/* ── F14 nested steps: repeat iterations, if branches, retried attempts ── */
+
+.step-groups {
+  margin: 0 0 4px 22px;
+  border-left: 1px solid var(--border);
+}
+
+.step-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.step-group > summary:hover {
+  background: var(--panel);
+}
+
+.step-group-label {
+  color: var(--text);
+}
+
+.step-group-body {
+  margin-left: 10px;
+}
+
+.step-group-error {
+  padding: 0 10px 4px 26px;
+}
+
+.step-group-retried > summary .step-group-label {
+  color: var(--warn);
+}
+
+.step-row.step-nested {
+  border-bottom-style: dashed;
+}
+
+.timeline-row.step-retried .label {
+  color: var(--text-faint);
+  text-decoration: line-through;
+  text-decoration-color: var(--warn);
+}
+
+/* ── F15 interaction paths and widget fields ── */
+
+.step-interaction {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  font-size: 11px;
+}
+
+.step-detail-live {
+  grid-column: 2 / -1;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.via-fallback {
+  color: var(--warn);
+}
+
+.widget-entry,
+.request-entry {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--info);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+}
+
+.widget-entry.widget-failed,
+.request-entry.request-mismatched {
+  border-left-color: var(--bad);
+}
+
+.widget-entry.widget-passed {
+  border-left-color: var(--ok);
+}
+
+table.grid.widget-fields tr.widget-field-failed td {
+  color: var(--bad);
+}
+
+.widget-error {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.widget-unanswered {
+  margin-top: 8px;
+}
+
+/* ── F18 requests: matrix and environment auth ── */
+
+table.grid.matrix-table tr.matrix-mismatched td {
+  color: var(--bad);
+}
+
+table.grid.request-table td,
+table.grid.request-table th {
+  padding: 3px 8px;
+}
+
+.live-chips {
+  grid-column: 2 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+/* ── F17 xlsx checks ── */
+
+.evidence-checks {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+
+.evidence-check {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 11.5px;
+}
+
+.evidence-check-failed .mono {
+  color: var(--bad);
+}
+
+.catalog-auth .tag {
+  margin-right: 4px;
+}
+
+.timeline-row.step-retried .step-error {
+  color: var(--text-dim);
+}
+
+/* ── wave 6: run policy, suites, metrics, config vars, service windows ──
+ *
+ * State is never colour alone: every row and badge carries a glyph and a
+ * word, and the two exit codes the run policy added differ by shape
+ * (exit 8: heavy solid border; exit 9: dashed border). Every colour comes
+ * from the theme variables above, so a theme change carries over. */
+
+.notice {
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  border-radius: var(--radius);
+  padding: 7px 11px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.notice-warn {
+  border-color: rgba(224, 179, 65, 0.4);
+  color: var(--warn);
+}
+
+.ops-badges {
+  margin: 0 0 10px;
+}
+
+.ops-glyph {
+  font-family: var(--mono);
+  line-height: 1;
+}
+
+.tag.ops-badge {
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 9px;
+}
+
+/* exit 8: a hard stop, outranks every verdict */
+.tag.ops-badge-critical-teardown {
+  border: 2px solid var(--bad);
+  font-weight: 700;
+  background: rgba(229, 101, 94, 0.16);
+}
+
+/* exit 9: dirty state, a warning that is not a verdict */
+.tag.ops-badge-dirty-after {
+  border: 2px dashed var(--warn);
+  font-weight: 600;
+}
+
+.tag.ops-badge-dirty-before,
+.tag.ops-badge-preflight-failed,
+.tag.ops-badge-lock-refused {
+  border-width: 2px;
+  border-style: double;
+}
+
+.ops-callouts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ops-callout {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 9px;
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+
+.ops-callout-critical-teardown {
+  border: 2px solid var(--bad);
+  border-left-width: 8px;
+  background: rgba(229, 101, 94, 0.1);
+  color: var(--text);
+}
+
+.ops-callout-critical-teardown .ops-glyph,
+.ops-callout-critical-teardown strong {
+  color: var(--bad);
+}
+
+.ops-callout-dirty-after {
+  border: 2px dashed var(--warn);
+  background: rgba(224, 179, 65, 0.07);
+  color: var(--text);
+}
+
+.ops-callout-dirty-after .ops-glyph,
+.ops-callout-dirty-after strong {
+  color: var(--warn);
+}
+
+.ops-exit {
+  margin: 6px 0;
+}
+
+.ops-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ops-section {
+  margin-top: 6px;
+}
+
+.ops-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.ops-row {
+  display: grid;
+  grid-template-columns: 16px minmax(86px, auto) 1fr;
+  gap: 4px 9px;
+  align-items: baseline;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+
+.ops-row:last-child {
+  border-bottom: 0;
+}
+
+.ops-mark {
+  font-family: var(--mono);
+  text-align: center;
+}
+
+.ops-status {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ops-text {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.ops-detail {
+  grid-column: 3;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ops-row-ok .ops-mark,
+.ops-row-ok .ops-status {
+  color: var(--ok);
+}
+
+.ops-row-bad .ops-mark,
+.ops-row-bad .ops-status {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.ops-row-warn .ops-mark,
+.ops-row-warn .ops-status {
+  color: var(--warn);
+}
+
+.ops-row-info .ops-mark,
+.ops-row-info .ops-status {
+  color: var(--info);
+}
+
+.ops-row-muted .ops-mark,
+.ops-row-muted .ops-status {
+  color: var(--text-faint);
+}
+
+.ops-live {
+  margin: 6px 12px 0;
+}
+
+.ops-live-details > summary {
+  cursor: pointer;
+  padding: 3px 0;
+}
+
+.inv-policy {
+  margin-bottom: 12px;
+}
+
+.ops-inline {
+  font-size: 12px;
+}
+
+.ops-inline-ok {
+  color: var(--ok);
+}
+
+.ops-inline-warn {
+  color: var(--warn);
+}
+
+.ops-inline-bad {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+/* metrics */
+
+.ops-delta {
+  white-space: nowrap;
+}
+
+.ops-delta-up {
+  color: var(--warn);
+}
+
+.ops-delta-down {
+  color: var(--info);
+}
+
+.ops-scope {
+  margin-left: 6px;
+}
+
+table.metrics-table td {
+  vertical-align: top;
+}
+
+.metric-history {
+  min-width: 270px;
+}
+
+figure.spark-figure {
+  margin: 0;
+}
+
+svg.spark {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  color: var(--text-faint);
+}
+
+.spark-axis {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.spark-label {
+  fill: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.spark-line {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.spark-dot {
+  fill: var(--accent);
+}
+
+.spark-current {
+  fill: var(--bg);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.spark-values > summary {
+  cursor: pointer;
+}
+
+table.spark-table {
+  margin-top: 4px;
+}
+
+tr.spark-current-row td {
+  font-weight: 700;
+}
+
+/* suites */
+
+.suite-card {
+  margin-bottom: 14px;
+}
+
+table.suite-envs tr.suite-env-picked td:first-child {
+  box-shadow: inset 4px 0 0 var(--accent);
+  font-weight: 700;
+}
+
+table.suite-envs tr.suite-env-problem td {
+  color: var(--text-dim);
+}
+
+.suite-specs {
+  margin-top: 8px;
+}
+
+/* config vars */
+
+table.cv-table td {
+  vertical-align: top;
+}
+
+.cv-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.cv-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 1px 0;
+}
+
+.cv-env {
+  min-width: 64px;
+}
+
+.cv-display {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.cv-masked {
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.cv-row-unused td:first-child {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+.cv-used-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+}
+
+.cv-summary {
+  margin-bottom: 10px;
+}
+
+/* service windows and orphans */
+
+.svc-facts,
+.svc-provisioner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.svc-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.svc-log {
+  margin-top: 12px;
+}
+
+.svc-log-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.svc-log-pane {
+  max-height: 340px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orphans-summary {
+  margin: 0 0 8px;
+}

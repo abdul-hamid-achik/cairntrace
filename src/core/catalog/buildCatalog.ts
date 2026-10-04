@@ -1,3 +1,4 @@
+import { canonicalEnvironment, realEnvironmentNames } from "../config/envAlias";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
@@ -10,6 +11,7 @@ import {
   sep,
 } from "node:path";
 import {
+  isAlias,
   isMap,
   isScalar,
   parseDocument,
@@ -20,17 +22,30 @@ import { ZodError, type z } from "zod";
 import { CheckpointStore } from "../checkpoint/CheckpointStore";
 import { urlOrigin } from "../checkpoint/meta";
 import { loadConfig, type LoadedConfig } from "../config/loader";
-import { UnknownEnvironmentError } from "../config/runtimeContext";
+import type { VarDefinition } from "../config/compose";
+import {
+  resolveEffectiveServices,
+  UnknownEnvironmentError,
+} from "../config/runtimeContext";
 import type { Config } from "../schema/config.v1";
 import { fixtureDurationMs } from "../fixtures/schema";
+import {
+  SuiteError,
+  suiteLabelsOf,
+  suiteProcessEnvOf,
+  SuiteResolver,
+} from "../suites/resolve";
+import { suiteRequiredEnvs } from "../suites/schema";
 import { actionInputProblems } from "../schema/spec.v1";
 import {
   CATALOG_KINDS,
+  CATALOG_SERVICE_PHASES,
   CatalogActionSchema,
   CatalogCheckpointSchema,
   CatalogEnvSchema,
   CatalogFixtureSchema,
   CatalogFlowSchema,
+  CatalogSuiteSchema,
   CatalogVarSchema,
   CatalogVerifierSchema,
   type CatalogAction,
@@ -40,6 +55,7 @@ import {
   type CatalogFlow,
   type CatalogKind,
   type CatalogResult,
+  type CatalogSuite,
   type CatalogVar,
   type CatalogVerifier,
 } from "./catalog.v1";
@@ -135,14 +151,20 @@ export async function buildCatalog(
     relative(root, path).split(sep).join("/") || ".";
 
   const defaultEnv = config?.defaultEnvironment;
-  const env =
+  // `--env <alias>` (environments.<name>: { alias }) stands for its target.
+  const canonicalName = (name: string | undefined): string | undefined =>
+    name !== undefined && config
+      ? canonicalEnvironment(config.environments, name).name
+      : name;
+  const env = canonicalName(
     opts.env ??
-    (opts.defaultEnv &&
-    defaultEnv !== undefined &&
-    config &&
-    Object.hasOwn(config.environments, defaultEnv)
-      ? defaultEnv
-      : undefined);
+      (opts.defaultEnv &&
+      defaultEnv !== undefined &&
+      config &&
+      Object.hasOwn(config.environments, defaultEnv)
+        ? defaultEnv
+        : undefined),
+  );
   if (opts.env !== undefined && !config) {
     throw new CatalogConfigError(
       `--env "${opts.env}" needs a cairntrace.config.yml that defines it; none was found from ${resolve(cwd)}`,
@@ -162,7 +184,7 @@ export async function buildCatalog(
     }
   }
   const envNames = config
-    ? Object.keys(config.environments).filter(
+    ? realEnvironmentNames(config.environments).filter(
         (name) => env === undefined || name === env,
       )
     : [];
@@ -249,8 +271,13 @@ export async function buildCatalog(
     name: user.name,
     file: rel(user.path),
   });
+  // F7: `${vars.name.key}` reads inside a typed var — it uses `name`.
   const varUsers = (name: string): User[] =>
-    users.filter((u) => u.varRefs.has(name));
+    users.filter(
+      (u) =>
+        u.varRefs.has(name) ||
+        [...u.varRefs].some((ref) => ref.startsWith(`${name}.`)),
+    );
 
   // ---- runs ------------------------------------------------------------------
   let runIndex: RunIndex = { byName: new Map(), read: 0 };
@@ -478,45 +505,85 @@ export async function buildCatalog(
         const varsNode = isMap(pair.value)
           ? pair.value.get("vars", true)
           : undefined;
-        if (!isMap(varsNode)) continue;
-        mapEntries(varsNode as YAMLMap, doc, (anchor) =>
-          anchors.get(anchor),
-        ).forEach((entry, index) => {
-          const value = nodeValue(entry.value, doc);
-          const masked =
-            typeof value === "string" ||
-            typeof value === "number" ||
-            typeof value === "boolean"
-              ? masker.value(entry.key, value)
-              : undefined;
-          const usedBy = varUsers(entry.key);
-          rows.push({
-            row: {
-              name: entry.key,
-              env: envName,
-              ...(masked ? { value: masked.value } : {}),
-              ...(masked?.masked ? { masked: true as const } : {}),
-              ...(entry.comment ? { comment: masker.text(entry.comment) } : {}),
-              definedIn: entry.inheritedFrom ? "inherited" : "environment",
-              ...(entry.inheritedFrom
-                ? { inheritedFrom: entry.inheritedFrom }
-                : {}),
-              usedBy: usedBy
-                .map(useRow)
-                .toSorted((a, b) => a.file.localeCompare(b.file)),
-            },
-            fields: [
-              { field: "name", text: entry.key },
-              { field: "comment", text: entry.comment },
-              {
-                field: "text",
-                text:
-                  masked && !masked.masked ? String(masked.value) : undefined,
+        // F7: vars the environment gets from the top-level `vars:` (and
+        // included files) or its `extends` chain, after its own entries.
+        const own = new Set<string>();
+        const composedRows = (): void => {
+          const composed =
+            loaded.composition?.environments[envName]?.vars ?? {};
+          let index = own.size;
+          for (const [name, entry] of Object.entries(composed)) {
+            if (own.has(name)) continue;
+            const def = entry.definitions.at(-1);
+            if (!def) continue;
+            index += 1;
+            rows.push(
+              composedVarRow(name, envName, def, {
+                envIndex,
+                index,
+                masker,
+                rel,
+                usedBy: varUsers(name)
+                  .map(useRow)
+                  .toSorted((a, b) => a.file.localeCompare(b.file)),
+              }),
+            );
+          }
+        };
+        const varsMap = isAlias(varsNode) ? varsNode.resolve(doc) : varsNode;
+        if (!isMap(varsMap)) {
+          composedRows();
+          continue;
+        }
+        const aliasOwner = isAlias(varsNode)
+          ? (anchors.get(varsNode.source) ?? `&${varsNode.source}`)
+          : undefined;
+        mapEntries(varsMap as YAMLMap, doc, (anchor) => anchors.get(anchor))
+          .map((entry) =>
+            aliasOwner && !entry.inheritedFrom
+              ? { ...entry, inheritedFrom: aliasOwner }
+              : entry,
+          )
+          .forEach((entry, index) => {
+            own.add(entry.key);
+            const value = nodeValue(entry.value, doc);
+            const masked =
+              typeof value === "string" ||
+              typeof value === "number" ||
+              typeof value === "boolean"
+                ? masker.value(entry.key, value)
+                : undefined;
+            const usedBy = varUsers(entry.key);
+            rows.push({
+              row: {
+                name: entry.key,
+                env: envName,
+                ...(masked ? { value: masked.value } : {}),
+                ...(masked?.masked ? { masked: true as const } : {}),
+                ...(entry.comment
+                  ? { comment: masker.text(entry.comment) }
+                  : {}),
+                definedIn: entry.inheritedFrom ? "inherited" : "environment",
+                ...(entry.inheritedFrom
+                  ? { inheritedFrom: entry.inheritedFrom }
+                  : {}),
+                usedBy: usedBy
+                  .map(useRow)
+                  .toSorted((a, b) => a.file.localeCompare(b.file)),
               },
-            ],
-            order: `${String(envIndex).padStart(4, "0")}:${String(index).padStart(6, "0")}`,
+              fields: [
+                { field: "name", text: entry.key },
+                { field: "comment", text: entry.comment },
+                {
+                  field: "text",
+                  text:
+                    masked && !masked.masked ? String(masked.value) : undefined,
+                },
+              ],
+              order: `${String(envIndex).padStart(4, "0")}:${String(index).padStart(6, "0")}`,
+            });
           });
-        });
+        composedRows();
       }
     }
     result.vars = finish("vars", rows);
@@ -804,6 +871,113 @@ export async function buildCatalog(
     );
   }
 
+  if (kinds.has("suites")) {
+    const resolver = new SuiteResolver({
+      configDir: root,
+      skipDirs: [artifactRoot],
+    });
+    const rows: Ranked<CatalogSuite>[] = [];
+    // A config without environments still has one to resolve against.
+    const suiteEnvs =
+      envNames.length > 0
+        ? envNames
+        : [env ?? config?.defaultEnvironment ?? "local"];
+    for (const [name, suite] of Object.entries(config?.suites ?? {})) {
+      const envs: CatalogSuite["envs"] = [];
+      for (const envName of suiteEnvs) {
+        const block = suite.env?.[envName];
+        const varNames = Object.keys({ ...suite.vars, ...block?.vars });
+        const processEnv = Object.keys(suiteProcessEnvOf(suite, envName));
+        const labels = Object.entries(suiteLabelsOf(suite, envName)).map(
+          ([key, value]) => `${key}=${masker.text(value)}`,
+        );
+        const envSkip = block?.seed?.postCommands?.skip;
+        const common = {
+          env: envName,
+          ...(varNames.length > 0 ? { vars: varNames } : {}),
+          ...(block?.bail !== undefined ? { bail: block.bail } : {}),
+          ...(envSkip
+            ? {
+                seedSkip: [
+                  ...new Set([
+                    ...(suite.seed?.postCommands?.skip ?? []),
+                    ...envSkip,
+                  ]),
+                ],
+              }
+            : {}),
+          ...(processEnv.length > 0 ? { processEnv } : {}),
+          ...(labels.length > 0 ? { labels } : {}),
+        };
+        const hookTimeoutMs = block?.hookTimeoutMs ?? suite.hookTimeoutMs;
+        try {
+          const resolved = await resolver.resolve({
+            name,
+            suite,
+            envName,
+            vars: config?.environments[envName]?.vars ?? {},
+          });
+          envs.push({
+            ...common,
+            specs: resolved.specs.map(rel),
+            before: resolved.before.length,
+            after: resolved.after.length,
+            ...(hookTimeoutMs !== undefined ? { hookTimeoutMs } : {}),
+          });
+        } catch (e) {
+          if (!(e instanceof SuiteError)) throw e;
+          envs.push({
+            ...common,
+            specs: [],
+            problem: masker.text(e.message),
+            before: (suite.before?.length ?? 0) + (block?.before?.length ?? 0),
+            after: (suite.after?.length ?? 0) + (block?.after?.length ?? 0),
+            ...(hookTimeoutMs !== undefined ? { hookTimeoutMs } : {}),
+          });
+        }
+      }
+      const requiredEnvs = suiteRequiredEnvs(suite);
+      rows.push({
+        row: {
+          name,
+          ...(suite.description
+            ? { description: masker.text(suite.description) }
+            : {}),
+          ...(suite.specs ? { specs: suite.specs } : {}),
+          ...(suite.tags ? { tags: suite.tags } : {}),
+          ...(suite.order ? { order: suite.order } : {}),
+          ...(suite.parallel !== undefined ? { parallel: suite.parallel } : {}),
+          ...(suite.bail !== undefined ? { bail: suite.bail } : {}),
+          ...(suite.requires
+            ? {
+                requires: {
+                  ...(requiredEnvs.length > 0 ? { env: requiredEnvs } : {}),
+                  ...(suite.requires.vars ? { vars: suite.requires.vars } : {}),
+                },
+              }
+            : {}),
+          ...(suite.seed?.postCommands?.skip
+            ? { seedSkip: suite.seed.postCommands.skip }
+            : {}),
+          envs,
+        },
+        fields: [
+          { field: "name", text: name },
+          { field: "description", text: suite.description ?? "" },
+          {
+            field: "text",
+            text: [
+              ...(suite.tags ?? []),
+              ...envs.flatMap((e) => e.specs.map((s) => basename(s))),
+            ].join(" "),
+          },
+        ],
+        order: name,
+      });
+    }
+    result.suites = finish("suites", rows);
+  }
+
   // Rows were validated one by one above; the document shape is asserted
   // against CatalogResultSchema by the tests.
   return result;
@@ -817,6 +991,7 @@ const ROW_SCHEMAS: Record<CatalogKind, z.ZodType> = {
   flows: CatalogFlowSchema,
   checkpoints: CatalogCheckpointSchema,
   fixtures: CatalogFixtureSchema,
+  suites: CatalogSuiteSchema,
 };
 
 /** How a warning names a row: its file, else its name (vars: `name [env]`). */
@@ -840,25 +1015,30 @@ function envRow(
   index: number,
 ): Ranked<CatalogEnv> {
   const env = config.environments[name]!;
-  const top = config.services;
-  let services: CatalogEnv["services"];
-  if (env.services === false || (!top && !env.services)) {
-    services = { enabled: false, phases: [] };
-  } else {
-    const override = env.services || undefined;
-    const phases = (["docker", "seed", "tmux"] as const).filter((phase) => {
-      const own = override?.[phase];
-      if (own === false) return false;
-      return own !== undefined || top?.[phase] !== undefined;
-    });
-    services = { enabled: true, phases };
-  }
+  // The environment's effective block: its own merged over the top-level
+  // one, or alone when the config has no top-level `services:`.
+  // A runner environment runs elsewhere: no local services.
+  const effective = resolveEffectiveServices(
+    config.services,
+    env.runner ? false : env.services,
+  );
+  const services: CatalogEnv["services"] = effective
+    ? {
+        enabled: true,
+        phases: CATALOG_SERVICE_PHASES.filter(
+          (phase) => effective[phase] !== undefined,
+        ),
+      }
+    : { enabled: false, phases: [] };
   const secrets = env.secrets ?? config.secrets;
   const policy = env.policy;
   return {
     row: {
       name,
-      default: config.defaultEnvironment === name,
+      default:
+        config.defaultEnvironment !== undefined &&
+        canonicalEnvironment(config.environments, config.defaultEnvironment)
+          .name === name,
       ...(env.baseUrl ? { baseUrl: masker.text(env.baseUrl) } : {}),
       ...(policy && Object.keys(policy).length > 0
         ? {
@@ -940,4 +1120,68 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * F7: a catalog row for a var an environment gets without writing it — from
+ * the top-level `vars:` (an included file names its `file`), its `extends`
+ * chain, or an aliased vars block (`vars: *anchor`). The value is the
+ * authored one (placeholders kept), masked like every catalog value.
+ */
+function composedVarRow(
+  name: string,
+  env: string,
+  def: VarDefinition,
+  ctx: {
+    envIndex: number;
+    index: number;
+    masker: Masker;
+    rel: (path: string) => string;
+    usedBy: CatalogVar["usedBy"];
+  },
+): Ranked<CatalogVar> {
+  const authored = def.template ?? def.value;
+  const masked =
+    typeof authored === "string" ||
+    typeof authored === "number" ||
+    typeof authored === "boolean"
+      ? ctx.masker.value(name, authored)
+      : undefined;
+  const ownScope = `environments.${env}.vars`;
+  const parent =
+    def.scope.startsWith("environments.") && def.scope !== ownScope
+      ? def.scope.slice("environments.".length, -".vars".length)
+      : undefined;
+  const definedIn: CatalogVar["definedIn"] =
+    def.scope === "vars"
+      ? "top-level"
+      : parent !== undefined
+        ? "extends"
+        : def.inheritedFrom
+          ? "inherited"
+          : "environment";
+  const inheritedFrom = parent ?? def.inheritedFrom;
+  return {
+    row: {
+      name,
+      env,
+      ...(masked ? { value: masked.value } : {}),
+      ...(masked?.masked ? { masked: true as const } : {}),
+      definedIn,
+      ...(inheritedFrom ? { inheritedFrom } : {}),
+      file:
+        def.line !== undefined
+          ? `${ctx.rel(def.file)}:${def.line}`
+          : ctx.rel(def.file),
+      usedBy: ctx.usedBy,
+    },
+    fields: [
+      { field: "name", text: name },
+      {
+        field: "text",
+        text: masked && !masked.masked ? String(masked.value) : undefined,
+      },
+    ],
+    order: `${String(ctx.envIndex).padStart(4, "0")}:${String(ctx.index).padStart(6, "0")}`,
+  };
 }

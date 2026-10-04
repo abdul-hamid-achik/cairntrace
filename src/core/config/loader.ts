@@ -1,12 +1,30 @@
 import { access } from "node:fs/promises";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
-import { readFile } from "node:fs/promises";
-import { parse as parseYaml } from "yaml";
-import { ConfigSchema, type Config } from "../schema/config.v1";
+import type { Config } from "../schema/config.v1";
+import { assertEngineRequirement } from "../engineRequirements";
+import type { EnvLateBinding } from "./text";
+import {
+  ConfigCompositionError,
+  composeConfigFile,
+  type ConfigComposition,
+} from "./compose";
+
+export { parseConfigText, substituteEnv } from "./text";
 
 export interface LoadedConfig {
   config: Config;
   path: string;
+  /**
+   * F7: how the config was composed — included files, top-level vars,
+   * `extends` chains and where every var is defined. Absent only for
+   * configs built in memory.
+   */
+  composition?: ConfigComposition;
+  /**
+   * Exporter late binding only: typed fields whose late-bound value only a
+   * validation stand-in could fill (see `EnvLateBinding.standIns`).
+   */
+  lateUnbound?: string[];
 }
 
 /**
@@ -41,6 +59,15 @@ export async function findConfigFile(
  * per-run YAML. Missing env vars substitute as "" (same as spec parsing).
  * `${config.dir}` resolves to the directory holding the config file, and YAML
  * merge keys (`<<: *anchor`) are enabled — see {@link parseConfigText}.
+ *
+ * F7: `include:`, top-level `vars:`, `environments.<n>.extends` and
+ * `${vars.X}` inside var values are composed here (see `compose.ts`), so
+ * every reader sees each environment's effective vars. A schema violation
+ * throws the ZodError (as before); a composition problem (missing include,
+ * include or extends cycle, undefined var reference) throws a
+ * {@link ConfigCompositionError}. F19: a config whose `requires.cairntrace`
+ * range this cairn does not satisfy throws an `EngineRequirementError`
+ * (exit 4).
  */
 export async function loadConfig(
   specPath: string,
@@ -51,6 +78,10 @@ export async function loadConfig(
     envRef?: (name: string) => string;
     /** Environment used for config interpolation. Defaults to process.env. */
     env?: Record<string, string | undefined>;
+    /** Do not enforce `requires.cairntrace` (doctor and validate report it). */
+    skipRequires?: boolean;
+    /** Exporter late binding: no env VALUE is substituted (see EnvLateBinding). */
+    late?: EnvLateBinding;
   },
 ): Promise<LoadedConfig | undefined> {
   let configPath: string | undefined;
@@ -70,119 +101,32 @@ export async function loadConfig(
 
   if (!configPath) return undefined;
 
-  const text = await readFile(configPath, "utf8");
-  const raw = parseConfigText(text, {
+  const result = await composeConfigFile({
     configPath,
     ...(opts?.envRef ? { envRef: opts.envRef } : {}),
     ...(opts?.env ? { env: opts.env } : {}),
+    ...(opts?.late ? { late: opts.late } : {}),
   });
-  const config = ConfigSchema.parse(raw);
-  return { config, path: configPath };
-}
-
-const CONFIG_DIR_TOKEN = "${config.dir}";
-
-/**
- * Turn raw `cairntrace.config.yml` TEXT into the plain object the schema
- * validates. Every config reader (loadConfig, `cairn config validate`) should
- * go through this so they agree on what a config means:
- *   1. `${env.X}` / `${env.X:-default}` → the invocation environment
- *      (text substitution, as before);
- *   2. YAML parse with merge keys enabled, so `<<: *anchor` can share a
- *      `vars:` map between environments;
- *   3. `${config.dir}` → the directory that holds the config file, inserted
- *      into the PARSED strings. A directory name with YAML-significant
- *      characters (` #`, `: `, quotes, backslashes) can therefore never
- *      truncate or break the config, quoted or not, block or flow style.
- */
-export function parseConfigText(
-  text: string,
-  opts: {
-    /** Absolute path of the config file the text came from. */
-    configPath: string;
-    envRef?: (name: string) => string;
-    env?: Record<string, string | undefined>;
-  },
-): unknown {
-  if (!text.includes(CONFIG_DIR_TOKEN)) {
-    return parseYaml(substituteEnv(text, opts.envRef, opts.env), {
-      merge: true,
-    });
-  }
-  // Swap the placeholder for a YAML-inert token (letters/underscores only, so
-  // it is a valid plain scalar anywhere), parse, then put the real directory
-  // into the resulting strings. The swap runs before env substitution so an
-  // env VALUE that happens to contain `${config.dir}` stays literal.
-  const sentinel = uniqueSentinel(text);
-  const configDir = dirname(opts.configPath);
-  const parsed: unknown = parseYaml(
-    substituteEnv(
-      text.replaceAll(CONFIG_DIR_TOKEN, () => sentinel),
-      opts.envRef,
-      opts.env,
-    ),
-    { merge: true },
-  );
-  return replaceInStrings(parsed, sentinel, configDir);
-}
-
-function uniqueSentinel(text: string): string {
-  let sentinel = "__CAIRNTRACE_CONFIG_DIR__";
-  while (text.includes(sentinel)) sentinel = `_${sentinel}_`;
-  return sentinel;
-}
-
-/** Deep-copy `value`, replacing `token` in every string (keys included). */
-function replaceInStrings(
-  value: unknown,
-  token: string,
-  replacement: string,
-): unknown {
-  if (typeof value === "string") {
-    return value.includes(token)
-      ? value.replaceAll(token, () => replacement)
-      : value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => replaceInStrings(item, token, replacement));
-  }
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
-      out[key.replaceAll(token, () => replacement)] = replaceInStrings(
-        item,
-        token,
-        replacement,
-      );
+  if (!result.ok) {
+    if (
+      (result.stage === "yaml" || result.stage === "schema") &&
+      result.cause !== undefined
+    ) {
+      throw result.cause;
     }
-    return out;
+    throw new ConfigCompositionError(configPath, result.errors);
   }
-  return value;
-}
-
-/**
- * `${env.X}` / `${env.X:-default}` in config text (also used for a spec's own
- * `vars:` values, so they resolve like config vars).
- */
-export function substituteEnv(
-  text: string,
-  envRef?: (name: string) => string,
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return text.replace(
-    /\$\{env\.(\w+)(?::-([^}]+))?\}/g,
-    (_match, name: string, fallback?: string) => {
-      const value = env[name];
-      // `:-` shell semantics: an empty OR unset env var falls back to the
-      // default. Matches the spec-parser placeholder behavior so config and
-      // specs resolve `${env.X:-default}` identically.
-      if (value === undefined || value === "") {
-        if (fallback !== undefined) return fallback;
-        return envRef ? envRef(name) : "";
-      }
-      return value;
-    },
-  );
+  // F19: a config that needs a newer cairn is refused here, so every reader
+  // (run, verify, MCP, catalog, …) fails the same way (exit 4).
+  if (!opts?.skipRequires) {
+    assertEngineRequirement(result.config, configPath);
+  }
+  return {
+    config: result.config,
+    path: configPath,
+    composition: result.composition,
+    ...(result.lateUnbound ? { lateUnbound: result.lateUnbound } : {}),
+  };
 }
 
 async function exists(path: string): Promise<boolean> {

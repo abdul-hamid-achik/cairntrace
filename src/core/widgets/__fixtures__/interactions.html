@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Interaction flags replica</title>
+    <style>
+      body { font: 14px sans-serif; padding: 16px; }
+      #covered-box { position: relative; width: 240px; height: 60px; margin: 12px 0; }
+      #covered-box button { position: absolute; left: 10px; top: 10px; }
+      /* A modal mask left behind by a dialog: it swallows pointer events. */
+      .p-dialog-mask { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.2); }
+      .suggestions { border: 1px solid #ccc; }
+    </style>
+  </head>
+  <body>
+    <p id="status">idle</p>
+    <div id="covered-box">
+      <button type="button" id="save" onclick="document.getElementById('status').textContent = 'saved'">
+        Save draft
+      </button>
+      <div class="p-dialog-mask"></div>
+    </div>
+    <button type="button" id="plain" onclick="document.getElementById('status').textContent = 'plain clicked'">
+      Plain
+    </button>
+    <button type="button" id="disabled" disabled>Disabled</button>
+
+    <!-- An address field whose keydown / focus opens a suggestions overlay. -->
+    <label>Address line 1 <input id="address" type="text" /></label>
+    <div id="overlay" class="suggestions" hidden>Suggestions…</div>
+
+    <script>
+      window.__events = [];
+      const address = document.getElementById("address");
+      const overlay = document.getElementById("overlay");
+      for (const type of ["focus", "keydown", "input", "change"]) {
+        address.addEventListener(type, () => window.__events.push("address:" + type));
+      }
+      address.addEventListener("focus", () => (overlay.hidden = false));
+      address.addEventListener("keydown", () => (overlay.hidden = false));
+    </script>
+  </body>
+</html>

@@ -91,6 +91,129 @@ loader[LOAD] = function (/** @type {string} */ request, ...rest) {
 const { registerIpc } = require("../ipc");
 
 const RESTORED_RUN = "2026-09-01T11-00-00-000Z_checkout_d4e5f6";
+
+// what the fake cairn answers for the wave 6 commands
+const SUITES_DOC = {
+  $schema: "urn:cairntrace.dev:suites:v1",
+  version: "1",
+  project: "demo",
+  root: "/proj",
+  suites: [
+    {
+      name: "smoke",
+      description: "fast checks",
+      bail: true,
+      envs: [
+        {
+          env: "local",
+          specs: ["flows/demo.yml"],
+          before: 1,
+          after: 1,
+          vars: ["PORT"],
+        },
+        {
+          env: "prod",
+          specs: [],
+          problem: "requires.env rules prod out",
+          before: 0,
+          after: 0,
+        },
+      ],
+    },
+  ],
+  warnings: [],
+};
+const CONFIG_VARS_DOC = {
+  $schema: "urn:cairntrace.dev:config-vars:v1",
+  version: "1",
+  ok: true,
+  path: "/proj/cairntrace.config.yml",
+  files: ["cairntrace.config.yml"],
+  environments: ["local"],
+  totals: {
+    vars: 2,
+    unused: 1,
+    sameInAllEnvironments: 2,
+    differing: 0,
+    sameWhereDefined: 0,
+  },
+  vars: [
+    {
+      name: "apiUrl",
+      kind: "string",
+      values: {
+        local: { value: "http://localhost:3000", scope: "vars", at: "c.yml:3" },
+      },
+      definedAt: [{ scope: "vars", at: "c.yml:3" }],
+      overriddenBy: [],
+      usedBy: [{ kind: "spec", name: "demo", file: "flows/demo.yml" }],
+    },
+    {
+      name: "dbPassword",
+      kind: "string",
+      values: { local: { value: "hunter2", scope: "vars", at: "c.yml:4" } },
+      definedAt: [{ scope: "vars", at: "c.yml:4" }],
+      overriddenBy: [],
+      usedBy: [],
+      unused: true,
+    },
+  ],
+  findings: [],
+};
+const ORPHANS_DOC = {
+  $schema: "urn:cairntrace.dev:doctor-orphans:v1",
+  version: "1",
+  ok: false,
+  exitCode: 1,
+  orphans: [
+    {
+      session: "cairn-orphan-1",
+      backend: "agent-browser",
+      invocationId: "inv-gone",
+      ownerPid: 99999,
+      startedAt: "2026-10-03T09:00:00.000Z",
+      processes: [{ pid: 4321, command: "chrome --headless" }],
+    },
+  ],
+  staleEntriesRemoved: 0,
+  liveSessions: 0,
+  killRequested: false,
+  killed: 0,
+  remaining: [],
+};
+const ORPHANS_KILLED_DOC = {
+  ...ORPHANS_DOC,
+  ok: true,
+  exitCode: 0,
+  killRequested: true,
+  killed: 1,
+};
+const RESTART_DOC = {
+  $schema: "urn:cairntrace.dev:services-restart:v1",
+  version: "1",
+  ok: true,
+  exitCode: 0,
+  session: "demo-local",
+  windows: [
+    { window: "web", ok: true, alreadyStopped: false, durationMs: 900 },
+  ],
+  events: [],
+  durationMs: 950,
+  warnings: [],
+};
+const LOGS_DOC = {
+  $schema: "urn:cairntrace.dev:services-logs:v1",
+  version: "1",
+  ok: true,
+  exitCode: 0,
+  session: "demo-local",
+  window: "web",
+  lines: ["listening on :3000", "db url postgres://app:topsecret@db/app"],
+  totalLines: 2,
+  sinceRestart: { requested: true, found: true },
+  durationMs: 20,
+  warnings: [],
+};
 const SPEC = "intent: demo\nsteps:\n  - open: /\noutcomes: []\n";
 
 /** @type {Array<() => void>} */
@@ -151,6 +274,15 @@ function setup() {
       'if [ "$1" = "run" ]; then echo "$@" > "$here/ran.txt"; fi',
       // a run of a spec named *slow* stays up until it is cancelled
       'if [ "$1" = "run" ]; then case "$*" in *slow*) sleep 20;; esac; fi',
+      // *graceful*: records the cancel signal; on SIGINT it takes 3s to
+      // finish (a delegated cairn waiting for its runner), past the 2s a
+      // SIGKILL escalation would allow
+      'if [ "$1" = "run" ]; then case "$*" in *graceful*)',
+      "  trap 'echo INT > \"$here/signal.txt\"; sleep 3; exit 130' INT",
+      "  trap 'echo TERM > \"$here/signal.txt\"; exit 143' TERM",
+      '  echo ready > "$here/graceful-ready.txt"',
+      "  n=0; while [ $n -lt 300 ]; do sleep 0.1; n=$((n+1)); done;;",
+      "esac; fi",
       'if [ "$1" = "spec" ] && [ "$2" = "heal" ]; then echo "$@" > "$here/healed.txt"; fi',
       'if [ "$1" = "clean" ]; then echo "$@" > "$here/cleaned.txt"; fi',
       // authoring: one argv entry per line, so a joined flag stays one entry
@@ -166,12 +298,29 @@ function setup() {
       "fi",
       'if [ "$1" = "services" ]; then printf "%s\\n" "$@" >> "$here/services.txt"; fi',
       'if [ "$1" = "services" ] && [ "$2" = "status" ]; then',
-      '  echo \'{"hasServices":true,"lock":{"state":"held","path":"/locks/demo.local.lock.json","ageSeconds":120,"lock":{"version":1,"owner":"services-up","project":"demo","env":"local","configPath":"/p/c.yml","startedAt":"2026-10-02T11:58:00.000Z","pid":77,"by":"cli"}}}\'',
+      '  echo \'{"hasServices":true,"lock":{"state":"held","path":"/locks/demo.local.lock.json","ageSeconds":120,"lock":{"version":1,"owner":"services-up","project":"demo","env":"local","configPath":"/p/c.yml","startedAt":"2026-10-02T11:58:00.000Z","pid":77,"by":"cli"}},"tmux":{"configured":true,"sessionExists":true,"session":"demo-local","windows":[{"name":"web","healthy":true,"paneTail":"TOKEN=hunter2"},{"name":"worker","healthy":false}]},"tunnels":[{"name":"db","state":"ready","running":true,"pid":4,"restarts":0}],"provisioner":{"exports":["OPS_HOST"]},"docker":{"configured":false,"running":false},"seed":{"configured":false,"expired":true},"errors":[]}\'',
       "  exit 0",
+      "fi",
+      // wave 6: restart / logs / suites / config vars / orphans read their
+      // answers from files next to the binary, so a test sets the scene
+      'if [ "$1" = "services" ] && [ "$2" = "restart" ]; then cat "$here/services-restart.json"; exit $(cat "$here/restart.exit" 2>/dev/null || echo 0); fi',
+      'if [ "$1" = "services" ] && [ "$2" = "logs" ]; then cat "$here/services-logs.json"; exit 0; fi',
+      'if [ "$1" = "suites" ]; then printf "%s\\n" "$@" > "$here/suites.txt"; cat "$here/suites.json"; exit 0; fi',
+      'if [ "$1" = "config" ] && [ "$2" = "vars" ]; then printf "%s\\n" "$@" > "$here/config-vars.txt"; cat "$here/config-vars.json"; exit 0; fi',
+      'if [ "$1" = "doctor" ] && [ "$2" = "--orphans" ]; then',
+      '  printf "%s\\n" "$@" >> "$here/doctor.txt"',
+      '  case " $* " in *" --kill "*) cat "$here/orphans-killed.json"; exit 0;; esac',
+      '  cat "$here/orphans.json"; exit 1',
       "fi",
       "echo '{}'",
     ].join("\n"),
   );
+  write(bin, "suites.json", JSON.stringify(SUITES_DOC));
+  write(bin, "config-vars.json", JSON.stringify(CONFIG_VARS_DOC));
+  write(bin, "orphans.json", JSON.stringify(ORPHANS_DOC));
+  write(bin, "orphans-killed.json", JSON.stringify(ORPHANS_KILLED_DOC));
+  write(bin, "services-restart.json", JSON.stringify(RESTART_DOC));
+  write(bin, "services-logs.json", JSON.stringify(LOGS_DOC));
   const launcher = script(
     path.join(bin, "launcher.sh"),
     'echo "$@" > "$(cd "$(dirname "$0")" && pwd)/launched.txt"',
@@ -191,12 +340,15 @@ function setup() {
   const sent = [];
   handlers.clear();
   const fixturesLedgerDir = path.join(base, "fixture-ledgers");
+  const runLockDir = path.join(base, "run-locks");
+  fs.mkdirSync(runLockDir, { recursive: true });
   const handle = registerIpc({
     settingsFile,
     repoRoot: path.join(base, "no-repo"),
     getWindow: () => null,
     send: (channel, payload) => sent.push([channel, payload]),
     fixturesLedgerDir,
+    runLockDir,
   });
   shutdowns.push(handle.shutdown);
   /**
@@ -223,6 +375,7 @@ function setup() {
     call,
     settings,
     fixturesLedgerDir,
+    runLockDir,
     shutdown: handle.shutdown,
   };
 }
@@ -242,6 +395,66 @@ async function waitForSent(sent, channel, timeoutMs = 8000) {
   }
   assert.fail(`${channel} was never sent`);
 }
+
+describe("ipc: Live Cancel of a delegated run (M1)", () => {
+  const CONFIG = [
+    "version: 1",
+    "environments:",
+    "  local: { baseUrl: http://demo.example.test }",
+    "  remote:",
+    "    baseUrl: http://demo.example.test",
+    "    services: false",
+    "    runner: { command: [remote-runner], cancelGraceMs: 1000 }",
+    "",
+  ].join("\n");
+
+  /**
+   * @param {ReturnType<typeof setup>} h
+   * @param {string} env
+   */
+  async function cancelGraceful(h, env) {
+    write(h.project, "cairntrace.config.yml", CONFIG);
+    const spec = write(h.project, "flows/graceful.yml", SPEC);
+    const run = await h.call("run:start", {
+      specs: [spec],
+      overrides: { env },
+    });
+    assert.equal(run.ok, true, run.error);
+    const ready = path.join(h.bin, "graceful-ready.txt");
+    const deadline = Date.now() + 8000;
+    while (!fs.existsSync(ready) && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    const cancel = await h.call("run:cancel", run.data.token);
+    assert.equal(cancel.ok, true, cancel.error);
+    const done = await waitForSent(h.sent, "run:done", 15_000);
+    return {
+      cancel: cancel.data,
+      done,
+      signal: fs.readFileSync(path.join(h.bin, "signal.txt"), "utf8").trim(),
+    };
+  }
+
+  it("sends SIGINT and does not SIGKILL it while cairn cancels its runner", async () => {
+    const h = setup();
+    const { cancel, done, signal } = await cancelGraceful(h, "remote");
+    assert.deepEqual(cancel, {
+      cancelled: true,
+      signal: "SIGINT",
+      delegated: true,
+    });
+    assert.equal(signal, "INT");
+    // It finished its 3s cancel and exited on its own: no SIGKILL at 2s.
+    assert.equal(done.exitCode, 130);
+  });
+
+  it("keeps SIGTERM (then SIGKILL) for a run that is not delegated", async () => {
+    const h = setup();
+    const { cancel, done, signal } = await cancelGraceful(h, "local");
+    assert.deepEqual(cancel, { cancelled: true });
+    assert.equal(signal, "TERM");
+    assert.equal(done.exitCode, 143);
+  });
+});
 
 describe("ipc: renderer-named project directories", () => {
   it("refuses a project the user never opened", async () => {
@@ -879,6 +1092,92 @@ describe("ipc: config registries and the fixture ledger (wave 4)", () => {
     const refused = await h.call("fixtures:ledger", h.outside);
     assert.equal(refused.ok, false);
     assert.match(refused.error, /unknown project/);
+  });
+});
+
+describe("ipc: wave-5 evidence and registries", () => {
+  const primitives = require("./primitives-fixture");
+  const PLANTED = primitives.SECRET;
+
+  it("serves widget and request evidence summarized, a planted credential never", async () => {
+    const h = setup();
+    primitives.makeRunA(h.runsRoot);
+    const result = await h.call("run:detail", primitives.RUN_A, h.project);
+    assert.equal(result.ok, true, result.error);
+    const detail = result.data;
+    assert.deepEqual(
+      detail.widgets.map((/** @type {any} */ entry) => entry.path),
+      [
+        "widgets/002_profile_form.json",
+        "widgets/006_pick_row_i1.json",
+        "widgets/006_pick_row_i2.json",
+      ],
+    );
+    assert.equal(
+      detail.requests.find(
+        (/** @type {any} */ entry) => entry.assign === "denied",
+      ).matrix.mismatched,
+      1,
+    );
+    // run.json keeps the F14 / F15 fields for the renderer
+    assert.equal(
+      detail.steps.find((/** @type {any} */ step) => step.id === "submit_retry")
+        .retries.length,
+      1,
+    );
+    assert.ok(!JSON.stringify(detail).includes(PLANTED));
+  });
+
+  it("sends the widget registry and auth blocks by name, never their values", async () => {
+    const h = setup();
+    write(
+      h.project,
+      "cairntrace.config.yml",
+      [
+        "project: profiles",
+        "browser:",
+        "  widgets:",
+        "    - use: pills",
+        "    - file: ./drivers/upper.js",
+        "  appHandle:",
+        "    store: window.appStore",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:4567",
+        "    auth:",
+        "      login:",
+        "        url: /api/login",
+        `        headers: { x-api-key: ${PLANTED} }`,
+        "        body:",
+        "          email: ${secrets.E2E_EMAIL}",
+        `          password: ${PLANTED}`,
+        "      hydrate:",
+        "        eval: window.__signedIn = true",
+        "",
+      ].join("\n"),
+    );
+    const result = await h.call("project:inspect", h.project);
+    assert.equal(result.ok, true, result.error);
+    const config = result.data.config;
+    assert.ok(!JSON.stringify(result.data).includes(PLANTED));
+    assert.deepEqual(config.registries.auth, [
+      {
+        env: "local",
+        login: { method: "POST", path: "/api/login" },
+        alreadyAuthenticated: null,
+        after: [],
+        hydrate: "inline script",
+        secrets: ["E2E_EMAIL"],
+      },
+    ]);
+    assert.equal(config.registries.widgets.declared, true);
+    assert.deepEqual(config.registries.widgets.appHandles, ["store"]);
+    assert.deepEqual(
+      config.registries.widgets.drivers
+        .slice(0, 2)
+        .map((/** @type {any} */ driver) => driver.name),
+      ["pills", "upper.js"],
+    );
   });
 });
 
@@ -2256,5 +2555,653 @@ describe("ipc: authoring ↔ the real CLI", () => {
     // The draft moved: the journal lists its export as missing.
     const session = await h.call("session:get", { sessionId: SESSION });
     assert.deepEqual(session.data.exportedMissing, [target]);
+  });
+});
+
+// ── wave 6: run lock, suites, config vars, orphans, service windows ─────────
+
+/**
+ * A project config that takes the run lock, and a lock file for it.
+ * @param {ReturnType<typeof setup>} h
+ * @param {{ pid?: number, scope?: "config" | "project", config?: string }} [options]
+ */
+function holdRunLock(h, options = {}) {
+  const configPath = write(
+    h.project,
+    "cairntrace.config.yml",
+    options.config ?? "project: demo\nrun:\n  lock: true\n",
+  );
+  write(
+    h.runLockDir,
+    "demo.0123456789abcdef.run.lock.json",
+    JSON.stringify({
+      version: 1,
+      token: "t",
+      pid: options.pid ?? process.pid,
+      startedAt: new Date(Date.now() - 1000).toISOString(),
+      argv: ["run", "flows/other.yml"],
+      cwd: h.project,
+      scope: options.scope ?? "config",
+      key:
+        options.scope === "project"
+          ? "project:demo"
+          : fs.realpathSync(configPath),
+      invocationId: "2026-10-03T10-00-00-000Z_1_abcdef",
+      origin: "cli",
+      env: "local",
+    }),
+  );
+  return configPath;
+}
+
+describe("ipc: the config run lock", () => {
+  it("blocks every run, heal and services action while a live owner holds it, then lifts", async () => {
+    const h = setup();
+    holdRunLock(h);
+    const locks = await h.call("project:locks");
+    assert.equal(locks.ok, true, locks.error);
+    assert.equal(locks.data.runLock.configured, true);
+    assert.equal(locks.data.runLock.held.length, 1);
+    assert.equal(locks.data.active[0].kind, "run-lock");
+    assert.equal(locks.data.active[0].pid, process.pid);
+    assert.match(locks.data.active[0].owner, /cli, invocation .*, env "local"/);
+    assert.equal(locks.data.active[0].command, "cairn run flows/other.yml");
+
+    const spec = path.join(h.project, "flows", "demo.yml");
+    const refused = await h.call("run:start", { specs: [spec] });
+    assert.equal(refused.ok, false);
+    assert.match(
+      refused.error,
+      /a cairn run holds this project's run lock \(pid \d+ \(cli, invocation .*, env "local"\), running for \ds: cairn run flows\/other\.yml\) — Run is disabled until it finishes/,
+    );
+    const heal = await h.call("spec:heal", { spec });
+    assert.equal(heal.ok, false);
+    assert.match(heal.error, /run lock.*Heal is disabled/);
+    const up = await h.call("services:up", { env: "local" });
+    assert.equal(up.ok, false);
+    assert.match(up.error, /run lock.*Services up is disabled/);
+    const restart = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(restart.ok, false);
+    assert.match(restart.error, /run lock.*Service restart is disabled/);
+    assert.equal(fs.existsSync(path.join(h.bin, "ran.txt")), false);
+    assert.equal(dialogCalls.length, 0, "refused before any dialog");
+
+    fs.rmSync(path.join(h.runLockDir, "demo.0123456789abcdef.run.lock.json"));
+    const started = await h.call("run:start", { specs: [spec] });
+    assert.equal(started.ok, true, started.error);
+    await waitForSent(h.sent, "run:done");
+  });
+
+  it("does not count a dead owner's lock (cairn reclaims it), or a lock of another config", async () => {
+    const h = setup();
+    holdRunLock(h, { pid: 2_147_000_000 });
+    const dead = await h.call("project:locks");
+    assert.equal(dead.data.runLock.held.length, 0);
+    assert.equal(dead.data.active.length, 0);
+    fs.rmSync(path.join(h.runLockDir, "demo.0123456789abcdef.run.lock.json"));
+    write(
+      h.runLockDir,
+      "other.fedcba9876543210.run.lock.json",
+      JSON.stringify({
+        version: 1,
+        token: "t",
+        pid: process.pid,
+        startedAt: new Date(Date.now() - 1000).toISOString(),
+        argv: [],
+        cwd: "/elsewhere",
+        scope: "config",
+        key: "/elsewhere/cairntrace.config.yml",
+      }),
+    );
+    const other = await h.call("project:locks");
+    assert.equal(other.data.active.length, 0);
+  });
+
+  it("matches a project-scoped lock by the project name", async () => {
+    const h = setup();
+    holdRunLock(h, {
+      scope: "project",
+      config: "project: demo\nrun:\n  lock:\n    scope: project\n",
+    });
+    const locks = await h.call("project:locks");
+    assert.equal(locks.data.runLock.held[0].scope, "project");
+    assert.equal(locks.data.active.length, 1);
+  });
+
+  it("ignores lock files for a config that takes no run lock", async () => {
+    const h = setup();
+    const configPath = write(
+      h.project,
+      "cairntrace.config.yml",
+      "project: demo\n",
+    );
+    write(
+      h.runLockDir,
+      "demo.0123456789abcdef.run.lock.json",
+      JSON.stringify({
+        version: 1,
+        token: "t",
+        pid: process.pid,
+        startedAt: new Date(Date.now() - 1000).toISOString(),
+        argv: [],
+        cwd: h.project,
+        scope: "config",
+        key: fs.realpathSync(configPath),
+      }),
+    );
+    const locks = await h.call("project:locks");
+    assert.equal(locks.data.runLock.configured, false);
+    assert.equal(locks.data.active.length, 0);
+  });
+
+  it("keeps the suite lock files and the run lock together", async () => {
+    const h = setup();
+    holdRunLock(h);
+    await h.call("project:launch-update", {
+      launchTemplate: null,
+      lockFiles: [".suite.lock"],
+    });
+    write(h.project, ".suite.lock", JSON.stringify({ owner: "nightly" }));
+    const locks = await h.call("project:locks");
+    assert.deepEqual(
+      locks.data.active.map((/** @type {any} */ entry) => entry.kind ?? "file"),
+      ["file", "run-lock"],
+    );
+    const spec = path.join(h.project, "flows", "demo.yml");
+    const refused = await h.call("run:start", { specs: [spec] });
+    assert.match(refused.error, /suite in progress.*nightly/);
+  });
+});
+
+describe("ipc: suites", () => {
+  it("lists suites with the environment as one flag, and normalizes the document", async () => {
+    const h = setup();
+    const result = await h.call("suites:list", { env: "local" });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, true);
+    assert.equal(result.data.suites.suites[0].name, "smoke");
+    assert.equal(
+      result.data.suites.suites[0].envs[1].problem,
+      "requires.env rules prod out",
+    );
+    const argv = fs
+      .readFileSync(path.join(h.bin, "suites.txt"), "utf8")
+      .trim()
+      .split("\n");
+    assert.deepEqual(argv, ["suites", "list", "--env=local", "--json"]);
+    const bad = await h.call("suites:list", { env: "--all" });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /invalid environment name/);
+  });
+
+  it("degrades to a message when cairn answers without a suites document", async () => {
+    const h = setup();
+    fs.writeFileSync(path.join(h.bin, "suites.json"), "not json at all");
+    const result = await h.call("suites:list", {});
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.suites, null);
+  });
+
+  it("starts a suite as one --suite=<name> entry through the run path", async () => {
+    const h = setup();
+    const started = await h.call("run:start", {
+      suite: "smoke",
+      overrides: { env: "local" },
+    });
+    assert.equal(started.ok, true, started.error);
+    const begun = await waitForSent(h.sent, "run:started");
+    assert.equal(begun.suite, "smoke");
+    assert.deepEqual(begun.specs, [path.resolve("/proj", "flows/demo.yml")]);
+    const done = await waitForSent(h.sent, "run:done");
+    assert.equal(done.ok, true);
+    const argv = fs.readFileSync(path.join(h.bin, "ran.txt"), "utf8").trim();
+    assert.match(argv, /^run --suite=smoke --env local /);
+    assert.ok(!argv.includes(".yml"), "no spec paths next to --suite");
+    // the CLI is asked for the suite's resolution on that environment first
+    assert.deepEqual(
+      fs
+        .readFileSync(path.join(h.bin, "suites.txt"), "utf8")
+        .trim()
+        .split("\n"),
+      ["suites", "list", "--env=local", "--json"],
+    );
+  });
+
+  it("refuses an unknown suite, an environment its requires rule out, spec + suite, and a bad name", async () => {
+    const h = setup();
+    const spec = path.join(h.project, "flows", "demo.yml");
+    const unknown = await h.call("run:start", { suite: "nightly" });
+    assert.equal(unknown.ok, false);
+    assert.match(unknown.error, /unknown suite: nightly/);
+    const ruledOut = await h.call("run:start", {
+      suite: "smoke",
+      overrides: { env: "prod" },
+    });
+    assert.equal(ruledOut.ok, false);
+    assert.match(
+      ruledOut.error,
+      /suite smoke cannot run on prod: requires\.env rules prod out/,
+    );
+    const both = await h.call("run:start", { suite: "smoke", specs: [spec] });
+    assert.equal(both.ok, false);
+    assert.match(both.error, /specs or one suite, not both/);
+    for (const suite of ["--env=prod", "-x"]) {
+      const flag = await h.call("run:start", { suite });
+      assert.equal(flag.ok, false, suite);
+      assert.match(flag.error, /invalid suite name/);
+    }
+    assert.equal(fs.existsSync(path.join(h.bin, "ran.txt")), false);
+  });
+
+  it("refuses a suite while a launch template is set (it runs one spec at a time)", async () => {
+    const h = setup();
+    fake.dialogResponse = 0;
+    await h.call("project:launch-update", {
+      launchTemplate: `${h.launcher} {spec}`,
+      lockFiles: [],
+    });
+    const refused = await h.call("run:start", { suite: "smoke" });
+    assert.equal(refused.ok, false);
+    assert.match(
+      refused.error,
+      /launch template, which takes one spec at a time/,
+    );
+    assert.equal(fs.existsSync(path.join(h.bin, "ran.txt")), false);
+  });
+
+  it("says so when cairn has no suites command", async () => {
+    const h = setup();
+    script(h.cairn, "echo \"error: unknown command 'suites'\" >&2; exit 1");
+    const refused = await h.call("run:start", { suite: "smoke" });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /this cairn has no `cairn suites list`/);
+    const listed = await h.call("suites:list", {});
+    assert.equal(listed.data.unsupported, true);
+  });
+});
+
+describe("ipc: config vars", () => {
+  it("reads vars with the environment and unused flags as argv, values masked", async () => {
+    const h = setup();
+    const result = await h.call("config:vars", { env: "local", unused: true });
+    assert.equal(result.ok, true, result.error);
+    const dump = JSON.stringify(result.data);
+    assert.ok(
+      !dump.includes("hunter2"),
+      "a credential-named var never leaves main",
+    );
+    const password = result.data.vars.vars.find(
+      (/** @type {any} */ row) => row.name === "dbPassword",
+    );
+    assert.equal(password.values[0].masked, true);
+    assert.equal(password.unused, true);
+    const argv = fs
+      .readFileSync(path.join(h.bin, "config-vars.txt"), "utf8")
+      .trim()
+      .split("\n");
+    assert.deepEqual(argv, [
+      "config",
+      "vars",
+      "--env=local",
+      "--unused",
+      "--json",
+    ]);
+    assert.equal((await h.call("config:vars", { env: "--x" })).ok, false);
+  });
+
+  it("degrades when the document is missing", async () => {
+    const h = setup();
+    fs.writeFileSync(path.join(h.bin, "config-vars.json"), "");
+    const result = await h.call("config:vars", {});
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.vars, null);
+  });
+});
+
+describe("ipc: orphan sessions", () => {
+  it("lists them (exit 1 is a finding, not a failure)", async () => {
+    const h = setup();
+    const result = await h.call("orphans:list");
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, true);
+    assert.equal(result.data.exitCode, 1);
+    assert.equal(result.data.orphans.orphans[0].session, "cairn-orphan-1");
+    assert.deepEqual(
+      fs
+        .readFileSync(path.join(h.bin, "doctor.txt"), "utf8")
+        .trim()
+        .split("\n"),
+      ["doctor", "--orphans", "--json"],
+    );
+  });
+
+  it("kills only after a native confirmation that lists the sessions and pids", async () => {
+    const h = setup();
+    fake.dialogResponse = 1;
+    const cancelled = await h.call("orphans:kill");
+    assert.equal(cancelled.ok, true, cancelled.error);
+    assert.equal(cancelled.data.cancelled, true);
+    assert.equal(dialogCalls.length, 1);
+    assert.match(
+      dialogCalls[0].message,
+      /End 1 browser process\(es\) of 1 orphaned session\(s\)\?/,
+    );
+    assert.match(dialogCalls[0].detail, /cairn-orphan-1 \(agent-browser\)/);
+    assert.match(dialogCalls[0].detail, /pid 4321 {2}chrome --headless/);
+    assert.ok(
+      !fs
+        .readFileSync(path.join(h.bin, "doctor.txt"), "utf8")
+        .includes("--kill"),
+      "cancelled: the CLI never saw --kill",
+    );
+
+    fake.dialogResponse = 0;
+    dialogCalls.length = 0;
+    const killed = await h.call("orphans:kill");
+    assert.equal(killed.ok, true, killed.error);
+    assert.equal(killed.data.cancelled, false);
+    assert.equal(killed.data.ok, true);
+    assert.equal(killed.data.orphans.killed, 1);
+    const calls = fs.readFileSync(path.join(h.bin, "doctor.txt"), "utf8");
+    // Exactly the confirmed sessions and pids: nothing listed later is hit.
+    assert.match(
+      calls,
+      /doctor\n--orphans\n--kill\n--yes\n--only=cairn-orphan-1,4321\n--json/,
+    );
+  });
+
+  it("does not ask when there is nothing to end", async () => {
+    const h = setup();
+    fs.writeFileSync(
+      path.join(h.bin, "orphans.json"),
+      JSON.stringify({ ...ORPHANS_DOC, ok: true, exitCode: 0, orphans: [] }),
+    );
+    const result = await h.call("orphans:kill");
+    assert.equal(result.data.nothing, true);
+    assert.equal(dialogCalls.length, 0);
+  });
+});
+
+describe("ipc: service windows", () => {
+  it("reads windows, tunnels and the provisioner's export names, never pane text", async () => {
+    const h = setup();
+    const result = await h.call("services:windows", { env: "local" });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, true);
+    assert.deepEqual(
+      result.data.status.tmux.windows.map((/** @type {any} */ row) => row.name),
+      ["web", "worker"],
+    );
+    assert.deepEqual(result.data.status.provisioner, { exports: ["OPS_HOST"] });
+    assert.equal(result.data.status.tunnels[0].name, "db");
+    assert.ok(!JSON.stringify(result.data.status).includes("hunter2"));
+    assert.equal(result.data.lock.state, "held");
+    assert.equal((await h.call("services:windows", { env: "--x" })).ok, false);
+  });
+
+  it("restarts one window after a native confirmation naming it and the command", async () => {
+    const h = setup();
+    fake.dialogResponse = 1;
+    const cancelled = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(cancelled.ok, true, cancelled.error);
+    assert.equal(cancelled.data.cancelled, true);
+    assert.match(dialogCalls[0].message, /Restart "web" in "local"\?/);
+    assert.match(dialogCalls[0].detail, /services restart web --env=local/);
+    assert.ok(
+      !fs
+        .readFileSync(path.join(h.bin, "services.txt"), "utf8")
+        .includes("restart\nweb"),
+      "cancelled: nothing was restarted",
+    );
+
+    fake.dialogResponse = 0;
+    const restarted = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(restarted.ok, true, restarted.error);
+    assert.equal(restarted.data.ok, true);
+    assert.equal(restarted.data.restart.windows[0].window, "web");
+    assert.match(
+      fs.readFileSync(path.join(h.bin, "services.txt"), "utf8"),
+      /restart\nweb\n--env=local\n--json/,
+    );
+  });
+
+  it("refuses a window the CLI's own status does not list, and a name that is not one, before any dialog", async () => {
+    const h = setup();
+    const unknown = await h.call("services:restart", {
+      env: "local",
+      window: "nope",
+    });
+    assert.equal(unknown.ok, false);
+    assert.match(
+      unknown.error,
+      /"nope" is not a service window of local \(windows: web, worker\)/,
+    );
+    for (const window of ["--force", "a b", ""]) {
+      const bad = await h.call("services:restart", { env: "local", window });
+      assert.equal(bad.ok, false, JSON.stringify(window));
+      assert.match(bad.error, /invalid service window name/);
+    }
+    assert.equal(dialogCalls.length, 0);
+  });
+
+  it("is gated by the suite lock and by a run Studio started on that environment", async () => {
+    const h = setup();
+    await h.call("project:launch-update", {
+      launchTemplate: null,
+      lockFiles: [".suite.lock"],
+    });
+    write(h.project, ".suite.lock", JSON.stringify({ owner: "nightly" }));
+    const locked = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(locked.ok, false);
+    assert.match(
+      locked.error,
+      /suite in progress.*Service restart is disabled/,
+    );
+    fs.rmSync(path.join(h.project, ".suite.lock"));
+
+    const slow = write(h.project, "flows/slow.yml", SPEC);
+    const run = await h.call("run:start", {
+      specs: [slow],
+      overrides: { env: "local" },
+    });
+    assert.equal(run.ok, true, run.error);
+    const busy = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(busy.ok, false);
+    assert.match(
+      busy.error,
+      /a run Studio started is using "local".*before cairn services restart/,
+    );
+    await h.call("run:cancel", run.data.token);
+  });
+
+  it("reports a failed restart with the CLI's own message", async () => {
+    const h = setup();
+    fs.writeFileSync(
+      path.join(h.bin, "services-restart.json"),
+      JSON.stringify({
+        ...RESTART_DOC,
+        ok: false,
+        exitCode: 2,
+        windows: [
+          {
+            window: "web",
+            ok: false,
+            alreadyStopped: false,
+            durationMs: 5,
+            error: "readyOn never matched",
+          },
+        ],
+        error: "web did not become ready",
+      }),
+    );
+    fs.writeFileSync(path.join(h.bin, "restart.exit"), "2");
+    const result = await h.call("services:restart", {
+      env: "local",
+      window: "web",
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, false);
+    assert.equal(result.data.error, "web did not become ready");
+    assert.equal(result.data.exitCode, 2);
+  });
+
+  it("reads a window's log, bounded, masked and read-only", async () => {
+    const h = setup();
+    const result = await h.call("services:logs", {
+      env: "local",
+      window: "web",
+      sinceRestart: true,
+      lines: 99999,
+    });
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.data.ok, true);
+    assert.deepEqual(result.data.logs.lines, [
+      "listening on :3000",
+      "db url postgres://***@db/app",
+    ]);
+    assert.ok(!JSON.stringify(result.data).includes("topsecret"));
+    const argv = fs.readFileSync(path.join(h.bin, "services.txt"), "utf8");
+    assert.match(
+      argv,
+      /logs\nweb\n--env=local\n--since-restart\n--lines=1000\n--json/,
+    );
+    assert.ok(!argv.includes("--follow") && !argv.includes("--wait"));
+    assert.equal(
+      (await h.call("services:logs", { env: "local", window: "-x" })).ok,
+      false,
+    );
+  });
+});
+
+describe("ipc: metrics history", () => {
+  it("reads one spec's metric across the artifact root's runs", async () => {
+    const h = setup();
+    ["2026-10-01", "2026-10-02"].forEach((day, index) => {
+      const dir = path.join(
+        h.runsRoot,
+        `${day}T10-00-00-000Z_demo_aaaa0${index}`,
+      );
+      write(
+        dir,
+        "run.json",
+        JSON.stringify({
+          runId: path.basename(dir),
+          spec: { name: "demo" },
+          status: "passed",
+        }),
+      );
+      write(
+        dir,
+        "diagnostics/metrics.json",
+        JSON.stringify({
+          metrics: [
+            {
+              name: "depth",
+              scope: "spec",
+              delta: (index + 1) * 3,
+              failures: 0,
+            },
+          ],
+        }),
+      );
+    });
+    const result = await h.call("metrics:history", { spec: "demo" });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(
+      result.data.metrics.depth.points.map(
+        (/** @type {any} */ point) => point.value,
+      ),
+      [3, 6],
+    );
+    const empty = await h.call("metrics:history", { spec: "x".repeat(300) });
+    assert.equal(empty.ok, true);
+    assert.equal(empty.data.scanned, 2, "an overlong spec filter is ignored");
+  });
+});
+
+describe("ipc: wave 6 ↔ the real CLI", () => {
+  // The documents Studio normalizes must be the ones the repo's own cairn
+  // prints (a shape drift would otherwise read as "no document").
+  const BIN = path.join(__dirname, "..", "..", "bin", "cairn");
+  const bun = cliLib.which("bun");
+
+  it("reads suites, config vars and the orphan ledger from a real cairn", async (t) => {
+    if (!bun || !fs.existsSync(BIN)) {
+      t.skip("needs bun and the repo's bin/cairn");
+      return;
+    }
+    const h = setup();
+    fs.writeFileSync(
+      path.join(h.base, "userData", "settings.json"),
+      JSON.stringify({ ...h.settings(), cairnBin: BIN }),
+    );
+    write(
+      h.project,
+      "cairntrace.config.yml",
+      [
+        "version: 1",
+        "project: demo",
+        "vars:",
+        "  apiUrl: http://localhost:3000",
+        "  dbPassword: s3cr3t-do-not-show",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:3000",
+        "suites:",
+        "  smoke:",
+        "    description: fast checks",
+        "    specs: [flows/demo.yml]",
+        "",
+      ].join("\n"),
+    );
+    // the orphan ledger lives under $HOME: never read (or tidy) the real one
+    const home = tempDir("cairn-real-home-");
+    const savedHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const suites = await h.call("suites:list", { env: "local" });
+      assert.equal(suites.ok, true, suites.error);
+      assert.ok(suites.data.suites, JSON.stringify(suites.data));
+      assert.equal(suites.data.suites.suites[0].name, "smoke");
+      assert.equal(suites.data.suites.suites[0].envs[0].env, "local");
+
+      const vars = await h.call("config:vars", {});
+      assert.equal(vars.ok, true, vars.error);
+      assert.ok(vars.data.vars, JSON.stringify(vars.data));
+      assert.ok(!JSON.stringify(vars.data).includes("s3cr3t-do-not-show"));
+      const password = vars.data.vars.vars.find(
+        (/** @type {any} */ row) => row.name === "dbPassword",
+      );
+      assert.equal(password.values[0].masked, true);
+      const apiUrl = vars.data.vars.vars.find(
+        (/** @type {any} */ row) => row.name === "apiUrl",
+      );
+      assert.equal(apiUrl.values[0].display, "http://localhost:3000");
+
+      const orphans = await h.call("orphans:list");
+      assert.equal(orphans.ok, true, orphans.error);
+      assert.equal(orphans.data.ok, true, JSON.stringify(orphans.data));
+      assert.deepEqual(orphans.data.orphans.orphans, []);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
   });
 });

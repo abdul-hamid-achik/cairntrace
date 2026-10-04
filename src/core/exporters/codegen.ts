@@ -26,7 +26,9 @@ export type Stmt =
   | { kind: "blank" }
   /** Generic `open ... close` construct: if/braces/call-with-body. */
   | { kind: "block"; open: string; body: Stmt[]; close: string }
-  | { kind: "tryCatch"; body: Stmt[]; errName: string; handler: Stmt[] };
+  | { kind: "tryCatch"; body: Stmt[]; errName: string; handler: Stmt[] }
+  /** `if (c) { … } else { … }` (F14 if/else blocks). */
+  | { kind: "ifElse"; condition: string; body: Stmt[]; otherwise: Stmt[] };
 
 export function raw(code: string): Stmt {
   return { kind: "raw", code };
@@ -48,6 +50,14 @@ export function block(open: string, body: Stmt[], close = "}"): Stmt {
 
 export function iff(condition: string, body: Stmt[]): Stmt {
   return block(`if (${condition}) {`, body);
+}
+
+export function ifElse(
+  condition: string,
+  body: Stmt[],
+  otherwise: Stmt[],
+): Stmt {
+  return { kind: "ifElse", condition, body, otherwise };
 }
 
 export function braces(body: Stmt[]): Stmt {
@@ -89,6 +99,13 @@ function emitInto(stmts: Stmt[], depth: number, out: string[]): void {
         out.push(pad + s.open);
         emitInto(s.body, depth + 1, out);
         out.push(pad + s.close);
+        break;
+      case "ifElse":
+        out.push(`${pad}if (${s.condition}) {`);
+        emitInto(s.body, depth + 1, out);
+        out.push(`${pad}} else {`);
+        emitInto(s.otherwise, depth + 1, out);
+        out.push(`${pad}}`);
         break;
       case "tryCatch":
         out.push(`${pad}try {`);

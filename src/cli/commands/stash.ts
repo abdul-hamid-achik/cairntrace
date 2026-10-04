@@ -81,6 +81,12 @@ export type StashSearchResult = FcheapSearchResult;
 
 /** Default TTL of a PASSED run's auto-stash (`stash.passTtl`). */
 export const DEFAULT_PASS_STASH_TTL = "7d";
+/**
+ * Default TTL of a FAILED run's auto-stash (`stash.failTtl`). Pinned runs
+ * (`cairn pin --stash`) are saved separately without a TTL; `failTtl: never`
+ * opts out.
+ */
+export const DEFAULT_FAIL_STASH_TTL = "90d";
 
 /* ---------------------------------------------------------------------------
  * Stash commands
@@ -157,6 +163,73 @@ export async function readSpecStashTags(runDir: string): Promise<string[]> {
 }
 
 /**
+ * file.cheap's `--meta` rules (internal/stash/metadata.go): at most 32
+ * entries, keys `^[a-z0-9][a-z0-9_.-]{0,63}$`, values at most 256 BYTES with
+ * no control characters (Unicode Cc: C0, DEL, C1), and a few reserved keys
+ * the vault writes itself. One violation makes fcheap refuse the whole save.
+ */
+const FCHEAP_META_MAX_ENTRIES = 32;
+const FCHEAP_META_MAX_VALUE_BYTES = 256;
+const FCHEAP_META_KEY = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
+const FCHEAP_META_RESERVED_KEYS: ReadonlySet<string> = new Set([
+  "source",
+  "indexed",
+  "indexed_files",
+  "secrets_found",
+  "secrets_rules",
+  "source_video",
+  "duration_seconds",
+  "frame_rate",
+]);
+
+/**
+ * Cut `value` to at most `maxBytes` UTF-8 bytes without splitting a code
+ * point (a 4-byte emoji that does not fit is dropped whole).
+ */
+export function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let out = "";
+  let used = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (used + size > maxBytes) break;
+    out += character;
+    used += size;
+  }
+  return out;
+}
+
+/** A `--meta` value fcheap accepts: control characters out, bytes bounded. */
+function cleanMetaValue(value: string): string {
+  return truncateUtf8(
+    // eslint-disable-next-line no-control-regex
+    value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""),
+    FCHEAP_META_MAX_VALUE_BYTES,
+  );
+}
+
+/**
+ * Make `--meta` pairs acceptable to file.cheap: drop keys it rejects (or
+ * reserves), clean and byte-truncate values, drop empty values, keep at most
+ * 32 entries. Metadata is an index aid, never a reason to lose evidence.
+ */
+export function sanitizeStashMeta(
+  meta: Record<string, string> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(meta ?? {})) {
+    if (Object.keys(out).length >= FCHEAP_META_MAX_ENTRIES) break;
+    if (!FCHEAP_META_KEY.test(key) || FCHEAP_META_RESERVED_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof value !== "string") continue;
+    const clean = cleanMetaValue(value);
+    if (clean) out[key] = clean;
+  }
+  return out;
+}
+
+/**
  * Non-secret run identity passed as `fcheap save --meta key=value` (keys
  * file.cheap accepts: `[a-z0-9][a-z0-9_.-]*`, values ≤ 256 bytes).
  */
@@ -169,17 +242,14 @@ export function stashMetaForRun(run: {
 }): Record<string, string> {
   const meta: Record<string, string> = { cairn_version: CAIRN_VERSION };
   const put = (key: string, value: string | undefined): void => {
-    if (!value) return;
-    // eslint-disable-next-line no-control-regex
-    const clean = value.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 200);
-    if (clean) meta[key] = clean;
+    if (value) meta[key] = value;
   };
   put("run_id", run.runId);
   put("status", run.status);
   put("spec", run.spec?.name);
   put("env", run.environment);
   put("backend", run.backend);
-  return meta;
+  return sanitizeStashMeta(meta);
 }
 
 /** run.json fields the stash metadata needs (missing/invalid → {}). */
@@ -722,6 +792,8 @@ export interface StashDirectoryResult {
   fileCount?: number;
   sizeBytes?: number;
   expiresAt?: string;
+  /** fcheap rejected the `--meta` pairs; the stash was saved without them. */
+  metaDropped?: true;
   /** Secret-scanner findings from the save manifest (`custom.secrets_found`). */
   secretsFound?: number;
   secretsRules?: string[];
@@ -818,7 +890,7 @@ async function saveDirectory(
   opts: SaveDirectoryOptions,
 ): Promise<StashDirectoryResult> {
   const tool = opts.tool ?? "cairntrace";
-  const args = [
+  const buildArgs = (meta: Record<string, string>): string[] => [
     "save",
     dir,
     "--tool",
@@ -827,12 +899,30 @@ async function saveDirectory(
     ...(opts.tags ?? []).flatMap((t) => ["--tag", t]),
     ...(opts.source ? ["--source", opts.source] : []),
     ...(opts.ttl ? ["--ttl", opts.ttl] : []),
-    ...Object.entries(opts.meta ?? {}).flatMap(([key, value]) => [
+    ...Object.entries(meta).flatMap(([key, value]) => [
       "--meta",
       `${key}=${value}`,
     ]),
   ];
-  const r = await runFcheap(args, { json: true });
+  const meta = sanitizeStashMeta(opts.meta);
+  let r = await runFcheap(buildArgs(meta), { json: true });
+  let metaDropped: string | undefined;
+  // fcheap validates `--meta` before it saves anything and refuses the whole
+  // save on one bad pair: retry once without it so evidence is never lost to
+  // metadata (the sanitizer makes this a safety net for rule drift).
+  if (
+    !r.ok &&
+    !r.missing &&
+    !r.timedOut &&
+    Object.keys(meta).length > 0 &&
+    r.stdout.trim() === "" &&
+    /\bmetadata\b|--meta\b/i.test(r.stderr)
+  ) {
+    metaDropped = pathFreeMessage(
+      (r.stderr.split(/\r?\n/).find((line) => line.trim()) ?? "").trim(),
+    ).slice(0, 200);
+    r = await runFcheap(buildArgs({}), { json: true });
+  }
   try {
     const receipt = parseFcheapSaveOutput(r.stdout);
     const receiptFields = {
@@ -860,15 +950,26 @@ async function saveDirectory(
         reason: classifyFcheapFailure(r),
       };
     }
-    const warning =
+    const saveWarning =
       receipt.status === "saved_with_failures"
         ? r.stderr ||
           `stash saved with ${receipt.failed?.length ?? 0} failed post-save operation(s)`
         : undefined;
+    const warning = [
+      saveWarning,
+      metaDropped !== undefined
+        ? `run metadata was not saved (fcheap rejected --meta${
+            metaDropped ? `: ${metaDropped}` : ""
+          }); the evidence was saved without it`
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join("; ");
     return {
       ok: true,
       ...receiptFields,
       ...(warning ? { warning } : {}),
+      ...(metaDropped !== undefined ? { metaDropped: true } : {}),
     };
   } catch (error) {
     return {
@@ -1004,7 +1105,10 @@ export function shouldAutoStash(
   return failed && opts.configStash.autoStash === "on-failure";
 }
 
-/** TTL for a run's auto-stash: passTtl/failTtl, then ttl (passes default 7d). */
+/**
+ * TTL for a run's auto-stash: passTtl/failTtl, then ttl, then the default
+ * (passes 7d, failures 90d). `failTtl: never` yields no TTL.
+ */
 export function autoStashTtl(
   status: AutoStashStatus,
   config: Pick<StashConfig, "ttl" | "passTtl" | "failTtl"> | undefined,
@@ -1012,7 +1116,8 @@ export function autoStashTtl(
   if (status === "passed") {
     return config?.passTtl ?? config?.ttl ?? DEFAULT_PASS_STASH_TTL;
   }
-  return config?.failTtl ?? config?.ttl;
+  const ttl = config?.failTtl ?? config?.ttl ?? DEFAULT_FAIL_STASH_TTL;
+  return ttl === "never" ? undefined : ttl;
 }
 
 /**
@@ -1152,6 +1257,7 @@ export async function writeStashReceipt(
     ...(result.secretsFound !== undefined
       ? { secretsFound: result.secretsFound }
       : {}),
+    ...(result.metaDropped ? { metaDropped: true } : {}),
   });
   const redactor = stringOnlyRedactor();
   if (redactor.text(receipt.stashId) !== receipt.stashId) {
@@ -1173,6 +1279,7 @@ export async function writeStashReceipt(
     ...(receipt.secretsFound !== undefined
       ? { secretsFound: receipt.secretsFound }
       : {}),
+    ...(receipt.metaDropped ? { metaDropped: true } : {}),
     ...(receipt.ttl ? { ttl: receipt.ttl } : {}),
     ...(receipt.expiresAt ? { expiresAt: receipt.expiresAt } : {}),
     ...(receipt.tags?.length ? { tags: receipt.tags } : {}),

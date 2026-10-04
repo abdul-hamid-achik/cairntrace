@@ -20,11 +20,16 @@ export interface MatchOutcome {
 
 /* ----- paths ----- */
 
-type PathToken = { key: string } | { index: number } | { wildcard: true };
+type PathToken =
+  | { key: string }
+  | { index: number }
+  | { wildcard: true }
+  | { filter: FilterExpr };
 
 /**
  * Parse `$`, `$.a.b`, `a.b`, `items[0].id`, `items.0.id`, `rows[*].name`,
- * `$['key with.dots']`. An empty path (or `$`) is the root.
+ * `$['key with.dots']`, and a filter `tasks[?(@.title=="x")].id` (see
+ * parseFilter). An empty path (or `$`) is the root.
  */
 export function parsePath(path: string): PathToken[] {
   let rest = path.trim();
@@ -42,7 +47,9 @@ export function parsePath(path: string): PathToken[] {
       const inner = rest.slice(i + 1, close).trim();
       i = close + 1;
       if (inner === "*") tokens.push({ wildcard: true });
-      else if (/^-?\d+$/.test(inner)) tokens.push({ index: Number(inner) });
+      else if (inner.startsWith("?")) {
+        tokens.push({ filter: parseFilter(inner.slice(1), path) });
+      } else if (/^-?\d+$/.test(inner)) tokens.push({ index: Number(inner) });
       else tokens.push({ key: inner.replace(/^(['"])(.*)\1$/, "$2") });
       continue;
     }
@@ -58,16 +65,216 @@ export function parsePath(path: string): PathToken[] {
 
 function findClosingBracket(text: string, open: number): number {
   let quote: string | undefined;
+  let depth = 0;
   for (let j = open + 1; j < text.length; j++) {
     const ch = text[j]!;
     if (quote) {
-      if (ch === quote) quote = undefined;
+      if (ch === "\\") j++;
+      else if (ch === quote) quote = undefined;
       continue;
     }
     if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === "]") return j;
+    else if (ch === "[") depth++;
+    else if (ch === "]") {
+      if (depth === 0) return j;
+      depth--;
+    }
   }
   return text.length;
+}
+
+/* ----- filter expressions ([?(…)]) ----- */
+
+type FilterOperand =
+  | { kind: "path"; tokens: PathToken[] }
+  | { kind: "literal"; value: unknown };
+
+type FilterOp = "==" | "!=" | "<" | "<=" | ">" | ">=";
+
+type FilterExpr =
+  | { kind: "or" | "and"; left: FilterExpr; right: FilterExpr }
+  | { kind: "not"; expr: FilterExpr }
+  | { kind: "exists"; operand: FilterOperand }
+  | {
+      kind: "compare";
+      op: FilterOp;
+      left: FilterOperand;
+      right: FilterOperand;
+    };
+
+/** A filter that does not parse: the whole path is reported. */
+export class PathSyntaxError extends Error {
+  constructor(path: string, detail: string) {
+    super(`invalid path ${JSON.stringify(path)}: ${detail}`);
+    this.name = "PathSyntaxError";
+  }
+}
+
+/**
+ * Parse a JSONPath-style filter body (after `?`): `(@.title == "x")`,
+ * `@.done != true && @.count >= 2`, `!(@.archived)`, `@.owner` (present).
+ * Operands are `@` paths (`@.a.b`, `@.items[0]`, `@['key']`, `@` itself)
+ * or literals (quoted strings, numbers, true, false, null). Comparisons are
+ * strict (no type coercion); `<` / `>` compare numbers or strings.
+ */
+function parseFilter(source: string, path: string): FilterExpr {
+  let i = 0;
+  const fail = (detail: string): never => {
+    throw new PathSyntaxError(path, detail);
+  };
+  const skip = (): void => {
+    while (i < source.length && /\s/.test(source[i]!)) i++;
+  };
+  const peek = (text: string): boolean => {
+    skip();
+    return source.startsWith(text, i);
+  };
+  const operand = (): FilterOperand => {
+    skip();
+    const ch = source[i];
+    if (ch === "@") {
+      i++;
+      let end = i;
+      let depth = 0;
+      let quote: string | undefined;
+      while (end < source.length) {
+        const c = source[end]!;
+        if (quote) {
+          if (c === "\\") end++;
+          else if (c === quote) quote = undefined;
+        } else if (c === "'" || c === '"') quote = c;
+        else if (c === "[") depth++;
+        else if (c === "]") depth--;
+        else if (depth === 0 && /[\s=!<>&|)]/.test(c)) break;
+        end++;
+      }
+      const rest = source.slice(i, end);
+      i = end;
+      return { kind: "path", tokens: parsePath(`$${rest}`) };
+    }
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      let text = "";
+      while (j < source.length && source[j] !== ch) {
+        if (source[j] === "\\" && j + 1 < source.length) j++;
+        text += source[j];
+        j++;
+      }
+      if (j >= source.length) fail("unterminated string in filter");
+      i = j + 1;
+      return { kind: "literal", value: text };
+    }
+    const word = /^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(
+      source.slice(i),
+    );
+    if (!word)
+      fail(`unexpected ${JSON.stringify(source.slice(i, i + 12))} in filter`);
+    i += word![0].length;
+    const raw = word![0];
+    const value =
+      raw === "true"
+        ? true
+        : raw === "false"
+          ? false
+          : raw === "null"
+            ? null
+            : Number(raw);
+    return { kind: "literal", value };
+  };
+  const primary = (): FilterExpr => {
+    if (peek("!") && !peek("!=")) {
+      i++;
+      return { kind: "not", expr: primary() };
+    }
+    if (peek("(")) {
+      i++;
+      const inner = or();
+      if (!peek(")")) fail("missing ) in filter");
+      i++;
+      return inner;
+    }
+    const left = operand();
+    skip();
+    const op = (["==", "!=", "<=", ">=", "<", ">"] as const).find((candidate) =>
+      source.startsWith(candidate, i),
+    );
+    if (!op) {
+      if (left.kind !== "path") fail("a filter literal needs a comparison");
+      return { kind: "exists", operand: left };
+    }
+    i += op.length;
+    return { kind: "compare", op, left, right: operand() };
+  };
+  const and = (): FilterExpr => {
+    let left = primary();
+    while (peek("&&")) {
+      i += 2;
+      left = { kind: "and", left, right: primary() };
+    }
+    return left;
+  };
+  const or = (): FilterExpr => {
+    let left = and();
+    while (peek("||")) {
+      i += 2;
+      left = { kind: "or", left, right: and() };
+    }
+    return left;
+  };
+  if (source.trim() === "") fail("empty filter");
+  const expr = or();
+  skip();
+  if (i < source.length)
+    fail(`unexpected ${JSON.stringify(source.slice(i, i + 12))} in filter`);
+  return expr;
+}
+
+function filterOperandValue(
+  operand: FilterOperand,
+  item: unknown,
+): { exists: boolean; value: unknown } {
+  return operand.kind === "literal"
+    ? { exists: true, value: operand.value }
+    : walk(item, operand.tokens);
+}
+
+function filterHolds(expr: FilterExpr, item: unknown): boolean {
+  switch (expr.kind) {
+    case "or":
+      return filterHolds(expr.left, item) || filterHolds(expr.right, item);
+    case "and":
+      return filterHolds(expr.left, item) && filterHolds(expr.right, item);
+    case "not":
+      return !filterHolds(expr.expr, item);
+    case "exists":
+      return filterOperandValue(expr.operand, item).exists;
+    case "compare": {
+      const left = filterOperandValue(expr.left, item);
+      const right = filterOperandValue(expr.right, item);
+      if (!left.exists || !right.exists) return expr.op === "!=";
+      const a = left.value;
+      const b = right.value;
+      if (expr.op === "==") return deepEqual(a, b);
+      if (expr.op === "!=") return !deepEqual(a, b);
+      const comparable =
+        (typeof a === "number" && typeof b === "number") ||
+        (typeof a === "string" && typeof b === "string");
+      if (!comparable) return false;
+      const x = a as number | string;
+      const y = b as number | string;
+      if (expr.op === "<") return x < y;
+      if (expr.op === "<=") return x <= y;
+      if (expr.op === ">") return x > y;
+      return x >= y;
+    }
+  }
+}
+
+/** True when `path` can select several values (a wildcard or a filter). */
+export function isMultiValuePath(path: string): boolean {
+  return parsePath(path).some(
+    (token) => "wildcard" in token || "filter" in token,
+  );
 }
 
 /**
@@ -88,6 +295,26 @@ function walk(
 ): { exists: boolean; value: unknown } {
   if (tokens.length === 0) return { exists: value !== undefined, value };
   const [head, ...tail] = tokens as [PathToken, ...PathToken[]];
+  if ("filter" in head) {
+    // Like a wildcard over the items the filter keeps — but a filter that
+    // keeps nothing (or whose tail finds nothing) selects nothing at all,
+    // so `exists: true` on it means "some item matched".
+    const items = Array.isArray(value)
+      ? value
+      : value !== null && typeof value === "object"
+        ? Object.values(value)
+        : undefined;
+    if (items === undefined) return { exists: false, value: undefined };
+    const found: unknown[] = [];
+    for (const item of items) {
+      if (!filterHolds(head.filter, item)) continue;
+      const next = walk(item, tail);
+      if (next.exists) found.push(next.value);
+    }
+    return found.length > 0
+      ? { exists: true, value: found }
+      : { exists: false, value: undefined };
+  }
   if ("wildcard" in head) {
     const items = Array.isArray(value)
       ? value

@@ -1,0 +1,51 @@
+# The "before" layout: one environment owns an anchored vars block, the
+# others alias it, merge it with overrides, or repeat a few values by hand.
+version: 1
+defaultEnvironment: local
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    services: false
+    vars: &local-vars
+      envName: local
+      e2eEmail: "${env.CAIRN_FIXTURE_E2E_EMAIL:-e2e@example.test}"
+      kitAnswerKey: answer.status
+      defaultTimeoutMs: 30000
+      supplierName: Example Supplier
+      supplierId: 5f0000000000000000000001
+      connectionId: 5f0000000000000000000002
+      connectionPath: /connection/5f0000000000000000000002/overview
+      tableViewportPath: /connection/5f0000000000000000000002/table?view=kit
+      taskDeepLinkPath: /profile?element=task-1
+      websiteFieldDeepLinkPath: /profile?element=website-1
+      apiBase: http://localhost:8080/api
+      uploadDir: "${config.dir}/fixtures"
+      retryCount: 3
+      useSandbox: true
+  remote:
+    baseUrl: http://localhost:9080
+    waitScale: 3
+    services: false
+    vars: *local-vars
+  dev:
+    baseUrl: https://dev.example.test
+    services: false
+    vars:
+      <<: *local-vars
+      envName: dev
+      supplierId: 6a0000000000000000000001
+      connectionId: 6a0000000000000000000002
+      connectionPath: /connection/6a0000000000000000000002/overview
+      tableViewportPath: /connection/6a0000000000000000000002/table?view=kit
+      apiBase: https://dev.example.test/api
+      devOnlyFlag: true
+  test:
+    baseUrl: https://test.example.test
+    services: false
+    vars:
+      envName: test
+      kitAnswerKey: answer.status
+      defaultTimeoutMs: 30000
+      supplierName: Test Supplier
+      connectionId: 7b0000000000000000000002
+      connectionPath: /connection/7b0000000000000000000002/overview

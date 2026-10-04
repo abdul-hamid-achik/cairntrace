@@ -1,0 +1,8 @@
+vars:
+  host: http://localhost:8080
+  apiUrl: "${vars.host}/api"
+  regions: [eu, us]
+  adminEmail: "${env.CAIRN_FIXTURE_ADMIN_EMAIL:-admin@example.test}"
+  retryCount: 3
+  useSandbox: true
+  sandboxPath: /sandbox

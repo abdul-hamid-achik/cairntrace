@@ -69,7 +69,7 @@ export interface VerifierContext {
    * verifiers as `ctx.vars` (Node) / `vars` (browser) so each var doesn't
    * have to be threaded through per-outcome fixtures maps.
    */
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, unknown>;
   /** Environment authorized for Node verifier children; never exposed on ctx. */
   childEnv?: Record<string, string | undefined>;
   /** TinyVault-prefixed keys explicitly selected for target children. */
@@ -102,25 +102,19 @@ export interface VerifierContext {
   runStartedAt?: string;
   /** `browser.testIdAttribute` for `by: testid` in table/expect/capture. */
   testIdAttribute?: string;
+  /**
+   * F20: config `browser.appHandle`, for browser script verifiers that use
+   * `__cairn` (the page prelude registers them as `__cairn.app.<name>`).
+   */
+  appHandles?: Readonly<Record<string, string>>;
   /** Test seam: the optional `mongodb` driver module. */
   loadMongoDriver?: () => Promise<MongoDriverModule | undefined>;
   /** Run cancellation: polling stops and in-flight I/O is aborted. */
   signal?: AbortSignal;
 }
 
-/** What a `network` verifier with `assign` exposes to later outcomes. */
-export interface NetworkAssignment {
-  /** ISO time of the last matching request. */
-  at?: string;
-  /** ISO time of the first matching request. */
-  firstAt?: string;
-  count: number;
-  url?: string;
-  method?: string;
-  status?: number;
-  /** Parsed JSON request body of the last match, when there was one. */
-  body?: unknown;
-}
+import type { NetworkAssignment } from "./networkJudge";
+export type { NetworkAssignment };
 
 /** One poll sample, as recorded in `outcomes/<id>.raw.json`. */
 export interface PollAttemptRecord {

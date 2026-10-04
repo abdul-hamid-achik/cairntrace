@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Widget edge cases</title>
+    <style>
+      body { font: 14px sans-serif; padding: 16px; }
+      .p-autocomplete { display: inline-block; position: relative; }
+      .ac-panel { position: absolute; background: #fff; border: 1px solid #ccc; z-index: 5; }
+      .multiselect { display: inline-block; border: 1px solid #999; min-width: 200px; position: relative; }
+      .multiselect__content-wrapper { display: none; }
+      .multiselect--active .multiselect__content-wrapper { display: block; }
+      .question { margin: 12px 0; }
+    </style>
+  </head>
+  <body>
+    <!-- A single autocomplete whose suggestion click never reaches the app. -->
+    <div class="question" data-field-key="edge.address">
+      <div class="p-autocomplete p-component" data-pc-name="autocomplete">
+        <input class="p-autocomplete-input p-inputtext" role="combobox" aria-controls="edge_ac_list" autocomplete="off" />
+      </div>
+    </div>
+
+    <!-- A "+Add" list whose app rejects an item without "@" on blur. -->
+    <div class="question" data-field-key="edge.emails" data-widget="pills">
+      <div class="items"></div>
+      <button type="button" class="add-item">+Add</button>
+    </div>
+
+    <!-- A checkbox group: Newsletter checked, SMS alerts not. -->
+    <div class="question" data-field-key="edge.prefs">
+      <label><input type="checkbox" name="prefs" value="n" checked /> Newsletter</label>
+      <label><input type="checkbox" name="prefs" value="s" /> SMS alerts</label>
+    </div>
+
+    <!-- One visible checkbox; a second one is hidden. -->
+    <div class="question" data-field-key="edge.consent">
+      <label><input type="checkbox" name="consent" value="t" /> Accept terms</label>
+      <label style="display: none"><input type="checkbox" name="consent" value="m" /> Marketing emails</label>
+    </div>
+
+    <!-- Radios with values that differ from their labels. -->
+    <div class="question" data-field-key="edge.owner_answer">
+      <label><input type="radio" name="owner_answer" value="y" checked /> Yes</label>
+      <label><input type="radio" name="owner_answer" value="n" /> No</label>
+    </div>
+
+    <!-- A button inside an open shadow root, and an icon-only button. -->
+    <x-edge-card></x-edge-card>
+    <button type="button" id="icon-close"><img alt="Dismiss" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="12" height="12" /></button>
+
+    <!-- vue-multiselect with a remote, paged list: the first page lacks "Ana". -->
+    <div class="question" data-field-key="edge.owner">
+      <div class="multiselect" tabindex="0">
+        <div class="multiselect__select"></div>
+        <div class="multiselect__tags"><span class="multiselect__placeholder">Pick</span><input class="multiselect__input" style="width: 80px" /></div>
+        <div class="multiselect__content-wrapper"><ul class="multiselect__content"></ul></div>
+      </div>
+    </div>
+
+    <!-- A field only a project driver claims. -->
+    <div class="question" data-field-key="edge.custom"><span class="custom-widget">custom</span></div>
+
+    <script>
+      window.__models = { address: null, emails: [], owner: null };
+      window.__clicked = { shadow: false, icon: false };
+
+      // Autocomplete: suggestions after a short debounce; the item handler is broken.
+      const acInput = document.querySelector(".p-autocomplete-input");
+      const ITEMS = ["Main Street 1", "Main Street 10", "Harbor Road 5"];
+      let acPanel = null;
+      acInput.addEventListener("input", () => {
+        if (acPanel) acPanel.remove();
+        acPanel = null;
+        const query = acInput.value.toLowerCase();
+        if (!query) return;
+        setTimeout(() => {
+          if (acPanel) acPanel.remove();
+          acPanel = document.createElement("div");
+          acPanel.className = "ac-panel p-autocomplete-panel";
+          const list = document.createElement("ul");
+          list.id = "edge_ac_list";
+          list.setAttribute("role", "listbox");
+          for (const label of ITEMS.filter((item) => item.toLowerCase().includes(query))) {
+            const li = document.createElement("li");
+            li.className = "p-autocomplete-item";
+            li.setAttribute("role", "option");
+            li.textContent = label;
+            // Broken on purpose: the app listens to an event the click never fires.
+            li.addEventListener("app-select", () => { window.__models.address = label; });
+            list.appendChild(li);
+          }
+          acPanel.appendChild(list);
+          document.body.appendChild(acPanel);
+        }, 100);
+      });
+
+      // "+Add" list: blur commits a value with "@", otherwise marks the input invalid.
+      const emails = document.querySelector('[data-field-key="edge.emails"]');
+      emails.querySelector(".add-item").addEventListener("click", () => {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.addEventListener("blur", () => {
+          if (input.value.includes("@")) {
+            input.classList.remove("invalid");
+            if (!window.__models.emails.includes(input.value)) window.__models.emails.push(input.value);
+          } else {
+            input.classList.add("invalid");
+          }
+        });
+        emails.querySelector(".items").appendChild(input);
+        input.focus();
+      });
+
+      // Shadow DOM button and icon-only button.
+      customElements.define(
+        "x-edge-card",
+        class extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: "open" });
+            const button = document.createElement("button");
+            button.textContent = "Continue";
+            button.addEventListener("click", () => { window.__clicked.shadow = true; });
+            root.appendChild(button);
+          }
+        },
+      );
+      document.getElementById("icon-close").addEventListener("click", () => { window.__clicked.icon = true; });
+
+      // vue-multiselect replica with a remote list.
+      const ms = document.querySelector('[data-field-key="edge.owner"] .multiselect');
+      const content = ms.querySelector(".multiselect__content");
+      const tags = ms.querySelector(".multiselect__tags");
+      const msInput = ms.querySelector(".multiselect__input");
+      const PEOPLE = ["Ana", "Anabel", "Bruno", "Carla"];
+      const render = (labels) => {
+        content.innerHTML = "";
+        for (const label of labels) {
+          const li = document.createElement("li");
+          li.className = "multiselect__element";
+          const span = document.createElement("span");
+          span.className = "multiselect__option";
+          span.textContent = label;
+          span.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            select(label);
+          });
+          li.appendChild(span);
+          content.appendChild(li);
+        }
+      };
+      const select = (label) => {
+        window.__models.owner = label;
+        const old = tags.querySelector(".multiselect__single, .multiselect__placeholder");
+        if (old) old.remove();
+        const single = document.createElement("span");
+        single.className = "multiselect__single";
+        single.textContent = label;
+        tags.insertBefore(single, msInput);
+        ms.classList.remove("multiselect--active");
+      };
+      ms.querySelector(".multiselect__select").addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        ms.classList.add("multiselect--active");
+        // The first page of the remote list.
+        setTimeout(() => render(["Anabel", "Bruno"]), 50);
+      });
+      msInput.addEventListener("input", () => {
+        const query = msInput.value.toLowerCase();
+        setTimeout(() => render(PEOPLE.filter((label) => label.toLowerCase().includes(query))), 120);
+      });
+    </script>
+  </body>
+</html>

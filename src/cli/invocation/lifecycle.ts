@@ -1,16 +1,20 @@
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { InvocationJournal } from "../../core/artifacts/invocationJournal";
 import { createArtifactRedactor } from "../../core/artifacts/redaction";
+import { findConfigFile, loadConfig } from "../../core/config/loader";
 import { UnknownEnvironmentError } from "../../core/config/runtimeContext";
+import { EngineRequirementError } from "../../core/engineRequirements";
+import { NodeRuntimeError, resolveNodeRuntime } from "../../core/runtimes";
 import { resolveTemplateString } from "../../core/parser/parseSpec";
 import {
   checkServicesLive,
   createNoopServicesHandle,
   describeServicesLock,
   readServicesLock,
+  evaluateProvisionerExports,
   reuseLockedServices,
   ServicesLockError,
   startServices,
@@ -20,6 +24,8 @@ import {
   type StartServicesContext,
 } from "../../core/runner/services";
 import type { ServicesOwnerLock } from "../../core/schema/services.v1";
+import type { SeedPostCommand } from "../../core/servicesOps/schema";
+import { postCommandApplies } from "../../core/servicesOps/seedTransaction";
 import {
   startWebServer,
   type WebServerHandle,
@@ -60,7 +66,10 @@ export interface LifecycleSinks {
   warn?: (message: string) => void;
 }
 
-type RuntimeOptions = Pick<RunInvocationOptions, "env" | "config" | "var">;
+type RuntimeOptions = Pick<
+  RunInvocationOptions,
+  "env" | "config" | "var" | "servicesDryRun"
+>;
 
 /**
  * Resolve an invocation-scoped TinyVault environment. This intentionally keeps
@@ -72,6 +81,13 @@ export async function maybeInjectTvaultSecrets(
   opts: RuntimeOptions,
   sinks: LifecycleSinks = {},
   cwd: string = process.cwd(),
+  /** Every spec the invocation will run (the node pin checks all their configs). */
+  allSpecs?: readonly string[],
+  /**
+   * `skipNodePin`: a delegated environment runs its node scripts elsewhere
+   * (the remote cairn enforces `runtimes.node` itself).
+   */
+  extra: { skipNodePin?: boolean } = {},
 ): Promise<ScopedSecrets> {
   const firstSpecAbs = absoluteSpecPath(firstSpec, cwd);
   const vars = parseVarFlags(opts.var);
@@ -80,7 +96,17 @@ export async function maybeInjectTvaultSecrets(
     ...(opts.env !== undefined ? { environmentOverride: opts.env } : {}),
     ...(opts.config !== undefined ? { configPath: opts.config } : {}),
     ...(Object.keys(vars).length > 0 ? { vars } : {}),
+    // A services dry-run plans: it names the secrets it would inject and
+    // never calls the vault.
+    ...(opts.servicesDryRun ? { namesOnly: true } : {}),
   });
+  if (scoped.plannedKeys !== undefined) {
+    if (scoped.plannedKeys.length > 0) {
+      sinks.info?.(
+        `dry-run: would prepare ${scoped.plannedKeys.length} scoped secret name(s) from tvault "${scoped.target}" (vault not read): ${scoped.plannedKeys.join(", ")}`,
+      );
+    }
+  }
   if (scoped.shadowedKeys.length > 0) {
     sinks.warn?.(
       `tvault "${scoped.target}" secrets shadowed by existing env vars: ${scoped.shadowedKeys.join(", ")}`,
@@ -91,8 +117,133 @@ export async function maybeInjectTvaultSecrets(
       `prepared ${scoped.injectedKeys.length} scoped secrets from tvault "${scoped.target}"`,
     );
   }
+  if (!extra.skipNodePin) {
+    await pinNodeRuntime(
+      firstSpecAbs,
+      opts,
+      scoped,
+      sinks,
+      (allSpecs ?? [firstSpec]).map((spec) => absoluteSpecPath(spec, cwd)),
+    );
+  }
   return scoped;
 }
+
+/**
+ * The distinct configs the specs of an invocation resolve to (`--config`,
+ * else the one found from each spec's directory); `undefined` stands for
+ * specs without a config. Cheap: config discovery only, nothing parsed.
+ */
+export async function configPathsOf(
+  specs: readonly string[],
+  opts: Pick<RuntimeOptions, "config">,
+): Promise<Map<string | undefined, string[]>> {
+  const out = new Map<string | undefined, string[]>();
+  const byDir = new Map<string, string | undefined>();
+  for (const spec of specs) {
+    let configPath: string | undefined;
+    if (opts.config !== undefined) {
+      configPath = resolve(opts.config);
+    } else {
+      const dir = dirname(spec);
+      if (!byDir.has(dir)) byDir.set(dir, await findConfigFile(dir));
+      configPath = byDir.get(dir);
+    }
+    out.set(configPath, [...(out.get(configPath) ?? []), spec]);
+  }
+  return out;
+}
+
+/**
+ * F19: `runtimes.node` of the config picks the node binary of node scripts
+ * and verifiers. It is exported to the invocation's child env as
+ * `CAIRN_NODE` (an explicit `CAIRN_NODE` wins). A node that is missing or
+ * out of range throws a NodeRuntimeError (exit 4) before anything starts.
+ * A config without `runtimes.node` changes nothing.
+ */
+async function pinNodeRuntime(
+  firstSpecAbs: string,
+  opts: RuntimeOptions,
+  scoped: ScopedSecrets,
+  sinks: LifecycleSinks,
+  allSpecs: readonly string[],
+): Promise<void> {
+  // One CAIRN_NODE serves the whole invocation: specs from several configs,
+  // any of which pins node, cannot share it.
+  const configs = await configPathsOf(allSpecs, opts);
+  if (configs.size > 1) {
+    const pinning: string[] = [];
+    for (const [configPath, specs] of configs) {
+      if (configPath === undefined) continue;
+      const loaded = await loadConfig(specs[0]!, configPath, {
+        env: scoped.env,
+      });
+      if (loaded?.config.runtimes?.node) pinning.push(configPath);
+    }
+    if (pinning.length > 0) {
+      throw new NodeRuntimeError(
+        `runtimes.node: the specs of this invocation come from ${configs.size} configs (${describeConfigs(configs)}) and ${pinning.join(", ")} pin${
+          pinning.length === 1 ? "s" : ""
+        } node; ${MULTI_CONFIG_REMEDY}`,
+      );
+    }
+    return;
+  }
+  const ctx = await resolveRunRuntime(firstSpecAbs, opts, {
+    env: scoped.env,
+  }).catch(() => undefined);
+  const runtimes = ctx?.config?.runtimes;
+  if (!ctx?.configPath || !runtimes?.node) return;
+  const resolution = resolveNodeRuntime(runtimes, {
+    configDir: dirname(ctx.configPath),
+    env: { ...process.env, ...scoped.childEnv },
+  });
+  if (resolution.command !== "node" && resolution.source !== "CAIRN_NODE") {
+    scoped.env.CAIRN_NODE = resolution.command;
+    scoped.childEnv.CAIRN_NODE = resolution.command;
+  }
+  sinks.info?.(
+    `node runtime: ${resolution.command} (v${resolution.version}) via ${resolution.source}`,
+  );
+}
+
+/** "a.yml, b.yml and 1 without a config", for messages. */
+export function describeConfigs(
+  configs: ReadonlyMap<string | undefined, readonly string[]>,
+): string {
+  const parts: string[] = [];
+  let without: readonly string[] = [];
+  for (const [configPath, specs] of configs) {
+    if (configPath === undefined) {
+      without = specs;
+      continue;
+    }
+    parts.push(`${configPath}: ${describeSpecs(specs, dirname(configPath))}`);
+  }
+  if (without.length > 0) {
+    parts.push(
+      `${without.length} spec(s) without a config: ${describeSpecs(without)}`,
+    );
+  }
+  return parts.join("; ");
+}
+
+/** The first spec (relative to `dir` when given) and how many more. */
+function describeSpecs(specs: readonly string[], dir?: string): string {
+  const first = specs[0];
+  if (first === undefined) return "no specs";
+  const shown = dir ? relative(dir, first) || first : first;
+  return specs.length > 1 ? `${shown} +${specs.length - 1} more` : shown;
+}
+
+/**
+ * What to do when one policy (`run:`, `runtimes.node`) would have to guard
+ * specs from several configs. `--suite` is no remedy: a suite's specs still
+ * load their own nearest config, so a suite that reaches into a directory
+ * with another config spans two as well.
+ */
+export const MULTI_CONFIG_REMEDY =
+  "run each config's specs in an invocation of their own, or pass --config <path> to run them all under one config (its environments and policy then apply to every spec)";
 
 /**
  * Resolve every planned spec's runtime context once per invocation. Each
@@ -113,6 +264,7 @@ export async function preflightEnvironments(
 ): Promise<UnknownEnvironmentError | undefined> {
   const seen = new Set<string>();
   const resolvedNames = new Set<string>();
+  const aliasNames = new Set<string>();
   for (const specPath of specPaths) {
     try {
       const ctx = await resolveRunRuntime(specPath, opts, {
@@ -123,13 +275,15 @@ export async function preflightEnvironments(
         },
       });
       resolvedNames.add(ctx.envName);
+      if (ctx.envAlias) aliasNames.add(ctx.envAlias);
     } catch (e) {
       if (e instanceof UnknownEnvironmentError) return e;
     }
   }
   const exported = callerEnv.CAIRN_TVAULT_ENV?.trim();
   const others = [...resolvedNames].filter((name) => name !== exported);
-  if (exported && others.length > 0) {
+  // An exported name that is the alias the run was asked for is not a mismatch.
+  if (exported && others.length > 0 && !aliasNames.has(exported)) {
     onWarning(
       `CAIRN_TVAULT_ENV is "${exported}" but this run resolves environment ` +
         `${others.map((name) => `"${name}"`).join(", ")}: preconditions, ` +
@@ -225,6 +379,7 @@ export async function resolveInvocationContext(
   artifactRoot: string;
   configPath?: string;
   environment?: string;
+  envAlias?: string;
 }> {
   const fallback = resolve(opts.artifactRoot ?? defaultArtifactRoot());
   const firstSpecAbs = absoluteSpecPath(firstSpec, cwd);
@@ -239,6 +394,7 @@ export async function resolveInvocationContext(
           : resolve(ctx.config?.artifactRoot ?? defaultArtifactRoot()),
       ...(ctx.configPath ? { configPath: ctx.configPath } : {}),
       ...(ctx.envName ? { environment: ctx.envName } : {}),
+      ...(ctx.envAlias ? { envAlias: ctx.envAlias } : {}),
     };
   } catch {
     return { artifactRoot: fallback };
@@ -385,6 +541,53 @@ export interface ServicesPlan {
   lockPreview?: { state: ServicesLockState; reuseRequested: boolean };
   /** The config's `gates:` registry (`docker.ready`, tmux `readyOn.gate` / `after`). */
   gates?: Readonly<Record<string, GateNode>>;
+  /** Seed post-commands a suite's `seed.postCommands.skip` removed from `cfg`. */
+  skippedPostCommands?: string[];
+  /** The suite of this run (`postCommands.when.suite`). */
+  suite?: string;
+  /** `--services-dry-run` only: names of the suite's `processEnv`. */
+  processEnv?: string[];
+  /**
+   * false: do not supervise windows and tunnels after the boot (`cairn
+   * services up` exits right after it).
+   */
+  supervise?: boolean;
+}
+
+/** What `suites.<n>.seed.postCommands.skip` matches: a name, or the trimmed text. */
+function labelOf(entry: SeedPostCommand): string {
+  return typeof entry === "string" ? entry.trim() : entry.name;
+}
+
+/**
+ * Drop the seed post-commands a suite skips (F9). A named post-command (the
+ * object form) is matched by its `name`; a plain string by its exact command
+ * text (trimmed). Returns the config to use and the labels of what was
+ * dropped (a name, or the trimmed command text).
+ */
+function skipSeedPostCommands(
+  cfg: ServicesConfig,
+  skip: readonly string[] | undefined,
+): { cfg: ServicesConfig; skipped: string[] } {
+  const commands = cfg.seed?.postCommands;
+  if (!skip || skip.length === 0 || !commands || !cfg.seed) {
+    return { cfg, skipped: [] };
+  }
+  const wanted = new Set(skip.map((entry) => entry.trim()));
+  const skipped = commands
+    .filter((entry) => wanted.has(labelOf(entry)))
+    .map(labelOf);
+  if (skipped.length === 0) return { cfg, skipped };
+  return {
+    cfg: {
+      ...cfg,
+      seed: {
+        ...cfg.seed,
+        postCommands: commands.filter((entry) => !wanted.has(labelOf(entry))),
+      },
+    },
+    skipped,
+  };
 }
 
 /**
@@ -405,6 +608,10 @@ export async function resolveServicesPlan(
     >,
   scopedSecrets: ScopedSecrets,
   cwd: string = process.cwd(),
+  /** `--suite`: seed post-commands the suite does not run. */
+  skipPostCommands?: readonly string[],
+  /** `--suite`: the suite's name. */
+  suite?: string,
 ): Promise<ServicesPlan | undefined> {
   if (opts.noServices) return undefined; // --no-services
 
@@ -414,11 +621,17 @@ export async function resolveServicesPlan(
   const ctx = await resolveRunRuntime(firstSpecAbs, opts, {
     env: scopedSecrets.env,
   });
-  const cfg = ctx.services;
-  if (!cfg) return undefined;
+  const resolvedServices = ctx.services;
+  if (!resolvedServices) return undefined;
+  const { cfg, skipped } = skipSeedPostCommands(
+    resolvedServices,
+    skipPostCommands,
+  );
 
   const plan: ServicesPlan = {
     cfg,
+    ...(skipped.length > 0 ? { skippedPostCommands: skipped } : {}),
+    ...(suite !== undefined ? { suite } : {}),
     coldStart: opts.coldStart ?? isTruthyEnv(process.env.CI),
     configDir: ctx.configPath ? dirname(ctx.configPath) : dirname(firstSpecAbs),
     project: ctx.config?.project ?? "cairntrace",
@@ -584,32 +797,150 @@ export function renderServicesDryRunPlan(
   // Redact complete commands before truncating them. Truncating first could
   // expose a prefix of a long secret that no longer matches the registered
   // literal value.
+  const command = (text: string, max = 80): string => {
+    const redacted = redactor.text(text);
+    return `${redacted.slice(0, max)}${redacted.length > max ? "..." : ""}`;
+  };
   const dockerCommand = redactor.text(cfg.docker?.command ?? "");
-  const seedCommand = redactor.text(cfg.seed?.command ?? "");
   const lines = [
     "services dry-run plan:",
     `  project: ${project}`,
+    `  env: ${plan.envName}`,
     `  cold-start: ${coldStart}`,
+    ...(plan.suite !== undefined ? [`  suite: ${plan.suite}`] : []),
+    ...(plan.processEnv && plan.processEnv.length > 0
+      ? [`  suite processEnv: ${plan.processEnv.join(", ")} (names only)`]
+      : []),
+    ...dryRunProvisionerLines(cfg, command),
+    ...(cfg.tunnels
+      ? cfg.tunnels.map(
+          (tunnel) =>
+            `  tunnel ${tunnel.name}: ${command(tunnel.command)}${
+              tunnel.ready !== undefined
+                ? ` (ready: ${gateRefText(tunnel.ready)})`
+                : ""
+            }${tunnel.restart === "always" ? " (restart: always)" : ""}`,
+        )
+      : []),
     cfg.docker
       ? `  docker: ${dockerCommand} (reuseExisting: ${cfg.docker.reuseExisting ?? !coldStart})`
       : "  docker: (not configured)",
+    ...(cfg.files
+      ? cfg.files.map(
+          (file) =>
+            `  file: ${file.path} (${
+              file.json !== undefined ? "json merge" : "text"
+            }${file.restart ? `; restarts ${file.restart.join(", ")}` : ""})`,
+        )
+      : []),
     cfg.seed
-      ? `  seed: ${seedCommand.slice(0, 80)}${
-          seedCommand.length > 80 ? "..." : ""
-        } (ttlSeconds: ${cfg.seed.ttlSeconds ?? 0})`
+      ? `  seed: ${command(
+          cfg.seed.command ??
+            `phases ${(cfg.seed.phases ?? []).map((p) => p.name).join(", ")}`,
+        )} (ttlSeconds: ${cfg.seed.ttlSeconds ?? 0})`
       : "  seed: (not configured)",
+    ...dryRunPostCommandLines(plan),
     cfg.tmux
       ? `  tmux: session=${cfg.tmux.session}, ${cfg.tmux.windows.length} windows (reuseExisting: ${cfg.tmux.reuseExisting ?? !coldStart})`
       : "  tmux: (not configured)",
     cfg.teardown
-      ? `  teardown: ${cfg.teardown.length} command(s)`
+      ? `  teardown: ${cfg.teardown.length} command(s)${
+          cfg.teardown.some((e) => typeof e !== "string" && e.critical)
+            ? ` (${
+                cfg.teardown.filter((e) => typeof e !== "string" && e.critical)
+                  .length
+              } critical: a failure is exit 8)`
+            : ""
+        }`
       : "  teardown: (none)",
+    ...(scopedSecrets.plannedKeys !== undefined
+      ? [
+          scopedSecrets.plannedKeys.length > 0
+            ? `  secrets: tvault "${scopedSecrets.target ?? "?"}" would inject ${scopedSecrets.plannedKeys.length} name(s): ${scopedSecrets.plannedKeys.join(", ")} (names only; the vault is not read in a dry run)`
+            : `  secrets: tvault "${scopedSecrets.target ?? "?"}": none to inject (the vault is not read in a dry run)`,
+        ]
+      : []),
   ];
   const lockLine = plan.lockPreview
     ? dryRunLockLine(plan.lockPreview, plan.envName)
     : undefined;
   if (lockLine) lines.push(lockLine);
   return redactor.text(lines.join("\n") + "\n");
+}
+
+/** A tunnel's `ready` gate reference(s), for the dry-run text. */
+function gateRefText(ref: unknown): string {
+  if (typeof ref === "string") return ref;
+  if (Array.isArray(ref) && ref.every((item) => typeof item === "string")) {
+    return ref.join(", ");
+  }
+  const json = JSON.stringify(ref) ?? "";
+  return json.length > 80 ? `${json.slice(0, 77)}...` : json;
+}
+
+/** The provisioner's `up` / `down` / `exports` (names only), for the dry-run text. */
+function dryRunProvisionerLines(
+  cfg: ServicesConfig,
+  command: (text: string, max?: number) => string,
+): string[] {
+  const provisioner = cfg.provisioner;
+  if (!provisioner) return [];
+  const up =
+    typeof provisioner.up === "string" ? provisioner.up : provisioner.up.run;
+  const down =
+    typeof provisioner.down === "string"
+      ? { run: provisioner.down }
+      : provisioner.down;
+  const exportsList = Object.keys(provisioner.exports ?? {});
+  return [
+    `  provisioner up: ${command(up)}`,
+    // `down` defaults to critical + onSignal: wait (it runs on every exit path).
+    `  provisioner down: ${command(down.run)} (critical: ${
+      down.critical !== false
+    }; runs on every exit path, signals included)`,
+    ...(exportsList.length > 0
+      ? [`  provisioner exports: ${exportsList.join(", ")} (names only)`]
+      : []),
+  ];
+}
+
+/** A post-command label, cut for one dry-run line. */
+function shorten(text: string): string {
+  return text.length > 60 ? `${text.slice(0, 57)}...` : text;
+}
+
+/**
+ * The seed post-commands of the plan: how many run, which the suite's
+ * `seed.postCommands.skip` removed, and which a `when` leaves out of this
+ * run.
+ */
+function dryRunPostCommandLines(plan: ServicesPlan): string[] {
+  const commands = plan.cfg.seed?.postCommands ?? [];
+  const skipped = plan.skippedPostCommands ?? [];
+  if (commands.length === 0 && skipped.length === 0) return [];
+  const notThisRun: string[] = [];
+  let runs = 0;
+  for (const entry of commands) {
+    const applies = postCommandApplies(entry, {
+      ...(plan.suite !== undefined ? { suite: plan.suite } : {}),
+      env: plan.envName,
+    });
+    if (applies.applies) runs += 1;
+    else notThisRun.push(`${labelOf(entry)} (${applies.reason ?? "when"})`);
+  }
+  return [
+    `  seed postCommands: ${runs} run`,
+    ...(skipped.length > 0
+      ? [
+          `  seed postCommands skipped by ${
+            plan.suite !== undefined ? `suite ${plan.suite}` : "the suite"
+          }: ${skipped.map(shorten).join(", ")}`,
+        ]
+      : []),
+    ...(notThisRun.length > 0
+      ? [`  seed postCommands not for this run: ${notThisRun.join(", ")}`]
+      : []),
+  ];
 }
 
 /**
@@ -623,7 +954,7 @@ export function renderServicesDryRunPlan(
 export async function startServicesPlan(
   plan: ServicesPlan,
   scopedSecrets: ScopedSecrets,
-  onSpawn: (terminateSync: () => void) => void,
+  onSpawn: NonNullable<StartServicesContext["onSpawn"]>,
   sinks: {
     journal?: InvocationJournal;
     narration?: ServicesNarration;
@@ -635,6 +966,8 @@ export async function startServicesPlan(
     warn?: (message: string) => void;
     /** Cancels the boot (kills running commands, tears started phases down). */
     signal?: AbortSignal;
+    /** Every lifecycle event, a failed boot's too (`cairn services up`). */
+    onEvent?: (event: ServicesEvent) => void;
   },
 ): Promise<ServicesHandle> {
   const { journal, narration } = sinks;
@@ -654,10 +987,14 @@ export async function startServicesPlan(
     configDir: plan.configDir,
     coldStart: plan.coldStart,
     project: plan.project,
+    ...(plan.configPath ? { configPath: plan.configPath } : {}),
     onSpawn,
     env: scopedSecrets.childEnv,
     selectedTvaultKeys: scopedSecrets.selectedKeys,
     secretValues: scopedSecrets.secretValues,
+    envName: plan.envName,
+    ...(plan.suite !== undefined ? { suite: plan.suite } : {}),
+    ...(plan.supervise === false ? { supervise: false } : {}),
     ...(sinks.signal ? { signal: sinks.signal } : {}),
     ...(plan.gates ? { gates: plan.gates } : {}),
     ...(sinks.warn ? { warn: (m: string) => sinks.warn!(redactLine(m)) } : {}),
@@ -692,12 +1029,18 @@ export async function startServicesPlan(
           }
           journal.appendServicesEvent(event);
           narration?.onEvent?.(event);
+          sinks.onEvent?.(event);
         }
-      : narration?.onEvent,
+      : narration?.onEvent || sinks.onEvent
+        ? (event) => {
+            narration?.onEvent?.(event);
+            sinks.onEvent?.(event);
+          }
+        : undefined,
     ...(journal
       ? {
           onServiceOutput: (
-            source: "docker" | "seed" | "teardown",
+            source: "docker" | "seed" | "teardown" | "provisioner",
             line: string,
           ) => journal.servicesLog(source).writeLine(line),
           // SIGINT/SIGTERM: what the synchronous teardown did, written after
@@ -737,7 +1080,10 @@ async function reuseServicesPlan(
     );
   }
   for (const note of liveness.unchecked) ctx.log?.(`services: ${note}`);
-  return reuseLockedServices(plan.cfg, ctx, lock);
+  // A provisioned environment's exports (a droplet address, a tenant id) are
+  // printed again by their commands: the run needs them in its env.
+  const exported = await evaluateProvisionerExports(plan.cfg, ctx);
+  return reuseLockedServices(plan.cfg, ctx, lock, exported);
 }
 
 /**
@@ -842,6 +1188,9 @@ export function assertServicesBootAllowed(
 export function configErrorExitCode(e: unknown): 2 | 4 {
   if (e instanceof ServicesLockError) return e.exitCode;
   if (e instanceof ServicesBootRefusedError) return e.exitCode;
+  if (e instanceof EngineRequirementError || e instanceof NodeRuntimeError) {
+    return e.exitCode;
+  }
   return e instanceof UnknownEnvironmentError ? e.exitCode : 2;
 }
 

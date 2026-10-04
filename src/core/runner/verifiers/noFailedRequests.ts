@@ -3,9 +3,18 @@ import type {
   NetworkEntry,
 } from "../../../adapters/browserBackend";
 import type { NoFailedRequestsVerifier } from "../../schema/verifier.v1";
-import { filterNetworkEntries, formatEntries } from "./network";
+import {
+  filterNetworkEntries,
+  isInFlight,
+  judgeNoFailedRequests,
+} from "./networkJudge";
 import type { VerifierEvaluation } from "./types";
 
+/**
+ * `noFailedRequests` over the end-of-steps snapshot (or the live log under
+ * poll). The verdict is the runner's `judgeNoFailedRequests`, which the
+ * Playwright export embeds too (single-sourced, network errors included).
+ */
 export async function evaluateNoFailedRequests(
   verifier: NoFailedRequestsVerifier,
   backend: BrowserBackend,
@@ -15,31 +24,19 @@ export async function evaluateNoFailedRequests(
   const all = capturedEntries
     ? filterNetworkEntries(capturedEntries, method, urlContains)
     : await backend.getNetworkRequests({ method, filter: urlContains });
-  // A request is "failed" if it returned 4xx/5xx OR carries an error marker
-  // (aborted / blocked / DNS-failed / connection-refused / request-step
-  // failure) — those never get a >=400 status, so a status-only check would
-  // silently miss the most severe failures. A merely-pending request has
-  // neither, so it is not flagged.
-  const failed = all.filter(
-    (e) => e.error !== undefined || (e.status !== undefined && e.status >= 400),
-  );
-
-  const expected = `no ${method ?? "any"}-method requests matching ${JSON.stringify(urlContains)} returned 4xx/5xx or failed to complete`;
-
-  if (failed.length === 0) {
-    return {
-      passed: true,
-      expected,
-      actual:
-        all.length === 0
-          ? "no matching requests observed (the filter produced an empty set)"
-          : `all ${all.length} matching request(s) had no captured 4xx/5xx status or explicit network error`,
-    };
-  }
-
+  const judged = judgeNoFailedRequests(all, verifier.noFailedRequests);
+  // A backend that never marks a failed or cancelled request cannot judge
+  // the requests that did not complete: say so instead of a silent pass.
+  const unjudged =
+    backend.reportsRequestFailures === false
+      ? all.filter(isInFlight).length
+      : 0;
   return {
-    passed: false,
-    expected,
-    actual: `${failed.length} failing request(s):\n${formatEntries(failed.slice(0, 10))}`,
+    passed: judged.passed,
+    expected: judged.expected,
+    actual:
+      unjudged > 0
+        ? `${judged.actual}; ${unjudged} matching request(s) never completed (no status): ${backend.name} does not report failed or cancelled requests, so a refused, blocked or cancelled one cannot be told from one still in flight (use the playwright backend to judge them)`
+        : judged.actual,
   };
 }

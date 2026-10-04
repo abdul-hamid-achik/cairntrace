@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRunDirName } from "../artifacts/retention";
+import { DELEGATE_LABEL } from "../schema/delegate.v1";
 import type { RunResult } from "../schema/run.v1";
 import type {
   StatsDelta,
@@ -16,6 +17,8 @@ export interface AggregateRunStatsOptions {
   groupBy: string;
   /** AND filters: only runs whose labels include every pair. */
   filter?: Record<string, string>;
+  /** Only runs of this `cairn run` invocation (run.json `invocation.id`). */
+  invocation?: string;
   /**
    * Preferred metric field names to harvest from outcomes/*.raw.json
    * (depth-limited search). Default includes processingDurationMS.
@@ -61,6 +64,16 @@ export async function aggregateRunStats(
     if (!run) continue;
     scanned += 1;
 
+    // A delegated invocation's runs were written by the remote cairn (their
+    // run.json names the remote invocation) and carry the local one in the
+    // `cairn.delegate` label.
+    if (
+      opts.invocation !== undefined &&
+      run.invocation?.id !== opts.invocation &&
+      run.labels?.[DELEGATE_LABEL] !== opts.invocation
+    ) {
+      continue;
+    }
     const labels = run.labels ?? {};
     if (!labelsMatch(labels, filter)) continue;
     if (!(opts.groupBy in labels)) continue;
@@ -111,6 +124,7 @@ export async function aggregateRunStats(
     artifactRoot: opts.artifactRoot,
     groupBy: opts.groupBy,
     ...(Object.keys(filter).length > 0 ? { filter } : {}),
+    ...(opts.invocation !== undefined ? { invocation: opts.invocation } : {}),
     ...(primaryMetricName ? { metricName: primaryMetricName } : {}),
     scanned,
     matched: matched.length,

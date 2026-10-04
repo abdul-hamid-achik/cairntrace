@@ -8,7 +8,19 @@ import type {
   TypeStep,
   WaitStep,
 } from "../schema/spec.v1";
-import { clickLocator, withoutPostcondition } from "../schema/spec.v1";
+import {
+  clickLocator,
+  fillLocator,
+  isRunnerDrivenWait,
+  isWaitGroup,
+  plainWaitCondition,
+  withoutPostcondition,
+} from "../schema/spec.v1";
+import {
+  runRunnerDrivenWait,
+  runnerWaitInvocation,
+  type RunnerWaitOptions,
+} from "./waitGroups";
 import { describeWaitUrl, matchWaitUrl } from "../locators";
 import { textContains } from "../textMatching";
 import {
@@ -141,10 +153,23 @@ export function applyWaitScale(step: Step, waitScale: number): Step {
  * resolution and the actual browser action.
  */
 export async function runResilientBrowserStep(
-  step: Step,
+  input: Step,
   backend: BrowserBackend,
   waitScale: number,
+  waitOptions: RunnerWaitOptions = {},
 ): Promise<InvocationResult> {
+  // F14: wait.any/all and optional waits (F20: and app waits) are polled by
+  // the runner; a plain wait reaches the backend without the step-only keys
+  // (optional/assign).
+  if ("wait" in input && isRunnerDrivenWait(input.wait)) {
+    return runnerWaitInvocation(
+      await runRunnerDrivenWait(input.wait, backend, waitOptions),
+    );
+  }
+  const step: Step =
+    "wait" in input && !isWaitGroup(input.wait)
+      ? { ...input, wait: plainWaitCondition(input.wait) }
+      : input;
   const postcondition = networkPostconditionFromStep(step);
   if (postcondition !== undefined) {
     return runNetworkPostconditionStep(step, postcondition, backend, waitScale);
@@ -700,10 +725,7 @@ async function clickConditionHolds(
 }
 
 function inputLocator(step: FillStep | TypeStep): Locator {
-  if ("fill" in step) {
-    const { value: _value, ...locator } = step.fill;
-    return locator as Locator;
-  }
+  if ("fill" in step) return fillLocator(step);
   const { value: _value, delayMs: _delayMs, ...locator } = step.type;
   return locator as Locator;
 }

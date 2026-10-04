@@ -655,7 +655,7 @@ describe("review regressions (single-file)", () => {
       'page.request.get(`/api/records/${cairnSplice(cairnRequests_session, ["body","id"])}`)',
     );
     expect(source).toContain(
-      `expect(val).toEqual("\${requests.session.body.name}");`,
+      `cairnAssertHttpJson(body, { jsonPath: "$.owner", equals: "\${requests.session.body.name}" });`,
     );
     // script fixtures: spliced.
     expect(source).toContain(

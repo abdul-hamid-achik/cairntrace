@@ -24,6 +24,15 @@ import { afterEach } from "vitest";
  * fails in `afterEach`. Tests stay free to use a fake via `FCHEAP_BIN` or a
  * fake `fcheap` earlier on PATH — the shim only sees calls that would have
  * reached the real binary.
+ *
+ * `fcheap auth status` is answered by the shim itself ("not logged in",
+ * exit 1, like fcheap with no credentials): the real command refreshes and
+ * ROTATES the stored device token over the network. Every pass-through also
+ * runs with its config, data and vault locations pinned inside the guard
+ * directory (XDG_*_HOME, FCHEAP_STASH_DIR) and the vecgrep/service/token
+ * variables removed: fcheap resolves its vault and credentials from those
+ * before it looks at HOME, so the per-worker HOME alone would not keep a
+ * developer's exported XDG_* or FCHEAP_* variables out.
  */
 
 const READ_ONLY_COMMANDS = [
@@ -83,6 +92,15 @@ real=${quote(real ?? "")}
 log=${quote(join(dir, "violations.log"))}
 pass() {
   if [ -z "$real" ]; then echo "fcheap: not found (test guard)" >&2; exit 127; fi
+  # fcheap reads these before HOME: pin them so nothing in the caller's
+  # shell can point a pass-through at a real vault, config or credential.
+  unset FCHEAP_VECGREP_PATH FILECHEAP_ARTIFACT_SERVICE_URL FILECHEAP_INGEST_TOKEN
+  XDG_CONFIG_HOME=${quote(join(dir, "xdg", "config"))}
+  XDG_DATA_HOME=${quote(join(dir, "xdg", "data"))}
+  XDG_STATE_HOME=${quote(join(dir, "xdg", "state"))}
+  XDG_CACHE_HOME=${quote(join(dir, "xdg", "cache"))}
+  FCHEAP_STASH_DIR=${quote(join(dir, "xdg", "data", "fcheap"))}
+  export XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME FCHEAP_STASH_DIR
   exec "$real" "$@"
 }
 case "$1" in ""|--version) pass "$@" ;; esac
@@ -105,7 +123,12 @@ done
 case " ${READ_ONLY_COMMANDS.join(" ")} " in
   *" $sub "*) pass "$@" ;;
 esac
-if [ "$sub" = "auth" ] && [ "$next" = "status" ]; then pass "$@"; fi
+if [ "$sub" = "auth" ] && [ "$next" = "status" ]; then
+  # Real fcheap refreshes (rotates) the stored token over the network; no
+  # credentials means exactly this (stderr only, nothing on stdout, exit 1).
+  echo "not logged in; run fcheap auth login" >&2
+  exit 1
+fi
 stash_dir=""
 prev=""
 for arg in "$@"; do

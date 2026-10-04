@@ -115,18 +115,19 @@
         button.dataset.titleOriginal = button.title ?? "";
       button.disabled = locked;
       button.title = locked
-        ? `suite in progress (${active[0].path}) — Run is disabled while the lock exists`
+        ? `${Studio.ops.lockHeadline(active)} (${Studio.ops.lockSentence(active[0])}) — Run is disabled while the lock exists`
         : button.dataset.titleOriginal;
     }
     const banner = document.getElementById("spec-lock-banner");
     if (!banner) return;
     banner.classList.toggle("hidden", !locked);
     banner.textContent = locked
-      ? `Suite in progress: ${active
-          .map(
-            (lock) =>
-              `${lock.path}${lock.owner ? ` (owner: ${lock.owner})` : ""}`,
-          )
+      ? `${
+          active[0].kind === "run-lock"
+            ? "Run in progress"
+            : "Suite in progress"
+        }: ${active
+          .map((lock) => Studio.ops.lockSentence(lock))
           .join(", ")} — Run is disabled until the lock is released.`
       : "";
   }

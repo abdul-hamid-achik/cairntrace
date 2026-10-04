@@ -93,7 +93,11 @@ async function currentUser(req: Request): Promise<User | null> {
     return null;
   }
   try {
-    const [row] = await getDb().select().from(users).where(eq(users.id, userId)).limit(1);
+    const [row] = await getDb()
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
     return row ?? null;
   } catch {
     return null;
@@ -184,16 +188,27 @@ async function renderProducts(url: URL): Promise<Response> {
     return dbUnavailable();
   }
   const filtered = rows.filter(
-    (row) => (!category || row.category === category) && (!sku || row.sku === sku),
+    (row) =>
+      (!category || row.category === category) && (!sku || row.sku === sku),
   );
   const chips = ["all", ...CATEGORIES]
     .map(
       (c) =>
-        `<a href="${c === "all" ? "/products.html" : `/products.html?category=${c}`}"${category === c || (!category && c === "all") ? ' aria-current="true" style="font-weight:700"' : ""}>${c}</a>`,
+        `<a href="${
+          c === "all" ? "/products.html" : `/products.html?category=${c}`
+        }"${
+          category === c || (!category && c === "all")
+            ? ' aria-current="true" style="font-weight:700"'
+            : ""
+        }>${c}</a>`,
     )
     .join(" ");
   const body = `
-      ${flash ? `<p class="flash" data-testid="flash">Product created: ${esc(flash)}</p>` : ""}
+      ${
+        flash
+          ? `<p class="flash" data-testid="flash">Product created: ${esc(flash)}</p>`
+          : ""
+      }
       <p class="filters" aria-label="Category filters">${chips}</p>
       <p>
         <a href="/products/new.html">Add a product</a> ·
@@ -226,9 +241,16 @@ async function renderProducts(url: URL): Promise<Response> {
   return page("Products", body);
 }
 
-function renderNewProduct(url: URL, error?: string, values?: Record<string, string>): Response {
+function renderNewProduct(
+  url: URL,
+  error?: string,
+  values?: Record<string, string>,
+): Response {
   const opts = CATEGORIES.map(
-    (c) => `<option value="${c}"${values?.category === c ? " selected" : ""}>${c}</option>`,
+    (c) =>
+      `<option value="${c}"${
+        values?.category === c ? " selected" : ""
+      }>${c}</option>`,
   ).join("");
   const v = (key: string) => esc(values?.[key] ?? "");
   const body = `
@@ -257,9 +279,15 @@ async function renderDocuments(url: URL, user: User): Promise<Response> {
   } catch {
     return dbUnavailable();
   }
-  const typeOpts = DOC_TYPES.map((t) => `<option value="${t}">${t}</option>`).join("");
+  const typeOpts = DOC_TYPES.map(
+    (t) => `<option value="${t}">${t}</option>`,
+  ).join("");
   const body = `
-      ${uploaded ? `<p class="flash" data-testid="flash">Document uploaded</p>` : ""}
+      ${
+        uploaded
+          ? `<p class="flash" data-testid="flash">Document uploaded</p>`
+          : ""
+      }
       <p>Signed in as <strong>${esc(user.name)}</strong> (${esc(user.email)}) ·
          <form method="post" action="/logout" style="display:inline"><button type="submit" style="margin:0;padding:0 0.4rem;font-size:0.9em">Sign out</button></form>
       </p>
@@ -318,21 +346,46 @@ async function handleProductCreate(req: Request, url: URL): Promise<Response> {
   const category = form.get("category") ?? "";
   const price = Number(form.get("price"));
   const stock = Number(form.get("stock"));
-  const values = { name, sku, category, price: form.get("price") ?? "", stock: form.get("stock") ?? "" };
-  if (name.length < 2 || !sku || !CATEGORIES.includes(category as (typeof CATEGORIES)[number])) {
-    return renderNewProduct(url, "Name, SKU, and a valid category are required", values);
+  const values = {
+    name,
+    sku,
+    category,
+    price: form.get("price") ?? "",
+    stock: form.get("stock") ?? "",
+  };
+  if (
+    name.length < 2 ||
+    !sku ||
+    !CATEGORIES.includes(category as (typeof CATEGORIES)[number])
+  ) {
+    return renderNewProduct(
+      url,
+      "Name, SKU, and a valid category are required",
+      values,
+    );
   }
-  if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) {
-    return renderNewProduct(url, "Price and stock must be non-negative numbers", values);
+  if (
+    !Number.isFinite(price) ||
+    price < 0 ||
+    !Number.isInteger(stock) ||
+    stock < 0
+  ) {
+    return renderNewProduct(
+      url,
+      "Price and stock must be non-negative numbers",
+      values,
+    );
   }
   try {
-    await getDb().insert(products).values({
-      sku,
-      name,
-      category,
-      priceCents: Math.round(price * 100),
-      stock,
-    });
+    await getDb()
+      .insert(products)
+      .values({
+        sku,
+        name,
+        category,
+        priceCents: Math.round(price * 100),
+        stock,
+      });
   } catch (error) {
     if (errorText(error).includes("products_sku_unique")) {
       return renderNewProduct(url, `SKU already exists: ${sku}`, values);
@@ -345,12 +398,20 @@ async function handleProductCreate(req: Request, url: URL): Promise<Response> {
   });
 }
 
-async function handleDocumentUpload(req: Request, user: User): Promise<Response> {
+async function handleDocumentUpload(
+  req: Request,
+  user: User,
+): Promise<Response> {
   const form = await req.formData();
   const docType = String(form.get("docType") ?? "");
   const file = form.get("file");
-  if (!DOC_TYPES.includes(docType as (typeof DOC_TYPES)[number]) || !(file instanceof File)) {
-    return new Response("A known document type and a file are required", { status: 422 });
+  if (
+    !DOC_TYPES.includes(docType as (typeof DOC_TYPES)[number]) ||
+    !(file instanceof File)
+  ) {
+    return new Response("A known document type and a file are required", {
+      status: 422,
+    });
   }
   const bytes = Buffer.from(await file.arrayBuffer());
   if (bytes.byteLength === 0) {
@@ -359,14 +420,16 @@ async function handleDocumentUpload(req: Request, user: User): Promise<Response>
   if (bytes.byteLength > MAX_UPLOAD_BYTES) {
     return new Response("The file exceeds the 10 MB limit", { status: 422 });
   }
-  await getDb().insert(documents).values({
-    filename: file.name || "unnamed",
-    mimeType: file.type || "application/octet-stream",
-    sizeBytes: bytes.byteLength,
-    docType,
-    uploadedBy: user.name,
-    contentHex: bytes.toString("hex"),
-  });
+  await getDb()
+    .insert(documents)
+    .values({
+      filename: file.name || "unnamed",
+      mimeType: file.type || "application/octet-stream",
+      sizeBytes: bytes.byteLength,
+      docType,
+      uploadedBy: user.name,
+      contentHex: bytes.toString("hex"),
+    });
   return new Response(null, {
     status: 303,
     headers: { location: "/documents.html?uploaded=1" },
@@ -378,7 +441,11 @@ async function serveDocumentFile(
   disposition: "attachment" | "inline",
 ): Promise<Response> {
   try {
-    const [row] = await getDb().select().from(documents).where(eq(documents.id, id)).limit(1);
+    const [row] = await getDb()
+      .select()
+      .from(documents)
+      .where(eq(documents.id, id))
+      .limit(1);
     if (!row) {
       return new Response("Not found", { status: 404 });
     }
@@ -469,21 +536,45 @@ async function apiCreateProduct(req: Request): Promise<Response> {
   const category = String(body.category ?? "");
   const price = Number(body.price);
   const stock = Number(body.stock);
-  if (name.length < 2 || !sku || !CATEGORIES.includes(category as (typeof CATEGORIES)[number])) {
-    return Response.json({ error: "name, sku and a valid category are required" }, { status: 422 });
+  if (
+    name.length < 2 ||
+    !sku ||
+    !CATEGORIES.includes(category as (typeof CATEGORIES)[number])
+  ) {
+    return Response.json(
+      { error: "name, sku and a valid category are required" },
+      { status: 422 },
+    );
   }
-  if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) {
-    return Response.json({ error: "price and stock must be non-negative numbers" }, { status: 422 });
+  if (
+    !Number.isFinite(price) ||
+    price < 0 ||
+    !Number.isInteger(stock) ||
+    stock < 0
+  ) {
+    return Response.json(
+      { error: "price and stock must be non-negative numbers" },
+      { status: 422 },
+    );
   }
   try {
     const [row] = await getDb()
       .insert(products)
-      .values({ sku, name, category, priceCents: Math.round(price * 100), stock })
+      .values({
+        sku,
+        name,
+        category,
+        priceCents: Math.round(price * 100),
+        stock,
+      })
       .returning();
     return Response.json({ product: row }, { status: 201 });
   } catch (error) {
     if (errorText(error).includes("products_sku_unique")) {
-      return Response.json({ error: `sku already exists: ${sku}` }, { status: 409 });
+      return Response.json(
+        { error: `sku already exists: ${sku}` },
+        { status: 409 },
+      );
     }
     return Response.json({ error: "database unavailable" }, { status: 503 });
   }
@@ -491,7 +582,10 @@ async function apiCreateProduct(req: Request): Promise<Response> {
 
 async function apiDeleteProduct(sku: string): Promise<Response> {
   try {
-    const deleted = await getDb().delete(products).where(eq(products.sku, sku)).returning();
+    const deleted = await getDb()
+      .delete(products)
+      .where(eq(products.sku, sku))
+      .returning();
     return Response.json({ deleted: deleted.length });
   } catch {
     return Response.json({ error: "database unavailable" }, { status: 503 });
@@ -508,11 +602,19 @@ async function apiQueueRestock(req: Request): Promise<Response> {
   const sku = String(body.sku ?? "").trim();
   const quantity = Number(body.quantity);
   if (!sku || !Number.isInteger(quantity) || quantity < 1) {
-    return Response.json({ error: "sku and a positive integer quantity are required" }, { status: 422 });
+    return Response.json(
+      { error: "sku and a positive integer quantity are required" },
+      { status: 422 },
+    );
   }
   try {
-    const [row] = await getDb().select().from(products).where(eq(products.sku, sku)).limit(1);
-    if (!row) return Response.json({ error: `unknown sku: ${sku}` }, { status: 404 });
+    const [row] = await getDb()
+      .select()
+      .from(products)
+      .where(eq(products.sku, sku))
+      .limit(1);
+    if (!row)
+      return Response.json({ error: `unknown sku: ${sku}` }, { status: 404 });
   } catch {
     return Response.json({ error: "database unavailable" }, { status: 503 });
   }
@@ -530,7 +632,11 @@ async function apiQueueRestock(req: Request): Promise<Response> {
   setTimeout(async () => {
     try {
       const db = getDb();
-      const [row] = await db.select().from(products).where(eq(products.sku, sku)).limit(1);
+      const [row] = await db
+        .select()
+        .from(products)
+        .where(eq(products.sku, sku))
+        .limit(1);
       if (!row) throw new Error("product disappeared");
       await db
         .update(products)
@@ -552,8 +658,11 @@ async function apiStats(): Promise<Response> {
     const allUsers = await db.select().from(users);
     return Response.json({
       products: allProducts.length,
-      electronics: allProducts.filter((row) => row.category === "electronics").length,
-      categories: [...new Set(allProducts.map((row) => row.category))].toSorted(),
+      electronics: allProducts.filter((row) => row.category === "electronics")
+        .length,
+      categories: [
+        ...new Set(allProducts.map((row) => row.category)),
+      ].toSorted(),
       documents: allDocuments.length,
       users: allUsers.length,
     });
@@ -565,7 +674,11 @@ async function apiStats(): Promise<Response> {
 async function apiHealth(): Promise<Response> {
   try {
     const rows = await getDb().select().from(products).limit(1);
-    return Response.json({ status: "ok", database: "up", seeded: rows.length > 0 });
+    return Response.json({
+      status: "ok",
+      database: "up",
+      seeded: rows.length > 0,
+    });
   } catch {
     return Response.json({ status: "ok", database: "down", seeded: false });
   }
@@ -585,7 +698,10 @@ const server = Bun.serve({
       return new Response(null, { status: 204 });
     }
     if (path === "/api/broken") {
-      return Response.json({ error: "intentional 500 for the demo" }, { status: 500 });
+      return Response.json(
+        { error: "intentional 500 for the demo" },
+        { status: 500 },
+      );
     }
     if (path === "/api/import-preview" && req.method === "POST") {
       const bytes = (await req.arrayBuffer()).byteLength;
@@ -635,13 +751,21 @@ const server = Bun.serve({
       try {
         const category = url.searchParams.get("category");
         const sku = url.searchParams.get("sku");
-        const rows = await getDb().select().from(products).orderBy(products.sku);
+        const rows = await getDb()
+          .select()
+          .from(products)
+          .orderBy(products.sku);
         const filtered = rows.filter(
-          (row) => (!category || row.category === category) && (!sku || row.sku === sku),
+          (row) =>
+            (!category || row.category === category) &&
+            (!sku || row.sku === sku),
         );
         return Response.json({ products: filtered, total: filtered.length });
       } catch {
-        return Response.json({ error: "database unavailable" }, { status: 503 });
+        return Response.json(
+          { error: "database unavailable" },
+          { status: 503 },
+        );
       }
     }
     if (path === "/api/restock" && req.method === "POST") {
@@ -653,19 +777,27 @@ const server = Bun.serve({
     const restockMatch = path.match(/^\/api\/restock\/([^/]+)$/);
     if (restockMatch && req.method === "GET") {
       const job = restockJobs.get(decodeURIComponent(restockMatch[1]!));
-      return job ? Response.json(job) : Response.json({ error: "not_found" }, { status: 404 });
+      return job
+        ? Response.json(job)
+        : Response.json({ error: "not_found" }, { status: 404 });
     }
 
     // --- platform exports ---------------------------------------------------
     if (path === "/export/products.csv") {
       try {
         const category = url.searchParams.get("category");
-        const rows = await getDb().select().from(products).orderBy(products.sku);
-        const filtered = category ? rows.filter((row) => row.category === category) : rows;
+        const rows = await getDb()
+          .select()
+          .from(products)
+          .orderBy(products.sku);
+        const filtered = category
+          ? rows.filter((row) => row.category === category)
+          : rows;
         const csv = [
           "sku,name,category,price,stock",
           ...filtered.map(
-            (row) => `${row.sku},"${row.name.replaceAll('"', '""')}",${row.category},${money(row.priceCents)},${row.stock}`,
+            (row) =>
+              `${row.sku},"${row.name.replaceAll('"', '""')}",${row.category},${money(row.priceCents)},${row.stock}`,
           ),
         ].join("\n");
         return new Response(csv, {
@@ -680,7 +812,10 @@ const server = Bun.serve({
     }
     if (path === "/export/products.xlsx") {
       try {
-        const rows = await getDb().select().from(products).orderBy(products.sku);
+        const rows = await getDb()
+          .select()
+          .from(products)
+          .orderBy(products.sku);
         const workbook = makeWorkbook([
           {
             name: "Products",
@@ -745,13 +880,18 @@ const server = Bun.serve({
         return new Response("Upload failed", { status: 422 });
       }
     }
-    const docMatch = path.match(/^\/documents\/([0-9a-f-]+)\/(download|preview)$/);
+    const docMatch = path.match(
+      /^\/documents\/([0-9a-f-]+)\/(download|preview)$/,
+    );
     if (docMatch) {
       const user = await currentUser(req);
       if (!user) {
         return loginRedirect("/documents.html");
       }
-      return serveDocumentFile(docMatch[1]!, docMatch[2] === "download" ? "attachment" : "inline");
+      return serveDocumentFile(
+        docMatch[1]!,
+        docMatch[2] === "download" ? "attachment" : "inline",
+      );
     }
     if (path === "/login" && req.method === "POST") {
       return handleLogin(req);
@@ -777,11 +917,21 @@ const server = Bun.serve({
 });
 
 console.log(`Cairntrace demo platform at http://localhost:${server.port}/`);
-console.log(`  Static smoke pages:  /  /dashboard.html  /api.html  /import.html  /table-actions.html`);
-console.log(`  Platform pages:      /products.html  /products/new.html  /documents.html  /login.html`);
-console.log(`  API:                 /api/health  /api/stats  /api/products  /api/session  POST /api/login`);
-console.log(`                       POST|DELETE /api/products  POST /api/restock  /api/restock/<id>`);
-console.log(`  Exports:             /export/products.csv  /export/products.xlsx`);
+console.log(
+  `  Static smoke pages:  /  /dashboard.html  /api.html  /import.html  /table-actions.html  /widgets.html`,
+);
+console.log(
+  `  Platform pages:      /products.html  /products/new.html  /documents.html  /login.html`,
+);
+console.log(
+  `  API:                 /api/health  /api/stats  /api/products  /api/session  POST /api/login`,
+);
+console.log(
+  `                       POST|DELETE /api/products  POST /api/restock  /api/restock/<id>`,
+);
+console.log(
+  `  Exports:             /export/products.csv  /export/products.xlsx`,
+);
 
 function makeTemplateWorkbook(): Buffer {
   return makeWorkbook([

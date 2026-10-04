@@ -2,6 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  emptyScopedState,
+  phaseFingerprint,
+  SeedPhaseStore,
+  seedTargetHash,
+} from "../../../core/servicesOps/seedTransaction";
 import { getServicesStatus, servicesStatusCommand } from "./status";
 import type { MockInstance } from "vitest";
 
@@ -40,6 +46,25 @@ describe("cairn services status — getServicesStatus", () => {
     const result = await getServicesStatus({ config: configPath });
     expect(result.hasServices).toBe(false);
     expect(result.project).toBe("myapp");
+  });
+
+  it("reports an environment's own services when the config has no top-level block", async () => {
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      "version: 1\nproject: env-only\ndefaultEnvironment: local\nenvironments:\n  local: {}\n  remote:\n    services:\n      seed:\n        command: yarn seed\n        ttlSeconds: 60\n",
+    );
+    const remote = await getServicesStatus({
+      config: configPath,
+      env: "remote",
+    });
+    expect(remote).toMatchObject({
+      hasServices: true,
+      env: "remote",
+      seed: { configured: true, ttlSeconds: 60 },
+    });
+    const local = await getServicesStatus({ config: configPath, env: "local" });
+    expect(local.hasServices).toBe(false);
   });
 
   it("returns hasServices=true with docker/seed/tmux configured when services block exists", async () => {
@@ -215,6 +240,41 @@ describe("cairn services status — error handling branches", () => {
     const result = await getServicesStatus({ config: configPath });
     expect(result.seed.configured).toBe(true);
     expect(result.seed.expired).toBe(true);
+  });
+
+  it("reads a phased seed from the per project + environment + target store", async () => {
+    const project = `phased-${process.pid}`;
+    const configPath = join(dir, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      `version: 1\nproject: ${project}\ndefaultEnvironment: local\nenvironments:\n  local:\n    baseUrl: http://localhost:8080\nservices:\n  seed:\n    ttlSeconds: 3600\n    phases:\n      - { name: restore, run: "true" }\n      - { name: migrate, run: "true" }\n`,
+    );
+    const store = new SeedPhaseStore();
+    const targetHash = seedTargetHash({ cwd: dir });
+    const state = emptyScopedState(project, "local", targetHash);
+    const ranAt = new Date().toISOString();
+    state.phases.restore = {
+      fingerprint: phaseFingerprint({ name: "restore", run: "true" }),
+      ranAt,
+      exitCode: 0,
+      durationMs: 5,
+    };
+    state.phases.migrate = {
+      fingerprint: phaseFingerprint({ name: "migrate", run: "true" }),
+      ranAt,
+      exitCode: 2,
+      durationMs: 5,
+    };
+    state.resume = { at: ranAt, done: { restore: "x" } };
+    await store.write(state);
+    const result = await getServicesStatus({ config: configPath });
+    expect(result.seed.phases).toEqual([
+      { name: "restore", lastRunAt: ranAt, exitCode: 0, fresh: true },
+      { name: "migrate", lastRunAt: ranAt, exitCode: 2, fresh: false },
+    ]);
+    expect(result.seed.expired).toBe(true);
+    expect(result.seed.lastRunAt).toBe(ranAt);
+    expect(result.seed.resume).toEqual({ at: ranAt, phases: ["restore"] });
   });
 
   it("handles tmux status errors when tmux is not installed", async () => {

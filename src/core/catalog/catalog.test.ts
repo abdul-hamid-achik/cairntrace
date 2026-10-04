@@ -566,6 +566,59 @@ describe("buildCatalog", () => {
     ]);
   });
 
+  it("lists every services phase an environment boots, its own block alone without a top-level one", async () => {
+    const proj = await mkdtemp(join(tmpdir(), "cairn-catalog-env-services-"));
+    await writeFile(
+      join(proj, "cairntrace.config.yml"),
+      `version: 1
+defaultEnvironment: local
+environments:
+  local: {}
+  remote:
+    services:
+      provisioner: { up: ./up.sh, down: ./down.sh }
+      tunnels: [{ name: db, command: ssh -N box }]
+      files: [{ path: app.json, json: { a: 1 } }]
+      seed: { command: ./seed.sh }
+suites:
+  s:
+    specs: [flows]
+    processEnv: { ENGINE_MODE: durable }
+    labels: { cohort: a }
+    env:
+      remote:
+        bail: false
+        labels: { cohort: b }
+        seed: { postCommands: { skip: [extra] } }
+`,
+    );
+    await mkdir(join(proj, "flows"), { recursive: true });
+    await writeFile(join(proj, "flows", "a.yml"), signInFlow("a"));
+    const c = await buildCatalog({ cwd: proj, kinds: ["envs", "suites"] });
+    expect(() => CatalogResultSchema.parse(c)).not.toThrow();
+    const envs = Object.fromEntries(c.envs!.map((e) => [e.name, e.services]));
+    expect(envs).toEqual({
+      local: { enabled: false, phases: [] },
+      remote: {
+        enabled: true,
+        phases: ["provisioner", "tunnels", "files", "seed"],
+      },
+    });
+    const suite = c.suites![0]!;
+    const byEnv = Object.fromEntries(suite.envs.map((e) => [e.env, e]));
+    expect(byEnv.local).toMatchObject({
+      processEnv: ["ENGINE_MODE"],
+      labels: ["cohort=a"],
+    });
+    expect(byEnv.local).not.toHaveProperty("bail");
+    expect(byEnv.remote).toMatchObject({
+      bail: false,
+      seedSkip: ["extra"],
+      processEnv: ["ENGINE_MODE"],
+      labels: ["cohort=b"],
+    });
+  });
+
   it("lists flows with tags, requires, drafts and their last run", async () => {
     const c = await catalog({ kinds: ["flows"] });
     const byName = Object.fromEntries(c.flows!.map((f) => [f.name, f]));
@@ -924,7 +977,7 @@ describe("MCP cairn_catalog", () => {
         expect(new Set(whole.vars!.map((v) => v.env))).toEqual(
           new Set(["local"]),
         );
-        expect(whole.kinds).toHaveLength(7);
+        expect(whole.kinds).toHaveLength(8);
       } finally {
         process.chdir(cwd);
       }

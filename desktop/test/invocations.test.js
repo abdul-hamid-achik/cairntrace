@@ -475,3 +475,64 @@ describe("stop safety checks", () => {
     assert.equal(await invocations.readProcessInfo(2 ** 22 + 12345), null);
   });
 });
+
+describe("readInvocation — delegated runner", () => {
+  it("labels a journal whose environment has a runner and keeps the local pid as the owner", () => {
+    const root = tempDir("cairn-inv-");
+    journal(root, ID_A, {
+      delegate: {
+        contract: "urn:cairntrace.dev:delegate:v1",
+        command: ["./tools/remote-run.sh", "--slot", "auto"],
+        pid: 4300,
+        remoteInvocationId: "2026-10-03T10-00-06-000Z_77_def456",
+        diagnostics: 1,
+      },
+    });
+    write(
+      root,
+      `_invocations/${ID_A}/events.ndjson`,
+      fs.readFileSync(
+        path.join(__dirname, "fixtures", "invocation-delegated.ndjson"),
+        "utf8",
+      ),
+    );
+    const read = invocations.readInvocation(root, ID_A, {
+      pidAlive: (pid) => pid === 4242,
+      now: Date.parse("2026-10-03T10:00:20.000Z"),
+    });
+    assert.deepEqual(read?.delegate, {
+      remoteInvocationId: "2026-10-03T10-00-06-000Z_77_def456",
+      command: ["./tools/remote-run.sh", "--slot", "auto"],
+      exitCode: null,
+      cancelled: false,
+      timedOut: false,
+      idle: false,
+      diagnostics: 1,
+    });
+    // The local cairn process (4242) owns it: running, not aborted.
+    assert.equal(read?.status, "running");
+    assert.equal(read?.alive, true);
+    // An ordinary journal has no delegate block.
+    journal(root, ID_B);
+    assert.equal(
+      invocations.readInvocation(root, ID_B, { pidAlive: () => true })
+        ?.delegate,
+      null,
+    );
+  });
+
+  it("reduces a delegated journal stream like any journal", () => {
+    const CairnEvents = require("../lib/events");
+    const lines = fs
+      .readFileSync(
+        path.join(__dirname, "fixtures", "invocation-delegated.ndjson"),
+        "utf8",
+      )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const model = CairnEvents.reduceEvents(lines);
+    assert.equal(model.planned, 2);
+    assert.equal(model.status, "failed");
+  });
+});

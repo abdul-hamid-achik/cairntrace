@@ -19,6 +19,7 @@ export const CATALOG_KINDS = [
   "flows",
   "checkpoints",
   "fixtures",
+  "suites",
 ] as const;
 export const CatalogKindSchema = z.enum(CATALOG_KINDS);
 export type CatalogKind = z.infer<typeof CatalogKindSchema>;
@@ -120,10 +121,17 @@ export const CatalogVarSchema = z
     masked: z.literal(true).optional(),
     /** The YAML comment above (or after) the key. */
     comment: z.string().optional(),
-    /** `environment` = written in this environment; `inherited` = via a `<<:` merge key. */
-    definedIn: z.enum(["environment", "inherited"]),
+    /**
+     * `environment` = written in this environment; `inherited` = via a `<<:`
+     * merge key or a `vars: *anchor` alias; F7: `top-level` = the config's
+     * (or an included file's) top-level `vars:`; `extends` = an environment
+     * this one extends (`inheritedFrom` names it).
+     */
+    definedIn: z.enum(["environment", "inherited", "top-level", "extends"]),
     /** Where an inherited value comes from: an environment name or `&anchor`. */
     inheritedFrom: z.string().optional(),
+    /** F7: `file:line` of the definition when it is not this environment's own entry. */
+    file: z.string().optional(),
     usedBy: z.array(CatalogUseSchema),
     ...rankFields,
   })
@@ -180,6 +188,16 @@ export const CatalogVerifierSchema = z
   .strict();
 export type CatalogVerifier = z.infer<typeof CatalogVerifierSchema>;
 
+/** The services phases a catalog environment row lists, in boot order. */
+export const CATALOG_SERVICE_PHASES = [
+  "provisioner",
+  "tunnels",
+  "docker",
+  "files",
+  "seed",
+  "tmux",
+] as const;
+
 export const CatalogEnvSchema = z
   .object({
     name: z.string().min(1),
@@ -198,7 +216,8 @@ export const CatalogEnvSchema = z
       .object({
         /** `cairn run` boots services for this environment. */
         enabled: z.boolean(),
-        phases: z.array(z.enum(["docker", "seed", "tmux"])),
+        /** In boot order (provisioner → tunnels → docker → files → seed → tmux). */
+        phases: z.array(z.enum(CATALOG_SERVICE_PHASES)),
       })
       .strict(),
     /** Secrets provider and key NAMES (never values). */
@@ -287,6 +306,73 @@ export const CatalogFixtureSchema = z
   .strict();
 export type CatalogFixture = z.infer<typeof CatalogFixtureSchema>;
 
+/** One environment's view of a suite: the specs it resolves to there. */
+const CatalogSuiteEnvSchema = z
+  .object({
+    env: z.string().min(1),
+    /** Resolved spec files, in run order (relative to `root`). Empty when `problem` is set. */
+    specs: z.array(z.string().min(1)),
+    /** Why the suite does not resolve or may not run here (unknown spec, `requires`, …). */
+    problem: z.string().optional(),
+    /** Names of the vars the suite sets here (values are never listed). */
+    vars: z.array(z.string()).optional(),
+    /** Commands of the suite's before / after hooks here (the commands themselves are not listed). */
+    before: z.number().int().nonnegative(),
+    after: z.number().int().nonnegative(),
+    hookTimeoutMs: z.number().int().positive().optional(),
+    /** `env.<n>.bail` (present only when the environment sets its own). */
+    bail: z.boolean().optional(),
+    /** The seed post-commands skipped here, when the environment adds its own skips. */
+    seedSkip: z.array(z.string()).optional(),
+    /** Names of the `processEnv` variables exported here (values are never listed). */
+    processEnv: z.array(z.string()).optional(),
+    /** `labels` stamped on every run here, as `key=value` (masked). */
+    labels: z.array(z.string()).optional(),
+  })
+  .strict();
+
+/** A config `suites:` entry (F9) with its resolved spec list per environment. */
+export const CatalogSuiteSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    /** The selectors as authored. */
+    specs: z.array(z.string()).optional(),
+    tags: z.array(z.string()).optional(),
+    order: z.array(z.string()).optional(),
+    parallel: z.number().int().positive().optional(),
+    bail: z.boolean().optional(),
+    requires: z
+      .object({
+        env: z.array(z.string()).optional(),
+        vars: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Seed post-commands the suite skips. */
+    seedSkip: z.array(z.string()).optional(),
+    envs: z.array(CatalogSuiteEnvSchema),
+    ...rankFields,
+  })
+  .strict();
+export type CatalogSuite = z.infer<typeof CatalogSuiteSchema>;
+
+/** `cairn suites list --json`: the config's suites with their per-environment spec lists. */
+export const SuitesListResultSchema = z
+  .object({
+    $schema: z.literal("urn:cairntrace.dev:suites:v1"),
+    version: z.literal("1"),
+    project: z.string().optional(),
+    root: z.string().min(1),
+    configPath: z.string().optional(),
+    /** The `--env` the list was narrowed to. */
+    env: z.string().optional(),
+    suites: z.array(CatalogSuiteSchema),
+    warnings: z.array(z.string()),
+  })
+  .strict();
+export type SuitesListResult = z.infer<typeof SuitesListResultSchema>;
+
 const CatalogCountsSchema = z
   .object({
     actions: z.number().int().nonnegative().optional(),
@@ -296,6 +382,7 @@ const CatalogCountsSchema = z
     flows: z.number().int().nonnegative().optional(),
     checkpoints: z.number().int().nonnegative().optional(),
     fixtures: z.number().int().nonnegative().optional(),
+    suites: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -322,6 +409,7 @@ export const CatalogResultSchema = z
     flows: z.array(CatalogFlowSchema).optional(),
     checkpoints: z.array(CatalogCheckpointSchema).optional(),
     fixtures: z.array(CatalogFixtureSchema).optional(),
+    suites: z.array(CatalogSuiteSchema).optional(),
     scan: z
       .object({
         /** YAML files read under the scan roots. */

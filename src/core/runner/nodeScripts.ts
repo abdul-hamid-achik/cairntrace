@@ -6,6 +6,7 @@ import {
 } from "../../adapters/agent-browser/processTree";
 import { LineSplitter } from "../artifacts/liveLog";
 import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
+import { nodeCommand } from "../runtimes";
 
 const RESULT_MARKER = "__CAIRNTRACE_RESULT__";
 
@@ -64,21 +65,31 @@ export interface NodeScriptResult {
  * properties). Node 26 removed that flag; type *stripping* is the default
  * and the old flag is a hard "bad option" that failed every verifier.
  */
-let transformTypesArgs: string[] | undefined;
+const transformTypesArgs = new Map<string, string[]>();
 
-function nodeTransformTypesArgs(): string[] {
-  if (transformTypesArgs) return transformTypesArgs;
+/**
+ * Per node binary: a pinned `CAIRN_NODE` / `runtimes.node` binary may be a
+ * different release than the PATH one.
+ */
+function nodeTransformTypesArgs(
+  node: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const cached = transformTypesArgs.get(node);
+  if (cached) return cached;
+  let args: string[];
   try {
-    execaSync("node", ["--experimental-transform-types", "--version"], {
+    execaSync(node, ["--experimental-transform-types", "--version"], {
       reject: true,
       extendEnv: false,
-      env: process.env,
+      env,
     });
-    transformTypesArgs = ["--experimental-transform-types"];
+    args = ["--experimental-transform-types"];
   } catch {
-    transformTypesArgs = [];
+    args = [];
   }
-  return transformTypesArgs;
+  transformTypesArgs.set(node, args);
+  return args;
 }
 
 export async function runNodeScript(
@@ -99,19 +110,28 @@ export async function runNodeScript(
     ...rest,
     ...(sdkEntry ? { sdk: pathToFileURL(sdkEntry).href } : {}),
   };
+  const childEnv = targetChildEnvWithSelectedTvaultKeys(
+    env ?? process.env,
+    selectedTvaultKeys ?? [],
+  );
+  // F19: `CAIRN_NODE` (or the config's `runtimes.node`, which the run engine
+  // exports as CAIRN_NODE) picks the binary; otherwise `node` from PATH.
+  const node = nodeCommand(childEnv);
   const subprocess = execa(
-    "node",
-    [...nodeTransformTypesArgs(), "--input-type=module", "-e", NODE_BOOTSTRAP],
+    node,
+    [
+      ...nodeTransformTypesArgs(node, childEnv),
+      "--input-type=module",
+      "-e",
+      NODE_BOOTSTRAP,
+    ],
     {
       cwd: invocation.cwd,
       input: JSON.stringify(payload),
       reject: false,
       all: false,
       extendEnv: false,
-      env: targetChildEnvWithSelectedTvaultKeys(
-        env ?? process.env,
-        selectedTvaultKeys ?? [],
-      ),
+      env: childEnv,
       ...(invocation.timeoutMs ? { timeout: invocation.timeoutMs } : {}),
       // A polite-cancel child (the verifier SDK) handles SIGTERM itself and
       // has already met its own deadline; the budget kill must not wait on

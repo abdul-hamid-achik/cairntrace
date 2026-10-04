@@ -1,0 +1,19 @@
+import { expect } from "@playwright/test";
+import { BasePage } from "./base-page";
+
+export class SignInPage extends BasePage {
+  async goto(): Promise<void> {
+    await this.page.goto("/signin");
+  }
+
+  async signIn(email: string, password: string, expectCode = true): Promise<void> {
+    await this.fillInput("email", email);
+    await this.fillInput("password", password);
+    await this.page.getByRole("button", { name: "Sign In" }).click();
+    await expect(this.page).not.toHaveURL(/\/signin(?:\?|$)/);
+    if (expectCode) {
+      await this.page.locator(".verify-code input").fill("000000");
+    }
+    await this.waitForSelector("css=.start-search >> text=Get Started");
+  }
+}

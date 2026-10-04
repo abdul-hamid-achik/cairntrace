@@ -1,0 +1,20 @@
+# The same environments, each one's vars in its own file.
+version: 1
+defaultEnvironment: local
+vars:
+  tenant: acme
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    include: [config/vars/local.yml]
+  tunnel:
+    extends: local
+    baseUrl: http://localhost:9080
+    vars:
+      host: http://localhost:9080
+  dev:
+    baseUrl: https://dev.example.test
+    include: [config/vars/dev.yml]
+  test:
+    baseUrl: https://test.example.test
+    include: [config/vars/test.yml]

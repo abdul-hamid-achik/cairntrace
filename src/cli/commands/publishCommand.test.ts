@@ -35,7 +35,7 @@ afterEach(() => {
   }
 });
 
-async function fakePublisher(mode: "ok" | "auth-fail") {
+async function fakePublisher(mode: "ok" | "auth-fail" | "server-times") {
   const root = await mkdtemp(join(tmpdir(), "cairntrace-fake-publish-"));
   const log = join(root, "args.log");
   const indexCopy = join(root, "run-index.json");
@@ -85,7 +85,13 @@ console.log(JSON.stringify({
   size_bytes: bytes.length,
   verification: "server-sha256",
   published_at: "2026-10-02T12:00:00Z",
-}));
+${
+  mode === "server-times"
+    ? `  committed_at: "2026-10-02T12:00:01.250Z",
+  expires_at: "2026-10-04T08:30:00Z",
+`
+    : ""
+}}));
 `,
   );
   await chmod(bin, 0o755);
@@ -184,6 +190,30 @@ describe("cairn publish", { timeout: 30_000 }, () => {
     expect(manifest.artifacts.map((a) => a.path)).toContain(
       "publish-receipt.json",
     );
+  });
+
+  it("prefers the server expires_at and records committed_at from a 0.37 receipt", async () => {
+    await fakePublisher("server-times");
+    const { root, runDir } = await runsRootWithRun();
+    const outcome = await publishRunRef("latest", {
+      artifactRoot: root,
+      retentionDays: 3,
+    });
+    expect(outcome).toMatchObject({
+      status: "published",
+      committedAt: "2026-10-02T12:00:01.250Z",
+      expiresAt: "2026-10-04T08:30:00Z",
+      webUrl: "https://file.cheap/console/artifacts/art-42",
+    });
+    const receipt = PublishReceiptSchema.parse(
+      JSON.parse(await readFile(join(runDir, "publish-receipt.json"), "utf8")),
+    );
+    expect(receipt).toMatchObject({
+      publishedAt: "2026-10-02T12:00:00Z",
+      committedAt: "2026-10-02T12:00:01.250Z",
+      expiresAt: "2026-10-04T08:30:00Z",
+      webUrl: "https://file.cheap/console/artifacts/art-42",
+    });
   });
 
   it("records an auth failure without surfacing publisher stderr", async () => {

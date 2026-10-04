@@ -1,0 +1,32 @@
+# Three environments that carry DIFFERENT var sets, written inline.
+version: 1
+defaultEnvironment: local
+vars:
+  tenant: acme
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    vars:
+      host: http://localhost:8080
+      apiUrl: "${vars.host}/api"
+      regions: [eu, us]
+      adminEmail: "${env.CAIRN_FIXTURE_ADMIN_EMAIL:-admin@example.test}"
+      retryCount: 3
+      useSandbox: true
+      sandboxPath: /sandbox
+  tunnel:
+    extends: local
+    baseUrl: http://localhost:9080
+    vars:
+      host: http://localhost:9080
+  dev:
+    baseUrl: https://dev.example.test
+    vars:
+      host: https://dev.example.test
+      apiUrl: "${vars.host}/api"
+      tenant: dev
+      devOnlyFlag: true
+  test:
+    baseUrl: https://test.example.test
+    vars:
+      host: https://test.example.test

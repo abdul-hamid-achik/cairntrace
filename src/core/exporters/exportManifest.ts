@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import type { ExportManifestVerify } from "../schema/exportVerify.v1";
 import type { ExportLang } from "./playwrightExporter";
 
 export const EXPORT_MANIFEST_FILE = ".cairn-export.json";
@@ -29,6 +30,24 @@ export interface ExportManifestSpec {
   testFile: string;
   /** sha256 over the spec source and its imported actions (name + source). */
   sourceDigest: string;
+}
+
+/**
+ * A precondition command listed for the host to run
+ * (`--preconditions manifest`). `run` is the authored command text with
+ * `${env.X}` placeholders — never an environment value — run through
+ * `/bin/sh -c` from `cwd`, like `cairn run`.
+ */
+export interface ExportManifestPrecondition {
+  /** Source spec relative to the export root (POSIX separators). */
+  spec: string;
+  name?: string;
+  run: string;
+  /** Directory it runs in, relative to `source.projectRoot` (POSIX). */
+  cwd: string;
+  timeoutMs: number;
+  /** Names of the `preconditions.env` entries layered over the env (no values). */
+  envKeys?: string[];
 }
 
 export interface ExportManifestFile {
@@ -56,9 +75,47 @@ export interface ExportManifestV1 {
     varKeys: string[];
     /** sha256 of the --var overrides, so the check can tell they differ. */
     varsDigest?: string;
+    /** `--preconditions` mode, when one was given. */
+    preconditions?: string;
+    /** `--verifiers` mode, when one was given. */
+    verifiers?: string;
+    /** `--gate-env` names (sorted). */
+    gateEnv?: string[];
+    /** The source project root (config dir), relative to the export root. */
+    projectRoot?: string;
+    /** E8: the host Playwright config the tree was adapted to, relative to the export root. */
+    hostConfig?: string;
+    /** E8: the `export.targets` profile the export was made from. */
+    target?: string;
+    /** E12: `--max-eval-ratio` (specs above it were refused, so the check skips them too). */
+    maxEvalRatio?: number;
+    /** E8: `--allow-eval-without-bypass` was given. */
+    allowEvalWithoutBypass?: boolean;
+    /** `--strict-locators`: no `.first()` on a locator without `nth`. */
+    strictLocators?: boolean;
+    /**
+     * The host Playwright project `--verify` lists, runs and mutates under
+     * (`--verify-project` / `export.targets.<name>.verifyProject` at export
+     * time). A later `--verify <dir>` uses it unless one is given.
+     */
+    verifyProject?: string;
+    /**
+     * E9: the export map the tree was made with: its path relative to the
+     * export root and the digest of its parsed content (the check regenerates
+     * with the same map and says when it changed).
+     */
+    map?: { file: string; digest: string };
   };
   specs: ExportManifestSpec[];
   files: ExportManifestFile[];
+  /** `--preconditions manifest`: the commands the host runs before the suite. */
+  preconditions?: ExportManifestPrecondition[];
+  /**
+   * The last `cairn export playwright --verify` result (E5): a summary that
+   * names the full report. `filesDigest` ties it to the files it verified: a
+   * re-export that changes any file drops it, one that does not keeps it.
+   */
+  verify?: ExportManifestVerify;
 }
 
 /** One generated or copied file, relative to the export root. */
@@ -85,6 +142,7 @@ export function buildExportManifest(input: {
   source: ExportManifestV1["source"];
   specs: ExportManifestSpec[];
   files: GeneratedExportFile[];
+  preconditions?: ExportManifestPrecondition[];
   generatedAt?: string;
 }): ExportManifestV1 {
   return {
@@ -102,7 +160,25 @@ export function buildExportManifest(input: {
         sha256: sha256Hex(file.content),
       }))
       .toSorted((a, b) => a.path.localeCompare(b.path)),
+    ...(input.preconditions
+      ? {
+          preconditions: [...input.preconditions].toSorted(
+            (a, b) =>
+              a.spec.localeCompare(b.spec) || a.run.localeCompare(b.run),
+          ),
+        }
+      : {}),
   };
+}
+
+/** Digest of the recorded file hashes: which export content a verify result covers. */
+export function exportFilesDigest(
+  files: ReadonlyArray<ExportManifestFile>,
+): string {
+  const rows = files
+    .map((file) => [file.path, file.sha256] as const)
+    .toSorted((a, b) => a[0].localeCompare(b[0]));
+  return `sha256:${sha256Hex(JSON.stringify(rows))}`;
 }
 
 export function renderExportManifest(manifest: ExportManifestV1): string {
@@ -134,14 +210,21 @@ function stabilizeManifest(
   previous: ExportManifestV1 | undefined,
 ): ExportManifestV1 {
   if (!previous || typeof previous.generatedAt !== "string") return next;
+  // A verify result stays valid only for the exact files it verified.
+  const verify =
+    previous.verify &&
+    previous.verify.filesDigest === exportFilesDigest(next.files)
+      ? { verify: previous.verify }
+      : {};
   return manifestContent(previous) === manifestContent(next)
-    ? { ...next, generatedAt: previous.generatedAt }
+    ? { ...next, ...verify, generatedAt: previous.generatedAt }
     : next;
 }
 
 /** Manifest identity without its timestamp. */
 function manifestContent(manifest: ExportManifestV1): string {
-  return JSON.stringify({ ...manifest, generatedAt: "" });
+  const { verify: _verify, ...rest } = manifest;
+  return JSON.stringify({ ...rest, generatedAt: "" });
 }
 
 function readPreviousManifest(exportDir: string): ExportManifestV1 | undefined {
@@ -150,6 +233,21 @@ function readPreviousManifest(exportDir: string): ExportManifestV1 | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Record a verify summary in an existing manifest (everything else, the
+ * timestamp included, stays byte-identical).
+ */
+export async function recordManifestVerify(
+  exportDir: string,
+  verify: ExportManifestVerify,
+): Promise<void> {
+  const manifest = readExportManifest(exportDir);
+  await writeFile(
+    join(exportDir, EXPORT_MANIFEST_FILE),
+    renderExportManifest({ ...manifest, verify }),
+  );
 }
 
 /** Write generated files (text or binary) plus the manifest. */
@@ -211,6 +309,11 @@ export interface ExportCheckReport {
     contractChanged?: boolean;
     sourceChanged?: boolean;
   }>;
+  /**
+   * `--preconditions manifest`: the listed commands differ from what the
+   * current sources generate (a command, cwd or timeout changed).
+   */
+  preconditionsStale?: boolean;
   warnings: string[];
   error?: string;
 }
@@ -225,6 +328,8 @@ export function diffExport(input: {
   previous: ExportManifestV1;
   expectedFiles: GeneratedExportFile[];
   expectedSpecs: ExportManifestSpec[];
+  /** `--preconditions manifest`: the commands the current sources list. */
+  expectedPreconditions?: ExportManifestPrecondition[];
   warnings?: string[];
   readDisk?: (relPath: string) => Buffer | undefined;
 }): ExportCheckReport {
@@ -300,10 +405,15 @@ export function diffExport(input: {
   }
   specs.sort((a, b) => a.spec.localeCompare(b.spec));
 
+  const preconditionsStale =
+    input.expectedPreconditions !== undefined &&
+    JSON.stringify(sortedPreconditions(input.previous.preconditions ?? [])) !==
+      JSON.stringify(sortedPreconditions(input.expectedPreconditions));
   const drift =
     stale.length > 0 ||
     missing.length > 0 ||
     orphaned.length > 0 ||
+    preconditionsStale ||
     specs.some((spec) => spec.status !== "fresh");
   const warnings = [...(input.warnings ?? [])];
   if (input.previous.exporterVersion !== input.exporterVersion) {
@@ -329,8 +439,17 @@ export function diffExport(input: {
       modified: modified.toSorted(),
     },
     specs,
+    ...(preconditionsStale ? { preconditionsStale: true } : {}),
     warnings,
   };
+}
+
+function sortedPreconditions(
+  list: readonly ExportManifestPrecondition[],
+): ExportManifestPrecondition[] {
+  return [...list].toSorted(
+    (a, b) => a.spec.localeCompare(b.spec) || a.run.localeCompare(b.run),
+  );
 }
 
 /**

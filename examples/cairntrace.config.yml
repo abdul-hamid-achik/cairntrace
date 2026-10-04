@@ -37,22 +37,57 @@ services:
       "select count(*) from products" | grep -qv '^0$'
     timeoutMs: 120000
 
+# Config composition (`cairn docs configuration`): top-level `vars` apply to
+# every environment (an environment's own `vars` win by name) and may
+# reference each other. `cairn config vars` shows where each one is defined
+# and which specs read it.
+vars:
+  expectedRows: 3
+  demoEmail: casey@cairntrace.dev
+  demoPassword: cairn-demo-2026
+
+# Run policy (`cairn docs services`, "Run Policy"): what a wrapper script around
+# `cairn run` used to do. One run at a time per config (a second `cairn run`
+# here exits 4 naming the owner), and a preflight check that must pass before
+# any service starts.
+run:
+  lock: true
+  preflight:
+    - command: bun --version
+      expectExit: 0
+      timeout: 30s
+
+# Widget steps (`cairn docs widgets`) find `field: <key>` through these
+# templates (the first visible match wins). Eval and browser-script sources
+# that mention `__cairn` read the page's own state through read-only app
+# handles (`__cairn.app.vendor`), and `wait: { app: … }` polls one.
+browser:
+  fieldRoot: '[data-field-key$=".{key}"]'
+  appHandle:
+    vendor: window.demoVendorStore
+
 environments:
   local:
     baseUrl: http://localhost:8787
-    vars:
-      expectedRows: 3
-      demoEmail: casey@cairntrace.dev
-      demoPassword: cairn-demo-2026
+    # What a spec's `use: login` runs when no imported action is named
+    # `login`: an API sign-in instead of driving the form. A real project
+    # reads `${secrets.X}` here; the demo operator's password is public.
+    auth:
+      alreadyAuthenticated:
+        url: /api/session
+        json: { "$.user.email": "${vars.demoEmail}" }
+      login:
+        url: /api/login
+        headers: { content-type: application/json }
+        body: { email: "${vars.demoEmail}", password: "${vars.demoPassword}" }
+        expectStatus: 200
 
   staging:
     # Pretend staging is something completely different; useful for demo
-    # of environment-swapping without rewriting specs.
-    baseUrl: http://localhost:8787
-    vars:
-      expectedRows: 3
-      demoEmail: casey@cairntrace.dev
-      demoPassword: cairn-demo-2026
+    # of environment-swapping without rewriting specs. `extends` takes
+    # everything from `local` (auth, vars) and overrides only what differs.
+    extends: local
+    baseUrl: http://127.0.0.1:8787
 
 # Readiness gates (`cairn docs services`): named probes a spec waits on in
 # `preconditions.wait`, `cairn wait <name>` checks from a shell, and services /
@@ -95,3 +130,46 @@ fixtures:
       args: [delete, "${fixtures.demo_product.sku}"]
     outputs: { sku: $.sku, name: $.name, stock: $.stock }
     timeoutMs: 30000
+
+# Suites (`cairn docs services`, "Suites"): a named, ordered spec set instead of
+# a Taskfile `case` on the suite name.
+#   cairn run --suite smoke --env local --config examples/cairntrace.config.yml
+#   cairn suites list --config examples/cairntrace.config.yml --json
+# Paths resolve against this file's directory. `before` runs once after the
+# services and the webServer are up, `after` once on every exit path with
+# CAIRN_EXIT_CODE.
+suites:
+  smoke:
+    description: the fast demo-app checks (dashboard, API session, guest redirect)
+    specs:
+      - flows/01-dashboard-nav.yml
+      - flows/platform/27-api-session.yml
+      - flows/platform/29-guest-redirect.yml
+    requires: { env: [local, staging] }
+    before: ["echo suite $CAIRN_SUITE starting"]
+    after: ["echo suite $CAIRN_SUITE finished with exit $CAIRN_EXIT_CODE"]
+
+# Metric probes (`cairn docs services`, "Metrics Probes"): numbers sampled
+# around each spec, written to <run>/diagnostics/metrics.json and merged into
+# diagnostics/report.json, so `cairn stats --metric electronics_products.delta`
+# works without an `--after` collector script. A failed probe never fails a run.
+metrics:
+  - name: electronics_products
+    command: curl -sf http://localhost:8787/api/stats
+    parse: { json: $.electronics }
+    timeout: 10s
+
+# Export targets (`cairn docs export`): the flags of one Playwright handoff.
+#   cairn export playwright --target demo --project --out-dir /tmp/demo-export
+# `input` is relative to this file; a flag on the command line wins over a
+# field. `inline` runs `run:` steps, `teardown:` and preconditions through the
+# generated runtime; `gate` skips (never passes) a node verifier whose env is
+# missing.
+export:
+  targets:
+    demo:
+      input: flows
+      env: local
+      preconditions: inline
+      verifiers: gate
+      lang: ts

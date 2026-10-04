@@ -14,6 +14,7 @@ import type {
 } from "../../schema/verifier.v1";
 import { runNodeScript, VERIFIER_SDK_SPECIFIER } from "../nodeScripts";
 import { resolveFixtureMap } from "../runtimePlaceholders";
+import { withCairnPrelude } from "../../prelude/prelude";
 import type { VerifierContext, VerifierEvaluation } from "./types";
 
 /** The verifier SDK runtime a node child imports (`@thelacanians/cairntrace/verifier`). */
@@ -379,7 +380,8 @@ function buildScript(
     `  const vars = ${vars};`,
     `  const run = ${run};`,
     `  return (function(){`,
-    source,
+    // F20: a source that mentions `__cairn` gets the page prelude first.
+    withCairnPrelude(source, ctx.appHandles),
     `  })();`,
     `})()`,
   ].join("\n");

@@ -1,0 +1,7 @@
+import { test } from "@playwright/test";
+import { seedEverything } from "@example/test-kit";
+
+test("opaque", async ({ page }) => {
+  await seedEverything(page);
+  await page.evaluate(() => window.scrollTo(0, 0));
+});

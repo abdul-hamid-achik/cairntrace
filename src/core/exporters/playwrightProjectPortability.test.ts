@@ -376,14 +376,7 @@ describe("E3: action coverage propagates into every calling test", () => {
         name: "prepare",
         steps: [
           { id: "go", open: "/prepare" },
-          {
-            id: "convert",
-            transform: {
-              file: "convert.ts",
-              input: "a.xlsx",
-              saveAs: "b.xlsx",
-            },
-          },
+          { id: "convert", run: "node convert.mjs" },
           { id: "snap", snapshot: {} },
         ],
       } as LoadedAction["action"],
@@ -403,7 +396,7 @@ describe("E3: action coverage propagates into every calling test", () => {
       expect.objectContaining({
         id: "prep",
         reason: expect.stringContaining(
-          "action prepare (convert): transform step not exportable",
+          "action prepare (convert): run step not exported",
         ),
       }),
     );
