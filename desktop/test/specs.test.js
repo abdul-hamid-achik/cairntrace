@@ -84,6 +84,98 @@ describe("readProjectConfig", () => {
     assert.equal(config.parseError, null);
     assert.equal(config.hasWebServer, false);
   });
+
+  it("counts services declared only per environment (no top-level block)", () => {
+    const root = tempDir("cairn-env-services-");
+    const file = write(
+      root,
+      "cairntrace.config.yml",
+      [
+        "version: 1",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:3000",
+        "  remote:",
+        "    services:",
+        "      provisioner: { up: ./up.sh, down: ./down.sh }",
+        "  off:",
+        "    services: false",
+        "",
+      ].join("\n"),
+    );
+    const config = specs.readProjectConfig(file);
+    assert.equal(config.hasServices, true);
+    const byName = Object.fromEntries(
+      config.environments.map((env) => [env.name, env]),
+    );
+    assert.equal(byName.local.services, false);
+    assert.equal(byName.remote.services, true);
+    assert.equal(byName.off.services, false);
+    assert.equal(byName.off.disabled, true);
+  });
+
+  it("shows what an environment inherits through extends (F7)", () => {
+    const root = tempDir("cairn-extends-");
+    const file = write(
+      root,
+      "cairntrace.config.yml",
+      [
+        "version: 1",
+        "environments:",
+        "  local:",
+        "    baseUrl: http://localhost:3000",
+        "    waitScale: 2",
+        "    policy: { trait: owned }",
+        "  tunnel:",
+        "    extends: local",
+        "    waitScale: 3",
+        "  remote:",
+        "    extends: tunnel",
+        "    services: false",
+        "    policy: { mutations: deny }",
+        "  loop:",
+        "    extends: loop",
+        "",
+      ].join("\n"),
+    );
+    const config = specs.readProjectConfig(file);
+    const byName = Object.fromEntries(
+      config.environments.map((env) => [env.name, env]),
+    );
+    assert.equal(byName.tunnel.baseUrl, "http://localhost:3000");
+    assert.equal(byName.tunnel.waitScale, 3);
+    assert.equal(byName.remote.baseUrl, "http://localhost:3000");
+    assert.equal(byName.remote.disabled, true);
+    assert.equal(byName.remote.policy.trait, "owned");
+    assert.equal(byName.remote.policy.mutations, "deny");
+    assert.equal(byName.loop.baseUrl, null);
+  });
+});
+
+describe("environment alias", () => {
+  it("shows an alias as its target", () => {
+    const root = tempDir("cairn-alias-");
+    const file = write(
+      root,
+      "cairntrace.config.yml",
+      [
+        "version: 1",
+        "environments:",
+        "  stage:",
+        "    baseUrl: http://localhost:3000",
+        "    policy: { trait: shared }",
+        "  remote:",
+        "    alias: stage",
+        "",
+      ].join("\n"),
+    );
+    const config = specs.readProjectConfig(file);
+    const byName = Object.fromEntries(
+      config.environments.map((env) => [env.name, env]),
+    );
+    assert.equal(byName.remote.baseUrl, "http://localhost:3000");
+    assert.equal(byName.remote.policy.trait, "shared");
+  });
 });
 
 describe("resolveRunsRoot", () => {

@@ -4,6 +4,7 @@ import { DocsResultSchema } from "../../core/schema/docs.v1";
 import { ConfigSchema } from "../../core/schema/config.v1";
 import { SpecSchema } from "../../core/schema/spec.v1";
 import { parse as parseYaml } from "yaml";
+import { parseExportMap } from "../../core/exporters/exportMap";
 import { readFileSync } from "node:fs";
 
 describe("buildDocs", () => {
@@ -15,14 +16,73 @@ describe("buildDocs", () => {
     expect(doc.relatedTopics).toContain("brief");
   });
 
-  it("exposes all 21 docs topics including discovery, export, brief, catalog, fixtures and author-flow", () => {
-    expect(DOC_TOPICS).toHaveLength(21);
+  it("services topic documents the run policy and critical teardown", () => {
+    const text = JSON.stringify(buildDocs("services"));
+    expect(text).toContain(
+      "Run Policy (lock, preflight, verifyClean, finally, --bail)",
+    );
+    expect(text).toContain("critical: true");
+    expect(text).toContain("exit 8");
+    expect(text).toContain("CAIRN_EXIT_CODE");
+    expect(text).toContain("doctor --orphans");
+    expect(text).toContain("invocation.bailed");
+  });
+
+  it("exposes all 25 docs topics including discovery, export, import, brief, catalog, fixtures, author-flow, widgets, run-policy and delegate", () => {
+    expect(DOC_TOPICS).toHaveLength(25);
+    expect(DOC_TOPICS).toContain("run-policy");
+    expect(DOC_TOPICS).toContain("delegate");
+    expect(DOC_TOPICS).toContain("widgets");
     expect(DOC_TOPICS).toContain("fixtures");
     expect(DOC_TOPICS).toContain("discovery");
     expect(DOC_TOPICS).toContain("export");
+    expect(DOC_TOPICS).toContain("import");
     expect(DOC_TOPICS).toContain("brief");
     expect(DOC_TOPICS).toContain("catalog");
     expect(DOC_TOPICS).toContain("author-flow");
+  });
+
+  it("delegate topic documents the runner config, the contract and the relay", () => {
+    const doc = buildDocs("delegate");
+    expect(() => DocsResultSchema.parse(doc)).not.toThrow();
+    const text = JSON.stringify(doc);
+    for (const needle of [
+      "urn:cairntrace.dev:delegate:v1",
+      "CAIRN_DELEGATE_REQUEST",
+      "CAIRN_DELEGATE_EVENTS",
+      "--relay",
+      "cancelGraceMs",
+      "missing-run-dir",
+      "cairn.delegate",
+    ]) {
+      expect(text).toContain(needle);
+    }
+    const yaml = doc.examples.find((example) => example.language === "yaml");
+    expect(() =>
+      ConfigSchema.parse({
+        version: 1,
+        ...(parseYaml(yaml!.code) as Record<string, unknown>),
+      }),
+    ).not.toThrow();
+  });
+
+  it("import topic documents both importers and the author-flow place", () => {
+    const doc = buildDocs("import");
+    expect(() => DocsResultSchema.parse(doc)).not.toThrow();
+    const text = JSON.stringify(doc);
+    for (const needle of [
+      "cairn import playwright",
+      "cairn import playwright-trace",
+      "cairn_import_playwright_trace",
+      "coverage",
+      "secrets",
+      "DRAFT",
+    ]) {
+      expect(text).toContain(needle);
+    }
+    expect(JSON.stringify(buildDocs("author-flow"))).toContain(
+      "cairn import playwright-trace",
+    );
   });
 
   it("author-flow topic carries the recipe the MCP prompt uses", () => {
@@ -180,6 +240,33 @@ describe("buildDocs", () => {
         ).not.toThrow();
       }
     }
+  });
+
+  it("keeps the export page's config and export map examples valid", () => {
+    const markdown = readFileSync("docs/export.md", "utf8");
+    const blocks = [...markdown.matchAll(/```yaml\n([\s\S]*?)\n```/g)].map(
+      (m) => m[1]!,
+    );
+    expect(blocks.length).toBeGreaterThanOrEqual(2);
+    let maps = 0;
+    let configs = 0;
+    for (const yaml of blocks) {
+      const parsed = parseYaml(yaml, { merge: true }) as Record<
+        string,
+        unknown
+      >;
+      if ("export" in parsed) {
+        configs += 1;
+        expect(() =>
+          ConfigSchema.parse({ version: 1, environments: {}, ...parsed }),
+        ).not.toThrow();
+      } else {
+        maps += 1;
+        expect(() => parseExportMap(yaml, "docs/export.md")).not.toThrow();
+      }
+    }
+    expect(configs).toBeGreaterThan(0);
+    expect(maps).toBeGreaterThan(0);
   });
 
   it("documents the text redaction boundary without exposing source snippets", () => {

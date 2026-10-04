@@ -596,6 +596,72 @@ describe("liveness of run-less directories", () => {
       [],
     );
   });
+  it("L3: a run a delegated runner copies here lives and dies with the local delegated invocation", () => {
+    const root = tempDir("cairn-runs-");
+    const now = Date.now();
+    const localId = "2026-10-01T08-59-50-000Z_5151_abc123";
+    const remoteId = "2026-10-01T08-59-55-000Z_77_def456";
+    /** @param {string} status */
+    const journal = (status) =>
+      write(
+        root,
+        `_invocations/${localId}/invocation.json`,
+        JSON.stringify({
+          version: 1,
+          invocationId: localId,
+          pid: 5151,
+          status,
+          runs: [{ index: 1, spec: "flows/a.yml", runId: RUN_B }],
+          delegate: {
+            contract: "urn:cairntrace.dev:delegate:v1",
+            command: ["remote-runner"],
+          },
+        }),
+      );
+    journal("running");
+    // The copy names the REMOTE invocation and a pid on the other machine,
+    // with a heartbeat that went quiet a while ago.
+    runningRun(root, RUN_B, [
+      {
+        ts: new Date(now - 60_000).toISOString(),
+        type: "run.started",
+        spec: "demo_spec",
+        invocation: {
+          id: remoteId,
+          index: 1,
+          total: 1,
+          dir: `_invocations/${remoteId}`,
+        },
+      },
+      {
+        ts: new Date(now - 120_000).toISOString(),
+        type: "run.heartbeat",
+        phase: "steps",
+        pid: 77,
+      },
+    ]);
+    const live = runs.summarizeRun(root, RUN_B, {
+      now,
+      pidAlive: (pid) => pid === 5151,
+    });
+    assert.equal(live.liveness.state, "running");
+    assert.equal(live.liveness.pid, 5151);
+    assert.match(live.liveness.reason, /delegated: .*local invocation/);
+    // The local owner settled without a run.json copied: dead, whatever
+    // the remote pid does here.
+    journal("failed");
+    const settled = runs.summarizeRun(root, RUN_B, {
+      now,
+      pidAlive: () => true,
+    });
+    assert.equal(settled.liveness.state, "dead");
+    assert.match(settled.liveness.reason, /settled \(failed\)/);
+    assert.deepEqual(runs.delegatedRunOwner(root, RUN_B), {
+      id: localId,
+      pid: 5151,
+      status: "failed",
+    });
+  });
 });
 
 describe("history", () => {

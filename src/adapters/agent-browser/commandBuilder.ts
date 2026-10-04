@@ -1,5 +1,7 @@
 import {
+  backendWaitCondition,
   clickLocator,
+  fillLocator,
   openPath,
   type BatchSubStep,
   type ClickStep,
@@ -107,8 +109,7 @@ export function focusStepToArgv(step: FocusStep): string[] {
 }
 
 export function fillStepToArgv(step: FillStep): string[] {
-  const { value, ...locator } = step.fill;
-  return locatorToArgv(locator as Locator, "fill", value);
+  return locatorToArgv(fillLocator(step), "fill", step.fill.value);
 }
 
 /**
@@ -158,7 +159,7 @@ export function downloadStepToArgv(step: DownloadStep): string[] {
 }
 
 export function waitStepToArgv(step: WaitStep): string[] {
-  return waitConditionToArgv(step.wait);
+  return waitConditionToArgv(backendWaitCondition(step.wait));
 }
 
 /**
@@ -364,6 +365,22 @@ export function stepToArgv(step: Step): string[] {
   if ("expect" in step || "capture" in step) {
     throw new Error(
       "expect/capture steps are handled by the runner via backend.evaluate before adapter dispatch",
+    );
+  }
+  if ("repeat" in step || "if" in step) {
+    throw new Error(
+      "repeat/if steps are run by the runner, which dispatches their nested steps",
+    );
+  }
+  if (
+    "set" in step ||
+    "check" in step ||
+    "uncheck" in step ||
+    "choose" in step ||
+    "form" in step
+  ) {
+    throw new Error(
+      "set/check/uncheck/choose/form steps are handled by the runner's widget runtime via backend.evaluate before adapter dispatch",
     );
   }
   const exhaustive: never = step;

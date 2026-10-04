@@ -14,6 +14,7 @@ import type {
   SecretsConfig,
   TvaultConfig,
 } from "../../core/schema/config.v1";
+import type { RunPolicyConfig } from "../../core/runPolicy/schema";
 
 /* ---------------------------------------------------------------------------
  * TinyVault secrets provider
@@ -258,15 +259,25 @@ export interface ScopedSecrets {
   shadowedKeys: string[];
   /** Explicit TinyVault names authorized for target children. */
   selectedKeys?: string[];
+  /**
+   * Names-only resolution (`--services-dry-run`): the secret names a real
+   * run would ask the vault for. Nothing was fetched, so `injectedKeys` and
+   * `secretValues` are empty and `secrets.required` was not checked.
+   */
+  plannedKeys?: string[];
 }
 
 export async function resolveScopedSecrets(
   specPath: string,
+  /** Do not enforce `requires.cairntrace` (teardown). */
+  /** Resolve which names would be injected but never call the vault. */
   opts: {
     environmentOverride?: string;
     configPath?: string;
     vars?: Record<string, ConfigVarValue>;
     baseEnv?: Record<string, string | undefined>;
+    skipRequires?: boolean;
+    namesOnly?: boolean;
   } = {},
 ): Promise<ScopedSecrets> {
   const env: Record<string, string | undefined> = targetChildEnv(
@@ -284,8 +295,13 @@ export async function resolveScopedSecrets(
       : {}),
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     ...(opts.vars ? { vars: opts.vars } : {}),
+    ...(opts.skipRequires ? { skipRequires: true } : {}),
     env,
   });
+  // The vault environment is the canonical name, never an alias.
+  if (runtime.envAlias && env.CAIRN_TVAULT_ENV === runtime.envAlias) {
+    env.CAIRN_TVAULT_ENV = runtime.envName;
+  }
   const secrets = runtime.secrets;
   if (!secrets || secrets.provider !== "tvault" || !secrets.tvault) {
     return {
@@ -300,7 +316,32 @@ export async function resolveScopedSecrets(
   }
 
   const { target } = tvaultArgs(secrets.tvault);
-  const selectedKeys = await selectedSecretKeys(specPath, secrets);
+  const selectedKeys = await selectedSecretKeys(
+    specPath,
+    secrets,
+    runtime.config?.environments[runtime.envName]?.auth,
+    await runPolicySecretNames(specPath, runtime.runPolicy, {
+      ...(opts.environmentOverride
+        ? { envOverride: opts.environmentOverride }
+        : {}),
+      ...(opts.configPath ? { configPath: opts.configPath } : {}),
+      ...(opts.vars ? { vars: opts.vars } : {}),
+      env,
+    }),
+  );
+  if (opts.namesOnly) {
+    return {
+      env,
+      childEnv: childEnvWithoutTvaultControls(env),
+      secrets,
+      target,
+      secretValues: [],
+      injectedKeys: [],
+      shadowedKeys: [],
+      selectedKeys,
+      plannedKeys: selectedKeys.filter((key) => env[key] === undefined),
+    };
+  }
   const resolved = await getTvaultSelectedEnv(secrets.tvault, selectedKeys);
   if (!resolved.ok) {
     throw new Error(
@@ -342,12 +383,64 @@ export async function resolveScopedSecrets(
   };
 }
 
+/**
+ * F8: what the config `run:` policy needs from the vault: every
+ * `preflight[].secret` name, and the `${env.X}` names that `preflight`
+ * commands and `finally` entries reference but the environment does not
+ * set (read from a late-bound load, where such a reference stays as
+ * written). Best-effort: a policy that does not load adds nothing here (the
+ * run reports that itself).
+ */
+async function runPolicySecretNames(
+  specPath: string,
+  policy: RunPolicyConfig | undefined,
+  load: Parameters<typeof resolveSpecRuntimeContext>[1],
+): Promise<string[]> {
+  if (!policy) return [];
+  const names = new Set<string>();
+  for (const check of policy.preflight ?? []) {
+    if (check.secret) names.add(check.secret);
+  }
+  const hasCommands =
+    (policy.preflight ?? []).some((check) => check.command !== undefined) ||
+    (policy.finally?.length ?? 0) > 0;
+  if (hasCommands) {
+    const late = await resolveSpecRuntimeContext(specPath, {
+      ...load,
+      envRef: (name) => `\${env.${name}}`,
+    }).catch(() => undefined);
+    const texts = [
+      ...(late?.runPolicy?.preflight ?? []).map((check) => check.command ?? ""),
+      ...(late?.runPolicy?.finally ?? []).map((entry) =>
+        typeof entry === "string" ? entry : entry.run,
+      ),
+    ];
+    for (const text of texts) {
+      for (const match of text.matchAll(
+        /\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}/g,
+      )) {
+        names.add(match[1]!);
+      }
+    }
+  }
+  return [...names];
+}
+
 async function selectedSecretKeys(
   specPath: string,
   secrets: SecretsConfig,
+  /** F18: the environment's `auth:` block, read when a flow `use: login`s. */
+  envAuth?: unknown,
+  /** F8: names the config `run:` policy needs (see {@link runPolicySecretNames}). */
+  policyNames: readonly string[] = [],
 ): Promise<string[]> {
-  const names = new Set([...(secrets.keys ?? []), ...(secrets.required ?? [])]);
+  const names = new Set([
+    ...(secrets.keys ?? []),
+    ...(secrets.required ?? []),
+    ...policyNames,
+  ]);
   const visited = new Set<string>();
+  let usesLogin = false;
   const collect = async (path: string): Promise<void> => {
     const absPath = resolve(path);
     if (visited.has(absPath)) return;
@@ -363,6 +456,7 @@ async function selectedSecretKeys(
     // in the same invocation as the root flow, so their selected key names
     // must not silently turn into empty strings before parsing.
     const parsed: unknown = parseYaml(source);
+    if (!usesLogin && usesBuiltinLogin(parsed)) usesLogin = true;
     if (!isRecord(parsed) || !Array.isArray(parsed.imports)) return;
     for (const importPath of parsed.imports) {
       if (typeof importPath !== "string") continue;
@@ -370,7 +464,30 @@ async function selectedSecretKeys(
     }
   };
   await collect(specPath);
+  // `use: login` signs in with the environment's auth block: its
+  // `${secrets.X}` names are this invocation's too.
+  if (usesLogin && envAuth !== undefined) {
+    for (const match of JSON.stringify(envAuth).matchAll(
+      /\$\{secrets\.([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g,
+    )) {
+      names.add(match[1]!);
+    }
+  }
   return [...names].toSorted();
+}
+
+/** Whether a parsed spec/action has a `use: login` step anywhere. */
+function usesBuiltinLogin(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => usesBuiltinLogin(item, depth + 1));
+  }
+  if (!isRecord(value)) return false;
+  const use = value.use;
+  if (use === "login" || (isRecord(use) && use.action === "login")) {
+    return true;
+  }
+  return Object.values(value).some((item) => usesBuiltinLogin(item, depth + 1));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

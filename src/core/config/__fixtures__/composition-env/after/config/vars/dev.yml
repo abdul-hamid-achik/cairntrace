@@ -1,0 +1,5 @@
+vars:
+  host: https://dev.example.test
+  apiUrl: "${vars.host}/api"
+  tenant: dev
+  devOnlyFlag: true

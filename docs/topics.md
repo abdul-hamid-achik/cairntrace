@@ -13,6 +13,7 @@ A grab-bag of pages on topics that don't fit cleanly under [Steps](/steps), [Ver
   screenshots with backends that do not support recording.
 - [Process monitoring](/monitor) — sample the browser process tree with `--monitor`; the `monitor` step and `process` verifier turn "the spec got slow" into an assertable budget.
 - [Services lifecycle](/services) — the config-driven docker/seed/tmux environment `cairn run` owns, and when to disable it per environment.
+- [Delegated runners](/delegate) — run an invocation on another machine while the local `cairn` keeps the journal, the run directories, the exit code and Ctrl-C; the `urn:cairntrace.dev:delegate:v1` contract and how to write a runner.
 - [Journey briefs](/brief) — compile a passing spec into an agent-neutral brief when locators will not replay, or accompany a live miss.
 
 ## Authoring a topic page

@@ -50,7 +50,7 @@ describe("signal-time tmux artifacts", () => {
       },
     );
 
-    expect(targets).toEqual(["cairn-test:web-api", "cairn-test:worker"]);
+    expect(targets).toEqual(["=cairn-test:=web-api", "=cairn-test:=worker"]);
     for (const window of ["web-api", "worker"]) {
       const path = join(testRoot, "services", "tmux", `${window}.log`);
       const text = await readFile(path, "utf8");

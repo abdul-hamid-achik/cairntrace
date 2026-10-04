@@ -19,8 +19,10 @@
  *     and a change the user did not make through a native dialog is confirmed
  *     in one (a binary not named `cairn…`, an artifact root typed by hand, any
  *     new launch template, dropping or resetting a lock file that is held);
- *   - while a configured suite lock exists, run:start and spec:heal (which
- *     re-runs the spec) are refused, with no override;
+ *   - while a configured suite lock exists, or a live owner holds the config
+ *     `run: { lock }` (read from ~/.cairntrace/locks, matched on the key the
+ *     lock file stores), run:start and spec:heal (which re-runs the spec) and
+ *     services up/down/restart are refused, with no override;
  *   - media is streamed through `cairn-artifact://` tokens issued here, never
  *     by path; external opens are limited to http(s), and "Open in
  *     file.cheap" opens only the https web URL main reads from the run's own
@@ -36,8 +38,14 @@
  *     the project, and reads `~/.cairntrace/fixtures/<project>.ledger.jsonl`
  *     with outputs masked; `spec:promote` takes a YAML draft inside the project
  *     and shows its intent + outcomes in a native dialog before cairn stamps
- *     them; `services:up` / `services:down` ask natively and are refused
- *     while a suite lock is held.
+ *     them; `services:up` / `services:down` / `services:restart` ask natively
+ *     and are refused while a suite or run lock is held; `orphans:kill` lists
+ *     what it would end in a native dialog before it runs `--kill --yes`;
+ *     `suites:list`, `config:vars`, `services:windows|logs` and
+ *     `metrics:history` take only validated names (environment, suite, a
+ *     window the CLI's own status lists) and bounded numbers, each one argv
+ *     entry joined to its flag (lib/ops.js), and their results are normalized
+ *     and masked before they reach the renderer.
  *
  * What this is NOT: a sandbox against command execution. A spec can declare
  * `preconditions.commands` and the project config can declare services, and
@@ -65,6 +73,8 @@ const runs = require("./lib/runs");
 const settingsStore = require("./lib/settings");
 const specs = require("./lib/specs");
 const stash = require("./lib/stash");
+const metricsLib = require("./lib/metrics");
+const ops = require("./lib/ops");
 const { createRunWatcher } = require("./lib/watcher");
 
 /**
@@ -76,6 +86,8 @@ const { createRunWatcher } = require("./lib/watcher");
  * @property {{ register: (file: string) => string, clear: () => void }} [media]
  * @property {string} [fixturesLedgerDir] where the CLI keeps per-project
  *   fixture ledgers (default `~/.cairntrace/fixtures`)
+ * @property {string} [runLockDir] where the CLI keeps run locks (default
+ *   `~/.cairntrace/locks`)
  */
 
 let tokenCounter = 0;
@@ -88,6 +100,8 @@ function nextToken() {
 
 /** Hard cap on how long a finished app run's tail may linger. */
 const TAIL_LINGER_CAP_MS = 15_000;
+/** A delegated runner's default `cancelGraceMs` (the CLI's DEFAULT_CANCEL_GRACE_MS). */
+const DELEGATE_CANCEL_GRACE_MS = 180_000;
 
 /**
  * @param {string} file
@@ -116,9 +130,14 @@ function registerIpc(ctx) {
    * Runs and heals Studio started. `envs`: the environments they use (null
    * when that cannot be told: any), so services up/down and runs on the
    * same project + environment never overlap.
-   * @type {Map<string, { controller: AbortController, tail: { stop: () => void, runDir?: () => string | null } | null, specs: string[], startedAt: number, argv: string[], command: string, pid?: number | null, projectDir?: string, envs?: string[] | null }>}
+   * @type {Map<string, { controller: AbortController, tail: { stop: () => void, runDir?: () => string | null } | null, specs: string[], suite?: string | null, startedAt: number, argv: string[], command: string, pid?: number | null, projectDir?: string, envs?: string[] | null, runsRoot?: string, delegatedRunner?: { cancelGraceMs: number | null } | null }>}
    */
   const activeRuns = new Map();
+  /**
+   * run:cancel's decision per token (read by execCairn when it aborts).
+   * @type {Map<string, { signal: NodeJS.Signals, killAfterMs: number | null }>}
+   */
+  const cancelPolicies = new Map();
   /** Finished app runs whose tails still drain late events. */
   /** @type {Set<{ stop: () => void }>} */
   const lingeringTails = new Set();
@@ -883,11 +902,31 @@ function registerIpc(ctx) {
   function lockStatus(dir) {
     const settings = launch.projectLaunchSettings(getSettings(), dir);
     const locks = launch.readLockState(dir, settings.lockFiles);
+    // The config `run: { lock }` the CLI takes for every cairn run (CLI or
+    // MCP): a live owner holds it, and the CLI would refuse a second run
+    // (exit 4), so Studio treats it like a held suite lock.
+    const config = specs.readProjectConfig(
+      specs.inspectProjectDir(dir).configPath,
+    );
+    const runLock = {
+      configured: config.runLock.configured,
+      scopes: config.runLock.scopes,
+      held: config.runLock.configured
+        ? ops.readRunLocks({
+            lockDir: ctx.runLockDir ?? ops.runLockRoot(),
+            keys: ops.runLockKeys({
+              configPath: config.path,
+              project: config.project,
+            }),
+          })
+        : [],
+    };
     return {
       launchTemplate: settings.launchTemplate,
       lockFiles: settings.lockFiles,
       locks,
-      active: locks.filter((entry) => entry.exists),
+      runLock,
+      active: [...locks.filter((entry) => entry.exists), ...runLock.held],
     };
   }
 
@@ -918,6 +957,12 @@ function registerIpc(ctx) {
     const gate = lockStatus(dir);
     if (!gate.active.length) return gate;
     const first = gate.active[0];
+    if (first.kind === "run-lock")
+      throw new Error(
+        `a cairn run holds this project's run lock (${first.owner}${
+          first.command ? `: ${first.command}` : ""
+        }) — ${what} is disabled until it finishes`,
+      );
     throw new Error(
       `suite in progress: ${first.path}${
         first.owner ? ` (owner: ${first.owner})` : ""
@@ -983,7 +1028,7 @@ function registerIpc(ctx) {
    * boot a second copy that run then tears down).
    * @param {string} dir
    * @param {string} env
-   * @param {"up" | "down"} action
+   * @param {"up" | "down" | "restart"} action
    */
   function assertNoStudioRunsOn(dir, env, action) {
     const using = [...activeRuns.values()].filter(
@@ -1091,7 +1136,7 @@ function registerIpc(ctx) {
   });
 
   // ── runs ──────────────────────────────────────────────────────────────────
-  handle("run:start", (_event, options, projectDir) => {
+  handle("run:start", async (_event, options, projectDir) => {
     const context = projectContext(projectDir);
     const cairn = cairnFor(context.dir);
     if (!cairn.command)
@@ -1099,26 +1144,68 @@ function registerIpc(ctx) {
     const settings = getSettings();
     const runSettings = settings.run ?? {};
     const requested = Array.isArray(options?.specs) ? options.specs : [];
-    if (!requested.length) throw new Error("no spec selected");
-    const specPaths = requested.map((spec) =>
-      assertSpecPath(spec, context.dir),
-    );
+    // `cairn run --suite <name>` stands in for the spec paths
+    const suiteName = options?.suite ? cli.checkSuiteName(options.suite) : null;
+    if (suiteName && requested.length)
+      throw new Error("run specs or one suite, not both");
+    if (!suiteName && !requested.length) throw new Error("no spec selected");
+    let specPaths = requested.map((spec) => assertSpecPath(spec, context.dir));
     // No override: while a suite lock exists, nothing Studio starts can run.
     const gate = assertUnlocked(context.dir, "Run");
+    if (suiteName && gate.launchTemplate)
+      throw new Error(
+        "this project runs specs through a launch template, which takes one spec at a time — run the suite from a terminal, or clear the template in Settings",
+      );
     const runsRoot = runsRootFor(context.dir);
     // Saved defaults and per-run overrides both become argv: validate them.
     const merged = settingsStore.sanitizeRunSettings({
       ...runSettings,
       ...settingsStore.sanitizeRunSettings(options?.overrides),
     });
-    const runEnvs = runEnvironments(
-      specPaths,
-      merged.env ?? null,
-      context.config,
-    );
+    /** @type {string[] | null} */
+    let runEnvs;
+    if (suiteName) {
+      // The suite's specs and environment verdict come from the CLI itself
+      // (`cairn suites list`): an unknown suite or an environment its
+      // `requires` rules out is refused here, before anything spawns, and
+      // the live tail learns which spec names to look for.
+      const envName = merged.env ?? context.config.defaultEnvironment ?? null;
+      const listArgv = ops.buildSuitesArgv({
+        env: envName,
+        config: context.configPath,
+      });
+      const listed = await cli.execCairn({
+        command: cairn.command,
+        argv: listArgv,
+        cwd: context.dir,
+        timeoutMs: 60_000,
+      });
+      const doc = ops.normalizeSuites(listed.payload);
+      if (!doc)
+        throw new Error(
+          authoring.looksUnsupported(listed)
+            ? "this cairn has no `cairn suites list` (config suites need a newer cairn)"
+            : `cairn suites list failed: ${authoring.refusalText(listed.stderr) ?? "no document"}`,
+        );
+      const suite = doc.suites.find((entry) => entry.name === suiteName);
+      if (!suite) throw new Error(`unknown suite: ${suiteName}`);
+      const forEnv = envName
+        ? suite.envs.find((entry) => entry.env === envName)
+        : null;
+      if (forEnv?.problem)
+        throw new Error(
+          `suite ${suiteName} cannot run on ${envName}: ${forEnv.problem}`,
+        );
+      const root = doc.root ?? context.dir;
+      specPaths = (forEnv?.specs ?? []).map((spec) => path.resolve(root, spec));
+      runEnvs = envName ? [envName] : null;
+    } else {
+      runEnvs = runEnvironments(specPaths, merged.env ?? null, context.config);
+    }
     assertServicesIdle(context.dir, runEnvs, "Run");
     const argv = cli.buildRunArgv({
-      specs: specPaths,
+      specs: suiteName ? [] : specPaths,
+      suite: suiteName,
       env: merged.env ?? null,
       backend: merged.backend ?? null,
       provider: merged.provider ?? null,
@@ -1170,6 +1257,7 @@ function registerIpc(ctx) {
     const knownIds = new Set(runs.listRunIds(runsRoot.runsRoot));
     // Run ids embed the spec's `name:` field, not the file basename — offer
     // both so the live tail recognises the directory the child creates.
+    /** @type {Set<string>} */
     const specNames = new Set();
     for (const specPath of specPaths) {
       specNames.add(path.basename(specPath, path.extname(specPath)));
@@ -1192,12 +1280,14 @@ function registerIpc(ctx) {
       cwd: context.dir,
       runsRoot: runsRoot.runsRoot,
       specs: specPaths,
+      suite: suiteName,
       startedAt: new Date().toISOString(),
     });
 
     const tail = live.createLiveTail({
       runsRoot: runsRoot.runsRoot,
-      specNames,
+      // a suite whose specs could not be resolved tails any new run dir
+      specNames: specNames.size ? specNames : null,
       knownIds,
       pollMs: Math.max(150, Number(settings.ui?.livePollMs ?? 400)),
       onRunDir: (runDir, runId) =>
@@ -1206,16 +1296,29 @@ function registerIpc(ctx) {
         ctx.send("run:events", { token, runDir, events }),
     });
 
+    // A run whose environment has a delegated runner (environments.<n>.runner):
+    // its cancel must leave cairn the runner's cancelGraceMs (see run:cancel).
+    const delegatedRunner =
+      (runEnvs ?? [])
+        .map(
+          (name) =>
+            context.config.environments.find((env) => env.name === name)
+              ?.runner ?? null,
+        )
+        .find((runner) => runner !== null) ?? null;
     activeRuns.set(token, {
       controller,
       tail,
       specs: specPaths,
+      suite: suiteName,
       startedAt: Date.now(),
       argv: commandArgv,
       command,
       pid: null,
       projectDir: context.dir,
       envs: runEnvs,
+      runsRoot: runsRoot.runsRoot,
+      delegatedRunner,
     });
 
     /** Let the tail linger for late stash/retention events, bounded. */
@@ -1236,6 +1339,8 @@ function registerIpc(ctx) {
         cwd: context.dir,
         timeoutMs: 0,
         signal: controller.signal,
+        // Decided by run:cancel right before it aborts.
+        cancelPolicy: () => cancelPolicies.get(token) ?? null,
         onSpawn: (pid) => {
           const entry = activeRuns.get(token);
           if (entry) entry.pid = pid ?? null;
@@ -1249,6 +1354,7 @@ function registerIpc(ctx) {
         setTimeout(() => {
           const cancelled = !activeRuns.has(token);
           activeRuns.delete(token);
+          cancelPolicies.delete(token);
           if (cancelled) tail.stop();
           else releaseTail();
           ctx.send("run:done", {
@@ -1267,6 +1373,7 @@ function registerIpc(ctx) {
       .catch((error) => {
         tail.stop();
         activeRuns.delete(token);
+        cancelPolicies.delete(token);
         ctx.send("run:done", {
           token,
           kind: "run",
@@ -1281,19 +1388,53 @@ function registerIpc(ctx) {
     return { token, argv: commandArgv, command, cwd: context.dir, launcher };
   });
 
+  /**
+   * Live "Cancel" of a run Studio launched: SIGTERM to its process group,
+   * SIGKILL 2s later — except a delegated run (its environment has a
+   * runner, from the config or from the run's own journal): it gets SIGINT,
+   * like Ctrl-C, and no early SIGKILL, so cairn can give the runner its
+   * cancelGraceMs to cancel the remote invocation and copy the results back,
+   * then mark the journal aborted and run `run.finally`. A SIGKILL only as a
+   * safety net well after cairn's own bound (grace + 15s + 60s).
+   */
   handle("run:cancel", (_event, token) => {
     const entry = activeRuns.get(String(token));
     if (!entry) return { cancelled: false };
+    const policy = delegatedCancelPolicy(entry);
+    if (policy) cancelPolicies.set(String(token), policy);
     entry.tail?.stop();
     entry.controller.abort();
     activeRuns.delete(String(token));
-    return { cancelled: true };
+    return {
+      cancelled: true,
+      ...(policy ? { signal: policy.signal, delegated: true } : {}),
+    };
   });
+
+  /**
+   * @param {any} entry an activeRuns entry
+   * @returns {{ signal: NodeJS.Signals, killAfterMs: number | null } | null}
+   */
+  function delegatedCancelPolicy(entry) {
+    let graceMs = entry.delegatedRunner?.cancelGraceMs ?? null;
+    let delegated = Boolean(entry.delegatedRunner);
+    if (!delegated && entry.runsRoot && entry.pid) {
+      const journal = invocations.findRunningInvocationByPid(
+        entry.runsRoot,
+        entry.pid,
+      );
+      delegated = Boolean(journal?.delegate);
+    }
+    if (!delegated) return null;
+    graceMs ??= DELEGATE_CANCEL_GRACE_MS;
+    return { signal: "SIGINT", killAfterMs: graceMs + 15_000 + 60_000 };
+  }
 
   handle("run:active", () =>
     [...activeRuns.entries()].map(([token, entry]) => ({
       token,
       specs: entry.specs,
+      suite: entry.suite ?? null,
       argv: entry.argv,
       command: entry.command,
       pid: entry.pid ?? null,
@@ -2471,7 +2612,7 @@ function registerIpc(ctx) {
 
   // ── services lifecycle per environment (`cairn services up|down`) ────────
   /** `<projectDir>\0<env>` → the services command running for it. */
-  /** @type {Map<string, "up" | "down">} */
+  /** @type {Map<string, "up" | "down" | "restart">} */
   const servicesBusy = new Map();
   /** In-flight `services up|down` children, cancelled on quit. */
   /** @type {Set<AbortController>} */
@@ -2630,6 +2771,355 @@ function registerIpc(ctx) {
   handle("services:down", (_event, options, projectDir) =>
     servicesAction("down", options, projectDir),
   );
+
+  // ── wave 6: suites, config vars, orphans, service windows, metrics ───────
+  /**
+   * The failure line of a command that gave no usable document: the CLI's
+   * own message (stderr from the start), else the payload's `error`.
+   * @param {{ ok?: boolean, stderr?: string, exitCode?: number | null }} result
+   * @param {unknown} payload
+   * @returns {string | null}
+   */
+  function failureText(result, payload) {
+    if (result.ok) return null;
+    const fromPayload = /** @type {any} */ (payload)?.error;
+    return (
+      authoring.refusalText(result.stderr) ??
+      (typeof fromPayload === "string" && fromPayload ? fromPayload : null)
+    );
+  }
+
+  // `cairn suites list [--env] --json`: each suite with the specs it
+  // resolves to per environment (or why it does not).
+  handle("suites:list", async (_event, options, projectDir) => {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    const argv = ops.buildSuitesArgv({
+      env: options?.env ?? null,
+      config: context.configPath,
+    });
+    const result = await cli.execCairn({
+      command: cairn.command,
+      argv,
+      cwd: context.dir,
+      timeoutMs: 60_000,
+    });
+    const suites = ops.normalizeSuites(result.payload);
+    return {
+      ok: result.ok && Boolean(suites),
+      exitCode: result.exitCode,
+      suites,
+      unsupported: authoring.looksUnsupported(result),
+      error: suites ? null : failureText(result, result.payload),
+      stderr: result.ok ? "" : result.stderr.slice(-2000),
+      cli: stash.cliEquivalent(argv),
+    };
+  });
+
+  // `cairn config vars [--env] [--unused] --json`: values arrive masked and
+  // stay masked (lib/ops.js normalizeConfigVars masks again by name).
+  handle("config:vars", async (_event, options, projectDir) => {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    const argv = ops.buildConfigVarsArgv({
+      env: options?.env ?? null,
+      unused: Boolean(options?.unused),
+      config: context.configPath,
+    });
+    const result = await cli.execCairn({
+      command: cairn.command,
+      argv,
+      cwd: context.dir,
+      timeoutMs: 60_000,
+    });
+    const vars = ops.normalizeConfigVars(result.payload);
+    return {
+      ok: result.ok && Boolean(vars?.ok),
+      exitCode: result.exitCode,
+      vars,
+      unsupported: authoring.looksUnsupported(result),
+      error: vars ? null : failureText(result, result.payload),
+      stderr: result.ok ? "" : result.stderr.slice(-2000),
+      cli: stash.cliEquivalent(argv),
+    };
+  });
+
+  // `cairn doctor --orphans --json`: exit 1 means "orphans listed", not a
+  // failure; only a missing document is.
+  /** @param {{ dir: string }} context @param {string} command */
+  async function listOrphans(context, command) {
+    const argv = ops.buildOrphansArgv();
+    const result = await cli.execCairn({
+      command,
+      argv,
+      cwd: context.dir,
+      timeoutMs: 60_000,
+    });
+    const orphans = ops.normalizeOrphans(result.payload);
+    return {
+      result,
+      argv,
+      orphans,
+      view: {
+        ok:
+          Boolean(orphans) && (result.exitCode === 0 || result.exitCode === 1),
+        exitCode: result.exitCode,
+        orphans,
+        unsupported: authoring.looksUnsupported(result),
+        error: orphans ? null : failureText(result, result.payload),
+        stderr:
+          result.exitCode === 0 || result.exitCode === 1
+            ? ""
+            : result.stderr.slice(-2000),
+        cli: stash.cliEquivalent(argv),
+      },
+    };
+  }
+
+  handle("orphans:list", async (_event, projectDir) => {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    return (await listOrphans(context, cairn.command)).view;
+  });
+
+  let orphansBusy = false;
+  // Ending processes: list first, show exactly what the CLI listed in a
+  // native dialog the renderer cannot answer, then `--kill --yes`.
+  handle("orphans:kill", async (_event, projectDir) => {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    if (orphansBusy)
+      throw new Error("cairn doctor --orphans --kill is already running");
+    orphansBusy = true;
+    try {
+      const listed = await listOrphans(context, cairn.command);
+      if (!listed.orphans) return { cancelled: false, ...listed.view };
+      if (!listed.orphans.orphans.length)
+        return { cancelled: false, nothing: true, ...listed.view };
+      // Exactly the sessions and pids the dialog shows: whatever changed
+      // between this listing and the kill is left alone (no TOCTOU).
+      const argv = ops.buildOrphansArgv({
+        kill: true,
+        only: ops.confirmedOrphanSet(listed.orphans),
+      });
+      const confirmed = await confirmInMain(
+        ops.orphansDialog({
+          orphans: listed.orphans.orphans,
+          cli: stash.cliEquivalent(argv),
+        }),
+      );
+      if (!confirmed) return { cancelled: true, ...listed.view };
+      const result = await cli.execCairn({
+        command: cairn.command,
+        argv,
+        cwd: context.dir,
+        timeoutMs: 120_000,
+      });
+      const orphans = ops.normalizeOrphans(result.payload);
+      return {
+        cancelled: false,
+        killed: true,
+        ok:
+          Boolean(orphans) && (result.exitCode === 0 || result.exitCode === 1),
+        exitCode: result.exitCode,
+        orphans,
+        error: orphans ? null : failureText(result, result.payload),
+        stderr:
+          result.exitCode === 0 || result.exitCode === 1
+            ? ""
+            : result.stderr.slice(-2000),
+        cli: stash.cliEquivalent(argv),
+      };
+    } finally {
+      orphansBusy = false;
+    }
+  });
+
+  /**
+   * One environment's services status, normalised (windows, tunnels,
+   * provisioner export names). The windows are what `services:restart`
+   * allows.
+   * @param {string | null | undefined} projectDir
+   * @param {unknown} envName
+   */
+  async function servicesWindows(projectDir, envName) {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    const env = authoring.checkEnvName(envName);
+    const status = await servicesStatusFor(context, cairn.command, env, 60_000);
+    return {
+      context,
+      cairn,
+      env,
+      status,
+      view: ops.normalizeServicesStatus(status.payload),
+    };
+  }
+
+  // Tunnels, provisioner and window health of one environment.
+  handle("services:windows", async (_event, options, projectDir) => {
+    const { env, status, view } = await servicesWindows(
+      projectDir,
+      options?.env,
+    );
+    return {
+      env,
+      ok: status.ok && Boolean(view),
+      exitCode: status.exitCode,
+      status: view,
+      lock: status.lock,
+      busy:
+        servicesBusy.get(`${projectContext(projectDir).dir}\0${env}`) ?? null,
+      error: view ? null : status.stderr || null,
+      cli: status.cli,
+    };
+  });
+
+  // `cairn services restart <window>`: the window must be one the CLI's own
+  // status lists for the environment; refused while a suite or run lock is
+  // held or a run Studio started uses that environment; asks natively.
+  handle("services:restart", async (_event, options, projectDir) => {
+    const { context, cairn, env, status, view } = await servicesWindows(
+      projectDir,
+      options?.env,
+    );
+    const window = ops.checkWindowName(options?.window);
+    assertUnlocked(context.dir, "Service restart");
+    assertNoStudioRunsOn(context.dir, env, "restart");
+    if (!view)
+      throw new Error(
+        `cannot read the services status of ${env}: ${status.stderr || "cairn services status gave no document"}`,
+      );
+    if (
+      !view.hasServices ||
+      !view.tmux.windows.some((entry) => entry.name === window)
+    )
+      throw new Error(
+        `"${window}" is not a service window of ${env}${
+          view.tmux.windows.length
+            ? ` (windows: ${view.tmux.windows.map((entry) => entry.name).join(", ")})`
+            : ""
+        }`,
+      );
+    const key = `${context.dir}\0${env}`;
+    const running = servicesBusy.get(key);
+    if (running)
+      throw new Error(
+        `cairn services ${running} is already running for ${env}`,
+      );
+    servicesBusy.set(key, "restart");
+    try {
+      const argv = ops.buildServicesRestartArgv({
+        window,
+        env,
+        config: context.configPath,
+      });
+      const policy =
+        context.config.environments.find((entry) => entry.name === env)
+          ?.policy ?? null;
+      const confirmed = await confirmInMain(
+        ops.restartDialog({
+          window,
+          env,
+          lock: status.lock ?? null,
+          policy,
+          cli: stash.cliEquivalent(argv),
+        }),
+      );
+      if (!confirmed) return { cancelled: true, window, env };
+      // both gates again: a suite can take its lock, and a run can start in
+      // another window, while the dialog is open
+      assertUnlocked(context.dir, "Service restart");
+      assertNoStudioRunsOn(context.dir, env, "restart");
+      const controller = new AbortController();
+      servicesControllers.add(controller);
+      let result;
+      try {
+        result = await cli.execCairn({
+          command: cairn.command,
+          argv,
+          cwd: context.dir,
+          // a restart waits for the old process and the new readyOn
+          timeoutMs: 600_000,
+          signal: controller.signal,
+        });
+      } finally {
+        servicesControllers.delete(controller);
+      }
+      const restart = ops.normalizeRestart(result.payload);
+      return {
+        cancelled: false,
+        window,
+        env,
+        ok: result.ok && Boolean(restart?.ok),
+        exitCode: result.exitCode,
+        meaning: cli.describeExitCode(result.exitCode),
+        restart,
+        error: restart?.ok
+          ? null
+          : (restart?.error ?? failureText(result, result.payload)),
+        unsupported: authoring.looksUnsupported(result),
+        stderr: result.ok ? "" : result.stderr.slice(-4000),
+        cli: stash.cliEquivalent(argv),
+      };
+    } finally {
+      servicesBusy.delete(key);
+    }
+  });
+
+  // `cairn services logs <window>`: a bounded, read-only tail (redacted by
+  // the CLI, masked again here).
+  handle("services:logs", async (_event, options, projectDir) => {
+    const context = projectContext(projectDir);
+    const cairn = cairnFor(context.dir);
+    if (!cairn.command) throw new Error("cairn binary not found");
+    const argv = ops.buildServicesLogsArgv({
+      window: options?.window,
+      env: options?.env,
+      config: context.configPath,
+      sinceRestart: Boolean(options?.sinceRestart),
+      lines: options?.lines,
+    });
+    const result = await cli.execCairn({
+      command: cairn.command,
+      argv,
+      cwd: context.dir,
+      timeoutMs: 60_000,
+    });
+    const logs = ops.normalizeLogs(result.payload);
+    return {
+      ok: result.ok && Boolean(logs?.ok),
+      exitCode: result.exitCode,
+      logs,
+      unsupported: authoring.looksUnsupported(result),
+      error: logs?.ok
+        ? null
+        : (logs?.error ?? failureText(result, result.payload)),
+      stderr: result.ok ? "" : result.stderr.slice(-2000),
+      cli: stash.cliEquivalent(argv),
+    };
+  });
+
+  // A metric across runs (a sparkline): from each run's
+  // diagnostics/metrics.json in the artifact root, optionally one spec.
+  handle("metrics:history", (_event, options, projectDir) => {
+    const { runsRoot } = runsRootFor(projectDir);
+    const spec =
+      typeof options?.spec === "string" && options.spec.length <= 200
+        ? options.spec
+        : null;
+    return metricsLib.metricsHistory(runsRoot, {
+      spec,
+      limit: Number.isInteger(options?.limit)
+        ? Math.min(100, Math.max(2, options.limit))
+        : undefined,
+    });
+  });
 
   handle("checkpoints:list", async (_event, projectDir) => {
     const context = projectContext(projectDir);
@@ -2813,9 +3303,13 @@ function registerIpc(ctx) {
   /** Cancel every spawned cairn process before the app disappears. */
   function shutdown() {
     runWatcher.stop();
-    for (const entry of activeRuns.values()) {
+    for (const [token, entry] of activeRuns.entries()) {
       entry.tail?.stop();
       try {
+        // A delegated run gets SIGINT and finishes its cancel on its own
+        // (cairn runs in its own process group and outlives the app).
+        const policy = delegatedCancelPolicy(entry);
+        if (policy) cancelPolicies.set(token, policy);
         entry.controller.abort();
       } catch {
         // already dead

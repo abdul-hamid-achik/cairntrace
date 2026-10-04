@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DelegatePlanSchema } from "./delegate.v1";
 import { AbsolutePathSchema } from "./shared";
 
 /**
@@ -52,6 +53,11 @@ export const SelectionResultSchema = z
     codemapAvailable: z.boolean(),
     selected: z.array(SelectedSpecSchema),
     skipped: z.array(SkippedSpecSchema),
+    /**
+     * The environment has a delegated runner: what `cairn run` would spawn
+     * (masked; nothing was spawned). Additive.
+     */
+    delegate: DelegatePlanSchema.optional(),
   })
   .strict();
 export type SelectionResult = z.infer<typeof SelectionResultSchema>;

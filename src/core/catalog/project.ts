@@ -15,7 +15,8 @@ import { allComments, leadingComment } from "./yamlComments";
 const MAX_FILES = 5_000;
 const MAX_DIRS = 10_000;
 const MAX_DEPTH = 10;
-const SKIP_DIRS = new Set([
+/** Directories no project scan enters (dependencies, build output, run journals). */
+export const SKIP_DIRS: ReadonlySet<string> = new Set([
   "node_modules",
   "coverage",
   "dist",
@@ -299,6 +300,15 @@ function collectUses(steps: unknown): UseRef[] {
   if (!Array.isArray(steps)) return [];
   const out: UseRef[] = [];
   for (const step of steps) {
+    // F14: `use:` inside repeat / if blocks counts too.
+    const block = record(step);
+    for (const nested of [
+      record(block?.repeat)?.steps,
+      record(block?.if)?.then,
+      record(block?.if)?.else,
+    ]) {
+      out.push(...collectUses(nested));
+    }
     const use = record(step)?.use;
     if (typeof use === "string") out.push({ action: use, vars: [] });
     else {

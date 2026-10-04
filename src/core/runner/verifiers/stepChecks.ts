@@ -52,11 +52,13 @@ export async function executeExpectStep(input: {
   stepId: string;
   /** 1-based step index (evidence file prefix). */
   index: number;
+  /** F14: keeps the evidence of repeated executions (loops) apart. */
+  fileSuffix?: string;
   writer: StepWriter;
   deps: StepCheckDeps;
 }): Promise<StepCheckOutcome> {
   const expectId = input.step.expect.id ?? input.stepId;
-  const path = `expects/${pad(input.index)}_${slug(expectId)}.json`;
+  const path = `expects/${pad(input.index)}_${slug(expectId)}${input.fileSuffix ?? ""}.json`;
   const result = await runExpect(input.step.expect, input.deps);
   await input.writer.writeJson(
     path,

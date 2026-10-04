@@ -101,6 +101,13 @@ const STEP_KINDS = [
   "capture",
   "transform",
   "snapshot",
+  // wave 5: control flow (F14) and the widget kit (F15)
+  "repeat",
+  "if",
+  "set",
+  "uncheck",
+  "choose",
+  "form",
 ];
 
 /**
@@ -217,8 +224,79 @@ function parseConfigText(text, configPath, env = process.env) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
+function isPlainMap(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Objects merge key by key (`over` wins); anything else replaces.
+ * @param {unknown} base
+ * @param {unknown} over
+ * @returns {unknown}
+ */
+function deepMerge(base, over) {
+  if (over === undefined) return base;
+  if (!isPlainMap(base) || !isPlainMap(over)) return over;
+  /** @type {Record<string, unknown>} */
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    out[key] = deepMerge(base[key], value);
+  }
+  return out;
+}
+
+/**
+ * F7: an environment over its `extends` chain, the way the CLI composes it
+ * for the fields Studio shows (objects merge key by key, the rest replaces;
+ * an unknown parent or a cycle stops the chain — `cairn config validate`
+ * reports those).
+ * @param {Record<string, any>} record
+ * @param {string} name
+ * @returns {Record<string, any>}
+ */
+function effectiveEnvironment(record, name) {
+  // `environments.<name>: { alias: <target> }` is the same environment under
+  // another name: show (and pick the policy of) the target.
+  const aliased = record[name];
+  if (
+    aliased &&
+    typeof aliased === "object" &&
+    typeof aliased.alias === "string" &&
+    Object.hasOwn(record, aliased.alias)
+  ) {
+    name = aliased.alias;
+  }
+  /** @type {string[]} */
+  const chain = [];
+  /** @type {string | undefined} */
+  let current = name;
+  while (
+    current !== undefined &&
+    Object.hasOwn(record, current) &&
+    !chain.includes(current)
+  ) {
+    chain.unshift(current);
+    const env = record[current];
+    current =
+      env && typeof env === "object" && typeof env.extends === "string"
+        ? env.extends
+        : undefined;
+  }
+  /** @type {Record<string, any>} */
+  let out = {};
+  for (const member of chain) {
+    const env = isPlainMap(record[member]) ? record[member] : {};
+    out = /** @type {Record<string, any>} */ (deepMerge(out, env));
+  }
+  return out;
+}
+
+/**
  * @param {string | null} configPath
- * @returns {{ path: string | null, project: string | null, defaultEnvironment: string | null, environments: Array<{ name: string, baseUrl: string | null, waitScale: number | null, services: boolean, disabled: boolean, policy: ReturnType<typeof CairnPolicy.normalizePolicy> }>, artifactRoot: string | null, backend: string | null, testIdAttribute: string | null, hasWebServer: boolean, hasServices: boolean, retention: Record<string, unknown> | null, parseError: string | null, raw: Record<string, any> | null, registries: ReturnType<typeof registries.summarizeRegistries> }}
+ * @returns {{ path: string | null, project: string | null, defaultEnvironment: string | null, environments: Array<{ name: string, baseUrl: string | null, waitScale: number | null, services: boolean, disabled: boolean, policy: ReturnType<typeof CairnPolicy.normalizePolicy>, runner: { cancelGraceMs: number | null } | null }>, artifactRoot: string | null, backend: string | null, testIdAttribute: string | null, hasWebServer: boolean, hasServices: boolean, retention: Record<string, unknown> | null, runLock: { configured: boolean, scopes: string[] }, parseError: string | null, raw: Record<string, any> | null, registries: ReturnType<typeof registries.summarizeRegistries> }}
  */
 function readProjectConfig(configPath) {
   const empty = {
@@ -232,6 +310,7 @@ function readProjectConfig(configPath) {
     hasWebServer: false,
     hasServices: false,
     retention: null,
+    runLock: { configured: false, scopes: [] },
     parseError: null,
     raw: null,
     registries: registries.summarizeRegistries(null),
@@ -264,20 +343,34 @@ function readProjectConfig(configPath) {
     doc.environments && typeof doc.environments === "object"
       ? doc.environments
       : {};
-  const environments = Object.entries(environmentsRecord).map(
-    ([name, value]) => {
-      const env = value && typeof value === "object" ? value : {};
-      return {
-        name,
-        baseUrl: typeof env.baseUrl === "string" ? env.baseUrl : null,
-        waitScale: typeof env.waitScale === "number" ? env.waitScale : null,
-        services: env.services !== false,
-        disabled: env.services === false,
-        // environments.<name>.policy (trait / mutations / description)
-        policy: CairnPolicy.normalizePolicy(env.policy),
-      };
-    },
-  );
+  const topServices = Boolean(doc.services) && typeof doc.services === "object";
+  const environments = Object.keys(environmentsRecord).map((name) => {
+    // F7: show what the environment inherits through `extends`
+    const env = effectiveEnvironment(environmentsRecord, name);
+    return {
+      name,
+      baseUrl: typeof env.baseUrl === "string" ? env.baseUrl : null,
+      waitScale: typeof env.waitScale === "number" ? env.waitScale : null,
+      // Boots services: the top-level block, or its own (a config may
+      // declare services only per environment), unless `services: false`.
+      services:
+        env.services !== false &&
+        (topServices ||
+          (Boolean(env.services) && typeof env.services === "object")),
+      disabled: env.services === false,
+      // environments.<name>.policy (trait / mutations / description)
+      policy: CairnPolicy.normalizePolicy(env.policy),
+      // A delegated runner (environments.<name>.runner): its runs execute
+      // elsewhere and a cancel must give the runner its cancelGraceMs.
+      runner: isPlainMap(env.runner)
+        ? {
+            cancelGraceMs: Number.isInteger(env.runner.cancelGraceMs)
+              ? env.runner.cancelGraceMs
+              : null,
+          }
+        : null,
+    };
+  });
 
   return {
     path: configPath,
@@ -296,15 +389,42 @@ function readProjectConfig(configPath) {
         ? doc.browser.testIdAttribute
         : null,
     hasWebServer: Boolean(doc.webServer),
-    hasServices: Boolean(doc.services),
+    // Top-level `services:` or any environment's own block.
+    hasServices: topServices || environments.some((env) => env.services),
     retention:
       doc.retention && typeof doc.retention === "object" ? doc.retention : null,
+    runLock: summarizeRunLock(doc, environmentsRecord),
     parseError: null,
     raw: doc,
     // datasources (per environment) / gates / fixtures, redacted; from the
     // unsubstituted text so env values never enter the summary
     registries: registries.summarizeRegistries(templateOf(text, configPath)),
   };
+}
+
+/**
+ * Does the config take a run lock (`run: { lock }`, top-level or in an
+ * environment)? `scopes` says what one lock covers: `config` (default) or
+ * `project`. The lock itself lives under `~/.cairntrace/locks`.
+ * @param {Record<string, any>} doc
+ * @param {Record<string, any>} environmentsRecord
+ * @returns {{ configured: boolean, scopes: string[] }}
+ */
+function summarizeRunLock(doc, environmentsRecord) {
+  /** @type {Set<string>} */
+  const scopes = new Set();
+  const note = (/** @type {any} */ lock) => {
+    if (lock === undefined || lock === null || lock === false) return;
+    scopes.add(
+      lock && typeof lock === "object" && lock.scope === "project"
+        ? "project"
+        : "config",
+    );
+  };
+  note(doc?.run?.lock);
+  for (const name of Object.keys(environmentsRecord ?? {}))
+    note(effectiveEnvironment(environmentsRecord, name)?.run?.lock);
+  return { configured: scopes.size > 0, scopes: [...scopes].toSorted() };
 }
 
 /**

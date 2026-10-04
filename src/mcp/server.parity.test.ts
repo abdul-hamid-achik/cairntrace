@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { RunResultSchema } from "../core/schema/run.v1";
+import { writeCjsHost } from "../testing/hostTrees";
 import { buildMcpServer } from "./server";
 
 // MCP ↔ CLI parity for the authoring loop: the MCP tools must resolve config
@@ -661,5 +662,323 @@ outcomes:
     expect(await readFile(join(outDir, "README.md"), "utf8")).toContain(
       "upload_flow",
     );
+  });
+
+  it("preconditions / verifiers / gateEnv reach the same code path as the CLI flags (E10)", async () => {
+    await writeFile(
+      join(dir, "flows", "host.yml"),
+      `version: 1
+name: host_flow
+intent: a command and a polled outcome
+coldStart: guest
+preconditions:
+  commands:
+    - run: bun run reset
+outcomes:
+  - id: soon
+    description: shows soon
+    verify:
+      text: { contains: ready }
+      poll: { timeoutMs: 5000 }
+steps:
+  - open: /home
+  - id: seed
+    run: echo seeded
+`,
+    );
+    const c = await connect();
+    try {
+      // stdout: inline exports the run step through the bounded helper.
+      const inline = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "host.yml"),
+          stdout: true,
+          preconditions: "inline",
+          config: configPath,
+        },
+      });
+      expect(inline.isError, text(inline)).toBeFalsy();
+      const source = (inline.structuredContent as { source: string }).source;
+      expect(source).toContain("test.beforeAll");
+      expect(source).toContain("await cairnCommand(");
+      expect(source).toContain(".toPass({ timeout: 5000, intervals: [1000] })");
+
+      // The same combination errors exactly like the CLI: global needs a project.
+      const global = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "host.yml"),
+          stdout: true,
+          preconditions: "global",
+          config: configPath,
+        },
+      });
+      expect(global.isError).toBe(true);
+      expect(text(global)).toContain(
+        "--preconditions global needs --project or --into",
+      );
+
+      // manifest lists the commands in .cairn-export.json (project export).
+      const outDir = join(dir, "pw-manifest");
+      const project = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "host.yml"),
+          project: true,
+          outDir,
+          preconditions: "manifest",
+          verifiers: "drop",
+          config: configPath,
+        },
+      });
+      expect(project.isError, text(project)).toBeFalsy();
+      const manifest = JSON.parse(
+        await readFile(join(outDir, ".cairn-export.json"), "utf8"),
+      ) as {
+        source: { preconditions?: string; verifiers?: string };
+        preconditions?: Array<{ run: string }>;
+      };
+      expect(manifest.source).toMatchObject({
+        preconditions: "manifest",
+        verifiers: "drop",
+      });
+      expect(manifest.preconditions?.map((p) => p.run)).toEqual([
+        "bun run reset",
+      ]);
+
+      const gateEnv = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "host.yml"),
+          stdout: true,
+          gateEnv: ["MONGO_URI"],
+          config: configPath,
+        },
+      });
+      expect(gateEnv.isError).toBe(true);
+      expect(text(gateEnv)).toContain(
+        "--gate-env only applies with --verifiers gate",
+      );
+    } finally {
+      await c.close();
+    }
+  });
+
+  it("mapFile reaches the same code path as --map (E9): a fixture binding, the report, and the refusal outside a structured export", async () => {
+    const tree = writeCjsHost(join(dir, "host"));
+    await mkdir(join(dir, "actions"), { recursive: true });
+    await writeFile(
+      join(dir, "actions", "login_member.yml"),
+      `version: 1
+name: login_member
+steps:
+  - id: open_login
+    open: /login
+`,
+    );
+    await writeFile(
+      join(dir, "flows", "mapped.yml"),
+      `version: 1
+name: mapped_flow
+intent: a mapped login
+coldStart: guest
+imports:
+  - ../actions/login_member.yml
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: Hi }
+steps:
+  - use: login_member
+`,
+    );
+    const mapFile = join(tree.e2e, "export.map.yml");
+    await writeFile(
+      mapFile,
+      `version: 1
+test: { import: ./fixtures }
+actions:
+  login_member:
+    fixture: { name: memberSession }
+`,
+    );
+    const c = await connect();
+    try {
+      const mapped = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "mapped.yml"),
+          into: tree.into,
+          hostConfig: tree.config,
+          mapFile,
+          config: configPath,
+        },
+      });
+      expect(mapped.isError, text(mapped)).toBeFalsy();
+      const report = mapped.structuredContent as {
+        map: {
+          file: string;
+          actions: Array<{ action: string; treatment: string; target: string }>;
+        };
+      };
+      expect(report.map.file).toBe("../../export.map.yml");
+      expect(report.map.actions).toMatchObject([
+        {
+          action: "login_member",
+          treatment: "fixture",
+          target: "memberSession",
+        },
+      ]);
+      const spec = await readFile(
+        join(tree.into, "mapped_flow.spec.ts"),
+        "utf8",
+      );
+      expect(spec).toContain("async ({ page, memberSession }) => {");
+
+      const stray = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "mapped.yml"),
+          stdout: true,
+          mapFile,
+          config: configPath,
+        },
+      });
+      expect(stray.isError).toBe(true);
+      expect(text(stray)).toContain("--map binds actions");
+    } finally {
+      await c.close();
+    }
+  });
+
+  it("host profile, export target and maxEvalRatio reach the same code path as the CLI flags (E8 / E12)", async () => {
+    const tree = writeCjsHost(join(dir, "host"));
+    await writeFile(
+      join(dir, "flows", "plain.yml"),
+      `version: 1
+name: plain_flow
+intent: a plain page
+coldStart: guest
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: Plain }
+steps:
+  - id: open_it
+    open: /plain
+  - id: pick
+    click: { by: testid, testid: go }
+`,
+    );
+    await writeFile(
+      join(dir, "flows", "evals.yml"),
+      `version: 1
+name: eval_flow
+intent: evals
+coldStart: guest
+outcomes:
+  - id: ok
+    description: ok
+    verify:
+      text: { contains: Evals }
+steps:
+  - id: open_it
+    open: /evals
+  - id: a
+    eval: { js: "window.a = 1;" }
+  - id: b
+    eval: { js: "window.b = 1;" }
+`,
+    );
+    const c = await connect();
+    try {
+      // host profile: tests flat in the host's testDir, the host's test id attribute.
+      const adapted = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "plain.yml"),
+          into: tree.into,
+          hostConfig: tree.config,
+          config: configPath,
+        },
+      });
+      expect(adapted.isError, text(adapted)).toBeFalsy();
+      const report = adapted.structuredContent as {
+        host: { moduleSystem: string; testIdAttribute: string };
+        specs: Array<{ file: string }>;
+      };
+      expect(report.host).toMatchObject({
+        moduleSystem: "cjs",
+        testIdAttribute: "data-qa-key",
+      });
+      expect(report.specs.map((s) => s.file)).toEqual(["plain_flow.spec.ts"]);
+      // The config's browser.testIdAttribute (data-qa) is what the spec means.
+      expect(
+        await readFile(join(tree.into, "plain_flow.spec.ts"), "utf8"),
+      ).toContain('[data-qa=\\"go\\"]');
+
+      // maxEvalRatio: the over-limit spec is refused (isError), the other written.
+      const outDir = join(dir, "pw-eval");
+      const limited = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows"),
+          outDir,
+          maxEvalRatio: 0.5,
+          config: configPath,
+        },
+      });
+      expect(limited.isError).toBe(true);
+      const limitedReport = limited.structuredContent as {
+        files: Array<{ name: string }>;
+        refused: Array<{ name: string; ratio: number }>;
+      };
+      expect(limitedReport.files.map((f) => f.name)).toEqual(["plain_flow"]);
+      expect(limitedReport.refused.map((r) => r.name)).toEqual(["eval_flow"]);
+
+      // --host-config only makes sense with into.
+      const stray = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: {
+          path: join(dir, "flows", "plain.yml"),
+          stdout: true,
+          hostConfig: tree.config,
+          config: configPath,
+        },
+      });
+      expect(stray.isError).toBe(true);
+      expect(text(stray)).toContain("--host-config adapts");
+
+      // target: a named profile from the config; the path comes from it.
+      await writeFile(
+        configPath,
+        `${await readFile(configPath, "utf8")}export:
+  targets:
+    ui:
+      input: flows/plain.yml
+      into: host/e2e/tests/cairn
+      hostConfig: host/e2e/playwright.config.ts
+`,
+      );
+      const viaTarget = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: { target: "ui", config: configPath },
+      });
+      expect(viaTarget.isError, text(viaTarget)).toBeFalsy();
+      expect((viaTarget.structuredContent as { target: string }).target).toBe(
+        "ui",
+      );
+      const unknown = await c.callTool({
+        name: "cairn_export_playwright",
+        arguments: { target: "nope", config: configPath },
+      });
+      expect(unknown.isError).toBe(true);
+      expect(text(unknown)).toContain("unknown export target");
+    } finally {
+      await c.close();
+    }
   });
 });

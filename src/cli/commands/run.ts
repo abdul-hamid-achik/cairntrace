@@ -1,4 +1,5 @@
 import type { Command } from "commander";
+import { writeSync } from "node:fs";
 import type { InvocationJournal } from "../../core/artifacts/invocationJournal";
 import { renderRunMarkdown } from "../../core/artifacts/renderers/markdown";
 import type { ServicesHandle } from "../../core/runner/services";
@@ -8,7 +9,6 @@ import type { RunResult } from "../../core/schema/run.v1";
 import type { BatchRunResult } from "../../core/schema/runBatch.v1";
 import type { RunInvocationOptions } from "../../core/schema/runInvocation.v1";
 import type { SelectionResult } from "../../core/schema/selection.v1";
-import type { ExitCode } from "../../core/schema/shared";
 import type { BackendChoice } from "../backendFactory";
 import { trackAbortReporter } from "../cleanup";
 import { emit, resolveFormat } from "../format";
@@ -101,6 +101,8 @@ export interface RunCommandOptions {
   artifactRoot?: string;
   config?: string;
   parallel?: string;
+  /** `--suite <name>`: run the config `suites:` entry instead of spec paths. */
+  suite?: string;
   /** Repeatable `--var key=value` overrides; win over config env vars. */
   var?: string[];
   /** Write a JUnit XML report to this file. */
@@ -174,9 +176,12 @@ export interface RunCommandOptions {
   matrix?: string;
   /** With --repeat/--matrix: stop at the first iteration that fails. */
   stopOnFail?: boolean;
+  /** Stop scheduling the remaining specs after the first failed or errored one. */
+  bail?: boolean;
   /** Fail a batch (exit 7) when the environment policy refuses a spec. */
   strictRequires?: boolean;
   allowFixtureWrites?: boolean;
+  runToken?: string;
 }
 
 /** Scoped logger for the run command's lifecycle/errors. */
@@ -195,148 +200,166 @@ function collectRepeatable(value: string, previous: string[]): string[] {
  * its shorthands) is a RunInvocationOptions key; a parity test enforces it.
  */
 export function configureRunCommand(command: Command): Command {
-  return command
-    .description("Run one or more behavioral specs")
-    .option("--env <name>", "environment override")
-    .option("--cold-start", "force fresh browser profile (default: on in CI)")
-    .option(
-      "--progress <mode>",
-      "narration renderer: auto | tty | plain (auto = tty on a terminal, plain when piped)",
-    )
-    .option("--headed", "show the browser window", false)
-    .option("--mock", "use the in-memory mock backend", false)
-    .option("--backend <name>", "agent-browser (default) | playwright | mock")
-    .option(
-      "--provider <name>",
-      "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
-    )
-    .option(
-      "--device <name>",
-      'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
-    )
-    .option(
-      "--parallel <n>",
-      "run N specs concurrently (each in its own browser session)",
-      "1",
-    )
-    .option("--artifact-root <path>", "override artifact root directory")
-    .option("--junit <file>", "write a JUnit XML report")
-    .option(
-      "--stamp-if-green",
-      "write contractHash only after all requested specs pass",
-      false,
-    )
-    .option(
-      "--config <path>",
-      "explicit cairntrace.config.yml (overrides auto-discovery)",
-    )
-    .option(
-      "--var <key=value>",
-      "runtime var override; repeatable, wins over config env vars",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--no-web-server",
-      "skip the config webServer lifecycle (manage the server yourself)",
-    )
-    .option(
-      "--no-services",
-      "skip the config services lifecycle (docker/seed/tmux)",
-    )
-    .option(
-      "--services-dry-run",
-      "print the services lifecycle plan and exit without running specs",
-      false,
-    )
-    .option(
-      "--reuse-services",
-      "run against the services `cairn services up` owns for this config + env: quick readiness check (stale lock = exit 4), no start, no teardown, cold browser; without it a run refuses (exit 4) while that lock exists, and so does a run of another env of the config",
-      false,
-    )
-    .option(
-      "--stash-on-failure",
-      "auto-stash failed run directories to fcheap (non-fatal if fcheap is missing)",
-      false,
-    )
-    .option(
-      "--stash",
-      "stash every run to fcheap regardless of status (config stash.include/ttl apply; refused runs are never stashed)",
-    )
-    .option(
-      "--auto-annotate <mode>",
-      "auto-annotate runs into codemap: on-run (pass+fail) | never (default: config annotate.autoAnnotate or never)",
-    )
-    .option(
-      "--monitor",
-      "sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json}. Zero-cost when absent.",
-      false,
-    )
-    .option(
-      "--since-codemap <ref>",
-      "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
-    )
-    .option(
-      "--tag <tag>",
-      "run only specs whose metadata.tags includes this tag (repeatable = AND, case-insensitive)",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--label <key=value>",
-      "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=legacy)",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--before <shell>",
-      "run a shell command after services/secrets and before the first spec of each run (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--after <shell>",
-      "run a shell command after EACH spec finishes (pass or fail), while services are still up (repeatable). $CAIRN_RUN_DIR points at the run directory; collectors may write $CAIRN_RUN_DIR/diagnostics/ (numeric top-level fields of diagnostics/report.json become `cairn stats --metric` values). Failures are logged, non-fatal.",
-      collectRepeatable,
-      [] as string[],
-    )
-    .option(
-      "--repeat <n>",
-      "run the spec set n times sequentially (distinct run dirs), stamping label repeat=<i>; --before hooks run per run",
-    )
-    .option(
-      "--matrix <spec>",
-      "run the cartesian product of key=a,b[;key2=x,y]: each combination exports CAIRN_MATRIX_<KEY> env vars and key=value labels (so `cairn stats --group-by key` works)",
-    )
-    .option(
-      "--stop-on-fail",
-      "with --repeat/--matrix: stop at the first run that does not pass",
-      false,
-    )
-    .option(
-      "--strict-requires",
-      "fail a batch with exit 7 when the environment policy (requires.env / requires.mutates vs environments.<name>.policy) refuses any spec; without it refused specs are reported and skipped (a run where every spec was refused exits 7 either way)",
-      false,
-    )
-    .option(
-      "--allow-fixture-writes",
-      "let fixture ensure/reset/teardown write on an environment whose policy trait is shared (otherwise they are dry-run there unless the spec's fixture reference says write: true)",
-      false,
-    )
-    .option(
-      "--hook-timeout-ms <ms>",
-      "maximum duration of each --before/--after hook (default 600000; max 7200000)",
-      "600000",
-    )
-    .option(
-      "--select-only",
-      "resolve which specs WOULD run and exit 0 without launching a browser (SelectionResult v1); pairs with --tag and/or --since-codemap",
-      false,
-    )
-    .option("--format <format>", "output format: json | yaml | md", "md")
-    .option("--json", "shorthand for --format json")
-    .option("--yaml", "shorthand for --format yaml")
-    .option("--md", "shorthand for --format md");
+  return (
+    command
+      .description("Run one or more behavioral specs")
+      .option("--env <name>", "environment override")
+      .option("--cold-start", "force fresh browser profile (default: on in CI)")
+      .option(
+        "--progress <mode>",
+        "narration renderer: auto | tty | plain (auto = tty on a terminal, plain when piped)",
+      )
+      .option("--headed", "show the browser window", false)
+      .option("--mock", "use the in-memory mock backend", false)
+      .option("--backend <name>", "agent-browser (default) | playwright | mock")
+      .option(
+        "--provider <name>",
+        "agent-browser provider: ios (Mobile Safari via Appium) | browserbase | kernel | …",
+      )
+      .option(
+        "--device <name>",
+        'iOS device name, e.g. "iPhone 15 Pro" (with --provider ios)',
+      )
+      .option(
+        "--parallel <n>",
+        "run N specs concurrently (each in its own browser session; default 1, or the suite's parallel)",
+      )
+      .option(
+        "--suite <name>",
+        "run the config `suites:` entry <name> instead of spec paths: its specs (paths, globs, spec names, tags) in order, the environment's vars, once-per-run before/after hooks, parallel and bail. Spec paths next to it narrow it to those of its own specs (another path: exit 2); --tag still narrows it",
+      )
+      .option("--artifact-root <path>", "override artifact root directory")
+      .option("--junit <file>", "write a JUnit XML report")
+      .option(
+        "--stamp-if-green",
+        "write contractHash only after all requested specs pass",
+        false,
+      )
+      .option(
+        "--config <path>",
+        "explicit cairntrace.config.yml (overrides auto-discovery)",
+      )
+      .option(
+        "--var <key=value>",
+        "runtime var override; repeatable, wins over config env vars",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--no-web-server",
+        "skip the config webServer lifecycle (manage the server yourself)",
+      )
+      .option(
+        "--no-services",
+        "skip the config services lifecycle (docker/seed/tmux)",
+      )
+      .option(
+        "--services-dry-run",
+        "print the services lifecycle plan and exit without running specs",
+        false,
+      )
+      .option(
+        "--reuse-services",
+        "run against the services `cairn services up` owns for this config + env: quick readiness check (stale lock = exit 4), no start, no teardown, cold browser; without it a run refuses (exit 4) while that lock exists, and so does a run of another env of the config",
+        false,
+      )
+      .option(
+        "--stash-on-failure",
+        "auto-stash failed run directories to fcheap (non-fatal if fcheap is missing)",
+        false,
+      )
+      .option(
+        "--stash",
+        "stash every run to fcheap regardless of status (config stash.include/ttl apply; refused runs are never stashed)",
+      )
+      .option(
+        "--auto-annotate <mode>",
+        "auto-annotate runs into codemap: on-run (pass+fail) | never (default: config annotate.autoAnnotate or never)",
+      )
+      .option(
+        "--monitor",
+        "sample the browser process tree (CPU/RSS) during the run via the `monitor` CLI; writes diagnostics/process.{md,json}. Zero-cost when absent.",
+        false,
+      )
+      .option(
+        "--since-codemap <ref>",
+        "run only specs whose coversSymbol intersects `codemap review --since <ref>` blast radius (degrades to run-all when codemap is absent)",
+      )
+      .option(
+        "--tag <tag>",
+        "run only specs whose metadata.tags includes this tag (repeatable = AND, case-insensitive)",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--label <key=value>",
+        "stamp free-form cohort labels onto each run.json (repeatable); used by `cairn stats --group-by` for A/B cohorts (e.g. path=legacy)",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--before <shell>",
+        "run a shell command after services/secrets and before the first spec of each run (repeatable; e.g. tools/flip-path.sh next). Failures abort the run.",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--after <shell>",
+        "run a shell command after EACH spec finishes (pass or fail), while services are still up (repeatable). $CAIRN_RUN_DIR points at the run directory; collectors may write $CAIRN_RUN_DIR/diagnostics/ (numeric top-level fields of diagnostics/report.json become `cairn stats --metric` values). Failures are logged, non-fatal.",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
+        "--repeat <n>",
+        "run the spec set n times sequentially (distinct run dirs), stamping label repeat=<i>; --before hooks run per run",
+      )
+      .option(
+        "--matrix <spec>",
+        "run the cartesian product of key=a,b[;key2=x,y]: each combination exports CAIRN_MATRIX_<KEY> env vars and key=value labels (so `cairn stats --group-by key` works)",
+      )
+      .option(
+        "--stop-on-fail",
+        "with --repeat/--matrix: stop at the first run that does not pass",
+        false,
+      )
+      // No default: unset lets a suite's `bail` apply; `--no-bail` turns it off.
+      .option(
+        "--bail",
+        "stop scheduling the remaining specs after the first failed or errored one: they are reported as skipped (reason bailed), running specs finish, teardown runs as usual, exit code = the usual precedence over the specs that ran",
+      )
+      .option(
+        "--no-bail",
+        "run every spec even when the suite (suites.<name>.bail, or its env.<name>.bail) says to bail",
+      )
+      .option(
+        "--strict-requires",
+        "fail a batch with exit 7 when the environment policy (requires.env / requires.mutates vs environments.<name>.policy) refuses any spec; without it refused specs are reported and skipped (a run where every spec was refused exits 7 either way)",
+        false,
+      )
+      .option(
+        "--allow-fixture-writes",
+        "let fixture ensure/reset/teardown write on an environment whose policy trait is shared (otherwise they are dry-run there unless the spec's fixture reference says write: true)",
+        false,
+      )
+      .option(
+        "--run-token <token>",
+        "pin ${run.token} / CAIRN_RUN_TOKEN (letters, digits, _ . -; at most 64) instead of a random one, so an exported Playwright test run with the same CAIRN_RUN_TOKEN writes the same unique values",
+      )
+      .option(
+        "--hook-timeout-ms <ms>",
+        "maximum duration of each --before/--after hook (default 600000; max 7200000)",
+        "600000",
+      )
+      .option(
+        "--select-only",
+        "resolve which specs WOULD run and exit 0 without launching a browser (SelectionResult v1); pairs with --tag and/or --since-codemap",
+        false,
+      )
+      .option("--format <format>", "output format: json | yaml | md", "md")
+      .option("--json", "shorthand for --format json")
+      .option("--yaml", "shorthand for --format yaml")
+      .option("--md", "shorthand for --format md")
+  );
 }
 
 /** `{ key: value }` when the flag was given, else nothing. */
@@ -356,7 +379,12 @@ function defined<K extends keyof RunInvocationOptions>(
 export function runInvocationOptionsFromCli(
   opts: RunCommandOptions,
 ): RunInvocationOptions {
-  const hookTimeoutMs = parseHookTimeoutMs(opts.hookTimeoutMs);
+  // Validated here, but only forwarded when the caller set it: the engine applies the default, and
+  // a delegated request must not carry a flag the user never passed.
+  const hookTimeoutMs =
+    opts.hookTimeoutMs === undefined
+      ? undefined
+      : parseHookTimeoutMs(opts.hookTimeoutMs);
   const repeat = parseRepeat(opts.repeat);
   return {
     ...defined("env", opts.env),
@@ -369,7 +397,12 @@ export function runInvocationOptionsFromCli(
     ...defined("provider", opts.provider),
     ...defined("device", opts.device),
     // Commander hands `--parallel` over as a string; the engine floors it at 1.
-    parallel: Number(opts.parallel ?? "1"),
+    // Left unset when not given, so a suite's `parallel` can apply.
+    ...defined(
+      "parallel",
+      opts.parallel === undefined ? undefined : Number(opts.parallel),
+    ),
+    ...defined("suite", opts.suite),
     ...defined("artifactRoot", opts.artifactRoot),
     ...defined("junit", opts.junit),
     ...defined("stampIfGreen", opts.stampIfGreen),
@@ -390,12 +423,14 @@ export function runInvocationOptionsFromCli(
     ...defined("label", opts.label),
     ...defined("before", opts.before),
     ...defined("after", opts.after),
-    hookTimeoutMs,
+    ...defined("hookTimeoutMs", hookTimeoutMs),
     ...defined("repeat", repeat),
     ...defined("matrix", opts.matrix),
     ...defined("stopOnFail", opts.stopOnFail),
+    ...defined("bail", opts.bail),
     ...defined("strictRequires", opts.strictRequires),
     ...defined("allowFixtureWrites", opts.allowFixtureWrites),
+    ...defined("runToken", opts.runToken),
   };
 }
 
@@ -434,7 +469,7 @@ function cliNote(kind: "info" | "warn", message: string): void {
  * When the tree is mounted, give React a frame to paint the alert before
  * exiting — a synchronous process.exit would unmount before the render.
  */
-function failRun(message: string, code: ExitCode = 2): void {
+function failRun(message: string, code: number = 2): void {
   if (isTuiMounted()) {
     tuiFatal(message);
     setTimeout(() => process.exit(code), 100);
@@ -599,6 +634,48 @@ function makeCliNarration(
         });
       }
     },
+    delegatedRunFinish(ctx) {
+      // The runner already copied run.json: render it like a local run.
+      if (ctx.result) {
+        narration.specFinish?.({ ...ctx, result: ctx.result });
+        return;
+      }
+      const name = specLabel(ctx.specPath);
+      if (progressMode === "tty") {
+        getTuiStore()?.push({
+          type: "spec-finish",
+          idx: ctx.idx,
+          status: ctx.status,
+          name,
+          durationMs: ctx.durationMs ?? 0,
+          passed: 0,
+          totalOutcomes: 0,
+          ...(ctx.status === "passed"
+            ? {}
+            : { error: `delegated run ${ctx.status}` }),
+        });
+      } else if (progressMode) {
+        log.raw(
+          `  ${completionMark(ctx.status, interactive)} [${ctx.idx + 1}/${ctx.total}] ${name}${
+            ctx.durationMs !== undefined ? ` (${formatMs(ctx.durationMs)})` : ""
+          } (delegated)\n`,
+        );
+      } else if (jsonNarration) {
+        const fields = {
+          specIndex: ctx.idx + 1,
+          specTotal: ctx.total,
+          spec: name,
+          runId: ctx.runId,
+          status: ctx.status,
+          ...(ctx.durationMs !== undefined
+            ? { durationMs: ctx.durationMs }
+            : {}),
+          delegated: true,
+        };
+        if (ctx.status === "passed") progressLog.info("spec finished", fields);
+        else progressLog.warn("spec finished", fields);
+      }
+    },
     batchEnd(summary) {
       if (isTuiMounted()) {
         getTuiStore()?.push({ type: "batch-end", summary });
@@ -696,6 +773,41 @@ function emitErroredResult(result: RunResult, format: string): void {
   }
 }
 
+/**
+ * What one iteration's document prints on stdout (undefined: nothing; an
+ * errored single document in md goes to stderr through emitErroredResult).
+ */
+function runDocumentOutput(
+  document: RunDocument,
+  meta: RunDocumentMeta,
+  opts: RunCommandOptions,
+  interactive: boolean,
+): { stdout?: string; batch?: boolean } {
+  const format = resolveFormat(opts, "md");
+  if (meta.kind === "preflight") {
+    // An invocation stopped before any spec: structured formats still get a
+    // schema-valid errored document; md only gets the stderr error.
+    return format === "json" || format === "yaml"
+      ? { stdout: emit(format, document, () => ""), batch: true }
+      : {};
+  }
+  if (meta.kind === "batch") {
+    return {
+      stdout:
+        format === "json" || format === "yaml"
+          ? emit(format, document, () => "")
+          : `${renderBatchMarkdown(document as BatchRunResult)}\n`,
+      batch: true,
+    };
+  }
+  if (meta.errored || interactive) return {};
+  return {
+    stdout: `${emit(format, document as RunResult, renderRunMarkdown)}${
+      format !== "json" && format !== "yaml" ? "\n" : ""
+    }`,
+  };
+}
+
 /** Print one iteration's document exactly where `cairn run` always did. */
 async function writeRunDocument(
   document: RunDocument,
@@ -703,31 +815,64 @@ async function writeRunDocument(
   opts: RunCommandOptions,
   interactive: boolean,
 ): Promise<void> {
-  const format = resolveFormat(opts, "md");
-  if (meta.kind === "preflight") {
-    // An invocation stopped before any spec: structured formats still get a
-    // schema-valid errored document; md only gets the stderr error.
-    if (format === "json" || format === "yaml") {
-      await writeStdoutFully(emit(format, document, () => ""));
+  if (meta.kind === "single" && meta.errored) {
+    emitErroredResult(document as RunResult, resolveFormat(opts, "md"));
+    return;
+  }
+  const { stdout, batch } = runDocumentOutput(
+    document,
+    meta,
+    opts,
+    interactive,
+  );
+  if (stdout === undefined) return;
+  if (batch) await writeStdoutFully(stdout);
+  else process.stdout.write(stdout);
+}
+
+/**
+ * The signal path's writer (documents held for a verdict that a SIGINT /
+ * SIGTERM pre-empted): synchronous, because cairn exits right after and a
+ * buffered pipe write would lose everything past the pipe's capacity.
+ * Bounded: a reader that stops reading costs at most a few seconds.
+ */
+function writeRunDocumentSync(
+  document: RunDocument,
+  meta: RunDocumentMeta,
+  opts: RunCommandOptions,
+  interactive: boolean,
+): void {
+  if (meta.kind === "single" && meta.errored) {
+    emitErroredResult(document as RunResult, resolveFormat(opts, "md"));
+    return;
+  }
+  const { stdout } = runDocumentOutput(document, meta, opts, interactive);
+  if (stdout !== undefined) writeStdoutSync(stdout);
+}
+
+const SYNC_STDOUT_BUDGET_MS = 5_000;
+
+function writeStdoutSync(output: string): void {
+  const buffer = Buffer.from(output);
+  const deadline = Date.now() + SYNC_STDOUT_BUDGET_MS;
+  let offset = 0;
+  while (offset < buffer.length) {
+    try {
+      offset += writeSync(1, buffer, offset);
+    } catch (error) {
+      // A non-blocking pipe that is full: wait for the reader, a little.
+      if ((error as NodeJS.ErrnoException).code !== "EAGAIN") return;
+      if (Date.now() > deadline) return;
+      sleepSync(5);
     }
-    return;
   }
-  if (meta.kind === "batch") {
-    const output =
-      format === "json" || format === "yaml"
-        ? emit(format, document, () => "")
-        : `${renderBatchMarkdown(document as BatchRunResult)}\n`;
-    await writeStdoutFully(output);
-    return;
-  }
-  const result = document as RunResult;
-  if (meta.errored) {
-    emitErroredResult(result, format);
-    return;
-  }
-  if (!interactive) {
-    process.stdout.write(emit(format, result, renderRunMarkdown));
-    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+}
+
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // No Atomics.wait here: spin instead (bounded by the caller).
   }
 }
 
@@ -755,7 +900,9 @@ export async function runCommand(
   // instead of presenting as a 0-byte mystery. Kept compact by default; the
   // full list is still one --verbose away. In tty narration the line
   // renders with the same flat mark as the services milestones.
-  const startingLine = summarizeStartingSpecs(specs, process.cwd());
+  const startingLine = opts.suite
+    ? `starting suite "${opts.suite}"`
+    : summarizeStartingSpecs(specs, process.cwd());
   if (progressMode === "tty") {
     // The Ink tree owns stderr from here on; every later narration line goes
     // through the store. The exit handler unmounts it on process.exit.
@@ -790,6 +937,8 @@ export async function runCommand(
       signal: controller.signal,
       onDocument: (document, meta) =>
         writeRunDocument(document, meta, opts, interactive),
+      onDocumentSync: (document, meta) =>
+        writeRunDocumentSync(document, meta, opts, interactive),
     },
   );
   // SIGINT/SIGTERM: the engine's synchronous emergency hook marks the
@@ -830,6 +979,11 @@ export async function runCommand(
       process.exitCode = result.exitCode;
       return;
     default:
+      // 8 (critical teardown failed) and 9 (dirty state): the documents
+      // carry it (`invocationOutcome`); stderr says why as well.
+      if ((result.exitCode === 8 || result.exitCode === 9) && result.error) {
+        runLog.error(`exit ${result.exitCode}: ${result.error}`);
+      }
       // The engine returns the stable wire exit code after lifecycle
       // teardown. Do not force process.exit here: stdout may still be
       // draining a large batch JSON/YAML document into a pipe.
@@ -963,13 +1117,26 @@ function renderBatchMarkdown(b: BatchRunResult): string {
   const bannerColor =
     b.exitCode === 0 ? "\x1b[32m" : b.exitCode === 1 ? "\x1b[31m" : "\x1b[33m";
   const refusedCount = b.summary.refused ?? 0;
+  const skippedCount = b.summary.skipped ?? 0;
   const lines: string[] = [
     "",
     `${bannerColor}\x1b[1m${b.summary.passed}/${b.summary.total} passed\x1b[0m  ${b.summary.failed} failed  ${b.summary.errored} errored${
       refusedCount > 0 ? `  ${refusedCount} refused` : ""
+    }${
+      skippedCount > 0 ? `  ${skippedCount} skipped (bailed)` : ""
     }  in ${formatMs(b.totalDurationMs)}`,
     "",
   ];
+  // The invocation settled on another code than its specs (8 / 9).
+  const outcome = b.invocationOutcome;
+  if (outcome && outcome.exitCode !== outcome.specsExitCode) {
+    lines.push(
+      `\x1b[31m\x1b[1mexit ${outcome.exitCode}\x1b[0m (the specs alone: exit ${outcome.specsExitCode})${
+        outcome.error ? ` — ${truncate(outcome.error, 300)}` : ""
+      }`,
+      "",
+    );
+  }
   const failed = b.results.filter(
     (r) => r.status !== "passed" && r.status !== "refused",
   );
@@ -984,6 +1151,14 @@ function renderBatchMarkdown(b: BatchRunResult): string {
         r.synthetic
           ? `  - ${r.spec.name} (no run directory)${headline}`
           : `  - ${r.spec.name} → ${r.runDir}/${r.artifacts.agentContext}${headline}`,
+      );
+    }
+  }
+  if (b.skipped && b.skipped.length > 0) {
+    lines.push("Skipped (--bail):");
+    for (const entry of b.skipped) {
+      lines.push(
+        `  - ${specLabel(entry.spec)} (after ${specLabel(entry.bailedBy)})`,
       );
     }
   }

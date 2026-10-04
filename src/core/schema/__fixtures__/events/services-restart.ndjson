@@ -1,0 +1,5 @@
+{"ts":"<ts>","type":"services.restart.start","message":"restarting \"web\"","data":{"window":"web","reason":"manual"}}
+{"ts":"<ts>","type":"services.restart.stop","message":"\"web\" stopped","data":{"window":"web","graceful":true,"durationMs":0}}
+{"ts":"<ts>","type":"services.restart.ready","message":"\"web\" restarted","data":{"window":"web","reason":"manual","generation":"<generation>","durationMs":0}}
+{"ts":"<ts>","type":"services.restart.giveup","message":"\"web\" gave up after 3 restarts","data":{"window":"web","reason":"exited","restarts":3}}
+{"ts":"<ts>","type":"services.tunnel.giveup","message":"tunnel \"db\" gave up after 5 restarts","data":{"tunnel":"db","restarts":5}}

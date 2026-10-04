@@ -1,0 +1,42 @@
+{"ts":"2026-10-02T12:00:00.050Z","type":"run.started","runId":"2026-10-02T12-00-00-000Z_profile_wizard_c0ffee","spec":"profile_wizard"}
+{"ts":"2026-10-02T12:00:00.100Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"2026-10-02T12:00:00.150Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-02T12:00:00.200Z","type":"step.started","stepId":"sign_in","index":1,"total":9,"kind":"use","label":"use login"}
+{"ts":"2026-10-02T12:00:00.250Z","type":"artifact.request","stepId":"sign_in","path":"requests/login_check.json","assign":"login_check","status":401}
+{"ts":"2026-10-02T12:00:00.300Z","type":"artifact.request","stepId":"sign_in","path":"requests/login.json","assign":"login","status":200}
+{"ts":"2026-10-02T12:00:00.350Z","type":"artifact.request","stepId":"sign_in","path":"requests/login_after_1.json","assign":"login_after_1","status":200}
+{"ts":"2026-10-02T12:00:00.400Z","type":"step.finished","stepId":"sign_in","durationMs":420,"detail":"logged in (POST /api/login → 200); 1 follow-up(s); hydrated"}
+{"ts":"2026-10-02T12:00:00.450Z","type":"step.started","stepId":"profile_form","index":2,"total":9,"kind":"form","label":"form (3 fields)"}
+{"ts":"2026-10-02T12:00:00.500Z","type":"widget.field","stepId":"profile_form","field":"country","driver":"vue-multiselect","status":"committed","durationMs":12,"path":"widgets/002_profile_form.json"}
+{"ts":"2026-10-02T12:00:00.550Z","type":"widget.field","stepId":"profile_form","field":"start_date","driver":"primevue-calendar","status":"committed","via":"picker","durationMs":30,"path":"widgets/002_profile_form.json"}
+{"ts":"2026-10-02T12:00:00.600Z","type":"widget.field","stepId":"profile_form","field":"certify","driver":"radio-group","status":"already","durationMs":1,"path":"widgets/002_profile_form.json"}
+{"ts":"2026-10-02T12:00:00.650Z","type":"step.finished","stepId":"profile_form","durationMs":90}
+{"ts":"2026-10-02T12:00:00.700Z","type":"step.started","stepId":"save_draft","index":3,"total":9,"kind":"click","label":"click role=button \"Save draft\" (fallback dispatch)"}
+{"ts":"2026-10-02T12:00:00.750Z","type":"step.finished","stepId":"save_draft","durationMs":8,"via":"dispatch","detail":"pointer blocked by div.p-dialog-mask"}
+{"ts":"2026-10-02T12:00:00.800Z","type":"step.started","stepId":"start_task","index":4,"total":9,"kind":"click","label":"click role=button \"Start task\" (optional)"}
+{"ts":"2026-10-02T12:00:00.850Z","type":"step.finished","stepId":"start_task","durationMs":6,"skipped":true,"skipReason":"absent"}
+{"ts":"2026-10-02T12:00:00.900Z","type":"step.started","stepId":"maybe_confirm","index":5,"total":9,"kind":"if","label":"if text \"Confirm changes\" (then 1)"}
+{"ts":"2026-10-02T12:00:00.950Z","type":"step.started","stepId":"maybe_confirm.then.1","index":1,"total":1,"kind":"click","label":"click role=button \"Confirm\"","parentId":"maybe_confirm","branch":"then"}
+{"ts":"2026-10-02T12:00:01.000Z","type":"step.finished","stepId":"maybe_confirm.then.1","durationMs":40,"parentId":"maybe_confirm","branch":"then"}
+{"ts":"2026-10-02T12:00:01.050Z","type":"step.finished","stepId":"maybe_confirm","durationMs":60,"taken":"then"}
+{"ts":"2026-10-02T12:00:01.100Z","type":"step.started","stepId":"each_row","index":6,"total":9,"kind":"repeat","label":"repeat ≤3 (1 steps)"}
+{"ts":"2026-10-02T12:00:01.150Z","type":"step.started","stepId":"pick_row","index":1,"total":1,"kind":"set","label":"set field \"row_owner\"","parentId":"each_row","iteration":1}
+{"ts":"2026-10-02T12:00:01.200Z","type":"widget.field","stepId":"pick_row","field":"row_owner","driver":"native-select","status":"committed","durationMs":3,"path":"widgets/006_pick_row_i1.json","parentId":"each_row","iteration":1}
+{"ts":"2026-10-02T12:00:01.250Z","type":"step.finished","stepId":"pick_row","durationMs":9,"driver":"native-select","parentId":"each_row","iteration":1}
+{"ts":"2026-10-02T12:00:01.300Z","type":"step.started","stepId":"pick_row","index":1,"total":1,"kind":"set","label":"set field \"row_owner\"","parentId":"each_row","iteration":2}
+{"ts":"2026-10-02T12:00:01.350Z","type":"widget.field","stepId":"pick_row","field":"row_owner","driver":"native-select","status":"committed","durationMs":3,"path":"widgets/006_pick_row_i2.json","parentId":"each_row","iteration":2}
+{"ts":"2026-10-02T12:00:01.400Z","type":"step.finished","stepId":"pick_row","durationMs":9,"driver":"native-select","parentId":"each_row","iteration":2}
+{"ts":"2026-10-02T12:00:01.450Z","type":"step.finished","stepId":"each_row","durationMs":30,"iterations":2}
+{"ts":"2026-10-02T12:00:01.500Z","type":"step.started","stepId":"submit_retry","index":7,"total":9,"kind":"use","label":"use submit_form (retry ×1)"}
+{"ts":"2026-10-02T12:00:01.550Z","type":"step.started","stepId":"submit_retry.1","index":1,"total":1,"kind":"click","label":"click role=button \"Submit\"","parentId":"submit_retry","iteration":1}
+{"ts":"2026-10-02T12:00:01.600Z","type":"step.failed","stepId":"submit_retry.1","durationMs":5000,"error":"click role=button \"Submit\": no match","parentId":"submit_retry","iteration":1}
+{"ts":"2026-10-02T12:00:01.650Z","type":"step.started","stepId":"submit_retry.1","index":1,"total":1,"kind":"click","label":"click role=button \"Submit\"","parentId":"submit_retry","iteration":2}
+{"ts":"2026-10-02T12:00:01.700Z","type":"step.finished","stepId":"submit_retry.1","durationMs":70,"parentId":"submit_retry","iteration":2}
+{"ts":"2026-10-02T12:00:01.750Z","type":"step.finished","stepId":"submit_retry","durationMs":5200,"iterations":2}
+{"ts":"2026-10-02T12:00:01.800Z","type":"step.started","stepId":"wait_task","index":8,"total":9,"kind":"request","label":"request GET /api/tasks"}
+{"ts":"2026-10-02T12:00:01.850Z","type":"artifact.request","stepId":"wait_task","path":"requests/tasks.json","assign":"tasks","status":200,"attempts":3}
+{"ts":"2026-10-02T12:00:01.900Z","type":"step.finished","stepId":"wait_task","durationMs":2100}
+{"ts":"2026-10-02T12:00:01.950Z","type":"step.started","stepId":"denied","index":9,"total":9,"kind":"request","label":"request ${matrix.route.method} ${matrix.route.path}"}
+{"ts":"2026-10-02T12:00:02.000Z","type":"artifact.request","stepId":"denied","path":"requests/denied.json","assign":"denied","status":401,"combinations":4,"mismatches":1}
+{"ts":"2026-10-02T12:00:02.050Z","type":"step.failed","stepId":"denied","durationMs":300,"error":"request matrix: 1/4 combination(s) did not match expectStatus [401, 403]: route=… auth=[redacted] → 200"}
+{"ts":"2026-10-02T12:00:02.110Z","type":"run.failed","runId":"2026-10-02T12-00-00-000Z_profile_wizard_c0ffee","durationMs":2060}

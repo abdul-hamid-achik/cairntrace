@@ -5,12 +5,21 @@ import {
   probeDockerCompose,
   readServicesLock,
   servicesLockAgeSeconds,
+  servicesStateRoot,
   tmuxSessionExists,
   captureTmuxPane,
   resolveCwd,
+  tunnelKeyOf,
 } from "../../../core/runner/services";
 import { SeedStateStore } from "../../../core/runner/seedState";
+import {
+  phaseStateDecision,
+  SeedPhaseStore,
+  seedTargetHash,
+} from "../../../core/servicesOps/seedTransaction";
+import { isAlive, readTunnelStates } from "../../../core/servicesOps/tunnels";
 import { loadConfig, findConfigFile } from "../../../core/config/loader";
+import { engineRequirementProblem } from "../../../core/engineRequirements";
 import { resolveProjectRuntimeContext } from "../../../core/config/runtimeContext";
 import type { GateNode } from "../../../core/gates/schema";
 import type { ServicesConfig } from "../../../core/schema/config.v1";
@@ -59,6 +68,19 @@ export interface ServicesStatusResult {
     fingerprint?: string;
     ttlSeconds?: number;
     freshnessCheck?: string;
+    /**
+     * `seed.phases`: each phase's last recorded outcome (the per project +
+     * environment + target store) and whether that record alone lets the
+     * next run skip it (a `skipIf` still decides at run time).
+     */
+    phases?: Array<{
+      name: string;
+      lastRunAt?: string;
+      exitCode?: number;
+      fresh: boolean;
+    }>;
+    /** A failed run left phases the next one resumes after. */
+    resume?: { at: string; phases: string[] };
   };
   /** tmux status. */
   tmux: {
@@ -71,8 +93,20 @@ export interface ServicesStatusResult {
       paneTail?: string;
     }>;
   };
+  /** `services.tunnels`: each tunnel's recorded state and whether its process runs. */
+  tunnels?: Array<{
+    name: string;
+    state: string;
+    running: boolean;
+    pid?: number;
+    restarts: number;
+  }>;
+  /** `services.provisioner` is configured; the names it exports (never values). */
+  provisioner?: { exports: string[] };
   /** Errors encountered during status check. */
   errors: string[];
+  /** The config's `requires.cairntrace` is not met by this cairn (exit 4). */
+  engineRequirement?: string;
 }
 
 /**
@@ -101,11 +135,17 @@ export async function getServicesStatus(
   let loaded: Awaited<ReturnType<typeof loadConfig>> | undefined;
   if (configPath) {
     try {
-      loaded = await loadConfig(configPath, configPath);
+      // Read-only: the state of a pinned config is still reported; the
+      // unmet pin is an error (exit 4), like the commands it refuses.
+      loaded = await loadConfig(configPath, configPath, { skipRequires: true });
     } catch (e) {
       errors.push(`config load: ${(e as Error).message}`);
     }
   }
+  const engineRequirement = loaded
+    ? engineRequirementProblem(loaded.config, undefined, loaded.path)
+    : undefined;
+  if (engineRequirement) errors.push(`requires: ${engineRequirement}`);
 
   const cfg = loaded?.config;
   const project = cfg?.project ?? opts.project ?? "cairntrace";
@@ -119,6 +159,7 @@ export async function getServicesStatus(
     try {
       const ctx = await resolveProjectRuntimeContext({
         configPath: loaded.path,
+        skipRequires: true,
         ...(opts.env !== undefined ? { envOverride: opts.env } : {}),
       });
       envName = ctx.envName;
@@ -132,6 +173,7 @@ export async function getServicesStatus(
     hasServices: !!services,
     project,
     ...(envName !== undefined ? { env: envName } : {}),
+    ...(engineRequirement ? { engineRequirement } : {}),
     docker: { configured: false, running: false },
     seed: { configured: false, expired: true },
     tmux: { configured: false, sessionExists: false, windows: [] },
@@ -184,13 +226,68 @@ export async function getServicesStatus(
     result.seed.ttlSeconds = services.seed.ttlSeconds;
     result.seed.freshnessCheck = services.seed.freshnessCheck;
     try {
-      const store = new SeedStateStore();
-      const state = await store.read(project);
+      const seed = services.seed;
+      const ttl = seed.ttlSeconds ?? 0;
+      // A phased seed, a `target` or `commit: afterPostCommands` keeps its
+      // record per project + environment + target (F12), where the runner
+      // writes it; a plain seed keeps the legacy per-project record.
+      const scoped =
+        seed.phases !== undefined ||
+        seed.target !== undefined ||
+        seed.commit === "afterPostCommands";
+      const scopedState = scoped
+        ? await new SeedPhaseStore().read(
+            project,
+            envName ?? "default",
+            seedTargetHash({
+              target: seed.target,
+              cwd: resolveCwd(seed.cwd, configDir),
+              env: seed.env,
+            }),
+          )
+        : undefined;
+      if (seed.phases) {
+        const phases = seed.phases.map((phase) => {
+          const record = scopedState?.phases[phase.name];
+          return {
+            name: phase.name,
+            ...(record
+              ? { lastRunAt: record.ranAt, exitCode: record.exitCode }
+              : {}),
+            fresh:
+              phase.always !== true &&
+              !phaseStateDecision(phase, record, ttl).run,
+          };
+        });
+        result.seed.phases = phases;
+        const latest = phases
+          .filter((phase) => phase.lastRunAt !== undefined)
+          .toSorted((a, b) => (a.lastRunAt! < b.lastRunAt! ? 1 : -1))[0];
+        if (latest) {
+          result.seed.lastRunAt = latest.lastRunAt;
+          if (latest.exitCode !== undefined) {
+            result.seed.lastRunExitCode = latest.exitCode;
+          }
+        }
+        result.seed.expired = phases.some((phase) => !phase.fresh);
+        if (scopedState?.resume) {
+          result.seed.resume = {
+            at: scopedState.resume.at,
+            phases: Object.keys(scopedState.resume.done),
+          };
+        }
+      }
+      const state = seed.phases
+        ? undefined
+        : scoped
+          ? scopedState?.committed
+            ? { project, ...scopedState.committed }
+            : undefined
+          : await new SeedStateStore().read(project);
       if (state) {
         result.seed.lastRunAt = state.lastRunAt;
         result.seed.lastRunExitCode = state.lastRunExitCode;
         result.seed.fingerprint = state.fingerprint;
-        const ttl = services.seed.ttlSeconds ?? 0;
         if (ttl > 0 && state.lastRunAt) {
           const elapsed = Date.now() - new Date(state.lastRunAt).getTime();
           result.seed.expired = elapsed > ttl * 1000;
@@ -226,6 +323,39 @@ export async function getServicesStatus(
     } catch (e) {
       errors.push(`tmux: ${(e as Error).message}`);
     }
+  }
+
+  if (services.tunnels && services.tunnels.length > 0) {
+    try {
+      const states = await readTunnelStates(
+        tunnelKeyOf({
+          project,
+          envName,
+          configDir,
+          ...(loaded?.path ? { configPath: loaded.path } : {}),
+        }),
+        servicesStateRoot(),
+      );
+      result.tunnels = services.tunnels.map((tunnel) => {
+        const recorded = states.find((state) => state.name === tunnel.name);
+        return {
+          name: tunnel.name,
+          state: recorded?.state ?? "not started",
+          running: recorded
+            ? recorded.state === "running" && isAlive(recorded.pid)
+            : false,
+          ...(recorded ? { pid: recorded.pid } : {}),
+          restarts: recorded?.restarts ?? 0,
+        };
+      });
+    } catch (e) {
+      errors.push(`tunnels: ${(e as Error).message}`);
+    }
+  }
+  if (services.provisioner) {
+    result.provisioner = {
+      exports: Object.keys(services.provisioner.exports ?? {}),
+    };
   }
 
   return result;
@@ -271,6 +401,7 @@ async function servicesLockReport(
     scoped = await resolveScopedSecrets(configPath, {
       configPath,
       environmentOverride: envName,
+      skipRequires: true,
     });
   } catch (e) {
     errors.push(
@@ -310,6 +441,7 @@ export async function servicesStatusCommand(
       `\nWarnings:\n${result.errors.map((e) => `  - ${e}`).join("\n")}\n`,
     );
   }
+  if (result.engineRequirement) process.exitCode = 4;
 }
 
 function renderMarkdown(r: ServicesStatusResult): string {
@@ -348,6 +480,20 @@ function renderMarkdown(r: ServicesStatusResult): string {
       lines.push(`- ttlSeconds: ${r.seed.ttlSeconds}`);
     if (r.seed.freshnessCheck)
       lines.push(`- freshnessCheck: ${r.seed.freshnessCheck}`);
+    for (const phase of r.seed.phases ?? []) {
+      lines.push(
+        `- phase ${phase.name}: ${phase.fresh ? "fresh" : "runs next time"}${
+          phase.lastRunAt
+            ? ` (last ${phase.lastRunAt}, exit ${phase.exitCode ?? "?"})`
+            : ""
+        }`,
+      );
+    }
+    if (r.seed.resume) {
+      lines.push(
+        `- resume: after ${r.seed.resume.phases.join(", ") || "nothing"} (failed run at ${r.seed.resume.at})`,
+      );
+    }
   }
 
   // tmux
@@ -363,6 +509,27 @@ function renderMarkdown(r: ServicesStatusResult): string {
         lines.push(`  - ${w.name}`);
       }
     }
+  }
+
+  if (r.tunnels && r.tunnels.length > 0) {
+    lines.push("", "## Tunnels");
+    for (const t of r.tunnels) {
+      lines.push(
+        `- ${t.name}: ${t.running ? "running" : "not running"} (${t.state}${
+          t.pid !== undefined ? `, pid ${t.pid}` : ""
+        }${t.restarts > 0 ? `, ${t.restarts} restart(s)` : ""})`,
+      );
+    }
+  }
+  if (r.provisioner) {
+    lines.push("", "## Provisioner");
+    lines.push(
+      `- exports: ${
+        r.provisioner.exports.length > 0
+          ? r.provisioner.exports.join(", ")
+          : "(none)"
+      }`,
+    );
   }
 
   if (r.errors.length > 0) {

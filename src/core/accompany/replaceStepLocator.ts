@@ -6,10 +6,17 @@ import type { Locator, Step } from "../schema/spec.v1";
  */
 export function replaceStepLocator(step: Step, locator: Locator): Step {
   if ("click" in step) {
-    const { until } = step.click;
+    // Runner-owned flags (until, F15 optional / dispatch / fallback) stay.
+    const { until, optional, dispatch, fallback } = step.click;
     return {
       ...step,
-      click: until ? { ...locator, until } : locator,
+      click: {
+        ...locator,
+        ...(until ? { until } : {}),
+        ...(optional !== undefined ? { optional } : {}),
+        ...(dispatch !== undefined ? { dispatch } : {}),
+        ...(fallback !== undefined ? { fallback } : {}),
+      },
     } as Step;
   }
   if ("hover" in step) return { ...step, hover: locator };
@@ -17,7 +24,14 @@ export function replaceStepLocator(step: Step, locator: Locator): Step {
   if ("fill" in step) {
     return {
       ...step,
-      fill: { ...locator, value: step.fill.value },
+      fill: {
+        ...locator,
+        value: step.fill.value,
+        ...(step.fill.mode !== undefined ? { mode: step.fill.mode } : {}),
+        ...(step.fill.optional !== undefined
+          ? { optional: step.fill.optional }
+          : {}),
+      },
     } as Step;
   }
   if ("type" in step) {

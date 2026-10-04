@@ -44,6 +44,14 @@ const CairnEvents = (() => {
   const MAX_EXPECTS = 500;
   const MAX_FIXTURES = 200;
   const MAX_OUTPUTS = 30;
+  /** Step execution rows kept per run (F14 loops multiply them). */
+  const MAX_STEP_ROWS = 5000;
+  const MAX_POLICY_ROWS = 100;
+  const MAX_METRIC_SAMPLES = 400;
+  /** widget.field entries kept per step execution. */
+  const MAX_WIDGET_FIELDS = 100;
+  /** artifact.request entries kept per step execution. */
+  const MAX_STEP_REQUESTS = 50;
 
   /** Display names for `phase.changed.phase` values. */
   const PHASE_LABELS = {
@@ -77,7 +85,7 @@ const CairnEvents = (() => {
    * secrets out of these; this is the second lock.
    */
   const SECRET_KEY =
-    /(pass(word|wd|phrase)?$|^pwd$|secret|token|api[-_]?key|apikey|authorization|^auth$|credential|cookie|private[-_]?key|bearer|signature)/i;
+    /(pass(word|wd|phrase)?$|^pwd$|secret|token|api[-_]?key|apikey|authorization|^auth$|credential|cookie|private[-_]?key|bearer|jwt|signature)/i;
 
   /**
    * @param {unknown} value
@@ -343,6 +351,8 @@ const CairnEvents = (() => {
    * so `total - passed - failed - errored`); and the journal's own
    * `run.refused` events (`refusals`, the reduced model's list) for planned
    * specs without a run. The largest wins: they never disagree upward.
+   * Specs `--bail` skipped (`summary.skipped`) are not results either, so
+   * they are subtracted before the remainder is read as refused.
    * @param {Record<string, any> | null | undefined} journal invocation.json
    * @param {Array<Record<string, any>> | null | undefined} [refusals]
    * @returns {number}
@@ -376,7 +386,8 @@ const CairnEvents = (() => {
               total -
                 (num(summary.passed) ?? 0) -
                 (num(summary.failed) ?? 0) -
-                (num(summary.errored) ?? 0),
+                (num(summary.errored) ?? 0) -
+                (num(summary.skipped) ?? 0),
             ));
     }
     return Math.max(fromEvents, fromSummary);
@@ -892,6 +903,491 @@ const CairnEvents = (() => {
   }
 
   /**
+   * F14: where a nested step ran, from the additive `parentId` /
+   * `iteration` / `branch` fields of its step.* event or run.json result:
+   * `in visit_rows #2`, `in maybe_nav then`. Null for a top-level step.
+   * @param {Record<string, any> | null | undefined} source
+   * @returns {string | null}
+   */
+  function placeText(source) {
+    const parentId = str(source?.parentId);
+    if (!parentId) return null;
+    const iteration = num(source?.iteration);
+    const branch = str(source?.branch);
+    return `in ${parentId}${iteration === null ? "" : ` #${iteration}`}${
+      branch ? ` ${branch}` : ""
+    }`;
+  }
+
+  /**
+   * What a finished block did, in run-report shorthand: `×3` iterations (a
+   * repeat) or attempts (a retried use), `→ then` (an if), `not matched`
+   * (an optional or grouped wait). Empty for every other step.
+   * @param {Record<string, any> | null | undefined} source
+   * @returns {string}
+   */
+  function blockText(source) {
+    const parts = [];
+    const iterations = num(source?.iterations);
+    if (iterations !== null) parts.push(`×${iterations}`);
+    const taken = str(source?.taken);
+    if (taken) parts.push(taken === "none" ? "→ no branch" : `→ ${taken}`);
+    if (source?.matched === false) parts.push("not matched");
+    return parts.join(" · ");
+  }
+
+  /**
+   * The label of one group of a block's nested steps: `then` / `else` for an
+   * if branch, `attempt N` for a retried use, `iteration N` for a repeat.
+   * @param {{ iteration?: number | null, branch?: string | null }} place
+   * @param {string | null | undefined} parentKind the block's step kind
+   * @returns {string}
+   */
+  function groupLabel(place, parentKind) {
+    if (place.branch) return String(place.branch);
+    if (place.iteration === null || place.iteration === undefined)
+      return "steps";
+    return `${
+      parentKind === "use" ? "attempt" : "iteration"
+    } ${place.iteration}`;
+  }
+
+  /**
+   * A run-lock owner (`run.lock.refused` / `run.lock.reclaimed`) in one line:
+   * `pid 4242 (cli, env "local") · 5m 3s old`.
+   * @param {Record<string, any> | null | undefined} owner
+   * @returns {string | null}
+   */
+  function lockOwnerText(owner) {
+    if (!owner || typeof owner !== "object") return null;
+    const pid = num(owner.pid);
+    const bits = [
+      str(owner.origin),
+      str(owner.invocationId) ? `invocation ${owner.invocationId}` : null,
+      str(owner.env) ? `env "${owner.env}"` : null,
+    ].filter(Boolean);
+    const age = num(owner.ageSeconds);
+    return [
+      pid === null ? "unknown owner" : `pid ${pid}`,
+      bits.length ? `(${bits.join(", ")})` : null,
+      owner.alive === false ? "· not running" : null,
+      age === null ? null : `· ${fmt.formatDuration(age * 1000)} old`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  /**
+   * The CLI's exit-code meaning, for a suite's verdict line.
+   * @param {number} code
+   * @returns {string}
+   */
+  function describeSuiteExit(code) {
+    switch (code) {
+      case 0:
+        return "passed";
+      case 1:
+        return "outcome failure";
+      case 2:
+        return "errored";
+      case 4:
+        return "refused before start";
+      case 7:
+        return "refused by environment policy";
+      case 8:
+        return "critical teardown failed";
+      case 9:
+        return "dirty state after the run";
+      default:
+        return "failed";
+    }
+  }
+
+  /**
+   * Run-policy and suite events (config `run:` block, `--bail`, `--suite`,
+   * `metrics:` probes). Null for anything else.
+   * @param {string} type
+   * @param {Record<string, any>} event
+   * @param {string} took ` · 1.2s` or empty
+   * @returns {{ label: string, tone: "ok" | "bad" | "warn" | "info" | "muted" | "refused", detail: string | null } | null}
+   */
+  function describePolicyEvent(type, event, took) {
+    const kind = str(event?.kind);
+    const name = str(event?.name);
+    switch (type) {
+      case "run.lock.acquired":
+        return event?.reclaimed
+          ? {
+              label: "run lock acquired (a dead owner's lock was reclaimed)",
+              tone: "warn",
+              detail: str(event?.path),
+            }
+          : {
+              label: "run lock acquired",
+              tone: "ok",
+              detail: str(event?.path),
+            };
+      case "run.lock.reclaimed":
+        return {
+          label: "run lock reclaimed from a dead owner",
+          tone: "warn",
+          detail:
+            [lockOwnerText(event?.previousOwner), str(event?.path)]
+              .filter(Boolean)
+              .join(" — ") || null,
+        };
+      case "run.lock.refused":
+        return {
+          label: `run lock refused · ${str(event?.reason) ?? "held"}${
+            event?.owner ? ` by ${lockOwnerText(event.owner)}` : ""
+          }`,
+          tone: "bad",
+          detail: str(event?.message) ? short(event.message, 400) : null,
+        };
+      case "run.lock.released": {
+        const held = num(event?.heldMs);
+        return {
+          label: `run lock released${
+            held === null ? "" : ` · held ${fmt.formatDuration(held)}`
+          }`,
+          tone: "muted",
+          detail: str(event?.path),
+        };
+      }
+      case "preflight.started":
+        return {
+          label: `preflight started · ${num(event?.total) ?? "?"} check(s)`,
+          tone: "info",
+          detail: null,
+        };
+      case "preflight.passed":
+        return {
+          label: `preflight ${event?.index ?? "?"} · ${event?.check ?? "?"}${
+            name ? ` ${name}` : ""
+          } passed${took}`,
+          tone: "ok",
+          detail: null,
+        };
+      case "preflight.failed":
+        return {
+          label: `preflight ${event?.index ?? "?"} · ${event?.check ?? "?"}${
+            name ? ` ${name}` : ""
+          } FAILED${took}`,
+          tone: "bad",
+          detail: str(event?.reason) ? short(event.reason, 400) : null,
+        };
+      case "cleanliness.clean":
+        return {
+          label: `${event?.phase ?? "?"}-run cleanliness · ${kind ?? "?"}${
+            name ? ` ${name}` : ""
+          } clean`,
+          tone: "ok",
+          detail: null,
+        };
+      case "cleanliness.dirty": {
+        const survivors = Array.isArray(event?.survivors)
+          ? event.survivors.map(String)
+          : [];
+        const where = `${kind ?? "?"}${name ? ` ${name}` : ""} · ${
+          survivors.length
+        } left`;
+        return {
+          label:
+            event?.phase === "after"
+              ? `dirty after the run (exit 9) · ${where}`
+              : `dirty before the run (run refused) · ${where}`,
+          tone: event?.phase === "after" ? "warn" : "bad",
+          detail: survivors.length ? short(survivors.join(" · "), 400) : null,
+        };
+      }
+      case "finally.started":
+        return {
+          label: `finally ${event?.index ?? "?"}/${event?.total ?? "?"} started`,
+          tone: "info",
+          detail: null,
+        };
+      case "finally.finished": {
+        const ok = event?.exitCode === 0 && !event?.timedOut;
+        const tail = lastLine(event?.outputTail);
+        const how = event?.timedOut
+          ? "timed out"
+          : event?.exitCode === undefined || event?.exitCode === null
+            ? "did not exit cleanly"
+            : `exit ${event.exitCode}`;
+        return {
+          label: `finally ${event?.index ?? "?"} ${how}${took}${
+            ok ? "" : " (non-fatal)"
+          }`,
+          tone: ok ? "ok" : "warn",
+          detail: tail ? short(tail, 300) : null,
+        };
+      }
+      case "invocation.bailed":
+        return {
+          label: `bailed after ${event?.spec ?? "a spec"} (exit ${
+            event?.exitCode ?? "?"
+          }) · ${num(event?.skipped) ?? 0} spec(s) skipped`,
+          tone: "warn",
+          detail: null,
+        };
+      case "suite.started":
+        return {
+          label: `suite ${name ?? "?"} started · ${num(event?.specs) ?? "?"} spec(s)${
+            str(event?.env) ? ` · env ${event.env}` : ""
+          }${num(event?.parallel) ? ` · parallel ${event.parallel}` : ""}${
+            event?.bail ? " · bail" : ""
+          }`,
+          tone: "info",
+          detail: null,
+        };
+      case "suite.hook.started":
+        return {
+          label: `suite ${name ?? "?"} ${event?.hook ?? "?"} hook ${
+            event?.index ?? "?"
+          }/${event?.total ?? "?"} started`,
+          tone: "info",
+          detail: str(event?.command) ? short(event.command, 300) : null,
+        };
+      case "suite.hook.finished": {
+        const tail = lastLine(event?.outputTail);
+        const how = event?.timedOut
+          ? "timed out"
+          : event?.ok
+            ? "ok"
+            : `failed${
+                event?.exitCode === undefined || event?.exitCode === null
+                  ? ""
+                  : ` (exit ${event.exitCode})`
+              }`;
+        return {
+          label: `suite ${name ?? "?"} ${event?.hook ?? "?"} hook ${
+            event?.index ?? "?"
+          } ${how}${took}`,
+          tone: event?.ok ? "ok" : event?.hook === "after" ? "warn" : "bad",
+          detail: tail ? short(tail, 300) : null,
+        };
+      }
+      case "suite.finished": {
+        const code = num(event?.exitCode);
+        const failedHooks = num(event?.hooksFailed);
+        return {
+          label: `suite ${name ?? "?"} finished · exit ${code ?? "?"}${
+            code === null ? "" : ` (${describeSuiteExit(code)})`
+          }`,
+          tone: code === 0 ? "ok" : code === 7 ? "refused" : "bad",
+          detail: failedHooks ? `${failedHooks} suite hook(s) failed` : null,
+        };
+      }
+      case "metric.sampled": {
+        const value = num(event?.value);
+        const mark = `${
+          event?.scope === "invocation" ? "invocation " : ""
+        }metric ${name ?? "?"} ${event?.phase ?? "sample"}`;
+        return value === null
+          ? {
+              label: `${mark} failed`,
+              tone: "warn",
+              detail: str(event?.error) ? short(event.error, 300) : null,
+            }
+          : { label: `${mark} = ${value}`, tone: "muted", detail: null };
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * `services.restart|tunnel|provisioner|files|seed.phase|seed.commit|
+   * teardown` events, with the names their `data` carries. Null for any
+   * other services event (the generic `services <phase> <event>` line).
+   * @param {string} type
+   * @param {Record<string, any>} event
+   * @returns {{ label: string, tone: "ok" | "bad" | "warn" | "info" | "muted" | "refused", detail: string | null } | null}
+   */
+  function describeServicesOps(type, event) {
+    const rest = type.startsWith("services.")
+      ? type.slice("services.".length)
+      : "";
+    const data =
+      event?.data && typeof event.data === "object" ? event.data : {};
+    const message = str(event?.message);
+    const detail = message ? short(message, 300) : null;
+    const win = str(data.window);
+    const tunnel = str(data.tunnel);
+    const phase = str(data.phase);
+    const exit = num(data.exitCode);
+    const tookMs = num(data.durationMs);
+    const took = tookMs === null ? "" : ` · ${fmt.formatDuration(tookMs)}`;
+    // An event without the name it is about (an older or future cairn) reads
+    // as the generic `services <phase> <event> · message` line instead.
+    if (
+      (rest.startsWith("restart.") && !win) ||
+      (rest.startsWith("tunnel.") && !tunnel) ||
+      (rest.startsWith("seed.phase.") && !phase)
+    )
+      return null;
+    switch (rest) {
+      case "restart.start":
+        return {
+          label: `service restart · ${win ?? "?"}${
+            str(data.reason) ? ` (${data.reason})` : ""
+          }`,
+          tone: "info",
+          detail,
+        };
+      case "restart.stop":
+        return {
+          label: `service ${win ?? "?"} stopped${
+            data.graceful === false ? " (not gracefully)" : ""
+          }${took}`,
+          tone: data.graceful === false ? "warn" : "muted",
+          detail,
+        };
+      case "restart.ready":
+        return {
+          label: `service ${win ?? "?"} restarted${took}`,
+          tone: "ok",
+          detail,
+        };
+      case "restart.fail":
+        return {
+          label: `service ${win ?? "?"} restart FAILED`,
+          tone: "bad",
+          detail,
+        };
+      case "restart.giveup":
+        return {
+          label: `service ${win ?? "?"} gave up after ${
+            num(data.restarts) ?? "?"
+          } restart(s)`,
+          tone: "bad",
+          detail,
+        };
+      case "tunnel.start":
+        return {
+          label: `tunnel ${tunnel ?? "?"} starting`,
+          tone: "info",
+          detail,
+        };
+      case "tunnel.ready":
+        return { label: `tunnel ${tunnel ?? "?"} ready`, tone: "ok", detail };
+      case "tunnel.exit":
+        return {
+          label: `tunnel ${tunnel ?? "?"} exited`,
+          tone: "warn",
+          detail,
+        };
+      case "tunnel.restart":
+        return {
+          label: `tunnel ${tunnel ?? "?"} restarting`,
+          tone: "warn",
+          detail,
+        };
+      case "tunnel.giveup":
+        return {
+          label: `tunnel ${tunnel ?? "?"} gave up after ${
+            num(data.restarts) ?? "?"
+          } restart(s)`,
+          tone: "bad",
+          detail,
+        };
+      case "tunnel.stop":
+        return {
+          label: `tunnel ${tunnel ?? "?"} stopped`,
+          tone: "muted",
+          detail,
+        };
+      case "tunnel.fail":
+        return {
+          label: `tunnel ${tunnel ?? "?"} FAILED to start`,
+          tone: "bad",
+          detail,
+        };
+      case "provisioner.start":
+        return { label: "provisioner up started", tone: "info", detail };
+      case "provisioner.ready":
+        return { label: "provisioner up finished", tone: "ok", detail };
+      case "provisioner.exports": {
+        const names = Array.isArray(data.exports)
+          ? data.exports.map(String)
+          : Array.isArray(data.names)
+            ? data.names.map(String)
+            : [];
+        return {
+          label: `provisioner exports · ${names.length} name(s)`,
+          tone: "ok",
+          detail: names.length ? names.join(", ") : detail,
+        };
+      }
+      case "provisioner.fail":
+        return { label: "provisioner up FAILED", tone: "bad", detail };
+      case "files.write":
+      case "files.unchanged":
+      case "files.fail": {
+        const file = str(data.path);
+        const what = file ? ` · ${short(file, 120)}` : "";
+        return rest === "files.write"
+          ? { label: `services file written${what}`, tone: "ok", detail }
+          : rest === "files.unchanged"
+            ? { label: `services file unchanged${what}`, tone: "muted", detail }
+            : {
+                label: `services file write FAILED${what}`,
+                tone: "bad",
+                detail,
+              };
+      }
+      case "seed.postcommand.skip":
+        return {
+          label: `seed post-command skipped${
+            str(data.postCommand) ? ` · ${short(data.postCommand, 80)}` : ""
+          }`,
+          tone: "muted",
+          detail: str(data.reason) ? short(data.reason, 200) : detail,
+        };
+      case "seed.phase.start":
+        return {
+          label: `seed phase ${phase ?? "?"} started`,
+          tone: "info",
+          detail,
+        };
+      case "seed.phase.skip":
+        return {
+          label: `seed phase ${phase ?? "?"} skipped`,
+          tone: "muted",
+          detail,
+        };
+      case "seed.phase.complete":
+        return {
+          label: `seed phase ${phase ?? "?"} done`,
+          tone: "ok",
+          detail,
+        };
+      case "seed.phase.fail":
+        return {
+          label: `seed phase ${phase ?? "?"} FAILED${
+            exit === null ? "" : ` (exit ${exit})`
+          }`,
+          tone: "bad",
+          detail,
+        };
+      case "seed.commit":
+        return { label: "seed committed", tone: "ok", detail };
+      case "teardown.fail":
+        if (data.critical || data.provisioner)
+          return {
+            label: `${
+              data.provisioner ? "provisioner down" : "critical teardown"
+            } FAILED${exit === null ? "" : ` (exit ${exit})`} — exit 8`,
+            tone: "bad",
+            detail,
+          };
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  /**
    * @typedef {"ok" | "bad" | "warn" | "info" | "muted" | "refused"} Tone
    * @typedef {{
    *   ts: string | null,
@@ -1013,34 +1509,64 @@ const CairnEvents = (() => {
       case "step.started": {
         const position = positionOf(event);
         const what = stepWhat(str(event?.kind), str(event?.label));
+        const place = placeText(event);
         return set(
           `${position ? `[${position}] ` : ""}step ${stepId ?? "?"} started${
             what ? ` · ${short(what, 160)}` : ""
-          }`,
+          }${place ? ` (${short(place, 120)})` : ""}`,
           "info",
         );
       }
-      case "step.finished":
+      case "step.finished": {
+        const place = placeText(event);
+        const where = place ? ` (${short(place, 120)})` : "";
         if (event?.skipped) {
           const when = whenText(event?.when);
+          const reason = str(event?.skipReason);
           return set(
             `step ${stepId ?? "?"} skipped${
-              when ? ` (when: ${short(when, 80)})` : " (when:)"
-            }`,
+              reason
+                ? ` (${short(reason, 80)})`
+                : when
+                  ? ` (when: ${short(when, 80)})`
+                  : " (when:)"
+            }${where}`,
             "muted",
           );
         }
+        const block = blockText(event);
         return set(
-          `step ${stepId ?? "?"} passed${took}`,
-          "ok",
-          str(event?.url),
+          `step ${stepId ?? "?"} passed${took}${block ? ` · ${block}` : ""}${
+            event?.via === "dispatch" || event?.via === "dataTransfer"
+              ? ` · via ${event.via}`
+              : ""
+          }${where}`,
+          event?.matched === false ? "muted" : "ok",
+          str(event?.detail) ? short(event.detail, 300) : str(event?.url),
         );
-      case "step.failed":
+      }
+      // ── widget fields (F15) ──────────────────────────────────────────────
+      case "widget.field": {
+        const status = String(event?.status ?? "?");
         return set(
-          `step ${stepId ?? "?"} failed${took}`,
+          `field ${short(String(event?.field ?? "?"), 80)} ${status}${
+            event?.driver ? ` · ${event.driver}` : ""
+          }${took}`,
+          status === "failed" ? "bad" : status === "skipped" ? "muted" : "ok",
+          str(event?.path),
+        );
+      }
+      case "step.failed": {
+        const place = placeText(event);
+        const block = blockText(event);
+        return set(
+          `step ${stepId ?? "?"} failed${took}${block ? ` · ${block}` : ""}${
+            place ? ` (${short(place, 120)})` : ""
+          }`,
           "bad",
           str(event?.error) ? short(event.error, 400) : null,
         );
+      }
 
       // ── outcomes ─────────────────────────────────────────────────────────
       case "outcome.started": {
@@ -1273,13 +1799,25 @@ const CairnEvents = (() => {
           }`,
           event?.wedged ? "warn" : "muted",
         );
-      case "artifact.request":
+      case "artifact.request": {
+        // F18: a matrix reports its mismatches, a retry / until its attempts.
+        const matrix =
+          typeof event?.combinations === "number"
+            ? ` · ${event.combinations} combination(s)${
+                event?.mismatches ? `, ${event.mismatches} mismatched` : ""
+              }`
+            : "";
+        const attempts =
+          typeof event?.attempts === "number"
+            ? ` · ${event.attempts} attempts`
+            : "";
         return set(
           `request${
             event?.assign ? ` ${event.assign}` : ""
-          } → ${event?.status ?? "?"} · ${event?.path ?? "?"}`,
-          "muted",
+          } → ${event?.status ?? "?"}${attempts}${matrix} · ${event?.path ?? "?"}`,
+          event?.mismatches ? "warn" : "muted",
         );
+      }
       case "artifact.download":
       case "artifact.transform":
       case "artifact.eval":
@@ -1473,8 +2011,14 @@ const CairnEvents = (() => {
         break;
     }
 
+    // ── run policy, suites, metrics (wave 6) ─────────────────────────────
+    const policy = describePolicyEvent(type, event, took);
+    if (policy) return set(policy.label, policy.tone, policy.detail);
+
     // ── services.<phase>.<event> ─────────────────────────────────────────
     if (type.startsWith("services.")) {
+      const ops = describeServicesOps(type, event);
+      if (ops) return set(ops.label, ops.tone, ops.detail);
       const [, phase = "?", name = "?"] = type.split(".");
       const message = str(event?.message);
       const exit = num(event?.data?.exitCode);
@@ -1549,7 +2093,24 @@ const CairnEvents = (() => {
    *   startedAt: string | null, durationMs: number | null, error: string | null,
    *   url: string | null, screenshot: string | null, diagnostics: string | null,
    *   when: string | null, artifacts: string[], expect: ExpectRow | null,
+   *   key: string, started: boolean,
+   *   parentId: string | null, parentKey: string | null,
+   *   iteration: number | null, branch: string | null, depth: number,
+   *   iterations: number | null, taken: string | null, matched: boolean | null,
+   *   via: string | null, driver: string | null, detail: string | null,
+   *   skipReason: string | null, superseded: boolean,
+   *   widgets: WidgetFieldRow[], widgetsDropped: number,
+   *   requests: RequestRow[],
    * }} StepRow
+   * @typedef {{
+   *   field: string, status: string, driver: string | null,
+   *   via: string | null, durationMs: number | null, path: string | null,
+   * }} WidgetFieldRow
+   * @typedef {{
+   *   assign: string | null, status: number | null, attempts: number | null,
+   *   combinations: number | null, mismatches: number | null,
+   *   path: string | null,
+   * }} RequestRow
    * @typedef {{
    *   outcomeId: string, kind: string | null, timeoutMs: number | null,
    *   status: "verifying" | "passed" | "failed" | "skipped",
@@ -1604,8 +2165,12 @@ const CairnEvents = (() => {
       stepTotal: null,
       /** @type {StepRow[]} */
       steps: [],
-      /** @type {Record<string, number>} stepId → index into steps */
+      /** @type {Record<string, number>} stepId → its newest execution row */
       stepIndex: {},
+      /** @type {Record<string, number>} stepId → executions seen (F14 loops) */
+      stepRuns: {},
+      /** executions past MAX_STEP_ROWS (folded into their id's newest row) */
+      stepsDropped: 0,
       currentStepId: null,
       /** @type {OutcomeRow[]} */
       outcomes: [],
@@ -1632,8 +2197,282 @@ const CairnEvents = (() => {
       retention: null,
       video: null,
       viewport: null,
+      /** run lock, preflight, cleanliness, finally, bail, suite, metrics */
+      policy: createPolicyState(),
       eventCount: 0,
     };
+  }
+
+  /**
+   * @returns {{
+   *   lock: { state: string, path: string | null, scope: string | null, reason: string | null, owner: Record<string, any> | null, message: string | null, heldMs: number | null, reclaimed: boolean } | null,
+   *   preflight: { total: number | null, checks: Array<{ index: number, check: string, name: string | null, status: "passed" | "failed", durationMs: number | null, reason: string | null }> },
+   *   cleanliness: Array<{ phase: string, kind: string, name: string | null, status: "clean" | "dirty", survivors: string[] }>,
+   *   finally: Array<{ index: number, total: number | null, status: "running" | "passed" | "failed" | "timed out", exitCode: number | null, durationMs: number | null, outputTail: string | null }>,
+   *   bailed: { spec: string | null, exitCode: number | null, skipped: number } | null,
+   *   suite: { name: string, env: string | null, specs: number | null, parallel: number | null, bail: boolean, status: "running" | "passed" | "failed" | "refused", exitCode: number | null, hooksFailed: number | null } | null,
+   *   suiteHooks: Array<{ hook: string, index: number, total: number | null, command: string | null, logPath: string | null, status: "running" | "passed" | "failed" | "timed out", exitCode: number | null, durationMs: number | null, outputTail: string | null }>,
+   *   metrics: Array<{ name: string, scope: string | null, phase: string | null, value: number | null, error: string | null, runId: string | null, iteration: number | null, ts: string | null }>,
+   * }}
+   */
+  function createPolicyState() {
+    return {
+      lock: null,
+      preflight: { total: null, checks: [] },
+      cleanliness: [],
+      finally: [],
+      bailed: null,
+      suite: null,
+      suiteHooks: [],
+      metrics: [],
+    };
+  }
+
+  /**
+   * Fold one run-policy / suite / metric event into `model.policy`.
+   * @param {Record<string, any>} model
+   * @param {string} type
+   * @param {Record<string, any>} event
+   * @param {string | null} ts
+   * @returns {string[] | null} touched sections, or null when not a policy event
+   */
+  function applyPolicyEvent(model, type, event, ts) {
+    const policy = model.policy ?? (model.policy = createPolicyState());
+    switch (type) {
+      case "run.lock.acquired":
+        policy.lock = {
+          state: event.reclaimed ? "reclaimed" : "held",
+          path: str(event.path),
+          scope: str(event.scope),
+          reason: null,
+          owner: null,
+          message: null,
+          heldMs: null,
+          reclaimed: Boolean(event.reclaimed),
+        };
+        return ["policy"];
+      case "run.lock.reclaimed":
+        policy.lock = {
+          state: "reclaimed",
+          path: str(event.path),
+          scope: str(event.scope),
+          reason: null,
+          owner:
+            event.previousOwner && typeof event.previousOwner === "object"
+              ? event.previousOwner
+              : null,
+          message: null,
+          heldMs: null,
+          reclaimed: true,
+        };
+        return ["policy"];
+      case "run.lock.refused":
+        policy.lock = {
+          state: "refused",
+          path: str(event.path),
+          scope: str(event.scope),
+          reason: str(event.reason),
+          owner:
+            event.owner && typeof event.owner === "object" ? event.owner : null,
+          message: str(event.message) ? short(event.message, 600) : null,
+          heldMs: null,
+          reclaimed: false,
+        };
+        return ["policy"];
+      case "run.lock.released":
+        if (policy.lock) {
+          policy.lock.state = "released";
+          policy.lock.heldMs = num(event.heldMs);
+        } else
+          policy.lock = {
+            state: "released",
+            path: str(event.path),
+            scope: str(event.scope),
+            reason: null,
+            owner: null,
+            message: null,
+            heldMs: num(event.heldMs),
+            reclaimed: false,
+          };
+        return ["policy"];
+      case "preflight.started":
+        policy.preflight.total = num(event.total);
+        return ["policy"];
+      case "preflight.passed":
+      case "preflight.failed": {
+        const index = num(event.index) ?? policy.preflight.checks.length + 1;
+        const row = {
+          index,
+          check: str(event.check) ?? "check",
+          name: str(event.name),
+          status: /** @type {"passed" | "failed"} */ (
+            type === "preflight.passed" ? "passed" : "failed"
+          ),
+          durationMs: num(event.durationMs),
+          reason: str(event.reason) ? short(event.reason, 600) : null,
+        };
+        const at = policy.preflight.checks.findIndex(
+          (entry) => entry.index === index,
+        );
+        if (at >= 0) policy.preflight.checks[at] = row;
+        else policy.preflight.checks.push(row);
+        bound(policy.preflight.checks, MAX_POLICY_ROWS);
+        return ["policy"];
+      }
+      case "cleanliness.clean":
+      case "cleanliness.dirty": {
+        const phase = str(event.phase) ?? "?";
+        const kind = str(event.kind) ?? "?";
+        const name = str(event.name);
+        const row = {
+          phase,
+          kind,
+          name,
+          status: /** @type {"clean" | "dirty"} */ (
+            type === "cleanliness.clean" ? "clean" : "dirty"
+          ),
+          survivors: Array.isArray(event.survivors)
+            ? event.survivors.slice(0, 50).map((line) => short(line, 300))
+            : [],
+        };
+        const at = policy.cleanliness.findIndex(
+          (entry) =>
+            entry.phase === phase && entry.kind === kind && entry.name === name,
+        );
+        if (at >= 0) policy.cleanliness[at] = row;
+        else policy.cleanliness.push(row);
+        bound(policy.cleanliness, MAX_POLICY_ROWS);
+        return ["policy"];
+      }
+      case "finally.started":
+      case "finally.finished": {
+        const index = num(event.index) ?? policy.finally.length + 1;
+        let row = policy.finally.find((entry) => entry.index === index);
+        if (!row) {
+          row = {
+            index,
+            total: null,
+            status: "running",
+            exitCode: null,
+            durationMs: null,
+            outputTail: null,
+          };
+          policy.finally.push(row);
+          bound(policy.finally, MAX_POLICY_ROWS);
+        }
+        row.total = num(event.total) ?? row.total;
+        if (type === "finally.finished") {
+          row.exitCode = num(event.exitCode);
+          row.durationMs = num(event.durationMs);
+          row.outputTail = str(event.outputTail)
+            ? short(event.outputTail, OUTPUT_TAIL_CHARS)
+            : null;
+          row.status = event.timedOut
+            ? "timed out"
+            : row.exitCode === 0
+              ? "passed"
+              : "failed";
+        }
+        return ["policy"];
+      }
+      case "invocation.bailed":
+        policy.bailed = {
+          spec: str(event.spec),
+          exitCode: num(event.exitCode),
+          skipped: num(event.skipped) ?? 0,
+        };
+        return ["policy", "status"];
+      case "suite.started":
+        policy.suite = {
+          name: str(event.name) ?? "?",
+          env: str(event.env),
+          specs: num(event.specs),
+          parallel: num(event.parallel),
+          bail: Boolean(event.bail),
+          status: "running",
+          exitCode: null,
+          hooksFailed: null,
+        };
+        return ["policy"];
+      case "suite.hook.started":
+      case "suite.hook.finished": {
+        const hook = str(event.hook) ?? "?";
+        const index = num(event.index) ?? 1;
+        let row = policy.suiteHooks.find(
+          (entry) => entry.hook === hook && entry.index === index,
+        );
+        if (!row) {
+          row = {
+            hook,
+            index,
+            total: null,
+            command: null,
+            logPath: null,
+            status: "running",
+            exitCode: null,
+            durationMs: null,
+            outputTail: null,
+          };
+          policy.suiteHooks.push(row);
+          bound(policy.suiteHooks, MAX_POLICY_ROWS);
+        }
+        row.total = num(event.total) ?? row.total;
+        if (type === "suite.hook.started") {
+          row.command = str(event.command) ? short(event.command, 400) : null;
+          row.logPath = str(event.logPath);
+        } else {
+          row.exitCode = num(event.exitCode);
+          row.durationMs = num(event.durationMs);
+          row.outputTail = str(event.outputTail)
+            ? short(event.outputTail, OUTPUT_TAIL_CHARS)
+            : null;
+          row.status = event.timedOut
+            ? "timed out"
+            : event.ok
+              ? "passed"
+              : "failed";
+        }
+        return ["policy"];
+      }
+      case "suite.finished": {
+        const suite =
+          policy.suite ??
+          (policy.suite = {
+            name: str(event.name) ?? "?",
+            env: null,
+            specs: null,
+            parallel: null,
+            bail: false,
+            status: "running",
+            exitCode: null,
+            hooksFailed: null,
+          });
+        suite.exitCode = num(event.exitCode);
+        suite.hooksFailed = num(event.hooksFailed);
+        suite.status =
+          suite.exitCode === 0
+            ? "passed"
+            : suite.exitCode === 7
+              ? "refused"
+              : "failed";
+        return ["policy", "status"];
+      }
+      case "metric.sampled":
+        policy.metrics.push({
+          name: str(event.name) ?? "?",
+          scope: str(event.scope),
+          phase: str(event.phase),
+          value: num(event.value),
+          error: str(event.error) ? short(event.error, 300) : null,
+          runId: str(event.runId),
+          iteration: num(event.iteration),
+          ts,
+        });
+        bound(policy.metrics, MAX_METRIC_SAMPLES);
+        return ["policy"];
+      default:
+        return null;
+    }
   }
 
   /**
@@ -1645,9 +2484,24 @@ const CairnEvents = (() => {
   function stepRow(model, stepId, event) {
     const existing = model.stepIndex[stepId];
     if (existing !== undefined) return model.steps[existing];
+    return addStepRow(model, stepId, event, stepId);
+  }
+
+  /**
+   * Append a step row. `stepIndex` points at the newest execution of an id,
+   * so artifact / widget / request events (which carry only the stepId) land
+   * on the execution that is running.
+   * @param {Record<string, any>} model
+   * @param {string} stepId
+   * @param {Record<string, any>} event
+   * @param {string} key unique per execution (the stepId for the first)
+   * @returns {StepRow}
+   */
+  function addStepRow(model, stepId, event, key) {
     /** @type {StepRow} */
     const row = {
       stepId,
+      key,
       index: num(event?.index) ?? model.steps.length + 1,
       total: num(event?.total),
       kind: str(event?.kind),
@@ -1662,10 +2516,236 @@ const CairnEvents = (() => {
       when: null,
       artifacts: [],
       expect: null,
+      started: false,
+      parentId: null,
+      parentKey: null,
+      iteration: null,
+      branch: null,
+      depth: 0,
+      iterations: null,
+      taken: null,
+      matched: null,
+      via: null,
+      driver: null,
+      detail: null,
+      skipReason: null,
+      superseded: false,
+      widgets: [],
+      widgetsDropped: 0,
+      requests: [],
     };
     model.stepIndex[stepId] = model.steps.length;
     model.steps.push(row);
     return row;
+  }
+
+  /**
+   * The row a `step.started` opens. A step that already ran and finished
+   * (a repeat iteration, a retried attempt, an if inside a loop) gets a new
+   * execution row; anything else reuses the id's row (a flat spec never
+   * starts a step twice). Past MAX_STEP_ROWS, executions share their id's
+   * newest row and `stepsDropped` counts them.
+   * @param {Record<string, any>} model
+   * @param {string} stepId
+   * @param {Record<string, any>} event
+   * @returns {StepRow}
+   */
+  function startStepRow(model, stepId, event) {
+    const existing = model.stepIndex[stepId];
+    const previous = existing === undefined ? null : model.steps[existing];
+    if (!previous || !previous.started || previous.status === "running")
+      return stepRow(model, stepId, event);
+    if (model.steps.length >= MAX_STEP_ROWS) {
+      model.stepsDropped += 1;
+      return previous;
+    }
+    const count = (model.stepRuns[stepId] ?? 1) + 1;
+    model.stepRuns[stepId] = count;
+    return addStepRow(model, stepId, event, `${stepId}#${count}`);
+  }
+
+  /**
+   * F14: the rows of a retried use's earlier attempts (and everything nested
+   * under them) are superseded once a later attempt starts: their failure
+   * stays in the stream but no longer fails the run.
+   * @param {Record<string, any>} model
+   * @param {StepRow} parent the use block's row
+   * @param {number} attempt the attempt that just started
+   */
+  function supersedeAttempts(model, parent, attempt) {
+    const marked = new Set();
+    const from = model.steps.indexOf(parent);
+    for (let i = from + 1; i < model.steps.length; i += 1) {
+      const row = model.steps[i];
+      if (
+        (row.parentKey === parent.key &&
+          row.iteration !== null &&
+          row.iteration < attempt) ||
+        (row.parentKey !== null && marked.has(row.parentKey))
+      ) {
+        row.superseded = true;
+        marked.add(row.key);
+      }
+    }
+  }
+
+  // ── F14 step trees ───────────────────────────────────────────────────────
+
+  /**
+   * @typedef {{
+   *   item: Record<string, any>,
+   *   kind: string | null,
+   *   groups: StepGroup[],
+   * }} StepNode
+   * @typedef {{
+   *   key: string, label: string,
+   *   iteration: number | null, branch: string | null,
+   *   status: "running" | "passed" | "failed" | "skipped" | "retried",
+   *   superseded: boolean, error: string | null,
+   *   nodes: StepNode[],
+   * }} StepGroup
+   */
+
+  /**
+   * Put a nested execution into its block's group for that iteration /
+   * branch (created in the order the groups first ran).
+   * @param {StepNode} parent
+   * @param {StepNode} child
+   * @param {{ iteration: number | null, branch: string | null }} place
+   */
+  function addToGroup(parent, child, place) {
+    const key = `${place.iteration ?? ""}|${place.branch ?? ""}`;
+    let group = parent.groups.find((entry) => entry.key === key);
+    if (!group) {
+      group = {
+        key,
+        label: groupLabel(place, parent.kind),
+        iteration: place.iteration,
+        branch: place.branch,
+        status: "passed",
+        superseded: false,
+        error: null,
+        nodes: [],
+      };
+      parent.groups.push(group);
+    }
+    group.nodes.push(child);
+  }
+
+  /**
+   * A group's verdict from its direct steps: running while one runs, failed
+   * when one failed, skipped when every step was, and `retried` for an
+   * attempt a later one superseded.
+   * @param {StepGroup} group
+   */
+  function settleGroup(group) {
+    const items = group.nodes.map((node) => node.item);
+    if (items.length && items.every((item) => item.superseded === true)) {
+      group.superseded = true;
+      group.status = "retried";
+    } else if (items.some((item) => item.status === "running"))
+      group.status = "running";
+    else if (items.some((item) => item.status === "failed"))
+      group.status = "failed";
+    else if (items.length && items.every((item) => item.status === "skipped"))
+      group.status = "skipped";
+    else group.status = "passed";
+    for (const node of group.nodes)
+      for (const inner of node.groups) settleGroup(inner);
+  }
+
+  /**
+   * The live model's step executions as a tree: top-level rows, and under a
+   * block (repeat / if / retried use) its nested executions grouped by
+   * iteration, attempt or branch, in the order they ran. A nested row whose
+   * block never started in this stream stays at the top level.
+   * @param {Record<string, any> | null | undefined} model
+   * @returns {StepNode[]}
+   */
+  function modelStepTree(model) {
+    /** @type {Map<string, StepNode>} */
+    const nodes = new Map();
+    /** @type {StepNode[]} */
+    const roots = [];
+    for (const row of model?.steps ?? []) {
+      /** @type {StepNode} */
+      const node = { item: row, kind: row.kind ?? null, groups: [] };
+      nodes.set(row.key ?? row.stepId, node);
+      const parent = row.parentKey ? nodes.get(row.parentKey) : undefined;
+      if (parent)
+        addToGroup(parent, node, {
+          iteration: row.iteration ?? null,
+          branch: row.branch ?? null,
+        });
+      else roots.push(node);
+    }
+    for (const node of nodes.values())
+      if (!node.item.parentKey)
+        for (const group of node.groups) settleGroup(group);
+    return roots;
+  }
+
+  /**
+   * run.json `steps` (F14 post-order: a block's nested results come before
+   * the block's own) as a tree, like `modelStepTree`. A retried use's
+   * dropped attempts come back as `retried` groups from its `retries`
+   * (their step results are gone; the events still have them). Nested
+   * results whose block recorded no result stay at the top level.
+   * @param {Array<Record<string, any>> | null | undefined} steps
+   * @param {(stepId: string) => string | null} [kindOf] a step's kind
+   *   (from the events model), for group labels
+   * @returns {StepNode[]}
+   */
+  function resultStepTree(steps, kindOf = () => null) {
+    /** @type {Map<string, StepNode[]>} */
+    const pending = new Map();
+    /** @type {StepNode[]} */
+    const roots = [];
+    (Array.isArray(steps) ? steps : []).forEach((step, index) => {
+      if (!step || typeof step !== "object") return;
+      const id = str(step.id) ?? `step_${index + 1}`;
+      const retries = Array.isArray(step.retries) ? step.retries : [];
+      /** @type {StepNode} */
+      const node = {
+        item: step,
+        kind: kindOf(id) ?? (retries.length ? "use" : null),
+        groups: [],
+      };
+      for (const retry of retries) {
+        const attempt = num(retry?.attempt);
+        if (attempt === null) continue;
+        node.groups.push({
+          key: `retry|${attempt}`,
+          label: groupLabel({ iteration: attempt, branch: null }, "use"),
+          iteration: attempt,
+          branch: null,
+          status: "retried",
+          superseded: true,
+          error: str(retry?.error) ? short(retry.error, 600) : null,
+          nodes: [],
+        });
+      }
+      const children = pending.get(id);
+      if (children) {
+        pending.delete(id);
+        for (const child of children)
+          addToGroup(node, child, {
+            iteration: num(child.item.iteration),
+            branch: str(child.item.branch),
+          });
+        for (const group of node.groups)
+          if (!group.superseded) settleGroup(group);
+      }
+      const parentId = str(step.parentId);
+      if (parentId) {
+        const list = pending.get(parentId) ?? [];
+        list.push(node);
+        pending.set(parentId, list);
+      } else roots.push(node);
+    });
+    // a block that recorded no result (an older or interrupted runner)
+    for (const orphans of pending.values()) roots.push(...orphans);
+    return roots;
   }
 
   /**
@@ -1906,14 +2986,32 @@ const CairnEvents = (() => {
 
       case "step.started": {
         if (!stepId) return [];
-        const row = stepRow(model, stepId, event);
+        const row = startStepRow(model, stepId, event);
+        row.started = true;
         row.status = "running";
         row.startedAt = ts ?? row.startedAt;
         row.index = num(event.index) ?? row.index;
         row.total = num(event.total) ?? row.total;
         row.kind = str(event.kind) ?? row.kind;
         row.label = str(event.label) ?? row.label;
-        if (row.total !== null) model.stepTotal = row.total;
+        // F14: a nested execution names its block, loop and branch; it hangs
+        // under the block's open row (its newest execution).
+        const parentId = str(event.parentId);
+        if (parentId) {
+          const at = model.stepIndex[parentId];
+          const parent = at === undefined ? null : model.steps[at];
+          row.parentId = parentId;
+          row.parentKey = parent?.key ?? null;
+          row.depth = parent ? parent.depth + 1 : 1;
+          row.iteration = num(event.iteration);
+          row.branch = str(event.branch);
+          if (
+            parent?.kind === "use" &&
+            row.iteration !== null &&
+            row.iteration > 1
+          )
+            supersedeAttempts(model, parent, row.iteration);
+        } else if (row.total !== null) model.stepTotal = row.total;
         model.currentStepId = stepId;
         return ["steps", "phase"];
       }
@@ -1931,6 +3029,14 @@ const CairnEvents = (() => {
         row.error = str(event.error) ?? row.error;
         row.url = str(event.url) ?? row.url;
         row.when = whenText(event.when) ?? row.when;
+        // F14 block results and F15 interaction paths (all optional)
+        row.iterations = num(event.iterations) ?? row.iterations;
+        row.taken = str(event.taken) ?? row.taken;
+        if (typeof event.matched === "boolean") row.matched = event.matched;
+        row.via = str(event.via) ?? row.via;
+        row.driver = str(event.driver) ?? row.driver;
+        row.detail = str(event.detail) ? short(event.detail, 600) : row.detail;
+        row.skipReason = str(event.skipReason) ?? row.skipReason;
         const sections = ["steps"];
         const screenshot = str(event.screenshot);
         if (screenshot) {
@@ -1939,8 +3045,36 @@ const CairnEvents = (() => {
           model.latestScreenshot = { path: screenshot, stepId, ts };
           sections.push("screenshot");
         }
-        if (model.currentStepId === stepId) model.currentStepId = null;
+        if (model.currentStepId === stepId) {
+          // back to the enclosing block while it still runs
+          const at = row.parentId ? model.stepIndex[row.parentId] : undefined;
+          const parent = at === undefined ? null : model.steps[at];
+          model.currentStepId =
+            parent && parent.status === "running" ? parent.stepId : null;
+        }
         return sections;
+      }
+
+      // ── F15 widget fields: one per field a set/check/choose/form handled ──
+      case "widget.field": {
+        if (!stepId) return [];
+        const row = stepRow(model, stepId, event);
+        if (row.widgets.length >= MAX_WIDGET_FIELDS) {
+          row.widgetsDropped += 1;
+          return ["steps"];
+        }
+        row.widgets.push({
+          // a field key or a locator description, never the value
+          field: short(String(event.field ?? "?"), 200),
+          status: str(event.status) ?? "unknown",
+          driver: str(event.driver),
+          via: str(event.via),
+          durationMs: num(event.durationMs),
+          path: str(event.path),
+        });
+        const path = str(event.path);
+        if (path) pushUnique(row.artifacts, path);
+        return ["steps"];
       }
 
       case "outcome.started": {
@@ -2275,6 +3409,19 @@ const CairnEvents = (() => {
         const row = stepRow(model, stepId, event);
         pushUnique(row.artifacts, artifactPath);
         if (type === "artifact.diagnostics") row.diagnostics = artifactPath;
+        // F18: what each request did (status, retries / polls, matrix)
+        if (
+          type === "artifact.request" &&
+          row.requests.length < MAX_STEP_REQUESTS
+        )
+          row.requests.push({
+            assign: str(event.assign),
+            status: num(event.status),
+            attempts: num(event.attempts),
+            combinations: num(event.combinations),
+            mismatches: num(event.mismatches),
+            path: artifactPath,
+          });
         return ["steps"];
       }
       case "artifact.video":
@@ -2340,6 +3487,24 @@ const CairnEvents = (() => {
           summary: compactFields(event),
         };
         return ["badges"];
+      case "run.lock.acquired":
+      case "run.lock.reclaimed":
+      case "run.lock.refused":
+      case "run.lock.released":
+      case "preflight.started":
+      case "preflight.passed":
+      case "preflight.failed":
+      case "cleanliness.clean":
+      case "cleanliness.dirty":
+      case "finally.started":
+      case "finally.finished":
+      case "invocation.bailed":
+      case "suite.started":
+      case "suite.hook.started":
+      case "suite.hook.finished":
+      case "suite.finished":
+      case "metric.sampled":
+        return applyPolicyEvent(model, type, event, ts) ?? [];
       case "viewport.set":
         model.viewport = {
           width: num(event.width),
@@ -2458,10 +3623,13 @@ const CairnEvents = (() => {
   function openItem(model, phase) {
     if (phase === "steps" && model.currentStepId) {
       const row = model.steps[model.stepIndex[model.currentStepId]];
+      const place = row ? placeText(row) : null;
       return row
         ? `${row.index}${
             row.total ? `/${row.total}` : ""
-          } ${stepWhat(row.kind, row.label) || row.stepId}`
+          } ${stepWhat(row.kind, row.label) || row.stepId}${
+            place ? ` (${place})` : ""
+          }`
         : model.currentStepId;
     }
     if (phase === "outcomes")
@@ -2761,10 +3929,200 @@ const CairnEvents = (() => {
     };
   }
 
+  /**
+   * @typedef {{ key: string, label: string, tone: "bad" | "warn" | "info", glyph: string, title: string }} PolicyBadge
+   */
+
+  /**
+   * The exit codes the run policy added, as an accessible badge: a glyph and
+   * words as well as a tone, so the meaning never rides on colour alone.
+   * 8 (a critical teardown failed) is a hard stop and reads in the failure
+   * tone with a stop sign; 9 (dirty state after the run) is a warning with a
+   * warning sign. Null for every other code.
+   * @param {number | null | undefined} code
+   * @returns {PolicyBadge | null}
+   */
+  function exitBadge(code) {
+    if (code === 8)
+      return {
+        key: "critical-teardown",
+        label: "critical teardown failed · exit 8",
+        tone: "bad",
+        glyph: "⛔",
+        title:
+          "A services.teardown entry marked critical (or the provisioner's down) failed or timed out. It outranks every verdict: whatever it guarded may still be running.",
+      };
+    if (code === 9)
+      return {
+        key: "dirty-after",
+        label: "dirty state after the run · exit 9",
+        tone: "warn",
+        glyph: "⚠",
+        title:
+          "run.verifyClean found browsers, tmux sessions or docker projects this run left behind. cairn kills nothing; the survivors are listed.",
+      };
+    return null;
+  }
+
+  /**
+   * The invocation-level failure of a finished `cairn run`: exit 8 (a
+   * critical teardown failed) or 9 (dirty state after the run), from the
+   * process exit code or else the printed document's
+   * `invocationOutcome.exitCode`. Null for every other code. Such a run is
+   * errored whatever its specs did — its events still read passed.
+   * @param {number | null | undefined} exitCode
+   * @param {unknown} [document] the `--format json` run or batch document
+   * @returns {8 | 9 | null}
+   */
+  function invocationFailureCode(exitCode, document) {
+    if (exitCode === 8 || exitCode === 9) return exitCode;
+    const outcome =
+      document && typeof document === "object"
+        ? /** @type {Record<string, any>} */ (document).invocationOutcome
+        : null;
+    const code =
+      outcome && typeof outcome === "object" ? outcome.exitCode : null;
+    return code === 8 || code === 9 ? code : null;
+  }
+
+  /**
+   * Badges for what the run policy did to one invocation: critical teardown
+   * (exit 8), dirty state (exit 9), a failed preflight check, a refused run
+   * lock, failed `finally` / suite hooks, and specs skipped by `--bail`.
+   * Reads the events model (`model.policy`, `model.services`) and, when the
+   * journal has settled, its `summary` (`runPolicy`, `skipped`, `exitCode`).
+   * @param {Record<string, any> | null | undefined} model
+   * @param {Record<string, any> | null | undefined} [summary] invocation.json summary
+   * @returns {PolicyBadge[]}
+   */
+  function policyBadges(model, summary) {
+    /** @type {PolicyBadge[]} */
+    const out = [];
+    const policy = model?.policy ?? null;
+    const run = summary?.runPolicy ?? null;
+    const seen = new Set();
+    const add = (/** @type {PolicyBadge | null} */ badge) => {
+      if (!badge || seen.has(badge.key)) return;
+      seen.add(badge.key);
+      out.push(badge);
+    };
+    const criticalEvents = (model?.services ?? []).filter(
+      (/** @type {Record<string, any>} */ row) =>
+        row.phase === "teardown" &&
+        row.event === "fail" &&
+        (row.data?.critical || row.data?.provisioner),
+    );
+    if (
+      (Array.isArray(run?.criticalTeardown) && run.criticalTeardown.length) ||
+      criticalEvents.length ||
+      summary?.exitCode === 8
+    )
+      add(exitBadge(8));
+    const dirty = [
+      ...(Array.isArray(run?.dirty) ? run.dirty : []),
+      ...(policy?.cleanliness ?? []).filter(
+        (/** @type {Record<string, any>} */ row) => row.status === "dirty",
+      ),
+    ];
+    if (
+      dirty.some(
+        (/** @type {Record<string, any>} */ row) => row.phase === "after",
+      ) ||
+      summary?.exitCode === 9
+    )
+      add(exitBadge(9));
+    if (
+      dirty.some(
+        (/** @type {Record<string, any>} */ row) => row.phase === "before",
+      )
+    )
+      add({
+        key: "dirty-before",
+        label: "dirty before the run · refused",
+        tone: "bad",
+        glyph: "⛔",
+        title:
+          "run.verifyClean found leftovers before the run started, so cairn refused it (exit 4).",
+      });
+    if (
+      (policy?.preflight?.checks ?? []).some(
+        (/** @type {Record<string, any>} */ row) => row.status === "failed",
+      )
+    )
+      add({
+        key: "preflight-failed",
+        label: "preflight failed · refused",
+        tone: "bad",
+        glyph: "⛔",
+        title:
+          "A run.preflight check failed before anything started; cairn refused the run (exit 4).",
+      });
+    if (policy?.lock?.state === "refused")
+      add({
+        key: "lock-refused",
+        label: "run lock refused",
+        tone: "bad",
+        glyph: "⛔",
+        title:
+          policy.lock.message ??
+          "Another cairn run holds this config's run lock; cairn refused this one (exit 4).",
+      });
+    const finallyFailed =
+      num(run?.finallyFailed) ??
+      (policy?.finally ?? []).filter(
+        (/** @type {Record<string, any>} */ row) =>
+          row.status === "failed" || row.status === "timed out",
+      ).length;
+    if (finallyFailed)
+      add({
+        key: "finally-failed",
+        label: `${finallyFailed} finally hook(s) failed`,
+        tone: "warn",
+        glyph: "⚠",
+        title:
+          "run.finally commands are non-fatal: the run's exit code is unchanged.",
+      });
+    const hooksFailed = (policy?.suiteHooks ?? []).filter(
+      (/** @type {Record<string, any>} */ row) =>
+        row.status === "failed" || row.status === "timed out",
+    ).length;
+    if (hooksFailed)
+      add({
+        key: "suite-hooks-failed",
+        label: `${hooksFailed} suite hook(s) failed`,
+        tone: "warn",
+        glyph: "⚠",
+        title:
+          "A failed suite before hook stops the run (exit 2); a failed after hook never changes the exit code.",
+      });
+    const skipped = num(summary?.skipped) ?? policy?.bailed?.skipped ?? null;
+    if (skipped || policy?.bailed)
+      add({
+        key: "bailed",
+        label: `bailed · ${skipped ?? 0} skipped`,
+        tone: "warn",
+        glyph: "↷",
+        title: policy?.bailed?.spec
+          ? `--bail: ${policy.bailed.spec} failed (exit ${policy.bailed.exitCode ?? "?"}), so the remaining specs never started.`
+          : "--bail: the first failed spec stopped the scheduling of the rest.",
+      });
+    return out;
+  }
+
   return {
     HEARTBEAT_FRESH_MS,
+    createPolicyState,
+    policyBadges,
+    exitBadge,
+    invocationFailureCode,
+    lockOwnerText,
     PHASE_LABELS,
     describeEvent,
+    placeText,
+    blockText,
+    groupLabel,
+    modelStepTree,
+    resultStepTree,
     createRunModel,
     applyEvent,
     reduceEvents,

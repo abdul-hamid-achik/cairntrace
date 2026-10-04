@@ -301,3 +301,51 @@ describe("aggregateRunStats", () => {
     expect(g.passRate).toBe(0);
   });
 });
+
+/** A run.json `invocation` link. */
+const invocation = (id: string, index: number) => ({
+  id,
+  index,
+  total: 2,
+  dir: `_invocations/${id}`,
+});
+
+describe("aggregateRunStats --invocation", () => {
+  it("keeps only the runs of one invocation", async () => {
+    root = mkdtempSync(join(tmpdir(), "cairn-stats-invocation-"));
+    await writeRun(join(root, runDirName("a1")), {
+      runId: "a1",
+      labels: { suite: "s" },
+      invocation: invocation("inv-a", 1),
+    });
+    await writeRun(join(root, runDirName("a2")), {
+      runId: "a2",
+      labels: { suite: "s" },
+      invocation: invocation("inv-a", 2),
+    });
+    await writeRun(join(root, runDirName("b1")), {
+      runId: "b1",
+      labels: { suite: "s" },
+      invocation: invocation("inv-b", 1),
+    });
+    await writeRun(join(root, runDirName("c1")), {
+      runId: "c1",
+      labels: { suite: "s" },
+    });
+    const result = await aggregateRunStats({
+      artifactRoot: root,
+      groupBy: "suite",
+      invocation: "inv-a",
+      includeRuns: true,
+    });
+    expect(result.invocation).toBe("inv-a");
+    expect(result.scanned).toBe(4);
+    expect(result.runs?.map((r) => r.runId).toSorted()).toEqual(["a1", "a2"]);
+    const all = await aggregateRunStats({
+      artifactRoot: root,
+      groupBy: "suite",
+    });
+    expect(all.matched).toBe(4);
+    expect(all).not.toHaveProperty("invocation");
+  });
+});

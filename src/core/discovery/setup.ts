@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
+import { BUILTIN_LOGIN_ACTION } from "../schema/request.v1";
 import type {
   DiscoverySetup,
   DiscoverySetupFromSpec,
@@ -142,7 +143,10 @@ export async function resolveActionFiles(
       await consider(file);
     }
   }
-  const missing = [...wanted].filter((name) => !found.has(name));
+  // F18: `login` with no action file is the built-in environment login.
+  const missing = [...wanted].filter(
+    (name) => !found.has(name) && name !== BUILTIN_LOGIN_ACTION,
+  );
   if (missing.length > 0) {
     throw new SetupResolutionError(
       `setup: action${missing.length === 1 ? "" : "s"} ${missing
@@ -151,7 +155,14 @@ export async function resolveActionFiles(
         `or keep the action under an actions/ directory of ${opts.configDir}`,
     );
   }
-  return [...new Set(names.map((name) => found.get(name)!))];
+  return [
+    ...new Set(
+      names.flatMap((name) => {
+        const file = found.get(name);
+        return file ? [file] : [];
+      }),
+    ),
+  ];
 }
 
 /** `~/x`, absolute, or relative to `base`. */

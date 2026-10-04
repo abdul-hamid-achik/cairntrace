@@ -117,6 +117,44 @@ describe("remote artifact publication", () => {
     await expect(lstat(archivePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("uses the server expires_at and committed_at when the receipt has them, else computes expiry", async () => {
+    const dir = await completedRun("run-times");
+    const respond = (extra: Record<string, string>) =>
+      runFcheapMock.mockImplementationOnce(async (args: string[]) => {
+        const bytes = await readFile(args[1]!);
+        return {
+          ok: true,
+          exitCode: 0,
+          stdout: JSON.stringify({
+            ...publishReceipt(
+              createHash("sha256").update(bytes).digest("hex"),
+              bytes.length,
+              "run-times",
+            ),
+            ...extra,
+          }),
+          stderr: "",
+        };
+      });
+
+    respond({
+      committed_at: "2026-07-24T00:00:02Z",
+      expires_at: "2026-07-26T06:00:00Z",
+    });
+    await expect(publishRunDirectory(dir, "run-times")).resolves.toMatchObject({
+      publishedAt: "2026-07-24T00:00:00Z",
+      committedAt: "2026-07-24T00:00:02Z",
+      expiresAt: "2026-07-26T06:00:00Z",
+    });
+
+    respond({});
+    const computed = await publishRunDirectory(dir, "run-times", {
+      retentionDays: 2,
+    });
+    expect(computed.expiresAt).toBe("2026-07-26T00:00:00.000Z");
+    expect(computed).not.toHaveProperty("committedAt");
+  });
+
   it("rejects symlinks and never invokes fcheap", async () => {
     const dir = await completedRun("run-link");
     await symlink("artifact-manifest.json", join(dir, "linked-manifest"));

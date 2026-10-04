@@ -74,7 +74,60 @@ import {
 } from "../gates/schema";
 import { gatesRegistryFor } from "../gates/registry";
 import { SeedStateStore } from "./seedState";
-import { createArtifactRedactor } from "../artifacts/redaction";
+import {
+  normalizeTeardown,
+  type NormalizedTeardown,
+} from "../runPolicy/schema";
+import {
+  createArtifactRedactor,
+  isSensitiveEnvKey,
+  registerSecretValues,
+} from "../artifacts/redaction";
+import { backoffDelayMs, resolveBackoff } from "../servicesOps/backoff";
+import {
+  generationMarker,
+  generationMarkerCommand,
+  newGenerationId,
+  sliceAfterGeneration,
+} from "../servicesOps/generation";
+import { applyServiceFile, ServiceFileError } from "../servicesOps/files";
+import {
+  dropSeedResumeSync,
+  emptyScopedState,
+  expectOutputViolation,
+  phaseFingerprint,
+  phaseStateDecision,
+  postCommandApplies,
+  resumeFresh,
+  ScopedSeedFreshness,
+  SeedPhaseStore,
+  seedTargetHash,
+  type PhaseRecord,
+} from "../servicesOps/seedTransaction";
+import {
+  phaseRun,
+  postCommandLabel,
+  postCommandRun,
+  type ProvisionerConfig,
+  type SeedPhase,
+  type SeedPostCommand,
+  type TunnelConfig,
+} from "../servicesOps/schema";
+import {
+  stopTunnelsFromState,
+  tunnelStateKey,
+  TunnelSet,
+} from "../servicesOps/tunnels";
+import { durationMs as toMs } from "../gates/schema";
+import {
+  removeSupervisorMarker,
+  writeSupervisorMarker,
+} from "../servicesOps/supervisorMarker";
+import {
+  tmuxSessionScopeTarget,
+  tmuxSessionTarget,
+  tmuxWindowTarget,
+} from "./tmuxTarget";
 import type { ArtifactRedactor } from "../artifacts/ArtifactWriter";
 import { LineSplitter } from "../artifacts/liveLog";
 import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
@@ -100,6 +153,11 @@ export interface StartServicesContext {
   coldStart?: boolean;
   /** Project name (from config) — used for seed state file naming. */
   project: string;
+  /**
+   * The config file (absent without one): with the project and the
+   * environment it keys the tunnel state, so two checkouts never share it.
+   */
+  configPath?: string;
   /** Invocation-scoped environment; never copied into process.env. */
   env?: NodeJS.ProcessEnv;
   /** Explicit TinyVault names that may retain a `TVAULT_` prefix in targets. */
@@ -126,7 +184,7 @@ export interface StartServicesContext {
    * invocation journal's services-<source>.log.
    */
   onServiceOutput?: (
-    source: "docker" | "seed" | "teardown",
+    source: "docker" | "seed" | "teardown" | "provisioner",
     line: string,
   ) => void;
   /**
@@ -151,9 +209,14 @@ export interface StartServicesContext {
   /**
    * Invoked once, the instant a long-lived process is spawned (docker or tmux),
    * with a synchronous teardown bound to it. Lets the caller register
-   * signal-time cleanup for the whole boot window.
+   * signal-time cleanup for the whole boot window. `criticalPending` says
+   * whether that teardown still owes a critical entry (or a provisioner's
+   * `down`): the signal path names it before the slow part.
    */
-  onSpawn?: (terminateSync: () => void) => void;
+  onSpawn?: (
+    terminateSync: () => void,
+    criticalPending?: () => boolean,
+  ) => void;
   /**
    * Cancellation of the boot: a running docker/seed/readiness/healthcheck
    * command has its process tree killed, readiness and shell waits stop at
@@ -174,6 +237,26 @@ export interface StartServicesContext {
    * Default: `log`, else one stderr line.
    */
   warn?: (message: string) => void;
+  /** The environment being started (seed state key, `postCommands.when.env`). */
+  envName?: string;
+  /** The suite of this run (`postCommands.when.suite`). */
+  suite?: string;
+  /**
+   * Supervise windows (`restart`, `healthcheck.onUnhealthy`) and tunnels
+   * (`restart: always`) while the handle is alive. Default true; `cairn
+   * services up` passes false (cairn exits right after the boot, so nothing
+   * could supervise).
+   */
+  supervise?: boolean;
+  /** Poll period of the window supervisor (default 2000; tests lower it). */
+  supervisionIntervalMs?: number;
+  /** Where tunnel pid/state and seed state live (default ~/.cairntrace/services). */
+  stateRoot?: string;
+  /**
+   * Set by startServices: windows this call (re)launched. Lets a changed
+   * `services.files` entry restart only the windows that were already live.
+   */
+  launchedWindows?: Set<string>;
 }
 
 export interface ServicesHandle {
@@ -202,10 +285,43 @@ export interface ServicesHandle {
   /** Synchronous teardown for the signal path (Ctrl-C). No-op when reused. */
   terminateSync(): void;
   /**
+   * `critical: true` teardown entries that failed or timed out so far (async
+   * path and signal path). A non-empty list fails the run with exit 8.
+   */
+  criticalTeardownFailures?(): CriticalTeardownFailure[];
+  /**
+   * A `critical: true` teardown entry (or a provisioner's `down`) will run:
+   * the run's exit code can still change after its specs (exit 8).
+   */
+  hasCriticalTeardown?(): boolean;
+  /**
    * Set when the run reuses an environment `cairn services up` owns
    * (`--reuse-services`): nothing was started and nothing is torn down.
    */
   reusedLock?: ServicesOwnerLock;
+  /**
+   * `services.provisioner.exports`, evaluated at boot: environment
+   * variables for every later phase, hook, spec and verifier. The run engine
+   * merges them into the invocation env; values are never logged.
+   */
+  exportedEnv?: Record<string, string>;
+}
+
+/** A `critical: true` teardown entry that failed or timed out. */
+export interface CriticalTeardownFailure {
+  /** 0-based position in `services.teardown`. */
+  index: number;
+  /** The command, redacted. */
+  command: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  signal?: string;
+  /** The command could not be executed (error name), or was still running after the signal wait. */
+  error?: string;
+  /** Which path ran it: the normal async teardown or the SIGINT/SIGTERM path. */
+  path: "teardown" | "signal";
+  /** The entry is the provisioner's `down`. */
+  provisioner?: boolean;
 }
 
 /** Thrown for every services lifecycle failure; run.ts maps it to exit 2. */
@@ -261,7 +377,16 @@ export type ServicesEventName =
 /** A structured lifecycle event emitted at each phase boundary. */
 export interface ServicesEvent {
   /** Phase: docker, seed, tmux, teardown, stash */
-  phase: "docker" | "seed" | "tmux" | "teardown" | "stash";
+  phase:
+    | "docker"
+    | "seed"
+    | "tmux"
+    | "teardown"
+    | "stash"
+    | "restart"
+    | "tunnel"
+    | "provisioner"
+    | "files";
   /** Event type: start, reuse, skip, ready, fail, healthcheck, complete, … */
   event: ServicesEventName;
   /** Human-readable message. */
@@ -358,6 +483,8 @@ const DEFAULT_SEED_TIMEOUT_MS = 300_000;
 const DEFAULT_TMUX_READY_MS = 90_000;
 const POLL_MS = 500;
 const TMUX_STALL_INTERVAL_MS = 5_000;
+const DEFAULT_TMUX_COLUMNS = 250;
+const DEFAULT_TMUX_ROWS = 50;
 /** Max wait for an interactive shell to accept send-keys after window create. */
 const TMUX_SHELL_READY_MS = 30_000;
 /**
@@ -378,9 +505,16 @@ const SHELL_TAIL_LINES = 40;
 const DEFAULT_HC_INTERVAL_S = 30;
 const DEFAULT_HC_RETRIES = 3;
 const DEFAULT_HC_TIMEOUT_S = 10;
-/** Interactive shells that mean "service is not running in this pane". */
+/**
+ * Interactive shells that mean "service is not running in this pane" — when
+ * the shell is also the terminal's foreground process group (a shell-named
+ * foreground job such as `bash start.sh` is a running service).
+ */
 const TMUX_IDLE_SHELL_RE =
   /^(zsh|bash|fish|sh|dash|ksh|tcsh|csh|-zsh|-bash|-fish)$/i;
+/** The `list-panes` format of a readiness probe. */
+const TMUX_PANE_STATE_FORMAT =
+  "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_pid}";
 
 /**
  * The env of a services child: the inherited env filtered (TinyVault client
@@ -448,15 +582,39 @@ export async function startServices(
   // Register signal-time teardown immediately. The callback is a closure
   // that reads `phases.tmuxSession`, so it stays current as phases progress.
   // No-op until the tmux phase sets the session name.
-  ctx.onSpawn?.(() => {
-    terminateServicesSync(phases, ctx);
-  });
+  ctx.onSpawn?.(
+    () => {
+      terminateServicesSync(phases, ctx);
+    },
+    () => criticalTeardownPending(phases),
+  );
+
+  ctx.launchedWindows = phases.launchedWindows;
 
   try {
+    // Phase 0 (F10): the provisioned resource and its exports — everything
+    // after it may use the exported env.
+    throwIfCancelled(ctx.signal);
+    if (cfg.provisioner) {
+      await startProvisioner(cfg.provisioner, ctx, phases, emit);
+    }
+
+    // Phase 0b (F10): tunnels (a seed or a window may need one).
+    throwIfCancelled(ctx.signal);
+    if (cfg.tunnels && cfg.tunnels.length > 0) {
+      await startTunnels(cfg.tunnels, ctx, phases, emit);
+    }
+
     // Phase 1: Docker
     throwIfCancelled(ctx.signal);
     if (cfg.docker) {
       await startDocker(cfg.docker, ctx, coldStart, phases, emit);
+    }
+
+    // Phase 1b (F10): files (config the seed and the windows read)
+    throwIfCancelled(ctx.signal);
+    if (cfg.files && cfg.files.length > 0) {
+      await applyServicesFiles(cfg.files, cfg.tmux, ctx, phases, emit);
     }
 
     // Phase 2: Conditional seed
@@ -469,8 +627,18 @@ export async function startServices(
     throwIfCancelled(ctx.signal);
     if (cfg.tmux) {
       await startTmux(cfg.tmux, ctx, coldStart, phases, emit);
+      // A changed `services.files` entry restarts the windows that were
+      // already live (a window launched by this call read the new file).
+      await restartWindowsAfterFiles(cfg.tmux, ctx, phases, emit);
     }
     throwIfCancelled(ctx.signal);
+    if (cfg.tmux && ctx.supervise !== false) {
+      const supervisor = new WindowSupervisor(cfg.tmux, ctx, phases, emit);
+      if (supervisor.hasWork()) {
+        phases.supervisor = supervisor;
+        supervisor.start();
+      }
+    }
   } catch (e) {
     // A later phase failed after an earlier one already started. Tear down
     // what we started so we don't orphan tmux dev-servers or docker
@@ -478,6 +646,12 @@ export async function startServices(
     // throw, so cleanup MUST happen here — the returned handle never exists.
     emit("teardown", "failure-cleanup", (e as Error).message);
     await teardownStartedPhases(phases, ctx, emit).catch(() => undefined);
+    // A critical teardown entry that failed in the cleanup still fails the run.
+    if (phases.criticalFailures.length > 0 && e instanceof Error) {
+      Object.assign(e, {
+        criticalTeardownFailures: [...phases.criticalFailures],
+      });
+    }
     throw e;
   }
 
@@ -485,6 +659,9 @@ export async function startServices(
 
   return {
     startedByUs,
+    ...(Object.keys(phases.exportedEnv).length > 0
+      ? { exportedEnv: { ...phases.exportedEnv } }
+      : {}),
     /** Structured lifecycle events collected during startServices. */
     events: phases.events,
     captureRunArtifacts: (status, runWindow) => {
@@ -505,6 +682,8 @@ export async function startServices(
       });
     },
     stop: async () => {
+      // Nothing may restart a window or a tunnel while the stack comes down.
+      await phases.supervisor?.stop();
       // Deprecated services.stash: capture tmux panes (a reused session
       // too), docker logs and seed output before tearing down, only when
       // autoStash asks for it.
@@ -518,19 +697,27 @@ export async function startServices(
       }
 
       // Teardown commands from config (best-effort), reuse rules applied.
-      await runTeardownCommands(phases, ctx, emit, "teardown");
+      await runTeardownCommands(phases, ctx, emit, "teardown", "regular");
       // Kill the tmux session only when we created it AND we're not reusing
       // (reuse mode leaves it alive for the next run to reuse — no rebuild).
       if (phases.tmuxSession && !phases.tmuxReuse) {
         try {
-          await execa("tmux", ["kill-session", "-t", phases.tmuxSession], {
-            reject: false,
-            timeout: 5_000,
-          });
+          await execa(
+            "tmux",
+            ["kill-session", "-t", tmuxSessionTarget(phases.tmuxSession)],
+            {
+              reject: false,
+              timeout: 5_000,
+            },
+          );
         } catch {
           // best-effort
         }
       }
+      // Tunnels, then the provisioned resource they point at (critical: a
+      // failed `down` is exit 8).
+      await phases.tunnels?.stop().catch(() => undefined);
+      await runTeardownCommands(phases, ctx, emit, "teardown", "provisioner");
 
       // Stash artifacts to fcheap if configured.
       if (stashServices && cfg.stash && phases.artifacts.length > 0) {
@@ -547,6 +734,9 @@ export async function startServices(
     terminateSync: () => {
       terminateServicesSync(phases, ctx);
     },
+    criticalTeardownFailures: () => [...phases.criticalFailures],
+    hasCriticalTeardown: () =>
+      phases.teardownPolicies.some((policy) => policy.critical === true),
   };
 }
 
@@ -566,13 +756,26 @@ async function teardownStartedPhases(
   ctx: StartServicesContext,
   emit: EmitFn,
 ): Promise<void> {
-  await runTeardownCommands(phases, ctx, emit, "failure-cleanup");
+  await phases.supervisor?.stop();
+  await runTeardownCommands(phases, ctx, emit, "failure-cleanup", "regular");
   if (phases.tmuxSession && !phases.tmuxReuse) {
-    await execa("tmux", ["kill-session", "-t", phases.tmuxSession], {
-      reject: false,
-      timeout: 5_000,
-    }).catch(() => undefined);
+    await execa(
+      "tmux",
+      ["kill-session", "-t", tmuxSessionTarget(phases.tmuxSession)],
+      {
+        reject: false,
+        timeout: 5_000,
+      },
+    ).catch(() => undefined);
   }
+  await phases.tunnels?.stop().catch(() => undefined);
+  await runTeardownCommands(
+    phases,
+    ctx,
+    emit,
+    "failure-cleanup",
+    "provisioner",
+  );
   if (phases.artifactsDir) {
     await rm(phases.artifactsDir, { recursive: true, force: true }).catch(
       () => undefined,
@@ -598,11 +801,26 @@ async function runTeardownCommands(
   ctx: StartServicesContext,
   emit: EmitFn,
   label: "teardown" | "failure-cleanup",
+  /**
+   * `regular`: the configured teardown commands; `provisioner`: the
+   * provisioner's `down` (it runs after the tmux session and the tunnels);
+   * `all`: both, in order.
+   */
+  which: "regular" | "provisioner" | "all" = "all",
 ): Promise<void> {
   const managedSession = phases.tmuxSessionName;
   for (const [index, cmd] of phases.teardownCommands.entries()) {
     if (phases.teardownSettled.has(index)) continue;
+    const isProvisioner = index === phases.provisionerIndex;
+    if (which === "regular" && isProvisioner) continue;
+    if (which === "provisioner" && !isProvisioner) continue;
+    // A provisioner whose `up` never started has nothing to destroy.
+    if (isProvisioner && !phases.provisionerUpStarted) {
+      phases.teardownSettled.add(index);
+      continue;
+    }
     if (
+      !isProvisioner &&
       phases.tmuxReuse &&
       managedSession &&
       killsTmuxSession(cmd, managedSession)
@@ -613,18 +831,28 @@ async function runTeardownCommands(
       phases.teardownSettled.add(index);
       continue;
     }
-    if (phases.tmuxReuse && tearsDownDocker(cmd)) {
+    if (!isProvisioner && phases.tmuxReuse && tearsDownDocker(cmd)) {
       ctx.log?.(
         `${label} (skipped docker down for reuse — tmux services still need infra)`,
       );
       phases.teardownSettled.add(index);
       continue;
     }
+    // An `up` that failed (or was cancelled) never got to its exports: the
+    // `down` still needs them to find what to destroy.
+    if (isProvisioner) await provisionerExportsForDown(phases, ctx);
     const output = serviceOutput(ctx, "teardown", phases.artifactRedactor);
     const startedAt = Date.now();
+    const policy = phases.teardownPolicies[index];
+    const critical = policy?.critical === true;
+    const criticalData = {
+      ...(critical ? { critical: true } : {}),
+      ...(isProvisioner ? { provisioner: true } : {}),
+    };
     phases.teardownRunning = index;
     phases.teardownPid = undefined;
     phases.teardownOutputFile = undefined;
+    if (!isProvisioner) phases.regularTeardownRan = true;
     try {
       ctx.log?.(`teardown (${cmd})`);
       output?.announce(cmd);
@@ -636,6 +864,7 @@ async function runTeardownCommands(
           phases.teardownOutputFile = started.outputFile;
         },
         TEARDOWN_OUTPUT_BYTES,
+        policy?.timeoutMs,
       );
       if (output) {
         if (result.stdout) output.push(`${result.stdout}\n`);
@@ -643,22 +872,38 @@ async function runTeardownCommands(
         output.finish(result.exitCode);
       }
       const durationMs = Date.now() - startedAt;
-      if (result.exitCode === 0) {
+      if (result.exitCode === 0 && !result.timedOut) {
         emit("teardown", "complete", `teardown[${index}] completed`, {
           index,
           exitCode: result.exitCode,
           durationMs,
+          ...criticalData,
         });
       } else {
         ctx.log?.(
-          `teardown[${index}] failed (exit ${result.exitCode}); continuing`,
+          `teardown[${index}] ${
+            result.timedOut ? "timed out" : `failed (exit ${result.exitCode})`
+          }; continuing`,
         );
         emit("teardown", "fail", `teardown[${index}] failed`, {
           index,
           exitCode: result.exitCode,
           ...(result.signal ? { signal: result.signal } : {}),
+          ...(result.timedOut ? { timedOut: true } : {}),
           durationMs,
+          ...criticalData,
         });
+        if (critical) {
+          phases.criticalFailures.push({
+            index,
+            command: phases.artifactRedactor.text(cmd),
+            ...(isProvisioner ? { provisioner: true } : {}),
+            exitCode: result.exitCode,
+            ...(result.timedOut ? { timedOut: true } : {}),
+            ...(result.signal ? { signal: result.signal } : {}),
+            path: "teardown",
+          });
+        }
       }
     } catch (error) {
       // Teardown remains best-effort, but a thrown execution error is
@@ -669,7 +914,17 @@ async function runTeardownCommands(
         index,
         error: (error as Error).name,
         durationMs: Date.now() - startedAt,
+        ...criticalData,
       });
+      if (critical) {
+        phases.criticalFailures.push({
+          index,
+          command: phases.artifactRedactor.text(cmd),
+          ...(isProvisioner ? { provisioner: true } : {}),
+          error: (error as Error).name,
+          path: "teardown",
+        });
+      }
     } finally {
       phases.teardownRunning = undefined;
       phases.teardownPid = undefined;
@@ -677,6 +932,7 @@ async function runTeardownCommands(
       phases.teardownSettled.add(index);
     }
   }
+  dropSeedResumeAfterTeardown(phases, ctx.log);
 }
 
 /** Bytes of one teardown command's output kept by stop()/the cleanup. */
@@ -1059,13 +1315,16 @@ export function reuseLockedServices(
   cfg: ServicesConfig,
   ctx: StartServicesContext,
   lock: ServicesOwnerLock,
+  exportedEnv: Record<string, string> = {},
 ): ServicesHandle {
   const phases = newPhaseState(cfg, ctx);
+  phases.provisionerIndex = undefined;
   phases.dockerDisposition = cfg.docker ? "reused" : undefined;
   phases.tmuxSessionName = cfg.tmux?.session;
   phases.tmuxDisposition = cfg.tmux ? "reused" : undefined;
   phases.tmuxReuse = true;
   phases.teardownCommands = [];
+  phases.teardownPolicies = [];
   const data = {
     owner: lock.owner,
     by: lock.by,
@@ -1101,6 +1360,7 @@ export function reuseLockedServices(
     startedByUs: false,
     events: phases.events,
     reusedLock: lock,
+    ...(Object.keys(exportedEnv).length > 0 ? { exportedEnv } : {}),
     captureRunArtifacts: (status, runWindow) =>
       collectRunArtifacts(cfg, phases, ctx, status, runWindow),
     captureSignalArtifactsSync: (runDir, signal) => {
@@ -1130,6 +1390,11 @@ export interface ServicesTeardownStep {
   ok: boolean;
   exitCode?: number;
   error?: string;
+  /** A `critical: true` entry, or the provisioner's `down`: a failure is exit 8. */
+  critical?: boolean;
+  /** The step is the provisioner's `down`. */
+  provisioner?: boolean;
+  timedOut?: boolean;
 }
 
 /** What a full teardown did. */
@@ -1138,6 +1403,8 @@ export interface ServicesTeardownReport {
   tmuxSession?: string;
   /** True when the tmux session was still running and teardown killed it. */
   tmuxKilled: boolean;
+  /** Tunnels a state file named, and what happened to each. */
+  tunnels: Array<{ name: string; result: "stopped" | "gone" | "skipped" }>;
   events: ServicesEvent[];
 }
 
@@ -1145,14 +1412,24 @@ export interface ServicesTeardownReport {
  * Full teardown for `cairn services down`: every configured teardown
  * command in order — with no reuse skipping, so `docker compose down` and
  * `tmux kill-session` run when the config lists them — then the tmux
- * session is killed if it is still running. Best-effort per command (a
- * failure is reported and the rest still runs); never throws for a command.
+ * session is killed if it is still running, the tunnels a state file names
+ * are stopped, and the provisioner's `down` runs last (critical: a failure
+ * is exit 8 in the CLI). Best-effort per command (a failure is reported and
+ * the rest still runs); never throws for a command.
  */
 export async function teardownServices(
   cfg: ServicesConfig,
   ctx: Pick<
     StartServicesContext,
-    "configDir" | "env" | "selectedTvaultKeys" | "log" | "onEvent"
+    | "configDir"
+    | "configPath"
+    | "env"
+    | "envName"
+    | "selectedTvaultKeys"
+    | "log"
+    | "onEvent"
+    | "project"
+    | "stateRoot"
   >,
 ): Promise<ServicesTeardownReport> {
   const events: ServicesEvent[] = [];
@@ -1172,48 +1449,160 @@ export async function teardownServices(
     ctx.onEvent?.(e);
   };
   const steps: ServicesTeardownStep[] = [];
-  for (const [index, command] of (cfg.teardown ?? []).entries()) {
+  const runEntry = async (
+    index: number,
+    command: string,
+    policy: { critical: boolean; timeoutMs: number | undefined },
+    provisioner: boolean,
+    extraEnv: Record<string, string> = {},
+  ): Promise<void> => {
     ctx.log?.(`teardown (${command})`);
+    const marks = {
+      ...(policy.critical ? { critical: true } : {}),
+      ...(provisioner ? { provisioner: true } : {}),
+    };
     try {
-      const result = await runShell(command, {
-        cwd: ctx.configDir,
-        env: targetEnv(ctx as StartServicesContext),
+      // A timeout (and the provisioner's `down`) runs in its own process
+      // group, killed at the deadline.
+      const result =
+        policy.timeoutMs !== undefined || provisioner
+          ? await runShellDetached(
+              command,
+              {
+                cwd: ctx.configDir,
+                env: targetEnv(ctx as StartServicesContext, extraEnv),
+              },
+              undefined,
+              TEARDOWN_OUTPUT_BYTES,
+              policy.timeoutMs,
+            )
+          : await runShell(command, {
+              cwd: ctx.configDir,
+              env: targetEnv(ctx as StartServicesContext),
+            });
+      const timedOut =
+        "timedOut" in result &&
+        (result as { timedOut?: boolean }).timedOut === true;
+      const ok = result.exitCode === 0 && !timedOut;
+      steps.push({
+        command,
+        ok,
+        exitCode: result.exitCode,
+        ...marks,
+        ...(timedOut ? { timedOut: true } : {}),
       });
-      const ok = result.exitCode === 0;
-      steps.push({ command, ok, exitCode: result.exitCode });
       if (!ok) {
         ctx.log?.(
-          `teardown[${index}] failed (exit ${result.exitCode}); continuing`,
+          `teardown[${index}] ${
+            timedOut ? "timed out" : `failed (exit ${result.exitCode})`
+          }; continuing`,
         );
       }
       emit(
         ok ? "complete" : "fail",
         `teardown[${index}] ${ok ? "completed" : "failed"}`,
-        { index, exitCode: result.exitCode },
+        {
+          index,
+          exitCode: result.exitCode,
+          ...marks,
+          ...(timedOut ? { timedOut: true } : {}),
+        },
       );
     } catch (error) {
-      steps.push({ command, ok: false, error: (error as Error).message });
+      steps.push({
+        command,
+        ok: false,
+        error: (error as Error).message,
+        ...marks,
+      });
       ctx.log?.(`teardown[${index}] failed to execute; continuing`);
       emit("fail", `teardown[${index}] failed to execute`, {
         index,
         error: (error as Error).name,
+        ...marks,
       });
     }
+  };
+  const policies = normalizeTeardown(cfg.teardown);
+  for (const [index, policy] of policies.entries()) {
+    await runEntry(index, policy.run, policy, false);
   }
   const session = cfg.tmux?.session;
   let tmuxKilled = false;
   if (session && (await tmuxSessionExists(session))) {
     ctx.log?.(`tmux — killing session "${session}"`);
-    await execa("tmux", ["kill-session", "-t", session], {
+    await execa("tmux", ["kill-session", "-t", tmuxSessionTarget(session)], {
       reject: false,
       timeout: 5_000,
     }).catch(() => undefined);
     tmuxKilled = true;
   }
+  let tunnels: ServicesTeardownReport["tunnels"] = [];
+  if (cfg.tunnels && cfg.tunnels.length > 0) {
+    const reports = await stopTunnelsFromState(cfg.tunnels, {
+      project: tunnelKeyOf(ctx),
+      stateRoot: ctx.stateRoot ?? servicesStateRoot(),
+    });
+    tunnels = reports.map(({ name, result }) => ({ name, result }));
+    for (const report of reports) {
+      if (report.result === "stopped") {
+        ctx.log?.(`tunnel "${report.name}" stopped`);
+      }
+    }
+  }
+  if (cfg.provisioner) {
+    const down =
+      typeof cfg.provisioner.down === "string"
+        ? { run: cfg.provisioner.down }
+        : cfg.provisioner.down;
+    // `down` usually needs what `up` created (an id, an address): the export
+    // commands print those values again, in this separate process too.
+    let exported: Record<string, string> = {};
+    try {
+      exported = await evaluateProvisionerExports(cfg, {
+        ...(ctx as StartServicesContext),
+        bootPids: new Set(),
+      });
+    } catch (error) {
+      ctx.log?.(
+        `provisioner exports could not be evaluated for the down command: ${(error as Error).message.split("\n")[0]}`,
+      );
+    }
+    await runEntry(
+      policies.length,
+      down.run,
+      {
+        critical: ("critical" in down ? down.critical : undefined) !== false,
+        timeoutMs: toMs("timeout" in down ? down.timeout : undefined),
+      },
+      true,
+      exported,
+    );
+  }
+  // The stack is down: a resume a failed seed left behind no longer holds.
+  if (cfg.seed?.phases) {
+    try {
+      const file = new SeedPhaseStore(ctx.stateRoot).pathFor(
+        ctx.project,
+        ctx.envName ?? "default",
+        seedTargetHash({
+          target: cfg.seed.target,
+          cwd: resolveCwd(cfg.seed.cwd, ctx.configDir),
+          env: cfg.seed.env,
+        }),
+      );
+      if (dropSeedResumeSync(file)) {
+        ctx.log?.("seed — resume dropped; the next run repeats every phase");
+      }
+    } catch {
+      // An unusable project name has no seed state to drop.
+    }
+  }
   return {
     steps,
     ...(session ? { tmuxSession: session } : {}),
     tmuxKilled,
+    tunnels,
     events,
   };
 }
@@ -1225,7 +1614,43 @@ function newPhaseState(
   cfg: ServicesConfig,
   ctx: Pick<StartServicesContext, "env" | "secretValues">,
 ): PhaseState {
+  const teardownPolicies = normalizeTeardown(cfg.teardown);
+  // An environment can patch the provisioner, so the merged one may lack
+  // what the top level alone would have needed.
+  if (cfg.provisioner && (!cfg.provisioner.up || !cfg.provisioner.down)) {
+    throw new ServicesError(
+      "services.provisioner needs both `up` and `down` after the environment merge (a provisioned resource must always have a `down`)",
+    );
+  }
+  // F10: a provisioner's `down` is a critical teardown entry placed last
+  // (after the tmux session and the other teardown commands), so the
+  // resource outlives everything that uses it. It runs through the same
+  // machinery as every other critical entry (async path, failure cleanup,
+  // signal path), which is what makes "always torn down" and exit 8 hold.
+  let provisionerIndex: number | undefined;
+  if (cfg.provisioner) {
+    const down =
+      typeof cfg.provisioner.down === "string"
+        ? { run: cfg.provisioner.down }
+        : cfg.provisioner.down;
+    provisionerIndex = teardownPolicies.length;
+    teardownPolicies.push({
+      run: down.run,
+      critical: ("critical" in down ? down.critical : undefined) !== false,
+      timeoutMs: toMs("timeout" in down ? down.timeout : undefined),
+      onSignal: ("onSignal" in down ? down.onSignal : undefined) ?? "wait",
+    });
+  }
   return {
+    provisionerIndex,
+    provisionerUpStarted: false,
+    provisioned: false,
+    provisionerConfig: undefined,
+    provisionerRunning: false,
+    provisionerExportsDone: false,
+    exportedEnv: {},
+    launchedWindows: new Set<string>(),
+    restartAfterBoot: new Set<string>(),
     startedAt: new Date().toISOString(),
     dockerStarted: false,
     dockerDisposition: undefined,
@@ -1234,7 +1659,9 @@ function newPhaseState(
     tmuxSessionName: undefined,
     tmuxDisposition: undefined,
     tmuxReuse: false,
-    teardownCommands: cfg.teardown ?? [],
+    teardownCommands: teardownPolicies.map((policy) => policy.run),
+    teardownPolicies,
+    criticalFailures: [],
     teardownSettled: new Set(),
     teardownRunning: undefined,
     teardownPid: undefined,
@@ -1252,10 +1679,47 @@ function newPhaseState(
     commandArtifactBytes: 0,
     commandArtifactOmitted: {},
     stashSawFailure: false,
+    seedStateFile: undefined,
+    regularTeardownRan: false,
   };
 }
 
+/**
+ * A teardown command ran: a resume a failed seed phase left behind points at
+ * phases whose results that teardown may have destroyed. Drop it so the next
+ * run repeats them.
+ */
+function dropSeedResumeAfterTeardown(
+  phases: PhaseState,
+  log?: (line: string) => void,
+): void {
+  if (!phases.regularTeardownRan || !phases.seedStateFile) return;
+  if (dropSeedResumeSync(phases.seedStateFile)) {
+    log?.("seed — teardown ran; the next run repeats every phase");
+  }
+}
+
 interface PhaseState {
+  /** Index of the provisioner's `down` in teardownCommands (when configured). */
+  provisionerIndex: number | undefined;
+  /** `up` was started: only then does `down` have anything to destroy. */
+  provisionerUpStarted: boolean;
+  /** A provisioner exists: tmux is never reused (its services die with it). */
+  provisioned: boolean;
+  /** The provisioner of this boot (its exports feed the `down`). */
+  provisionerConfig: ProvisionerConfig | undefined;
+  /** Its `up` or an export command is running right now. */
+  provisionerRunning: boolean;
+  /** The exports were evaluated (or tried once for the `down`). */
+  provisionerExportsDone: boolean;
+  /** Values the provisioner exported (never logged). */
+  exportedEnv: Record<string, string>;
+  tunnels?: TunnelSet;
+  supervisor?: WindowSupervisor;
+  /** Windows booted (launched) during this startServices call. */
+  launchedWindows: Set<string>;
+  /** Windows a changed `services.files` entry wants restarted. */
+  restartAfterBoot: Set<string>;
   /** Invocation lower bound used when no per-run Docker log window is supplied. */
   startedAt: string;
   dockerStarted: boolean;
@@ -1274,6 +1738,10 @@ interface PhaseState {
   /** Whether the tmux session is in reuse mode (leave alive at end-of-run). */
   tmuxReuse: boolean;
   teardownCommands: string[];
+  /** The policy of each teardown entry (`critical`, `timeout`, `onSignal`). */
+  teardownPolicies: NormalizedTeardown[];
+  /** Critical teardown entries that failed or timed out. */
+  criticalFailures: CriticalTeardownFailure[];
   /** Teardown indices already run (or skipped for reuse) by stop()/cleanup. */
   teardownSettled: Set<number>;
   /** Index of the teardown command the async path is running right now. */
@@ -1297,11 +1765,15 @@ interface PhaseState {
   commandArtifactOmitted: Partial<Record<"docker" | "seed", number>>;
   /** A run of this invocation failed or errored (services.stash on-failure). */
   stashSawFailure: boolean;
+  /** The F12 seed state file of this boot (a teardown drops its resume). */
+  seedStateFile: string | undefined;
+  /** A configured (non-provisioner) teardown command ran. */
+  regularTeardownRan: boolean;
 }
 
 interface StoredServiceCommandArtifactRecord {
   source: "docker" | "seed";
-  kind: "command" | "readiness" | "freshness" | "post-command";
+  kind: "command" | "readiness" | "freshness" | "post-command" | "phase";
   index: number;
   label: string;
   content: string;
@@ -1707,18 +2179,81 @@ async function startSeed(
   phases: PhaseState,
   emit: EmitFn,
 ): Promise<void> {
-  const store = new SeedStateStore();
-  const state = await store.read(ctx.project);
-  const check = store.checkFreshness(ctx.project, cfg, state);
   const cwd = resolveCwd(cfg.cwd, ctx.configDir);
   const env = await resolveSeedEnv(cfg, ctx);
   const redactor = createArtifactRedactor(undefined, env, ctx.secretValues);
   const timeout = cfg.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
 
+  // F12: a seed described as phases keeps its own per-phase state.
+  if (cfg.phases) {
+    await runSeedPhases(
+      cfg,
+      cfg.phases,
+      { cwd, env, timeout },
+      ctx,
+      emit,
+      phases,
+      redactor,
+    );
+    return;
+  }
+
+  const command = cfg.command!;
+  // `commit: afterPostCommands` (or a `target`) keeps the freshness record per
+  // project + environment + target, and writes it only once the post-commands
+  // passed. Without either, the 2.x behavior is unchanged.
+  const hold = cfg.commit === "afterPostCommands";
+  const store =
+    hold || cfg.target !== undefined
+      ? new ScopedSeedFreshness(
+          new SeedPhaseStore(ctx.stateRoot),
+          ctx.envName ?? "default",
+          seedTargetHash({ target: cfg.target, cwd, env: cfg.env }),
+        )
+      : new SeedStateStore();
+  const state = await store.read(ctx.project);
+  const check = store.checkFreshness(ctx.project, cfg, state);
+  let pendingCommit = false;
+  const record = async (exitCode: number): Promise<void> => {
+    if (hold && exitCode === 0) {
+      pendingCommit = true;
+      return;
+    }
+    await store.recordRun(ctx.project, cfg, exitCode);
+  };
+  const finish = async (): Promise<void> => {
+    const summary = await runSeedPostCommands(
+      cfg,
+      { cwd, env, timeout },
+      ctx,
+      emit,
+      phases,
+      redactor,
+    );
+    if (!pendingCommit) return;
+    if (summary.failed.length === 0) {
+      await store.recordRun(ctx.project, cfg, 0);
+      emit("seed", "commit", "seed committed after its post-commands", {
+        committed: true,
+      });
+    } else {
+      const labels = summary.failed.map((f) => f.label);
+      ctx.log?.(
+        redactor.text(
+          `seed — not committed: postCommand(s) ${labels.join(", ")} failed; the next run seeds again`,
+        ),
+      );
+      emit("seed", "commit", "seed not committed: a postCommand failed", {
+        committed: false,
+        failed: labels,
+      });
+    }
+  };
+
   if (!check.shouldRun) {
     ctx.log?.(redactor.text(`seed — skipping (${check.reason})`));
     emit("seed", "skip", check.reason);
-    await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit, phases);
+    await finish();
     return;
   }
 
@@ -1746,8 +2281,8 @@ async function startSeed(
       emit("seed", "skip", "freshness check passed");
       // Still record the freshness check as a successful "non-seed" so the
       // timestamp is updated for the next TTL window.
-      await store.recordRun(ctx.project, cfg, 0);
-      await runSeedPostCommands(cfg, { cwd, env, timeout }, ctx, emit, phases);
+      await record(0);
+      await finish();
       return;
     }
     ctx.log?.(
@@ -1765,8 +2300,8 @@ async function startSeed(
     );
   }
 
-  ctx.log?.(redactor.text(`seed — running (${cfg.command})`));
-  emit("seed", "start", redactor.text(cfg.command));
+  ctx.log?.(redactor.text(`seed — running (${command})`));
+  emit("seed", "start", redactor.text(command));
   // A heavy import can run for many minutes; plain/CI runs have no ticker, so
   // emit a bounded info heartbeat so the phase reads as "working, bounded"
   // instead of a silent stall. The tty narrator filters these (its ticker
@@ -1782,11 +2317,11 @@ async function startSeed(
   }, 60_000);
   heartbeat.unref?.();
   const liveOutput = serviceOutput(ctx, "seed", redactor);
-  liveOutput?.announce(cfg.command);
+  liveOutput?.announce(command);
   let r: ShellResult;
   try {
     r = await runShellWithTimeout(
-      cfg.command,
+      command,
       { cwd, env, signal: ctx.signal, track: ctx.bootPids },
       timeout,
       liveOutput ? (_s, chunk) => liveOutput.push(chunk) : undefined,
@@ -1799,7 +2334,7 @@ async function startSeed(
     kind: "command",
     index: 0,
     label: "seed-command",
-    command: cfg.command,
+    command,
     result: r,
     redactor,
   });
@@ -1811,33 +2346,334 @@ async function startSeed(
   const seedStream = redactor.text(`${r.stdout}\n${r.stderr}`).trimEnd();
   if (seedStream) ctx.logDetail?.(seedStream);
 
-  // Record the result regardless of exit code (failed seeds are tracked too).
-  await store.recordRun(ctx.project, cfg, r.exitCode);
+  // F12: a seed that prints an error but exits 0 is a failed seed.
+  const violation =
+    r.exitCode === 0
+      ? expectOutputViolation(`${r.stdout}\n${r.stderr}`, cfg.expectOutput)
+      : undefined;
 
+  // Record the result regardless of exit code (failed seeds are tracked too).
+  await record(violation ? 1 : r.exitCode);
+
+  if (violation) {
+    emit("seed", "fail", "seed output check failed", { exitCode: r.exitCode });
+    throw new ServicesError(
+      redactor.text(
+        `seed command exited 0 but its ${violation}: ${command}\n` +
+          tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+      ),
+    );
+  }
   if (r.exitCode !== 0) {
     emit("seed", "fail", `exit ${r.exitCode}`, { exitCode: r.exitCode });
     throw new ServicesError(
       redactor.text(
-        `seed command failed (exit ${r.exitCode}): ${cfg.command}\n` +
+        `seed command failed (exit ${r.exitCode}): ${command}\n` +
           tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
       ),
     );
   }
   ctx.log?.("services: seed — complete");
   emit("seed", "complete", "seed complete");
-  await runSeedPostCommands(
+  await finish();
+}
+
+/**
+ * F12: the seed as ordered phases. A phase runs when `always` is set, or
+ * when neither a recorded success of the same command within `ttlSeconds`
+ * nor its `skipIf` says it is done. Each outcome is persisted per project +
+ * environment + target (right away, or all at once after the post-commands
+ * with `commit: afterPostCommands`; a failure is always recorded at once).
+ */
+async function runSeedPhases(
+  cfg: SeedConfig,
+  list: readonly SeedPhase[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+  ctx: StartServicesContext,
+  emit: EmitFn,
+  phases: PhaseState,
+  redactor: ArtifactRedactor,
+): Promise<void> {
+  const envName = ctx.envName ?? "default";
+  const store = new SeedPhaseStore(ctx.stateRoot);
+  const targetHash = seedTargetHash({
+    target: cfg.target,
+    cwd: opts.cwd,
+    env: cfg.env,
+  });
+  const state =
+    (await store.read(ctx.project, envName, targetHash)) ??
+    emptyScopedState(ctx.project, envName, targetHash);
+  phases.seedStateFile = store.pathFor(ctx.project, envName, targetHash);
+  const hold = cfg.commit === "afterPostCommands";
+  const held: Record<string, PhaseRecord> = {};
+  const ttl = cfg.ttlSeconds ?? 0;
+
+  // Phases that succeeded in a run that then failed on a later phase: the
+  // next run resumes after them (a seed transaction does not start over) —
+  // unless the resume is older than the TTL, and a phase with a `skipIf`
+  // still has to pass it (its result may be gone). A teardown drops it.
+  const resumeAt = state.resume?.at ?? "earlier";
+  const resumable = resumeFresh(state.resume, ttl)
+    ? (state.resume?.done ?? {})
+    : {};
+  // What a later failure of this run lets the next one resume after: phases
+  // that ran to success now, and resumed phases whose skipIf confirmed them.
+  // A phase only carried over from an earlier resume is not passed on again,
+  // so a seed whose earlier results are gone recovers on the next run.
+  const doneThisRun: Record<string, string> = {};
+
+  for (const [index, phase] of list.entries()) {
+    throwIfCancelled(ctx.signal);
+    const command = phaseRun(phase);
+    const fingerprint = phaseFingerprint(phase);
+    const resumed = !phase.always && resumable[phase.name] === fingerprint;
+    let skipReason: string | undefined;
+    if (phase.always) {
+      skipReason = undefined;
+    } else if (resumed && phase.skipIf !== undefined) {
+      const confirmed = await seedPhaseSkipIf(
+        phase,
+        opts,
+        ctx,
+        phases,
+        redactor,
+      );
+      if (confirmed !== undefined) {
+        skipReason = `resumed after a failed run (${resumeAt}); ${confirmed}`;
+        doneThisRun[phase.name] = fingerprint;
+      }
+    } else if (resumed) {
+      skipReason = `resumed after a failed run (${resumeAt})`;
+    } else {
+      skipReason = await seedPhaseSkipReason(
+        phase,
+        state,
+        ttl,
+        opts,
+        ctx,
+        phases,
+        redactor,
+      );
+    }
+    if (skipReason !== undefined) {
+      ctx.log?.(
+        redactor.text(`seed — phase ${phase.name} skipped (${skipReason})`),
+      );
+      emit("seed", "phase.skip", `phase ${phase.name} skipped`, {
+        phase: phase.name,
+        reason: skipReason,
+      });
+      continue;
+    }
+    ctx.log?.(redactor.text(`seed — phase ${phase.name} (${command})`));
+    emit("seed", "phase.start", `phase ${phase.name}`, { phase: phase.name });
+    const startedAt = Date.now();
+    const r = await runSeedShell(
+      command,
+      {
+        cwd: phase.cwd ? resolveCwd(phase.cwd, ctx.configDir) : opts.cwd,
+        env: phase.env ? { ...opts.env, ...phase.env } : opts.env,
+        timeoutMs: toMs(phase.timeout) ?? opts.timeout,
+        label: `phase-${phase.name}`,
+        kind: "phase",
+        index,
+      },
+      ctx,
+      phases,
+      redactor,
+    );
+    const output = `${r.stdout}\n${r.stderr}`;
+    const violation =
+      r.exitCode === 0
+        ? (expectOutputViolation(output, phase.expectOutput) ??
+          expectOutputViolation(output, cfg.expectOutput))
+        : undefined;
+    const exitCode = violation ? 1 : r.exitCode;
+    const record: PhaseRecord = {
+      fingerprint: phaseFingerprint(phase),
+      ranAt: new Date().toISOString(),
+      exitCode,
+      durationMs: Date.now() - startedAt,
+    };
+    if (exitCode === 0) doneThisRun[phase.name] = record.fingerprint;
+    if (exitCode !== 0 || !hold) {
+      state.phases[phase.name] = record;
+      if (exitCode !== 0) {
+        state.resume = { at: record.ranAt, done: { ...doneThisRun } };
+      }
+      await store.write(state);
+    } else {
+      held[phase.name] = record;
+    }
+    if (exitCode !== 0) {
+      emit("seed", "phase.fail", `phase ${phase.name} failed`, {
+        phase: phase.name,
+        exitCode: r.exitCode,
+        ...(violation ? { outputCheck: true } : {}),
+      });
+      throw new ServicesError(
+        redactor.text(
+          violation
+            ? `seed phase ${phase.name} exited 0 but its ${violation}: ${command}\n`
+            : `seed phase ${phase.name} failed (exit ${r.exitCode}): ${command}\n`,
+        ) + redactor.text(tailText(output, SHELL_TAIL_LINES)),
+      );
+    }
+    emit("seed", "phase.complete", `phase ${phase.name} complete`, {
+      phase: phase.name,
+      durationMs: record.durationMs,
+    });
+  }
+
+  // Every phase is done: nothing is left to resume.
+  if (state.resume) {
+    delete state.resume;
+    await store.write(state);
+  }
+
+  const summary = await runSeedPostCommands(
     cfg,
-    { cwd, env, timeout },
+    opts,
     ctx,
     emit,
     phases,
     redactor,
   );
+  if (!hold) return;
+  if (summary.failed.length === 0) {
+    Object.assign(state.phases, held);
+    await store.write(state);
+    emit("seed", "commit", "seed committed after its post-commands", {
+      committed: true,
+      phases: Object.keys(held),
+    });
+  } else {
+    const labels = summary.failed.map((f) => f.label);
+    ctx.log?.(
+      redactor.text(
+        `seed — phases not committed: postCommand(s) ${labels.join(", ")} failed; the next run repeats them`,
+      ),
+    );
+    emit("seed", "commit", "seed not committed: a postCommand failed", {
+      committed: false,
+      failed: labels,
+    });
+  }
+}
+
+/**
+ * Why a (non-`always`) phase need not run, or undefined when it must: a
+ * recorded success of the same command still inside the TTL, then its
+ * `skipIf` probe or gate.
+ */
+async function seedPhaseSkipReason(
+  phase: SeedPhase,
+  state: { phases: Record<string, PhaseRecord> },
+  ttlSeconds: number,
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  redactor: ArtifactRedactor,
+): Promise<string | undefined> {
+  const decision = phaseStateDecision(
+    phase,
+    state.phases[phase.name],
+    ttlSeconds,
+  );
+  if (!decision.run) return decision.reason;
+  return seedPhaseSkipIf(phase, opts, ctx, phases, redactor);
+}
+
+/** The phase's `skipIf` passes: the reason, else undefined (run it). */
+async function seedPhaseSkipIf(
+  phase: SeedPhase,
+  opts: { cwd: string; env: NodeJS.ProcessEnv; timeout: number },
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  redactor: ArtifactRedactor,
+): Promise<string | undefined> {
+  const skipIf = phase.skipIf;
+  if (skipIf === undefined) return undefined;
+  const cwd = phase.cwd ? resolveCwd(phase.cwd, ctx.configDir) : opts.cwd;
+  const env = phase.env ? { ...opts.env, ...phase.env } : opts.env;
+  if (typeof skipIf === "string" || "command" in skipIf) {
+    const probe = typeof skipIf === "string" ? skipIf : skipIf.command;
+    const r = await runShellWithTimeout(
+      probe,
+      { cwd, env, signal: ctx.signal, track: ctx.bootPids },
+      opts.timeout,
+    );
+    storeServiceCommandArtifactRecord(phases, "seed", {
+      kind: "freshness",
+      index: 0,
+      label: `phase-${phase.name}-skipIf`,
+      command: probe,
+      result: r,
+      redactor,
+    });
+    return r.exitCode === 0 ? "skipIf passed" : undefined;
+  }
+  const problems = await gateProblems(skipIf.gate, ctx, {
+    env,
+    cwd,
+    label: `seed phase ${phase.name}`,
+  });
+  return problems.length === 0 ? "skipIf gate passed" : undefined;
+}
+
+/** One seed shell command with live output and a stored artifact record. */
+async function runSeedShell(
+  command: string,
+  input: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    label: string;
+    kind: StoredServiceCommandArtifactRecord["kind"];
+    index: number;
+  },
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  redactor: ArtifactRedactor,
+): Promise<ShellResult> {
+  const liveOutput = serviceOutput(ctx, "seed", redactor);
+  liveOutput?.announce(command);
+  const r = await runShellWithTimeout(
+    command,
+    {
+      cwd: input.cwd,
+      env: input.env,
+      signal: ctx.signal,
+      track: ctx.bootPids,
+    },
+    input.timeoutMs,
+    liveOutput ? (_s, chunk) => liveOutput.push(chunk) : undefined,
+  );
+  liveOutput?.finish(r.exitCode);
+  storeServiceCommandArtifactRecord(phases, "seed", {
+    kind: input.kind,
+    index: input.index,
+    label: input.label,
+    command,
+    result: r,
+    redactor,
+  });
+  return r;
+}
+
+interface PostCommandSummary {
+  /** Post-commands that failed and were allowed to (`continueOnError`). */
+  failed: Array<{ label: string; reason: string }>;
+  skipped: string[];
 }
 
 /**
  * Always-run fixture ensure steps. Invoked after seed skip *or* successful
  * seed so lightweight mongosh/scripts re-apply data the bulk import omits.
+ * An object entry may limit itself (`when`), carry its own timeout and output
+ * check, and survive its own failure (`continueOnError`). A fatal failure
+ * stops the rest and names every earlier tolerated failure too.
  */
 async function runSeedPostCommands(
   cfg: SeedConfig,
@@ -1846,48 +2682,93 @@ async function runSeedPostCommands(
   emit: EmitFn,
   phases: PhaseState,
   redactor = createArtifactRedactor(undefined, opts.env, ctx.secretValues),
-): Promise<void> {
-  const commands = cfg.postCommands ?? [];
-  if (commands.length === 0) return;
+): Promise<PostCommandSummary> {
+  const summary: PostCommandSummary = { failed: [], skipped: [] };
+  const commands: readonly SeedPostCommand[] = cfg.postCommands ?? [];
+  if (commands.length === 0) return summary;
 
-  for (const [index, command] of commands.entries()) {
+  for (const [index, entry] of commands.entries()) {
+    const command = postCommandRun(entry);
+    const label = postCommandLabel(entry);
+    const applies = postCommandApplies(entry, {
+      suite: ctx.suite,
+      env: ctx.envName,
+    });
+    if (!applies.applies) {
+      summary.skipped.push(label);
+      ctx.logDetail?.(
+        redactor.text(
+          `seed — postCommand ${label} skipped (${applies.reason})`,
+        ),
+      );
+      emit("seed", "postcommand.skip", `postCommand ${label} skipped`, {
+        postCommand: label,
+        reason: applies.reason,
+      });
+      continue;
+    }
     ctx.logDetail?.(redactor.text(`seed — postCommand (${command})`));
     emit("seed", "start", redactor.text(`postCommand: ${command}`));
-    const liveOutput = serviceOutput(ctx, "seed", redactor);
-    liveOutput?.announce(command);
-    const r = await runShellWithTimeout(
+    const object = typeof entry === "string" ? undefined : entry;
+    const r = await runSeedShell(
       command,
       {
         cwd: opts.cwd,
         env: opts.env,
-        signal: ctx.signal,
-        track: ctx.bootPids,
+        timeoutMs: toMs(object?.timeout) ?? opts.timeout,
+        label: `post-command-${index}`,
+        kind: "post-command",
+        index,
       },
-      opts.timeout,
-      liveOutput ? (_s, chunk) => liveOutput.push(chunk) : undefined,
-    );
-    liveOutput?.finish(r.exitCode);
-    storeServiceCommandArtifactRecord(phases, "seed", {
-      kind: "post-command",
-      index,
-      label: `post-command-${index}`,
-      command,
-      result: r,
+      ctx,
+      phases,
       redactor,
-    });
-    if (r.exitCode !== 0) {
-      emit("seed", "fail", `postCommand exit ${r.exitCode}`, {
-        exitCode: r.exitCode,
-      });
-      throw new ServicesError(
-        redactor.text(
-          `seed postCommand failed (exit ${r.exitCode}): ${command}\n` +
-            tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
-        ),
-      );
+    );
+    const output = `${r.stdout}\n${r.stderr}`;
+    const violation =
+      r.exitCode === 0
+        ? expectOutputViolation(output, object?.expectOutput)
+        : undefined;
+    if (r.exitCode === 0 && !violation) {
+      emit("seed", "complete", redactor.text(`postCommand ok: ${command}`));
+      continue;
     }
-    emit("seed", "complete", redactor.text(`postCommand ok: ${command}`));
+    // The output check quotes the matching line: redact it once, here, so
+    // the tolerated-failure summary, logs and the aggregated error agree.
+    const reason = redactor.text(violation ?? `exit ${r.exitCode}`);
+    const detail = redactor.text(
+      `seed postCommand ${
+        typeof entry === "string" ? "" : `${label} `
+      }failed (${reason}): ${command}\n${tailText(output, SHELL_TAIL_LINES)}`,
+    );
+    emit("seed", "fail", `postCommand ${label} failed`, {
+      exitCode: r.exitCode,
+      postCommand: label,
+      ...(object?.continueOnError ? { continued: true } : {}),
+    });
+    if (object?.continueOnError) {
+      summary.failed.push({ label, reason });
+      ctx.log?.(`seed — postCommand ${label} failed (${reason}); continuing`);
+      continue;
+    }
+    throw new ServicesError(
+      [
+        ...summary.failed.map(
+          (f) =>
+            `earlier postCommand ${f.label} failed too (${f.reason}; continueOnError)`,
+        ),
+        detail,
+      ].join("\n"),
+    );
   }
+  if (summary.failed.length > 0) {
+    ctx.log?.(
+      `seed — ${summary.failed.length} postCommand(s) failed and were tolerated: ${summary.failed
+        .map((f) => f.label)
+        .join(", ")}`,
+    );
+  }
+  return summary;
 }
 
 /**
@@ -1973,7 +2854,10 @@ async function startTmux(
   // expensive to rebuild; reusing them across runs avoids recompiles. Decoupled
   // from --cold-start (browser profile only).
   void coldStart;
-  const reuse = cfg.reuseExisting ?? true;
+  // A provisioned environment is this run's own: its windows talk to a
+  // resource that `down` destroys, so a surviving session would only hold
+  // dead connections.
+  const reuse = (cfg.reuseExisting ?? true) && !phases.provisioned;
   let recreated = false;
   phases.tmuxReuse = reuse;
   phases.tmuxSessionName = cfg.session;
@@ -1999,10 +2883,14 @@ async function startTmux(
         "recreate",
         `recreating session after docker refresh: "${cfg.session}"`,
       );
-      await execa("tmux", ["kill-session", "-t", cfg.session], {
-        reject: false,
-        timeout: 5_000,
-      });
+      await execa(
+        "tmux",
+        ["kill-session", "-t", tmuxSessionTarget(cfg.session)],
+        {
+          reject: false,
+          timeout: 5_000,
+        },
+      );
       // fall through to create path
     } else if (exists) {
       phases.tmuxDisposition = "reused";
@@ -2023,7 +2911,7 @@ async function startTmux(
 
   // Always kill any leftover session before create so new-session cannot
   // silently fail (reject:false) and boot into a half-dead session.
-  await execa("tmux", ["kill-session", "-t", cfg.session], {
+  await execa("tmux", ["kill-session", "-t", tmuxSessionTarget(cfg.session)], {
     reject: false,
     timeout: 5_000,
   });
@@ -2041,6 +2929,12 @@ async function startTmux(
   const newSessionArgs = [
     "new-session",
     "-d",
+    // A wide, tall detached session: at tmux's 80x24 default long log lines
+    // and URLs wrap, and `readyOn.text` / `services logs` would see them cut.
+    "-x",
+    String(cfg.columns ?? DEFAULT_TMUX_COLUMNS),
+    "-y",
+    String(cfg.rows ?? DEFAULT_TMUX_ROWS),
     "-s",
     cfg.session,
     "-n",
@@ -2066,13 +2960,32 @@ async function startTmux(
     }
   }
 
+  // What the provisioner exported must reach the windows too (a tmux server
+  // that already runs does not take the new-session client env). A
+  // credential-named export is left out: set-environment would put it on a
+  // command line; it still reaches a session created with a new server.
+  for (const [key, value] of Object.entries(phases.exportedEnv)) {
+    if (isSensitiveEnvKey(key)) continue;
+    await execa(
+      "tmux",
+      ["set-environment", "-t", tmuxSessionTarget(cfg.session), key, value],
+      {
+        reject: false,
+        timeout: 3_000,
+      },
+    );
+  }
   // Set session-level env vars via tmux set-environment (propagates to all windows).
   if (cfg.env) {
     for (const [key, value] of Object.entries(cfg.env)) {
-      await execa("tmux", ["set-environment", "-t", cfg.session, key, value], {
-        reject: false,
-        timeout: 3_000,
-      });
+      await execa(
+        "tmux",
+        ["set-environment", "-t", tmuxSessionTarget(cfg.session), key, value],
+        {
+          reject: false,
+          timeout: 3_000,
+        },
+      );
     }
   }
 
@@ -2127,7 +3040,7 @@ async function startTmux(
       [
         "new-window",
         "-t",
-        cfg.session,
+        tmuxSessionScopeTarget(cfg.session),
         "-n",
         win.name,
         ...(win.cwd ? ["-c", resolveCwd(win.cwd, ctx.configDir)] : []),
@@ -2179,7 +3092,7 @@ async function ensureTmuxWindows(
         [
           "new-window",
           "-t",
-          cfg.session,
+          tmuxSessionScopeTarget(cfg.session),
           "-n",
           win.name,
           ...(win.cwd ? ["-c", resolveCwd(win.cwd, ctx.configDir)] : []),
@@ -2399,6 +3312,7 @@ async function bootTmuxWindow(
   win: TmuxWindow,
   ctx: StartServicesContext,
 ): Promise<void> {
+  ctx.launchedWindows?.add(win.name);
   await waitForTmuxShellReady(session, win.name, ctx);
   await clearTmuxHistory(session, win.name);
   await sendWindowCommands(session, win, ctx);
@@ -2416,7 +3330,7 @@ async function sendTmuxCommand(
 ): Promise<void> {
   await execa(
     "tmux",
-    ["send-keys", "-t", `${session}:${window}`, command, "Enter"],
+    ["send-keys", "-t", tmuxWindowTarget(session, window), command, "Enter"],
     {
       reject: false,
       timeout: 5_000,
@@ -2443,10 +3357,14 @@ async function sendWindowCommands(
   // containing $, backticks, !, or quotes.
   if (win.env && Object.keys(win.env).length > 0) {
     for (const [key, value] of Object.entries(win.env)) {
-      await execa("tmux", ["set-environment", "-t", session, key, value], {
-        reject: false,
-        timeout: 3_000,
-      });
+      await execa(
+        "tmux",
+        ["set-environment", "-t", tmuxSessionTarget(session), key, value],
+        {
+          reject: false,
+          timeout: 3_000,
+        },
+      );
     }
   }
 
@@ -2550,8 +3468,8 @@ async function waitForTmuxShellReady(
   let stable = 0;
   let last = "";
   while (Date.now() < deadline) {
-    const cmd = await tmuxPaneCurrentCommand(session, window);
-    if (cmd && TMUX_IDLE_SHELL_RE.test(cmd)) {
+    const { command: cmd, idle } = await tmuxPaneShell(session, window);
+    if (cmd && idle) {
       if (cmd === last) stable += 1;
       else {
         stable = 1;
@@ -2570,25 +3488,81 @@ async function waitForTmuxShellReady(
   );
 }
 
-async function tmuxPaneCurrentCommand(
+/** The first line of a `list-panes` answer (a split window lists more). */
+function firstPaneLine(stdout: unknown): string {
+  return String(stdout ?? "").split(/\r?\n/)[0] ?? "";
+}
+
+function parsePanePid(field: string | undefined): number | undefined {
+  const pid = Number.parseInt(field ?? "", 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+/**
+ * True when the pane's shell (`#{pane_pid}`, a session leader) is not the
+ * terminal's foreground process group: a job runs in the foreground even
+ * though `#{pane_current_command}` reads as a shell name (`bash start.sh`,
+ * `sh -c …`). Unknown (no pid, `ps` failed, no terminal) is false, and the
+ * name alone decides.
+ */
+async function shellRunsForegroundJob(
+  panePid: number | undefined,
+): Promise<boolean> {
+  if (panePid === undefined) return false;
+  try {
+    const r = await execa("ps", ["-o", "tpgid=", "-p", String(panePid)], {
+      reject: false,
+      timeout: 3_000,
+    });
+    if (r.exitCode !== 0) return false;
+    const tpgid = Number.parseInt(String(r.stdout ?? "").trim(), 10);
+    return Number.isInteger(tpgid) && tpgid > 0 && tpgid !== panePid;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the pane sits at its interactive shell with nothing running. */
+async function paneShellIdle(
+  command: string,
+  panePid: number | undefined,
+): Promise<boolean> {
+  if (!TMUX_IDLE_SHELL_RE.test(command)) return false;
+  return !(await shellRunsForegroundJob(panePid));
+}
+
+/**
+ * The pane's current command, and whether it is an idle shell (a shell name
+ * with no foreground job). `list-panes` with an exact target fails on a
+ * missing window (empty command); `display-message` would answer for
+ * another pane.
+ */
+async function tmuxPaneShell(
   session: string,
   window: string,
-): Promise<string> {
+): Promise<{ command: string; idle: boolean }> {
   try {
     const r = await execa(
       "tmux",
       [
-        "display-message",
-        "-p",
+        "list-panes",
         "-t",
-        `${session}:${window}`,
-        "#{pane_current_command}",
+        tmuxWindowTarget(session, window),
+        "-F",
+        "#{pane_current_command}\t#{pane_pid}",
       ],
       { reject: false, timeout: 3_000 },
     );
-    return typeof r.stdout === "string" ? r.stdout.trim() : "";
+    if (r.exitCode !== 0) return { command: "", idle: false };
+    const [field = "", pid] = firstPaneLine(r.stdout).split("\t");
+    const command = field.trim();
+    if (!command) return { command, idle: false };
+    return {
+      command,
+      idle: await paneShellIdle(command, parsePanePid(pid)),
+    };
   } catch {
-    return "";
+    return { command: "", idle: false };
   }
 }
 
@@ -2596,40 +3570,52 @@ async function isTmuxPaneIdleShell(
   session: string,
   window: string,
 ): Promise<boolean> {
-  const cmd = await tmuxPaneCurrentCommand(session, window);
+  const { command, idle } = await tmuxPaneShell(session, window);
   // Unknown / empty → treat as idle (not yet running a service). That way
   // send-retry keeps trying and reuse heal re-launches instead of trusting
   // a pane that never started.
-  if (!cmd) return true;
-  return TMUX_IDLE_SHELL_RE.test(cmd);
+  if (!command) return true;
+  return idle;
 }
 
 async function clearTmuxHistory(
   session: string,
   window: string,
 ): Promise<void> {
-  await execa("tmux", ["clear-history", "-t", `${session}:${window}`], {
-    reject: false,
-    timeout: 3_000,
-  });
+  await execa(
+    "tmux",
+    ["clear-history", "-t", tmuxWindowTarget(session, window)],
+    {
+      reject: false,
+      timeout: 3_000,
+    },
+  );
 }
 
 async function setTmuxOption(
   session: string,
   opt: TmuxSessionOption,
 ): Promise<void> {
-  await execa("tmux", ["set-option", "-t", session, opt.key, opt.value], {
-    reject: false,
-    timeout: 3_000,
-  });
+  await execa(
+    "tmux",
+    ["set-option", "-t", tmuxSessionScopeTarget(session), opt.key, opt.value],
+    {
+      reject: false,
+      timeout: 3_000,
+    },
+  );
 }
 
 export async function tmuxSessionExists(session: string): Promise<boolean> {
   try {
-    const r = await execa("tmux", ["has-session", "-t", session], {
-      reject: false,
-      timeout: 3_000,
-    });
+    const r = await execa(
+      "tmux",
+      ["has-session", "-t", tmuxSessionTarget(session)],
+      {
+        reject: false,
+        timeout: 3_000,
+      },
+    );
     return r.exitCode === 0;
   } catch {
     return false;
@@ -2644,7 +3630,13 @@ async function tmuxWindowExists(
   try {
     const r = await execa(
       "tmux",
-      ["list-windows", "-t", session, "-F", "#{window_name}"],
+      [
+        "list-windows",
+        "-t",
+        tmuxSessionTarget(session),
+        "-F",
+        "#{window_name}",
+      ],
       { reject: false, timeout: 3_000 },
     );
     if (r.exitCode !== 0) return false;
@@ -2669,6 +3661,11 @@ async function waitForTmuxWindow(
     gate?: { watch: GateWatch; everyMs: number };
     /** The readyOn url answered with a non-ready status. */
     onUrlStatus?: (url: string, status: number) => void;
+    /**
+     * A restart's generation id: `readyOn.text` is looked for only below the
+     * generation marker, so scrollback of the previous process never counts.
+     */
+    generation?: string;
   },
 ): Promise<void> {
   if (!win.readyOn) return;
@@ -2719,9 +3716,20 @@ async function waitForTmuxWindow(
     if (!signalled && win.readyOn.text) {
       // Large scrollback: a chatty service may print the readiness line early
       // then flood errors/warnings that push it past a small capture window.
-      const pane = await captureTmuxPane(session, win.name, 2000);
+      const pane = await captureTmuxPane(
+        session,
+        win.name,
+        hooks?.generation ? 10_000 : 2000,
+      );
+      // After a restart only the new generation's output counts.
+      const visible = hooks?.generation
+        ? sliceAfterGeneration(pane, hooks.generation)
+        : { text: pane, found: true };
       // Case-insensitive: server logs vary in casing ("Listening" vs "listening").
-      if (pane.toLowerCase().includes(win.readyOn.text.toLowerCase())) {
+      if (
+        visible.found &&
+        visible.text.toLowerCase().includes(win.readyOn.text.toLowerCase())
+      ) {
         signalled = true;
       }
     }
@@ -2827,24 +3835,22 @@ async function inspectTmuxPaneForReadiness(
     const r = await execa(
       "tmux",
       [
-        "display-message",
-        "-p",
+        "list-panes",
         "-t",
-        `${session}:${window}`,
-        "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}",
+        tmuxWindowTarget(session, window),
+        "-F",
+        TMUX_PANE_STATE_FORMAT,
       ],
       { reject: false, timeout: 3_000 },
     );
     if (r.exitCode !== 0) return { kind: "missing" };
 
-    const fields = String(r.stdout ?? "")
-      .replace(/\r?\n$/, "")
-      .split("\t");
+    const fields = firstPaneLine(r.stdout).split("\t");
     if (fields.length < 3 || !/^[01]$/.test(fields[0] ?? "")) {
       return { kind: "unknown" };
     }
 
-    const currentCommand = fields.slice(2).join("\t").trim();
+    const currentCommand = (fields[2] ?? "").trim();
     if (fields[0] === "1") {
       const parsedStatus = Number.parseInt(fields[1] ?? "", 10);
       return {
@@ -2852,7 +3858,10 @@ async function inspectTmuxPaneForReadiness(
         ...(Number.isFinite(parsedStatus) ? { exitCode: parsedStatus } : {}),
       };
     }
-    if (currentCommand && TMUX_IDLE_SHELL_RE.test(currentCommand)) {
+    if (
+      currentCommand &&
+      (await paneShellIdle(currentCommand, parsePanePid(fields[3])))
+    ) {
       return { kind: "idle-shell", currentCommand };
     }
     return currentCommand ? { kind: "running" } : { kind: "unknown" };
@@ -2917,9 +3926,11 @@ export async function captureTmuxPane(
         "capture-pane",
         "-p",
         "-t",
-        `${session}:${window}`,
+        tmuxWindowTarget(session, window),
         "-S",
         `-${scrollbackLines}`,
+        // -J joins wrapped lines (a log line is one line, however wide the pane).
+        "-J",
       ],
       { reject: false, timeout: 3_000 },
     );
@@ -2956,6 +3967,8 @@ function tearsDownDocker(cmd: string): boolean {
 
 /** Per-command cap of a teardown command on the signal path. */
 const DEFAULT_SIGNAL_TEARDOWN_TIMEOUT_MS = 10_000;
+/** Signal wait of an `onSignal: wait` teardown entry that sets no timeout. */
+const SIGNAL_WAIT_DEFAULT_MS = 600_000;
 /** How long the signal path lets a running boot command stop on its own. */
 const DEFAULT_SIGNAL_GRACE_MS = 5_000;
 /** Bytes of one teardown command's output kept by the signal path. */
@@ -2975,6 +3988,19 @@ function signalBudgetMs(name: string, fallback: number): number {
 }
 
 /**
+ * A critical teardown entry (the provisioner's `down` once its `up`
+ * started) that has not run yet.
+ */
+function criticalTeardownPending(phases: PhaseState): boolean {
+  return phases.teardownPolicies.some(
+    (policy, index) =>
+      policy?.critical === true &&
+      !phases.teardownSettled.has(index) &&
+      (index !== phases.provisionerIndex || phases.provisionerUpStarted),
+  );
+}
+
+/**
  * Synchronous, signal-safe teardown for SIGINT/SIGTERM, where the async stop()
  * never runs (process.exit follows as soon as this returns):
  *
@@ -2989,7 +4015,10 @@ function signalBudgetMs(name: string, fallback: number): number {
  *    while it is alive (two copies of a provisioner's `down` race for its
  *    state lock): the signal path waits up to the same cap for it, then
  *    leaves it to finish in the background. One that is gone (a signal
- *    killed it) runs again, as in 2.x (see awaitInFlightTeardownSync).
+ *    killed it) runs again, as in 2.x (see awaitInFlightTeardownSync);
+ * 4. the tunnels stop AFTER the regular teardown commands (a teardown that
+ *    needs a tunnel, a database dump through one, still reaches it) and
+ *    BEFORE the provisioner's `down`, the same order as a normal stop.
  *
  * Each step lands in `ctx.onSignalTeardown` (the invocation journal) as a
  * `services.teardown.signal` event, with the commands' redacted output.
@@ -3021,25 +4050,67 @@ function terminateServicesSync(
       // stderr may already be gone.
     }
   };
-  if (!phases.tmuxReuse) terminateTmuxSync(phases.tmuxSession);
+  // No window or tunnel restarts while the stack comes down.
   try {
-    awaitBootCommandsSync(
-      ctx.bootPids,
-      signalBudgetMs("CAIRN_SERVICES_SIGNAL_GRACE_MS", DEFAULT_SIGNAL_GRACE_MS),
-      record,
-      note,
-    );
+    phases.supervisor?.stopSync();
   } catch {
     // best-effort, never fatal in the signal path
   }
-  if (phases.teardownCommands.length === 0) return;
-  const timeoutMs = signalBudgetMs(
+  if (!phases.tmuxReuse) terminateTmuxSync(phases.tmuxSession);
+  // The tunnels outlive the regular teardown commands (they may need one);
+  // they stop right before the provisioner's `down` — see stopTunnels below.
+  let tunnelsStopped = false;
+  const stopTunnels = (): void => {
+    if (tunnelsStopped) return;
+    tunnelsStopped = true;
+    try {
+      phases.tunnels?.stopSync();
+    } catch {
+      // best-effort, never fatal in the signal path
+    }
+  };
+  const capMs = signalBudgetMs(
     "CAIRN_SERVICES_SIGNAL_TEARDOWN_TIMEOUT_MS",
     DEFAULT_SIGNAL_TEARDOWN_TIMEOUT_MS,
   );
+  try {
+    // The provisioner's `up` (or an export) is running: its `down` must not
+    // race it. Forward SIGTERM to its tree (a `kill <cairn pid>` reaches
+    // only cairn) and wait as long as the `down` itself may take.
+    const graceMs = phases.provisionerRunning
+      ? provisionerSignalWaitMs(phases, capMs)
+      : signalBudgetMs(
+          "CAIRN_SERVICES_SIGNAL_GRACE_MS",
+          DEFAULT_SIGNAL_GRACE_MS,
+        );
+    if (phases.provisionerRunning) signalBootCommandsSync(ctx.bootPids);
+    awaitBootCommandsSync(ctx.bootPids, graceMs, record, note);
+  } catch {
+    // best-effort, never fatal in the signal path
+  }
+  if (phases.teardownCommands.length === 0) {
+    stopTunnels();
+    return;
+  }
+  try {
+    provisionerExportsForDownSync(phases, ctx, capMs, note);
+  } catch {
+    // best-effort, never fatal in the signal path
+  }
   for (const [index, cmd] of phases.teardownCommands.entries()) {
     try {
       if (phases.teardownSettled.has(index)) continue;
+      const isProvisioner = index === phases.provisionerIndex;
+      if (isProvisioner && !phases.provisionerUpStarted) continue;
+      if (isProvisioner) stopTunnels();
+      const policy = phases.teardownPolicies[index];
+      const critical = policy?.critical === true;
+      // `onSignal: wait`: the entry's own timeout (10 minutes when it has
+      // none) replaces the short signal cap.
+      const timeoutMs =
+        policy?.onSignal === "wait"
+          ? (policy.timeoutMs ?? SIGNAL_WAIT_DEFAULT_MS)
+          : capMs;
       if (
         phases.teardownRunning === index &&
         awaitInFlightTeardownSync(phases, index, cmd, timeoutMs, ctx, {
@@ -3048,16 +4119,31 @@ function terminateServicesSync(
           redact,
         })
       ) {
+        if (
+          critical &&
+          phases.teardownPid !== undefined &&
+          liveProcessGroupSync(phases.teardownPid).length > 0
+        ) {
+          phases.criticalFailures.push({
+            index,
+            command: redact(cmd),
+            ...(isProvisioner ? { provisioner: true } : {}),
+            timedOut: true,
+            error: "still running after the signal wait",
+            path: "signal",
+          });
+        }
         continue;
       }
       if (
+        !isProvisioner &&
         phases.tmuxReuse &&
         phases.tmuxSessionName &&
         killsTmuxSession(cmd, phases.tmuxSessionName)
       ) {
         continue;
       }
-      if (phases.tmuxReuse && tearsDownDocker(cmd)) {
+      if (!isProvisioner && phases.tmuxReuse && tearsDownDocker(cmd)) {
         continue;
       }
       note(
@@ -3068,6 +4154,7 @@ function terminateServicesSync(
       // Settled before it runs: an async cleanup still in progress (an MCP
       // server outlives the signal path) must not run it a second time.
       phases.teardownSettled.add(index);
+      if (!isProvisioner) phases.regularTeardownRan = true;
       const result = runSignalTeardownCommand(cmd, ctx, timeoutMs, redact);
       const status = result.timedOut
         ? "timed-out"
@@ -3081,11 +4168,28 @@ function terminateServicesSync(
         ...(result.signal ? { signal: result.signal } : {}),
         durationMs: result.durationMs,
         timeoutMs,
+        ...(critical ? { critical: true } : {}),
       });
+      if (critical && status !== "completed") {
+        note(
+          `CRITICAL services teardown[${index}] ${status}; the invocation journal records it`,
+        );
+        phases.criticalFailures.push({
+          index,
+          command: redact(cmd),
+          ...(isProvisioner ? { provisioner: true } : {}),
+          ...(result.exitCode !== null ? { exitCode: result.exitCode } : {}),
+          ...(result.timedOut ? { timedOut: true } : {}),
+          ...(result.signal ? { signal: result.signal } : {}),
+          path: "signal",
+        });
+      }
     } catch {
       // best-effort, never fatal in the signal path
     }
   }
+  stopTunnels();
+  dropSeedResumeAfterTeardown(phases);
 }
 
 /**
@@ -3361,6 +4465,30 @@ function awaitBootCommandsSync(
   );
 }
 
+/** How long the signal path waits for a running provisioner `up`: the `down`'s own signal budget. */
+function provisionerSignalWaitMs(phases: PhaseState, capMs: number): number {
+  const policy =
+    phases.provisionerIndex === undefined
+      ? undefined
+      : phases.teardownPolicies[phases.provisionerIndex];
+  return policy?.onSignal === "wait"
+    ? (policy.timeoutMs ?? SIGNAL_WAIT_DEFAULT_MS)
+    : capMs;
+}
+
+/** SIGTERM every running boot command's tree (children first). */
+function signalBootCommandsSync(roots: Set<number> | undefined): void {
+  for (const root of roots ?? []) {
+    for (const pid of [root, ...descendantPidsSync(root)].toReversed()) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
 /** Poll until every pid exited (zombies count as exited) or `ms` passed. */
 function waitForExitSync(pids: number[], ms: number): number[] {
   const deadline = Date.now() + ms;
@@ -3412,7 +4540,7 @@ function sleepSync(ms: number): void {
 function terminateTmuxSync(session: string | undefined): void {
   if (!session) return;
   try {
-    spawnSync("tmux", ["kill-session", "-t", session], {
+    spawnSync("tmux", ["kill-session", "-t", tmuxSessionTarget(session)], {
       timeout: 3_000,
     });
   } catch {
@@ -3519,9 +4647,10 @@ export function captureTmuxSignalArtifactsSync(
           "capture-pane",
           "-p",
           "-t",
-          `${input.session}:${window}`,
+          tmuxWindowTarget(input.session, window),
           "-S",
           `-${policy.maxLinesPerSource}`,
+          "-J",
         ],
         {
           encoding: "utf8",
@@ -3766,9 +4895,10 @@ async function collectRunArtifacts(
             "capture-pane",
             "-p",
             "-t",
-            `${phases.tmuxSessionName}:${win.name}`,
+            tmuxWindowTarget(phases.tmuxSessionName, win.name),
             "-S",
             `-${policy.maxLinesPerSource}`,
+            "-J",
           ],
           {
             reject: false,
@@ -4447,7 +5577,7 @@ async function runHealthcheck(
  */
 function serviceOutput(
   ctx: StartServicesContext,
-  source: "docker" | "seed" | "teardown",
+  source: "docker" | "seed" | "teardown" | "provisioner",
   redactor: ArtifactRedactor,
 ):
   | {
@@ -4578,4 +5708,965 @@ function stripFinalNewline(text: string): string {
     : text.endsWith("\n")
       ? text.slice(0, -1)
       : text;
+}
+
+/* ===== F10: provisioner, tunnels, files, restart, supervision ===== */
+
+const DEFAULT_PROVISIONER_UP_MS = 600_000;
+const DEFAULT_EXPORT_TIMEOUT_MS = 60_000;
+const DEFAULT_RESTART_STOP_MS = 30_000;
+const DEFAULT_RESTART_MAX = 5;
+/** A restarted window that stays up this long has its failure streak reset. */
+const SUPERVISOR_STABLE_MS = 30_000;
+const DEFAULT_SUPERVISION_INTERVAL_MS = 2_000;
+
+/** A request refused up front: nothing was changed (exit 4 in the CLI). */
+export class ServicesRefusedError extends ServicesError {
+  override name = "ServicesRefusedError";
+}
+
+/** The tunnel state key of a services context (project + env + config). */
+export function tunnelKeyOf(
+  ctx: Pick<
+    StartServicesContext,
+    "project" | "envName" | "configPath" | "configDir"
+  >,
+): string {
+  return tunnelStateKey({
+    project: ctx.project,
+    env: ctx.envName,
+    configPath: ctx.configPath,
+    configDir: ctx.configDir,
+  });
+}
+
+/* ----- provisioner ----- */
+
+/**
+ * `services.provisioner.up` + exports. The `down` entry is already in the
+ * teardown list (see newPhaseState) and `provisionerUpStarted` is set BEFORE
+ * `up` runs, so a failed or cancelled `up` is still torn down.
+ */
+async function startProvisioner(
+  cfg: ProvisionerConfig,
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  emit: EmitFn,
+): Promise<void> {
+  phases.provisioned = true;
+  phases.provisionerUpStarted = true;
+  phases.provisionerConfig = cfg;
+  phases.provisionerRunning = true;
+  try {
+    await runProvisionerUp(cfg, ctx, phases, emit);
+  } finally {
+    phases.provisionerRunning = false;
+  }
+}
+
+async function runProvisionerUp(
+  cfg: ProvisionerConfig,
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  emit: EmitFn,
+): Promise<void> {
+  const up = typeof cfg.up === "string" ? { run: cfg.up } : cfg.up;
+  const cwd = resolveCwd(cfg.cwd, ctx.configDir);
+  const env = targetEnv(ctx, cfg.env);
+  const redactor = createArtifactRedactor(undefined, env, ctx.secretValues);
+  const timeout =
+    toMs("timeout" in up ? up.timeout : undefined) ??
+    toMs(cfg.timeout) ??
+    DEFAULT_PROVISIONER_UP_MS;
+  ctx.log?.(redactor.text(`provisioner — up (${up.run})`));
+  emit("provisioner", "start", redactor.text(up.run));
+  const live = serviceOutput(ctx, "provisioner", redactor);
+  live?.announce(up.run);
+  const r = await runShellWithTimeout(
+    up.run,
+    { cwd, env, signal: ctx.signal, track: ctx.bootPids },
+    timeout,
+    live ? (_stream, chunk) => live.push(chunk) : undefined,
+  );
+  live?.finish(r.exitCode);
+  if (r.exitCode !== 0) {
+    emit("provisioner", "fail", `up exit ${r.exitCode}`, {
+      exitCode: r.exitCode,
+    });
+    throw new ServicesError(
+      redactor.text(
+        `provisioner up failed (exit ${r.exitCode}): ${up.run}\n` +
+          tailText(`${r.stdout}\n${r.stderr}`, SHELL_TAIL_LINES),
+      ),
+    );
+  }
+  let values: Record<string, string>;
+  try {
+    values = await runProvisionerExports(cfg, ctx, { cwd, env, redactor });
+  } catch (error) {
+    emit("provisioner", "fail", (error as Error).message, {
+      reason: "exports",
+    });
+    throw error;
+  }
+  phases.provisionerExportsDone = true;
+  applyProvisionerExports(ctx, phases, values);
+  const names = Object.keys(values);
+  ctx.log?.(
+    `provisioner — up${
+      names.length > 0 ? `, exported ${names.join(", ")}` : ""
+    }`,
+  );
+  emit("provisioner", "ready", "provisioner up", { exports: names });
+  if (names.length > 0) {
+    // Names only: an export is a value the config never wrote down.
+    emit("provisioner", "exports", `exported ${names.length} value(s)`, {
+      names,
+    });
+  }
+}
+
+/**
+ * The provisioner's `up` started but its exports were never evaluated (the
+ * `up` failed, timed out or was cancelled): evaluate them once, best-effort
+ * and bounded by each export's timeout, so the `down` gets the values that
+ * name the resource. Never throws; a failure is logged and the `down` runs
+ * without them.
+ */
+async function provisionerExportsForDown(
+  phases: PhaseState,
+  ctx: StartServicesContext,
+): Promise<void> {
+  const cfg = phases.provisionerConfig;
+  if (
+    !cfg?.exports ||
+    !phases.provisionerUpStarted ||
+    phases.provisionerExportsDone
+  ) {
+    return;
+  }
+  phases.provisionerExportsDone = true;
+  // Not the boot's signal: a cancelled boot still tears down.
+  const evalCtx: StartServicesContext = { ...ctx, bootPids: new Set() };
+  delete evalCtx.signal;
+  try {
+    const values = await runProvisionerExports(cfg, evalCtx, {
+      cwd: resolveCwd(cfg.cwd, ctx.configDir),
+      env: targetEnv(ctx, cfg.env),
+      redactor: phases.artifactRedactor,
+    });
+    applyProvisionerExports(ctx, phases, values);
+    ctx.log?.(
+      `provisioner — exports evaluated for the down command (${Object.keys(values).join(", ")})`,
+    );
+  } catch (error) {
+    ctx.log?.(
+      phases.artifactRedactor.text(
+        `provisioner exports could not be evaluated for the down command: ${(error as Error).message.split("\n")[0]}`,
+      ),
+    );
+  }
+}
+
+/**
+ * The signal path's copy of {@link provisionerExportsForDown}: synchronous,
+ * each export capped at the signal teardown cap.
+ */
+function provisionerExportsForDownSync(
+  phases: PhaseState,
+  ctx: StartServicesContext,
+  capMs: number,
+  note: (line: string) => void,
+): void {
+  const cfg = phases.provisionerConfig;
+  if (
+    !cfg?.exports ||
+    !phases.provisionerUpStarted ||
+    phases.provisionerExportsDone
+  ) {
+    return;
+  }
+  phases.provisionerExportsDone = true;
+  const cwd = resolveCwd(cfg.cwd, ctx.configDir);
+  const env = targetEnv(ctx, cfg.env);
+  const values: Record<string, string> = {};
+  for (const [name, entry] of Object.entries(cfg.exports)) {
+    const command = typeof entry === "string" ? entry : entry.run;
+    const timeout = Math.min(
+      toMs(typeof entry === "string" ? undefined : entry.timeout) ??
+        DEFAULT_EXPORT_TIMEOUT_MS,
+      capMs,
+    );
+    const r = spawnSync(command, {
+      cwd,
+      env: { ...env, ...values },
+      shell: true,
+      encoding: "utf8",
+      timeout,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const lines = String(r.stdout ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    if (r.status !== 0 || lines.length !== 1) {
+      note(
+        `provisioner export ${name} could not be evaluated for the down command; it runs without the rest`,
+      );
+      break;
+    }
+    values[name] = lines[0]!;
+  }
+  applyProvisionerExports(ctx, phases, values);
+}
+
+/** Run each export command in order; one value (one line) each. */
+async function runProvisionerExports(
+  cfg: ProvisionerConfig,
+  ctx: StartServicesContext,
+  input: { cwd: string; env: NodeJS.ProcessEnv; redactor: ArtifactRedactor },
+): Promise<Record<string, string>> {
+  const values: Record<string, string> = {};
+  for (const [name, entry] of Object.entries(cfg.exports ?? {})) {
+    const command = typeof entry === "string" ? entry : entry.run;
+    const timeout =
+      toMs(typeof entry === "string" ? undefined : entry.timeout) ??
+      DEFAULT_EXPORT_TIMEOUT_MS;
+    const r = await runShellWithTimeout(
+      command,
+      {
+        cwd: input.cwd,
+        env: { ...input.env, ...values },
+        signal: ctx.signal,
+        track: ctx.bootPids,
+      },
+      timeout,
+    );
+    if (r.exitCode !== 0) {
+      throw new ServicesError(
+        input.redactor.text(
+          `provisioner export ${name} failed (exit ${r.exitCode}): ${command}\n${tailText(
+            r.stderr || r.stdout,
+            10,
+          )}`,
+        ),
+      );
+    }
+    const lines = r.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    if (lines.length !== 1) {
+      throw new ServicesError(
+        `provisioner export ${name}: the command printed ${
+          lines.length === 0 ? "nothing" : `${lines.length} lines`
+        }; it must print exactly one value`,
+      );
+    }
+    values[name] = lines[0]!;
+  }
+  return values;
+}
+
+/**
+ * Hand exported values to every later phase (ctx.env), keep them out of
+ * artifacts (a credential-named export is registered for redaction) and
+ * remember them for the run engine.
+ */
+function applyProvisionerExports(
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  values: Record<string, string>,
+): void {
+  if (Object.keys(values).length === 0) return;
+  const sensitive = Object.entries(values)
+    .filter(([name]) => isSensitiveEnvKey(name))
+    .map(([, value]) => value);
+  registerSecretValues(sensitive);
+  ctx.secretValues = [...(ctx.secretValues ?? []), ...sensitive];
+  ctx.env = { ...(ctx.env ?? process.env), ...values };
+  Object.assign(phases.exportedEnv, values);
+  phases.artifactRedactor = createArtifactRedactor(
+    undefined,
+    ctx.env,
+    ctx.secretValues,
+  );
+}
+
+/**
+ * Re-evaluate the exports of a provisioner owned by `cairn services up`
+ * (`--reuse-services`): nothing is created, the export commands just print
+ * their values again.
+ */
+export async function evaluateProvisionerExports(
+  cfg: ServicesConfig,
+  ctx: StartServicesContext,
+): Promise<Record<string, string>> {
+  if (!cfg.provisioner?.exports) return {};
+  const cwd = resolveCwd(cfg.provisioner.cwd, ctx.configDir);
+  const env = targetEnv(ctx, cfg.provisioner.env);
+  const redactor = createArtifactRedactor(undefined, env, ctx.secretValues);
+  const values = await runProvisionerExports(cfg.provisioner, ctx, {
+    cwd,
+    env,
+    redactor,
+  });
+  const sensitive = Object.entries(values)
+    .filter(([name]) => isSensitiveEnvKey(name))
+    .map(([, value]) => value);
+  registerSecretValues(sensitive);
+  return values;
+}
+
+/* ----- tunnels ----- */
+
+async function startTunnels(
+  tunnels: readonly TunnelConfig[],
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  emit: EmitFn,
+): Promise<void> {
+  const stateRoot = ctx.stateRoot ?? servicesStateRoot();
+  const set = new TunnelSet(tunnels, {
+    project: tunnelKeyOf(ctx),
+    stateRoot,
+    logRoot: ctx.serviceLogRoot ?? stateRoot,
+    envFor: (tunnel) => targetEnv(ctx, tunnel.env),
+    cwdFor: (tunnel) => resolveCwd(tunnel.cwd, ctx.configDir),
+    emit: (event, message, data) => emit("tunnel", event, message, data),
+    log: (message) => ctx.log?.(phases.artifactRedactor.text(message)),
+    warn: (message) =>
+      readinessWarn(ctx)(phases.artifactRedactor.text(message)),
+    redact: (text) => phases.artifactRedactor.text(text),
+    supervise: ctx.supervise !== false,
+    waitReady: async (tunnel) => {
+      const refs = gateRefList(tunnel.ready);
+      if (refs.length === 0) return;
+      const gateCtx = await serviceGateContext(ctx, {
+        scope: "services.tunnel",
+        label: `tunnel/${tunnel.name}`,
+        env: targetEnv(ctx, tunnel.env),
+        cwd: resolveCwd(tunnel.cwd, ctx.configDir),
+        defaultTimeoutMs: toMs(tunnel.readyTimeout) ?? 60_000,
+      });
+      await waitServiceGates(refs, gateCtx, `tunnel/${tunnel.name}`, ctx);
+    },
+  });
+  // Registered before the start: a tunnel that fails (or a later phase that
+  // fails) still has every spawned tunnel stopped by the cleanup.
+  phases.tunnels = set;
+  ctx.log?.(`tunnels — starting ${tunnels.map((t) => t.name).join(", ")}`);
+  try {
+    await set.start();
+  } catch (error) {
+    throw new ServicesError((error as Error).message);
+  }
+}
+
+/* ----- files ----- */
+
+async function applyServicesFiles(
+  files: NonNullable<ServicesConfig["files"]>,
+  tmux: TmuxConfig | undefined,
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  emit: EmitFn,
+): Promise<void> {
+  const env = targetEnv(ctx);
+  for (const file of files) {
+    try {
+      const r = await applyServiceFile(file, {
+        configDir: ctx.configDir,
+        env,
+        exports: phases.exportedEnv,
+      });
+      emit(
+        "files",
+        r.changed ? "write" : "unchanged",
+        `${file.path} ${r.changed ? "written" : "unchanged"}`,
+        {
+          path: file.path,
+          changed: r.changed,
+          existed: r.existed,
+          ...(r.before
+            ? { before: r.before.sha, beforeBytes: r.before.bytes }
+            : {}),
+          after: r.after.sha,
+          afterBytes: r.after.bytes,
+          ...(file.restart ? { restart: file.restart } : {}),
+        },
+      );
+      ctx.log?.(
+        `files — ${file.path} ${
+          r.changed ? "updated" : "unchanged"
+        } (${r.after.sha})`,
+      );
+      if (r.changed) {
+        for (const window of file.restart ?? []) {
+          if (!tmux) {
+            ctx.log?.(
+              `files — ${file.path} asks to restart "${window}", but no tmux session is configured`,
+            );
+            continue;
+          }
+          phases.restartAfterBoot.add(window);
+        }
+      }
+    } catch (error) {
+      emit("files", "fail", `${file.path} failed`, { path: file.path });
+      throw error instanceof ServiceFileError
+        ? new ServicesError(error.message)
+        : error;
+    }
+  }
+}
+
+/** After the tmux phase: restart windows a changed file named that were already live. */
+async function restartWindowsAfterFiles(
+  tmux: TmuxConfig,
+  ctx: StartServicesContext,
+  phases: PhaseState,
+  emit: EmitFn,
+): Promise<void> {
+  const wanted = [...phases.restartAfterBoot].filter(
+    (name) => !phases.launchedWindows.has(name),
+  );
+  if (wanted.length === 0) return;
+  const report = await restartTmuxWindows(tmux, ctx, wanted, {
+    emit,
+    reason: "files",
+  });
+  const failed = report.results.find((result) => !result.ok);
+  if (failed) {
+    throw new ServicesError(
+      `restarting window "${failed.window}" after a services.files change failed: ${failed.error ?? "unknown error"}`,
+    );
+  }
+}
+
+/* ----- restart ----- */
+
+export interface RestartWindowsOptions {
+  /** Wait for the old process to exit after Ctrl-C (default 30000). */
+  stopTimeoutMs?: number;
+  /** Wait for readiness of the new process (default tmux readyTimeoutMs, else 90000). */
+  readyTimeoutMs?: number;
+  /** Why (event data): `manual`, `exited`, `unhealthy`, `files`. */
+  reason?: string;
+  /** Event sink; default: ctx.onEvent. */
+  emit?: EmitFn;
+}
+
+export interface WindowRestartResult {
+  window: string;
+  ok: boolean;
+  /** The pane was already at an idle shell: nothing to stop. */
+  alreadyStopped: boolean;
+  /** Restart generation id (the marker printed into the pane). */
+  generation?: string;
+  durationMs: number;
+  error?: string;
+  /** Not attempted: an earlier window failed. */
+  skipped?: boolean;
+}
+
+export interface RestartWindowsReport {
+  session: string;
+  results: WindowRestartResult[];
+  events: ServicesEvent[];
+}
+
+/**
+ * Restart tmux windows of the configured session, one after the other:
+ * Ctrl-C, wait for the pane's process to exit (never a hard kill), clear the
+ * history, print a generation marker, resend the window's command (env,
+ * preCommands, command) and wait for `readyOn` of the NEW generation — text
+ * is read only below the marker, so stale scrollback never counts.
+ *
+ * Refuses (ServicesRefusedError, nothing touched) when the session is not
+ * running, a name is not a window of the configured session, or the window is
+ * missing from the live session. A runtime failure stops the sequence and is
+ * reported per window.
+ */
+export async function restartTmuxWindows(
+  cfg: TmuxConfig,
+  ctx: StartServicesContext,
+  names: readonly string[],
+  opts: RestartWindowsOptions = {},
+): Promise<RestartWindowsReport> {
+  const events: ServicesEvent[] = [];
+  const emit: EmitFn =
+    opts.emit ??
+    ((phase, event, message, data) => {
+      const e: ServicesEvent = {
+        phase,
+        event,
+        message,
+        timestamp: new Date().toISOString(),
+        ...(data ? { data } : {}),
+      };
+      events.push(e);
+      ctx.onEvent?.(e);
+    });
+  const unique = [...new Set(names)];
+  if (unique.length === 0) {
+    throw new ServicesRefusedError("name at least one window to restart");
+  }
+  const configured = new Map(cfg.windows.map((w) => [w.name, w]));
+  for (const name of unique) {
+    if (!configured.has(name)) {
+      throw new ServicesRefusedError(
+        `"${name}" is not a window of the configured tmux session "${cfg.session}" (configured: ${[
+          ...configured.keys(),
+        ].join(", ")}); cairn only restarts windows it owns`,
+      );
+    }
+  }
+  if (!(await tmuxSessionExists(cfg.session))) {
+    throw new ServicesRefusedError(
+      `tmux session "${cfg.session}" is not running; start the services first (cairn services up)`,
+    );
+  }
+  for (const name of unique) {
+    if (!(await tmuxWindowExists(cfg.session, name))) {
+      throw new ServicesRefusedError(
+        `window "${name}" is missing from the running session "${cfg.session}"; cairn services up recreates it`,
+      );
+    }
+  }
+  const results: WindowRestartResult[] = [];
+  let stopped = false;
+  for (const name of unique) {
+    if (stopped) {
+      results.push({
+        window: name,
+        ok: false,
+        alreadyStopped: false,
+        durationMs: 0,
+        skipped: true,
+      });
+      continue;
+    }
+    const result = await restartOneWindow(
+      cfg,
+      configured.get(name)!,
+      ctx,
+      emit,
+      opts,
+    );
+    results.push(result);
+    if (!result.ok) stopped = true;
+  }
+  return { session: cfg.session, results, events };
+}
+
+async function restartOneWindow(
+  cfg: TmuxConfig,
+  win: TmuxWindow,
+  ctx: StartServicesContext,
+  emit: EmitFn,
+  opts: RestartWindowsOptions,
+): Promise<WindowRestartResult> {
+  const session = cfg.session;
+  const target = tmuxWindowTarget(session, win.name);
+  const startedAt = Date.now();
+  const reason = opts.reason ?? "manual";
+  const generation = newGenerationId();
+  let alreadyStopped = false;
+  const fail = (why: string, message: string): WindowRestartResult => {
+    emit("restart", "fail", `"${win.name}" restart failed`, {
+      window: win.name,
+      reason,
+      why,
+    });
+    return {
+      window: win.name,
+      ok: false,
+      alreadyStopped: false,
+      generation,
+      durationMs: Date.now() - startedAt,
+      error: message,
+    };
+  };
+  emit("restart", "start", `restarting "${win.name}"`, {
+    window: win.name,
+    reason,
+  });
+  try {
+    // 1. Graceful stop: Ctrl-C (again at 40% of the budget), then wait for
+    // the pane to return to an idle shell. Never a hard kill.
+    const stopBudget = opts.stopTimeoutMs ?? DEFAULT_RESTART_STOP_MS;
+    alreadyStopped = await isTmuxPaneIdleShell(session, win.name);
+    if (!alreadyStopped) {
+      const sendInterrupt = async (): Promise<void> => {
+        await execa("tmux", ["send-keys", "-t", target, "C-c"], {
+          reject: false,
+          timeout: 5_000,
+        });
+      };
+      await sendInterrupt();
+      const stopStart = Date.now();
+      let second = false;
+      while (!(await isTmuxPaneIdleShell(session, win.name))) {
+        const waited = Date.now() - stopStart;
+        if (waited >= stopBudget) {
+          return fail(
+            "stop-timeout",
+            `"${win.name}" did not exit within ${formatBudget(stopBudget)} after Ctrl-C (the process ignores it; stop it by hand or raise --stop-timeout)`,
+          );
+        }
+        if (!second && waited >= stopBudget * 0.4) {
+          second = true;
+          await sendInterrupt();
+        }
+        await sleepUnlessCancelled(300, ctx.signal);
+      }
+      emit("restart", "stop", `"${win.name}" stopped`, {
+        window: win.name,
+        graceful: true,
+        durationMs: Date.now() - stopStart,
+      });
+    }
+    // 2. A clean pane and a generation marker below which only the new
+    // process' output will appear.
+    await waitForTmuxShellReady(session, win.name, ctx);
+    await clearTmuxHistory(session, win.name);
+    await sendTmuxCommand(
+      session,
+      win.name,
+      generationMarkerCommand(generation),
+    );
+    const markerDeadline = Date.now() + 10_000;
+    for (;;) {
+      const pane = await captureTmuxPane(session, win.name, 200);
+      if (
+        pane
+          .split("\n")
+          .some((line) => line.trim() === generationMarker(generation))
+      ) {
+        break;
+      }
+      if (Date.now() >= markerDeadline) {
+        return fail("marker", `"${win.name}": the pane did not accept input`);
+      }
+      await sleepUnlessCancelled(200, ctx.signal);
+    }
+    // 3. Resend env, preCommands and the command.
+    ctx.launchedWindows?.add(win.name);
+    await sendWindowCommands(session, win, ctx);
+    // 4. Readiness of the new generation.
+    if (win.readyOn) {
+      const readyMs =
+        opts.readyTimeoutMs ?? cfg.readyTimeoutMs ?? DEFAULT_TMUX_READY_MS;
+      const deadline =
+        readyMs > 0 ? Date.now() + readyMs : Number.POSITIVE_INFINITY;
+      const gate = await tmuxReadyOnGate(cfg, win, ctx);
+      const warn = readinessWarn(ctx);
+      try {
+        await waitForTmuxWindow(session, win, deadline, {
+          ...(gate ? { gate } : {}),
+          generation,
+          signal: ctx.signal,
+          onUrlStatus: (url, status) => warnLegacyReadiness(url, status, warn),
+        });
+      } catch (error) {
+        gate?.watch.finish(false, { timedOut: Date.now() >= deadline });
+        return fail(
+          error instanceof TmuxTerminalReadinessError
+            ? error.reason
+            : "ready-timeout",
+          (error as Error).message,
+        );
+      }
+    }
+  } catch (error) {
+    if (error instanceof ServicesCancelledError) throw error;
+    return fail("error", (error as Error).message);
+  }
+  const durationMs = Date.now() - startedAt;
+  emit("restart", "ready", `"${win.name}" restarted`, {
+    window: win.name,
+    reason,
+    generation,
+    durationMs,
+  });
+  return {
+    window: win.name,
+    ok: true,
+    alreadyStopped,
+    generation,
+    durationMs,
+  };
+}
+
+/* ----- supervision ----- */
+
+interface SupervisedWindow {
+  /** Consecutive failed-or-short-lived runs since the last stable one. */
+  consecutive: number;
+  lastRestartAt: number | undefined;
+  nextRestartAt: number | undefined;
+  pendingReason: "exited" | "unhealthy" | undefined;
+  restarting: boolean;
+  gaveUp: boolean;
+  nextHealthAt: number | undefined;
+  healthFailures: number;
+  unhealthy: boolean;
+}
+
+/**
+ * While a run is active: restart windows whose process exited
+ * (`restart.policy: on-exit`) and react to `healthcheck.onUnhealthy`.
+ * Polls every 2s; each restart waits `restart.backoff` and the window is
+ * given up on after `restart.max` consecutive failures. Stopped before any
+ * teardown, so nothing restarts while the stack comes down.
+ */
+class WindowSupervisor {
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private inflight: Promise<void> | undefined;
+  private stopped = false;
+  private readonly abort = new AbortController();
+  private readonly windows: TmuxWindow[];
+  private readonly states = new Map<string, SupervisedWindow>();
+
+  constructor(
+    private readonly cfg: TmuxConfig,
+    private readonly ctx: StartServicesContext,
+    private readonly phases: PhaseState,
+    private readonly emit: EmitFn,
+  ) {
+    this.windows = cfg.windows.filter(
+      (win) =>
+        win.restart?.policy === "on-exit" ||
+        win.healthcheck?.onUnhealthy !== undefined,
+    );
+    const onCancel = (): void => this.abort.abort();
+    ctx.signal?.addEventListener("abort", onCancel, { once: true });
+  }
+
+  hasWork(): boolean {
+    return this.windows.length > 0;
+  }
+
+  start(): void {
+    // Another process' `services restart` refuses while this one supervises.
+    writeSupervisorMarker(
+      this.ctx.stateRoot ?? servicesStateRoot(),
+      this.cfg.session,
+      this.windows.map((win) => win.name),
+    );
+    const everyMs =
+      this.ctx.supervisionIntervalMs ?? DEFAULT_SUPERVISION_INTERVAL_MS;
+    this.timer = setInterval(() => {
+      if (this.inflight || this.stopped) return;
+      this.inflight = this.tick()
+        .catch(() => undefined)
+        .finally(() => {
+          this.inflight = undefined;
+        });
+    }, everyMs);
+    this.timer.unref?.();
+  }
+
+  async stop(): Promise<void> {
+    this.stopSync();
+    await this.inflight?.catch(() => undefined);
+  }
+
+  stopSync(): void {
+    const first = !this.stopped;
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.abort.abort();
+    if (first) {
+      try {
+        removeSupervisorMarker(
+          this.ctx.stateRoot ?? servicesStateRoot(),
+          this.cfg.session,
+        );
+      } catch {
+        // best-effort, also on the signal path
+      }
+    }
+  }
+
+  private stateOf(win: TmuxWindow): SupervisedWindow {
+    let state = this.states.get(win.name);
+    if (!state) {
+      state = {
+        consecutive: 0,
+        lastRestartAt: undefined,
+        nextRestartAt: undefined,
+        pendingReason: undefined,
+        restarting: false,
+        gaveUp: false,
+        nextHealthAt: undefined,
+        healthFailures: 0,
+        unhealthy: false,
+      };
+      this.states.set(win.name, state);
+    }
+    return state;
+  }
+
+  private async tick(): Promise<void> {
+    for (const win of this.windows) {
+      if (this.stopped) return;
+      const state = this.stateOf(win);
+      if (state.gaveUp || state.restarting) continue;
+      // A restart waiting out its backoff.
+      if (state.nextRestartAt !== undefined) {
+        if (Date.now() >= state.nextRestartAt) {
+          await this.restart(win, state, state.pendingReason ?? "exited");
+        }
+        continue;
+      }
+      if (win.restart?.policy === "on-exit")
+        await this.superviseExit(win, state);
+      if (this.stopped || state.gaveUp || state.restarting) continue;
+      if (win.healthcheck?.onUnhealthy !== undefined) {
+        await this.superviseHealth(win, state);
+      }
+    }
+  }
+
+  private async superviseExit(
+    win: TmuxWindow,
+    state: SupervisedWindow,
+  ): Promise<void> {
+    const pane = await inspectTmuxPaneForReadiness(this.cfg.session, win.name);
+    if (pane.kind !== "idle-shell") return;
+    this.schedule(win, state, "exited");
+  }
+
+  /** Count a failure; schedule the restart after its backoff, or give up. */
+  private schedule(
+    win: TmuxWindow,
+    state: SupervisedWindow,
+    reason: "exited" | "unhealthy",
+  ): void {
+    const now = Date.now();
+    const sinceLast =
+      state.lastRestartAt === undefined
+        ? Number.POSITIVE_INFINITY
+        : now - state.lastRestartAt;
+    state.consecutive =
+      sinceLast >= SUPERVISOR_STABLE_MS ? 1 : state.consecutive + 1;
+    const max = win.restart?.max ?? DEFAULT_RESTART_MAX;
+    if (state.consecutive > max) {
+      state.gaveUp = true;
+      this.emit(
+        "restart",
+        "giveup",
+        `"${win.name}" gave up after ${max} restarts`,
+        {
+          window: win.name,
+          reason,
+          restarts: max,
+        },
+      );
+      readinessWarn(this.ctx)(
+        `tmux window "${win.name}" gave up after ${max} consecutive restarts (${reason})`,
+      );
+      return;
+    }
+    const delayMs = backoffDelayMs(
+      resolveBackoff(win.restart?.backoff),
+      state.consecutive,
+    );
+    state.nextRestartAt = now + delayMs;
+    state.pendingReason = reason;
+    this.ctx.log?.(
+      `tmux — "${win.name}" ${
+        reason === "exited" ? "exited" : "is unhealthy"
+      }; restarting in ${delayMs}ms (${state.consecutive}/${max})`,
+    );
+  }
+
+  private async restart(
+    win: TmuxWindow,
+    state: SupervisedWindow,
+    reason: "exited" | "unhealthy",
+  ): Promise<void> {
+    state.restarting = true;
+    state.nextRestartAt = undefined;
+    state.pendingReason = undefined;
+    try {
+      const ctx: StartServicesContext = {
+        ...this.ctx,
+        signal: this.abort.signal,
+      };
+      const report = await restartTmuxWindows(this.cfg, ctx, [win.name], {
+        emit: this.emit,
+        reason,
+      });
+      if (!report.results[0]?.ok) {
+        readinessWarn(this.ctx)(
+          `tmux window "${win.name}" restart failed: ${report.results[0]?.error ?? "unknown error"}`,
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof ServicesCancelledError)) {
+        readinessWarn(this.ctx)(
+          `tmux window "${win.name}" could not restart: ${(error as Error).message}`,
+        );
+      }
+    } finally {
+      state.lastRestartAt = Date.now();
+      state.restarting = false;
+      state.healthFailures = 0;
+      state.unhealthy = false;
+      state.nextHealthAt = undefined;
+    }
+  }
+
+  private async superviseHealth(
+    win: TmuxWindow,
+    state: SupervisedWindow,
+  ): Promise<void> {
+    const hc = win.healthcheck!;
+    const now = Date.now();
+    if (state.nextHealthAt === undefined) {
+      state.nextHealthAt = now + (hc.startPeriodSeconds ?? 0) * 1000;
+    }
+    if (now < state.nextHealthAt) return;
+    state.nextHealthAt =
+      now + (hc.intervalSeconds ?? DEFAULT_HC_INTERVAL_S) * 1000;
+    const r = await runShellWithTimeout(
+      hc.command,
+      {
+        cwd: resolveCwd(win.cwd, this.ctx.configDir),
+        env: targetEnv(this.ctx, { ...this.cfg.env, ...win.env }),
+        signal: this.abort.signal,
+      },
+      (hc.timeoutSeconds ?? DEFAULT_HC_TIMEOUT_S) * 1000,
+    ).catch(() => undefined);
+    if (!r) return;
+    if (r.exitCode === 0) {
+      if (state.unhealthy) {
+        state.unhealthy = false;
+        this.ctx.log?.(`tmux/${win.name} — healthcheck recovered`);
+        this.emit("tmux", "healthcheck", `healthy: ${win.name}`, {
+          window: win.name,
+          healthy: true,
+        });
+      }
+      state.healthFailures = 0;
+      return;
+    }
+    state.healthFailures += 1;
+    if (state.healthFailures < (hc.retries ?? DEFAULT_HC_RETRIES)) return;
+    if (!state.unhealthy) {
+      state.unhealthy = true;
+      readinessWarn(this.ctx)(
+        `tmux/${win.name} — healthcheck WARNING: unhealthy after ${state.healthFailures} failures`,
+      );
+      this.emit("tmux", "healthcheck", `unhealthy: ${win.name}`, {
+        window: win.name,
+        healthy: false,
+        consecutiveFailures: state.healthFailures,
+      });
+    }
+    if (hc.onUnhealthy === "restart") this.schedule(win, state, "unhealthy");
+  }
 }

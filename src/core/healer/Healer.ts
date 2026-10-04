@@ -8,7 +8,7 @@ import { runSpec, type ProgressListener } from "../runner/Runner";
 import type { PatchOp } from "../schema/heal.v1";
 import type { RunResult } from "../schema/run.v1";
 import type { ExitCode } from "../schema/shared";
-import type { Step } from "../schema/spec.v1";
+import { isBuiltinLoginUse, type Step } from "../schema/spec.v1";
 import {
   findByRole,
   parseSnapshot,
@@ -110,7 +110,32 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     };
   }
 
-  const failedStepIdx = result.steps.findIndex((s) => s.status === "failed");
+  const failedResultIdx = result.steps.findIndex((s) => s.status === "failed");
+  const failedResult =
+    failedResultIdx >= 0 ? result.steps[failedResultIdx] : undefined;
+  // F14: a step nested in a control-flow block (repeat / if / a retried
+  // use:) is not healed — the same step runs per iteration or branch, so
+  // one snapshot is no ground for one patch. Results are post-order (a
+  // block's steps before the block), so the first failure is the innermost.
+  if (failedResult?.parentId !== undefined) {
+    return {
+      specPath: specPathAbs,
+      basedOnRunId: result.runId,
+      status: "no-heal-possible",
+      outcomesStillReachable: false,
+      ops: [],
+      summary: `step '${failedResult.id}' failed inside control-flow block '${failedResult.parentId}' (repeat/if/retry) — heal does not patch nested steps; fix it by hand or run it as a top-level step to heal it`,
+      exitCode: 5,
+    };
+  }
+  // Resolved index of the top-level step: nested results are interleaved
+  // with the top-level ones, so count only top-level results before it.
+  const failedStepIdx =
+    failedResultIdx < 0
+      ? -1
+      : result.steps
+          .slice(0, failedResultIdx)
+          .filter((s) => s.parentId === undefined).length;
   if (failedStepIdx < 0) {
     // Outcome failure but no step failure → not a drift; this is a real regression.
     return {
@@ -169,8 +194,44 @@ export async function healSpec(opts: HealOptions): Promise<HealOutput> {
     };
   }
 
+  // F18: the built-in `use: login` is API calls, no locator to repair.
+  if (
+    "use" in origin.step &&
+    isBuiltinLoginUse(parsed.resolved.steps?.[failedStepIdx] ?? origin.step)
+  ) {
+    return {
+      specPath: specPathAbs,
+      basedOnRunId: result.runId,
+      status: "no-heal-possible",
+      outcomesStillReachable: false,
+      ops: [],
+      summary: `use: login failed (${failedResult?.error ?? "no detail"}) — heal repairs locators only; fix environments.<env>.auth or the credentials`,
+      exitCode: 5,
+    };
+  }
+
+  // F14: a failed repeat / if / retried use (until never held, a condition
+  // that could not be read) has no locator of its own to repair.
+  if (
+    "repeat" in origin.step ||
+    "if" in origin.step ||
+    ("use" in origin.step &&
+      typeof origin.step.use !== "string" &&
+      origin.step.use.retry !== undefined)
+  ) {
+    return {
+      specPath: specPathAbs,
+      basedOnRunId: result.runId,
+      status: "no-heal-possible",
+      outcomesStillReachable: false,
+      ops: [],
+      summary: `control-flow step '${failedResult?.id ?? failedStepIdx}' failed (${failedResult?.error ?? "no detail"}) — heal repairs locators only; fix the condition or the loop bound by hand`,
+      exitCode: 5,
+    };
+  }
+
   // Read the snapshot the backend took at the failing step (post-attempt page).
-  const failedStepResult = result.steps[failedStepIdx]!;
+  const failedStepResult = failedResult!;
   const stepIdForFile = failedStepResult.id;
   const snapshotPath = join(
     result.runDir,

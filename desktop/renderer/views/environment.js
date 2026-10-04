@@ -84,6 +84,7 @@
       root.appendChild(doctorPanel(doctor.value));
     else root.appendChild(Studio.errorBox(doctor.reason, "cairn doctor"));
 
+    root.appendChild(orphansPanel());
     root.appendChild(projectPanel(appInfo));
     root.appendChild(environmentsPanel());
     const registryPanel = registriesPanel(
@@ -94,6 +95,8 @@
 
     if (services.status === "fulfilled")
       root.appendChild(servicesPanel(services.value));
+    const windowsPanel = serviceWindowsPanel();
+    if (windowsPanel) root.appendChild(windowsPanel);
     if (checkpoints.status === "fulfilled")
       root.appendChild(checkpointsPanel(checkpoints.value));
 
@@ -214,7 +217,12 @@
       ["browser backend", config?.backend ?? "agent-browser (default)"],
       ["testIdAttribute", config?.testIdAttribute ?? "data-testid (default)"],
       ["webServer", config?.hasWebServer ? "declared" : "—"],
-      ["services", config?.hasServices ? "declared (docker/seed/tmux)" : "—"],
+      [
+        "services",
+        config?.hasServices
+          ? "declared (provisioner/tunnels/docker/files/seed/tmux)"
+          : "—",
+      ],
       [
         "retention",
         config?.retention
@@ -483,7 +491,10 @@
     const body = h("tbody");
     for (const env of environments) {
       const policy = env.policy ?? null;
-      const withServices = servicesDeclared && !env.disabled;
+      // `services: false` (an environment without any in a config that
+      // declares them per environment) has no lock to check.
+      const withServices =
+        servicesDeclared && !env.disabled && env.services !== false;
       const lockCell = h(
         "td",
         { class: "services-lock", dataset: { env: env.name } },
@@ -1247,6 +1258,677 @@
       .filter(Boolean)
       .join(" and ");
     return `Uploads: before deleting each pruned run, cairn clean ${what}, per the project's retention config. You will be asked to confirm the upload.`;
+  }
+
+  // ── wave 6: service windows (restart / logs), tunnels, orphan sessions ────
+
+  /**
+   * Service windows of one environment: health, restart and logs per window,
+   * the tunnels cairn supervises, and the names the provisioner exports.
+   * Everything comes from `cairn services status --env <name> --json`; a
+   * restart spawns `cairn services restart <window>` after a native
+   * confirmation (main refuses while a suite or run lock is held, or a run
+   * Studio started uses the environment).
+   * @returns {HTMLElement | null}
+   */
+  function serviceWindowsPanel() {
+    const config = state.project?.config ?? null;
+    if (!config?.hasServices) return null;
+    const envs = (config.environments ?? []).filter(
+      (/** @type {{ disabled?: boolean, services?: boolean }} */ env) =>
+        !env.disabled && env.services !== false,
+    );
+    if (!envs.length) return null;
+    const names = envs.map((/** @type {{ name: string }} */ env) => env.name);
+    let env =
+      config.defaultEnvironment && names.includes(config.defaultEnvironment)
+        ? config.defaultEnvironment
+        : names[0];
+    const body = h("div", { class: "svc-ops-body" });
+    const logHost = h("div", { class: "svc-logs-host" });
+    const picker = h(
+      "select",
+      {
+        id: "svc-env",
+        ariaLabel: "environment whose service windows to show",
+        onChange: (/** @type {Event} */ event) => {
+          env = /** @type {HTMLSelectElement} */ (event.target).value;
+          Studio.clear(logHost);
+          void refresh();
+        },
+      },
+      names.map((/** @type {string} */ name) =>
+        h("option", { value: name, text: name }),
+      ),
+    );
+    /** @type {HTMLSelectElement} */ (picker).value = env;
+    const panel = Studio.panel("service windows, tunnels & provisioner", [
+      h(
+        "div",
+        { class: "toolbar" },
+        h("label", { class: "field", for: "svc-env" }, "environment", picker),
+        h("button", {
+          class: "btn btn-sm",
+          type: "button",
+          text: "Refresh",
+          onClick: () => void refresh(),
+        }),
+      ),
+      body,
+      logHost,
+    ]);
+    panel.dataset.panel = "service-windows";
+
+    async function refresh() {
+      Studio.clear(body);
+      body.appendChild(Studio.loading("reading services status…"));
+      /** @type {any} */
+      let result;
+      try {
+        result = await api.call("services:windows", { env });
+      } catch (error) {
+        Studio.clear(body);
+        body.appendChild(Studio.errorBox(error, "services status"));
+        return;
+      }
+      Studio.clear(body);
+      const status = result?.status ?? null;
+      if (!status) {
+        body.appendChild(
+          h(
+            "div",
+            { class: "error-box" },
+            h("strong", { text: "cairn services status gave no document" }),
+            h("pre", { text: result?.error || "(no output)" }),
+          ),
+        );
+        return;
+      }
+      paintStatus(result, status);
+    }
+
+    /**
+     * @param {any} result
+     * @param {any} status
+     */
+    function paintStatus(result, status) {
+      const lockCell = h("span", { class: "services-lock-cell" });
+      paintLock(lockCell, result);
+      body.appendChild(
+        h(
+          "div",
+          { class: "svc-facts" },
+          h("span", { class: "cell-dim", text: "services-up lock: " }),
+          lockCell,
+          status.tmux.configured
+            ? Studio.tag(
+                status.tmux.sessionExists
+                  ? `tmux ${status.tmux.session ?? ""} running`
+                  : `tmux ${status.tmux.session ?? ""} not running`,
+                status.tmux.sessionExists ? "ok" : "warn",
+              )
+            : null,
+          status.docker.configured
+            ? Studio.tag(
+                status.docker.running ? "docker up" : "docker down",
+                status.docker.running ? "ok" : "warn",
+              )
+            : null,
+          status.seed.configured
+            ? Studio.tag(
+                status.seed.expired ? "seed stale" : "seed fresh",
+                status.seed.expired ? "warn" : "ok",
+              )
+            : null,
+        ),
+      );
+      for (const error of status.errors)
+        if (error)
+          body.appendChild(
+            h("div", { class: "notice notice-warn", text: error }),
+          );
+
+      // windows
+      if (status.tmux.windows.length) {
+        const rows = status.tmux.windows.map(
+          (/** @type {{ name: string, healthy: boolean | null }} */ win) => {
+            const restart = h("button", {
+              class: "btn btn-sm",
+              type: "button",
+              text: "Restart…",
+              dataset: { action: "restart", window: win.name },
+              ariaLabel: `restart service window ${win.name} (asks first)`,
+              disabled: Boolean(result.busy) || !status.tmux.sessionExists,
+              title: status.tmux.sessionExists
+                ? "cairn services restart: Ctrl-C, wait for exit, resend the command (asks first)"
+                : "the tmux session is not running",
+              onClick: () =>
+                void restartWindow(
+                  win.name,
+                  /** @type {HTMLButtonElement} */ (restart),
+                ),
+            });
+            return h(
+              "tr",
+              { class: "svc-window", dataset: { window: win.name } },
+              h("td", { class: "mono", text: win.name }),
+              h(
+                "td",
+                win.healthy === null
+                  ? h("span", { class: "cell-dim", text: "— no healthcheck" })
+                  : h(
+                      "span",
+                      {
+                        class: `ops-inline ops-inline-${
+                          win.healthy ? "ok" : "bad"
+                        }`,
+                      },
+                      h("span", {
+                        ariaHidden: "true",
+                        text: win.healthy ? "✓ " : "✗ ",
+                      }),
+                      win.healthy ? "healthy" : "unhealthy",
+                    ),
+              ),
+              h(
+                "td",
+                { class: "svc-actions" },
+                h("button", {
+                  class: "btn btn-sm btn-ghost",
+                  type: "button",
+                  text: "Logs",
+                  dataset: { action: "logs", window: win.name },
+                  ariaLabel: `show the log of service window ${win.name}`,
+                  onClick: () => void showLogs(win.name, false),
+                }),
+                restart,
+              ),
+            );
+          },
+        );
+        body.appendChild(
+          h(
+            "div",
+            { class: "data-table-scroll" },
+            h(
+              "table",
+              { class: "grid svc-windows", ariaLabel: "service windows" },
+              h(
+                "thead",
+                h(
+                  "tr",
+                  ["window", "health", ""].map((label) =>
+                    h("th", { text: label }),
+                  ),
+                ),
+              ),
+              h("tbody", rows),
+            ),
+          ),
+        );
+      } else
+        body.appendChild(
+          h("p", {
+            class: "cell-dim",
+            text: status.tmux.configured
+              ? "the tmux session has no windows"
+              : "this environment declares no tmux windows",
+          }),
+        );
+
+      // tunnels
+      if (status.tunnels.length)
+        body.appendChild(
+          h(
+            "div",
+            { class: "data-table-scroll" },
+            h(
+              "table",
+              { class: "grid svc-tunnels", ariaLabel: "tunnels" },
+              h(
+                "thead",
+                h(
+                  "tr",
+                  ["tunnel", "state", "running", "pid", "restarts"].map(
+                    (label) => h("th", { text: label }),
+                  ),
+                ),
+              ),
+              h(
+                "tbody",
+                status.tunnels.map(
+                  (/** @type {Record<string, any>} */ tunnel) =>
+                    h(
+                      "tr",
+                      { class: "svc-tunnel", dataset: { tunnel: tunnel.name } },
+                      h("td", { class: "mono", text: tunnel.name }),
+                      h("td", { class: "mono", text: tunnel.state }),
+                      h(
+                        "td",
+                        h(
+                          "span",
+                          {
+                            class: `ops-inline ops-inline-${
+                              tunnel.running ? "ok" : "warn"
+                            }`,
+                          },
+                          h("span", {
+                            ariaHidden: "true",
+                            text: tunnel.running ? "✓ " : "⚠ ",
+                          }),
+                          tunnel.running ? "running" : "not running",
+                        ),
+                      ),
+                      h("td", {
+                        class: "mono",
+                        text: tunnel.pid === null ? "—" : String(tunnel.pid),
+                      }),
+                      h("td", { class: "mono", text: String(tunnel.restarts) }),
+                    ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+      // provisioner: names only, never values
+      if (status.provisioner)
+        body.appendChild(
+          h(
+            "div",
+            { class: "svc-provisioner" },
+            h("span", {
+              class: "cell-dim",
+              text: "provisioner exports (names only): ",
+            }),
+            status.provisioner.exports.length
+              ? status.provisioner.exports.map((/** @type {string} */ name) =>
+                  h("code", { class: "tag mono", text: name }),
+                )
+              : h("span", { class: "cell-dim", text: "none yet" }),
+          ),
+        );
+    }
+
+    /**
+     * @param {string} window
+     * @param {HTMLButtonElement} button
+     */
+    async function restartWindow(window, button) {
+      const label = button.textContent ?? "";
+      button.disabled = true;
+      button.textContent = "Restarting…";
+      try {
+        const result = await api.call("services:restart", { env, window });
+        if (result?.cancelled) return;
+        const row = result?.restart?.windows?.find(
+          (/** @type {{ window: string }} */ entry) => entry.window === window,
+        );
+        toast(
+          result?.ok
+            ? `Restarted ${window} · ${env}`
+            : `Restart failed · ${window}`,
+          result?.ok
+            ? row?.alreadyStopped
+              ? "the process had already stopped; its command was started again"
+              : fmt.formatDuration(
+                  row?.durationMs ?? result?.restart?.durationMs,
+                )
+            : fmt.truncate(
+                result?.unsupported
+                  ? "this cairn has no `cairn services restart`"
+                  : String(
+                      result?.error ?? result?.stderr ?? result?.meaning ?? "",
+                    ),
+                260,
+              ),
+          result?.ok ? "ok" : "bad",
+          result?.ok ? 6000 : 12000,
+        );
+        if (result?.ok) void showLogs(window, true);
+      } catch (error) {
+        toast(
+          `Restart not started · ${window}`,
+          String(error?.message ?? error),
+          "bad",
+          9000,
+        );
+      } finally {
+        button.textContent = label;
+        button.disabled = false;
+        void refresh();
+      }
+    }
+
+    /**
+     * @param {string} window
+     * @param {boolean} sinceRestart
+     */
+    async function showLogs(window, sinceRestart) {
+      Studio.clear(logHost);
+      logHost.appendChild(Studio.loading(`reading ${window} log…`));
+      /** @type {any} */
+      let result;
+      try {
+        result = await api.call("services:logs", {
+          env,
+          window,
+          sinceRestart,
+          lines: 200,
+        });
+      } catch (error) {
+        Studio.clear(logHost);
+        logHost.appendChild(Studio.errorBox(error, `${window} log`));
+        return;
+      }
+      Studio.clear(logHost);
+      const logs = result?.logs ?? null;
+      if (!logs?.ok) {
+        logHost.appendChild(
+          h(
+            "div",
+            { class: "error-box" },
+            h("strong", {
+              text: result?.unsupported
+                ? "this cairn has no `cairn services logs`"
+                : `could not read the ${window} log`,
+            }),
+            h("pre", {
+              text: result?.error || result?.stderr || "(no output)",
+            }),
+          ),
+        );
+        return;
+      }
+      const since = h("input", {
+        type: "checkbox",
+        id: "svc-since",
+        checked: sinceRestart,
+        onChange: (/** @type {Event} */ event) =>
+          void showLogs(
+            window,
+            /** @type {HTMLInputElement} */ (event.target).checked,
+          ),
+      });
+      logHost.appendChild(
+        h(
+          "section",
+          { class: "svc-log", dataset: { window } },
+          h(
+            "div",
+            { class: "svc-log-head" },
+            h("strong", {
+              class: "mono",
+              text: `${window} · last ${logs.lines.length} of ${logs.totalLines} line(s)`,
+            }),
+            h(
+              "label",
+              { class: "field", for: "svc-since" },
+              since,
+              " since last restart",
+            ),
+            logs.sinceRestart.requested && !logs.sinceRestart.found
+              ? h("span", {
+                  class: "tag tag-warn",
+                  text: "no restart marker found: showing the whole pane",
+                })
+              : null,
+            h("button", {
+              class: "btn btn-sm btn-ghost",
+              type: "button",
+              text: "Reload",
+              onClick: () =>
+                void showLogs(
+                  window,
+                  /** @type {HTMLInputElement} */ (since).checked,
+                ),
+            }),
+            h("button", {
+              class: "btn btn-sm btn-ghost",
+              type: "button",
+              text: "Close",
+              onClick: () => Studio.clear(logHost),
+            }),
+          ),
+          h("pre", {
+            class: "log-pane svc-log-pane",
+            role: "log",
+            tabindex: "0",
+            ariaLabel: `${window} service log`,
+            text: logs.lines.length ? logs.lines.join("\n") : "(empty)",
+          }),
+          logs.warnings.length
+            ? h("div", { class: "cell-dim", text: logs.warnings.join(" · ") })
+            : null,
+        ),
+      );
+    }
+
+    void refresh();
+    return panel;
+  }
+
+  /**
+   * Browser sessions cairn started whose run is gone but whose processes
+   * survive (`cairn doctor --orphans --json`, found through the owned
+   * session ledger). Ending them is `--kill --yes` after a native
+   * confirmation listing every session and process.
+   * @returns {HTMLElement}
+   */
+  function orphansPanel() {
+    const body = h("div", { class: "orphans-body" });
+    const panel = Studio.panel("orphan browser sessions", body, {
+      actions: [
+        h("button", {
+          class: "btn btn-sm",
+          type: "button",
+          text: "Re-scan",
+          onClick: () => void scan(),
+        }),
+      ],
+    });
+    panel.dataset.panel = "orphans";
+
+    async function scan() {
+      Studio.clear(body);
+      body.appendChild(Studio.loading("checking the browser-session ledger…"));
+      /** @type {any} */
+      let result;
+      try {
+        result = await api.call("orphans:list");
+      } catch (error) {
+        Studio.clear(body);
+        body.appendChild(Studio.errorBox(error, "doctor --orphans"));
+        return;
+      }
+      paint(result);
+    }
+
+    /** @param {any} result */
+    function paint(result) {
+      Studio.clear(body);
+      const doc = result?.orphans ?? null;
+      if (!doc) {
+        body.appendChild(
+          result?.unsupported
+            ? h("p", {
+                class: "cell-dim",
+                text: "this cairn has no `cairn doctor --orphans` (the owned browser-session ledger is newer than this binary)",
+              })
+            : h(
+                "div",
+                { class: "error-box" },
+                h("strong", { text: "cairn doctor --orphans failed" }),
+                h("pre", {
+                  text: result?.error || result?.stderr || "(no output)",
+                }),
+              ),
+        );
+        return;
+      }
+      if (doc.error)
+        body.appendChild(
+          h("div", { class: "notice notice-warn", text: doc.error }),
+        );
+      const count = doc.orphans.length;
+      body.appendChild(
+        h(
+          "p",
+          { class: "orphans-summary", dataset: { orphans: String(count) } },
+          h("span", {
+            ariaHidden: "true",
+            text: count ? "⚠ " : "✓ ",
+          }),
+          count
+            ? `${count} orphaned session(s): the cairn run that started them is gone, their browsers are not`
+            : "no orphaned browser sessions",
+          h("span", {
+            class: "cell-dim",
+            text: ` · ${doc.liveSessions} live session(s) of running runs are never touched${
+              doc.staleEntriesRemoved
+                ? ` · ${doc.staleEntriesRemoved} stale ledger entr${
+                    doc.staleEntriesRemoved === 1 ? "y" : "ies"
+                  } removed`
+                : ""
+            }`,
+          }),
+        ),
+      );
+      if (doc.killRequested)
+        body.appendChild(
+          h("p", {
+            class: `ops-inline ops-inline-${
+              doc.remaining.length ? "bad" : "ok"
+            }`,
+            text: doc.remaining.length
+              ? `ended ${doc.killed} process(es); ${doc.remaining.length} still alive: ${doc.remaining.join(", ")}`
+              : `ended ${doc.killed} process(es)`,
+          }),
+        );
+      if (!count) return;
+      body.appendChild(
+        h(
+          "div",
+          { class: "data-table-scroll" },
+          h(
+            "table",
+            { class: "grid orphans-table", ariaLabel: "orphan sessions" },
+            h(
+              "thead",
+              h(
+                "tr",
+                [
+                  "session",
+                  "backend",
+                  "invocation",
+                  "owner pid",
+                  "started",
+                  "processes",
+                ].map((label) => h("th", { text: label })),
+              ),
+            ),
+            h(
+              "tbody",
+              doc.orphans.map((/** @type {Record<string, any>} */ orphan) =>
+                h(
+                  "tr",
+                  { class: "orphan-row", dataset: { session: orphan.session } },
+                  h("td", { class: "mono", text: orphan.session }),
+                  h("td", { class: "mono", text: orphan.backend }),
+                  h("td", {
+                    class: "mono cell-dim",
+                    title: orphan.projectDir ?? "",
+                    text: fmt.truncate(orphan.invocationId, 30),
+                  }),
+                  h("td", {
+                    class: "mono",
+                    text:
+                      orphan.ownerPid === null
+                        ? "—"
+                        : `${orphan.ownerPid} (gone)`,
+                  }),
+                  h(
+                    "td",
+                    orphan.startedAt
+                      ? Studio.relTime(orphan.startedAt)
+                      : h("span", { class: "cell-dim", text: "—" }),
+                  ),
+                  h(
+                    "td",
+                    { class: "mono" },
+                    orphan.processes.map(
+                      (/** @type {{ pid: number, command: string }} */ proc) =>
+                        h("div", {
+                          class: "cell-dim",
+                          title: proc.command,
+                          text: `${proc.pid} ${fmt.truncate(proc.command, 70)}`,
+                        }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      const kill = h("button", {
+        class: "btn btn-danger",
+        type: "button",
+        text: "End these processes…",
+        dataset: { action: "kill-orphans" },
+        title:
+          "cairn doctor --orphans --kill --yes, after a confirmation that lists them",
+        onClick: () =>
+          void endProcesses(/** @type {HTMLButtonElement} */ (kill)),
+      });
+      body.appendChild(h("div", { class: "toolbar" }, kill));
+    }
+
+    /** @param {HTMLButtonElement} button */
+    async function endProcesses(button) {
+      button.disabled = true;
+      const label = button.textContent ?? "";
+      button.textContent = "Ending…";
+      try {
+        const result = await api.call("orphans:kill");
+        if (result?.cancelled) return;
+        if (result?.nothing) {
+          toast("No orphaned sessions", "nothing to end", "info", 4000);
+          return;
+        }
+        const doc = result?.orphans ?? null;
+        toast(
+          result?.ok && doc && !doc.remaining.length
+            ? "Orphaned browsers ended"
+            : "Some processes survived",
+          doc
+            ? `ended ${doc.killed} process(es)${
+                doc.remaining.length
+                  ? `; still alive: ${doc.remaining.join(", ")}`
+                  : ""
+              }`
+            : fmt.truncate(String(result?.error ?? result?.stderr ?? ""), 240),
+          result?.ok && doc && !doc.remaining.length ? "ok" : "bad",
+          7000,
+        );
+        if (doc) paint(result);
+      } catch (error) {
+        toast(
+          "Could not end the processes",
+          String(error?.message ?? error),
+          "bad",
+          9000,
+        );
+      } finally {
+        if (button.isConnected) {
+          button.textContent = label;
+          button.disabled = false;
+        }
+      }
+    }
+
+    void scan();
+    return panel;
   }
 
   /**

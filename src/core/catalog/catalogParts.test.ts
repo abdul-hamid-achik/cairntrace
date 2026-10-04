@@ -98,8 +98,15 @@ describe("masking", () => {
       "samlAssertion",
       "codeVerifier",
       "OTP_CODE",
+      "dbPass",
+      "literalPw",
+      "seed_pass",
+      "ADMIN_PW",
     ]) {
       expect(isSensitiveName(name), name).toBe(true);
+    }
+    for (const name of ["bypass", "compass", "passenger", "bypassCache"]) {
+      expect(isSensitiveName(name), name).toBe(false);
     }
     expect(isSensitiveName("rootPath")).toBe(false);
     expect(isSensitiveName("footprint")).toBe(false);

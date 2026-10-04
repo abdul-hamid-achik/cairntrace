@@ -1,0 +1,64 @@
+# Platform export checks — read the XLSX export with the typed `xlsx`
+# verifier instead of a script that unzips the workbook.
+#
+# Demonstrates: `capture: table` of the rendered catalog, then the workbook's
+# header row checked against it (`includesInOrder: ${captures.screen.headers}`,
+# with `strip` removing the export's unit suffix), `present` / `absent`
+# headers, data rows after the header (`afterKeyRow`, `match` on one row),
+# single cells, and a data validation found by its column label.
+version: 1
+name: export_workbook
+intent: the XLSX export carries the columns the catalog page shows, in the same order, with every seeded product and a whole-number stock column
+environment: local
+coldStart: guest
+outcomes:
+  - id: columns_match_screen
+    description: the workbook header row holds the catalog's columns, in order
+    verify:
+      xlsx:
+        path: "${artifacts.workbook.path}"
+        sheet: Products
+        headers:
+          strip: '\s*\(USD\)$'
+          present: [SKU, Stock]
+          absent: [Supplier]
+          includesInOrder: "${captures.screen.headers}"
+  - id: rows_cover_catalog
+    description: the workbook lists every seeded product, the Anker hub among the electronics
+    verify:
+      xlsx:
+        path: "${artifacts.workbook.path}"
+        sheet: Products
+        rows:
+          afterKeyRow: { atLeast: 12 }
+          match:
+            - { column: SKU, matcher: AN-HUB-7P }
+            - { column: Category, matcher: electronics }
+        cells:
+          - { ref: A1, equals: SKU }
+          - { ref: D1, matches: "^Price" }
+  - id: stock_is_whole_number
+    description: the Stock column carries a whole-number data validation
+    verify:
+      xlsx:
+        path: "${artifacts.workbook.path}"
+        sheet: Products
+        validations:
+          - { column: Stock, type: whole }
+steps:
+  - id: open_products
+    open:
+      path: /products.html
+      waitUntil: networkidle
+  - id: catalog_rendered
+    expect: { by: role, role: table, name: Products, visible: true }
+  - id: capture_columns
+    capture: { assign: screen, table: { by: role, role: table, name: Products } }
+  - id: download_xlsx
+    download:
+      by: role
+      role: button
+      name: Export XLSX
+      saveAs: products.xlsx
+      assign: workbook
+contractHash: sha256:fd62233444f8258be9081fb285fb36517953bc0a8e4677b1b19f4a4b810deab4

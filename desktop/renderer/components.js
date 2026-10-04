@@ -1038,6 +1038,43 @@
   }
 
   /**
+   * One line per check a verifier ran (F17 xlsx: sheets, headers, rows,
+   * cells, validations), failed ones first in tone, all in run order.
+   * @param {Array<{ ok: boolean | null, label: string, detail: string | null }> | null | undefined} checks
+   * @returns {HTMLElement | null}
+   */
+  function checksList(checks) {
+    if (!Array.isArray(checks) || !checks.length) return null;
+    return h(
+      "ul",
+      { class: "evidence-checks" },
+      checks.map((check) =>
+        h(
+          "li",
+          {
+            class: `evidence-check evidence-check-${
+              check.ok === false ? "failed" : check.ok ? "passed" : "unknown"
+            }`,
+          },
+          h("span", {
+            class: `dot dot-${
+              check.ok === false ? "bad" : check.ok ? "ok" : "muted"
+            }`,
+          }),
+          h("span", { class: "mono", text: check.label }),
+          check.detail
+            ? h("span", {
+                class: "cell-dim",
+                title: check.detail,
+                text: ` · ${check.detail}`,
+              })
+            : null,
+        ),
+      ),
+    );
+  }
+
+  /**
    * Structured verifier evidence (lib/dataEvidence.js `normalizeRawEvidence`):
    * the source it read (never a connection string), key facts, the observed
    * rows as a table or the observed value, the request, and the attempts.
@@ -1076,6 +1113,7 @@
       data.note
         ? h("p", { class: "cell-dim data-note", text: data.note })
         : null,
+      checksList(data.checks),
       dataTable(data.table),
       data.value ? codeBlock(data.value, { tight: true }) : null,
       data.request

@@ -1,0 +1,12 @@
+{"ts":"<ts>","type":"invocation.started","invocationId":"<invocationId>","planned":1}
+{"ts":"<ts>","type":"run.lock.acquired","path":"<lock path>","scope":"config"}
+{"ts":"<ts>","type":"preflight.started","total":3}
+{"ts":"<ts>","type":"preflight.passed","index":1,"check":"json","durationMs":0}
+{"ts":"<ts>","type":"preflight.passed","index":2,"check":"secret","durationMs":0}
+{"ts":"<ts>","type":"preflight.passed","index":3,"check":"command","durationMs":0}
+{"ts":"<ts>","type":"cleanliness.clean","phase":"before","kind":"tmux","name":"golden-session"}
+{"ts":"<ts>","type":"finally.started","index":1,"total":1}
+{"ts":"<ts>","type":"finally.finished","index":1,"exitCode":0,"durationMs":0}
+{"ts":"<ts>","type":"cleanliness.clean","phase":"after","kind":"tmux","name":"golden-session"}
+{"ts":"<ts>","type":"run.lock.released","path":"<lock path>","scope":"config","heldMs":0}
+{"ts":"<ts>","type":"invocation.finished","invocationId":"<invocationId>","status":"passed"}

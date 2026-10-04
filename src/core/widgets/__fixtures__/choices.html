@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Choice and input replicas</title>
+    <style>
+      body { font: 14px sans-serif; padding: 16px; }
+      .question { margin: 10px 0; }
+      .p-radiobutton, .p-checkbox { display: inline-block; position: relative; width: 18px; height: 18px; }
+      .p-radiobutton-input, .p-checkbox-input { position: absolute; inset: 0; opacity: 0; margin: 0; }
+      .p-radiobutton-box, .p-checkbox-box { width: 16px; height: 16px; border: 1px solid #666; border-radius: 50%; }
+      .p-chips-multiple-container { display: inline-flex; gap: 4px; list-style: none; padding: 4px; margin: 0; border: 1px solid #ccc; }
+      .p-chips-token { background: #eee; padding: 2px 6px; }
+      [role="radio"] { display: inline-block; padding: 4px 10px; border: 1px solid #999; cursor: pointer; }
+      [role="radio"][aria-checked="true"] { background: #333; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <!-- Native radios inside .radio-label wrappers (values y/n, labels Yes/No). -->
+    <div class="question" data-field-key="form.owner">
+      <label class="question-label">Are you the business owner? *</label>
+      <div class="radio-label"><input type="radio" name="owner" value="y" /> Yes</div>
+      <div class="radio-label"><input type="radio" name="owner" value="n" /> No</div>
+      <div class="radio-label"><input type="radio" name="owner" value="dk" /> I don't know</div>
+    </div>
+
+    <!-- ARIA radios that allow unset: clicking the checked one clears it. -->
+    <div class="question" data-field-key="form.certify" role="radiogroup">
+      <label class="question-label">I certify the answers *</label>
+      <div role="radio" aria-checked="false" tabindex="0">Yes</div>
+      <div role="radio" aria-checked="false" tabindex="0">No</div>
+    </div>
+
+    <!-- PrimeVue RadioButton markup (input visually hidden, label[for]). -->
+    <div class="question" data-field-key="form.tier">
+      <label class="question-label">Tier</label>
+      <div class="field">
+        <div class="p-radiobutton p-component" data-pc-name="radiobutton">
+          <input type="radio" id="tier-gold" name="tier" value="gold" class="p-radiobutton-input" />
+          <div class="p-radiobutton-box"></div>
+        </div>
+        <label for="tier-gold">Gold</label>
+      </div>
+      <div class="field">
+        <div class="p-radiobutton p-component" data-pc-name="radiobutton">
+          <input type="radio" id="tier-silver" name="tier" value="silver" class="p-radiobutton-input" />
+          <div class="p-radiobutton-box"></div>
+        </div>
+        <label for="tier-silver">Silver</label>
+      </div>
+    </div>
+
+    <!-- Checkbox group + a single consent checkbox. -->
+    <div class="question" data-field-key="form.services">
+      <label class="question-label">Services</label>
+      <label><input type="checkbox" value="cons" /> Consulting</label>
+      <label><input type="checkbox" value="hw" /> Hardware</label>
+      <label><input type="checkbox" value="sw" /> Software</label>
+    </div>
+    <div class="question" data-field-key="form.terms">
+      <label><input type="checkbox" /> I accept the terms</label>
+    </div>
+
+    <!-- Radios found by their shared name (default fieldRoot [name="{key}"]). -->
+    <fieldset class="question">
+      <legend>Color</legend>
+      <label><input type="radio" name="color" value="red" /> Red</label>
+      <label><input type="radio" name="color" value="blue" /> Blue</label>
+    </fieldset>
+
+    <!-- Native controls. -->
+    <div class="question" data-field-key="form.legal_name">
+      <label>Legal name <input type="text" /></label>
+    </div>
+    <div class="question" data-field-key="form.employees">
+      <label>Employees <input type="number" /></label>
+    </div>
+    <div class="question" data-field-key="form.founded">
+      <label>Founded <input type="date" /></label>
+    </div>
+    <div class="question" data-field-key="form.notes">
+      <label>Notes <textarea></textarea></label>
+    </div>
+    <div class="question" data-field-key="form.passcode">
+      <label>Passcode <input type="password" /></label>
+    </div>
+    <div class="question" data-field-key="form.plan">
+      <label>Plan
+        <select>
+          <option value="">Choose…</option>
+          <option value="free">Free</option>
+          <option value="pro">Pro plan</option>
+        </select>
+      </label>
+    </div>
+    <div class="question" data-field-key="form.languages">
+      <label>Languages
+        <select multiple size="3">
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+        </select>
+      </label>
+    </div>
+    <!-- Two inputs, no widget: detection must refuse to guess. -->
+    <div class="question" data-field-key="form.address_block">
+      <label>Street <input type="text" /></label>
+      <label>City <input type="text" /></label>
+    </div>
+
+    <!-- MultiText "+Add" list: +Add reveals an input committed on Tab / blur. -->
+    <div class="question" data-field-key="form.products">
+      <label class="question-label">Products</label>
+      <div class="multitext">
+        <div class="items"></div>
+        <button type="button" class="add-item">+Add</button>
+      </div>
+    </div>
+
+    <!-- PrimeVue Chips: Enter adds a token. -->
+    <div class="question" data-field-key="form.keywords">
+      <label class="question-label">Keywords</label>
+      <div class="p-chips p-component p-inputwrapper" data-pc-name="chips">
+        <ul class="p-inputtext p-chips-multiple-container">
+          <li class="p-chips-input-token"><input type="text" /></li>
+        </ul>
+      </div>
+    </div>
+
+    <script>
+      window.__models = {};
+      window.__events = [];
+      // Vue-style v-model on every native control.
+      for (const el of document.querySelectorAll("input, textarea, select")) {
+        const key = el.closest("[data-field-key]")?.getAttribute("data-field-key") || el.name;
+        el.addEventListener("input", () => window.__events.push(key + ":input"));
+        el.addEventListener("change", () => window.__events.push(key + ":change"));
+        el.addEventListener("keydown", () => window.__events.push(key + ":keydown"));
+        el.addEventListener("focus", () => window.__events.push(key + ":focus"));
+      }
+      // allow-unset ARIA radios.
+      for (const radio of document.querySelectorAll("[role=radio]")) {
+        radio.addEventListener("click", () => {
+          const on = radio.getAttribute("aria-checked") === "true";
+          for (const other of radio.parentElement.querySelectorAll("[role=radio]")) {
+            other.setAttribute("aria-checked", "false");
+          }
+          radio.setAttribute("aria-checked", on ? "false" : "true");
+          window.__models.certify = on ? null : radio.textContent.trim();
+        });
+      }
+      // MultiText: +Add appends an input; Tab / blur commits a non-empty one.
+      const items = document.querySelector(".multitext .items");
+      document.querySelector(".multitext .add-item").addEventListener("click", () => {
+        const row = document.createElement("div");
+        row.className = "item";
+        const input = document.createElement("input");
+        input.type = "text";
+        const commit = () => {
+          window.__models.products = Array.from(items.querySelectorAll("input"))
+            .map((i) => i.value)
+            .filter(Boolean);
+        };
+        input.addEventListener("keydown", (e) => e.key === "Tab" && commit());
+        input.addEventListener("blur", commit);
+        row.appendChild(input);
+        items.appendChild(row);
+        input.focus();
+      });
+      // PrimeVue Chips: Enter adds a token and clears the input.
+      const chips = document.querySelector(".p-chips");
+      const chipInput = chips.querySelector("input");
+      chipInput.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" || !chipInput.value.trim()) return;
+        e.preventDefault();
+        const li = document.createElement("li");
+        li.className = "p-chips-token";
+        const label = document.createElement("span");
+        label.className = "p-chips-token-label";
+        label.textContent = chipInput.value.trim();
+        li.appendChild(label);
+        chips.querySelector(".p-chips-input-token").before(li);
+        chipInput.value = "";
+        window.__models.keywords = Array.from(chips.querySelectorAll(".p-chips-token-label")).map((l) => l.textContent);
+      });
+    </script>
+  </body>
+</html>

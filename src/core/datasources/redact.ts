@@ -64,7 +64,11 @@ export function scrubDatasourceText(
       /(authorization["']?\s*[:=]\s*["']?)(basic|bearer)\s+[^\s"',}]+/gi,
       "$1$2 [redacted]",
     );
-  for (const secret of secrets.toSorted((a, b) => b.length - a.length)) {
+  // A sorted copy without toSorted: this module is vendored into Playwright
+  // exports, whose host tsconfig may stop at lib ES2022.
+  const longestFirst = [...secrets];
+  longestFirst.sort((a, b) => b.length - a.length);
+  for (const secret of longestFirst) {
     if (secret.length === 0) continue;
     out = out.split(secret).join("[redacted]");
   }

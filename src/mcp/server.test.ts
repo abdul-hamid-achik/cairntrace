@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CheckpointStore } from "../core/checkpoint/CheckpointStore";
 import { buildCheckpointMeta } from "../core/checkpoint/meta";
 import { AuditResultSchema } from "../core/schema/audit.v1";
+import { ConfigVarsResultSchema } from "../core/schema/configVars.v1";
 import { DocsResultSchema } from "../core/schema/docs.v1";
 import { ExplainResultSchema } from "../core/schema/explain.v1";
 import { HealResultSchema } from "../core/schema/heal.v1";
@@ -92,6 +93,7 @@ describe("Cairntrace MCP server", () => {
       "cairn_checkpoint_show",
       "cairn_clip",
       "cairn_config_validate",
+      "cairn_config_vars",
       "cairn_context",
       "cairn_discover_close",
       "cairn_discover_export",
@@ -110,12 +112,15 @@ describe("Cairntrace MCP server", () => {
       "cairn_explain",
       "cairn_export_brief",
       "cairn_export_playwright",
+      "cairn_export_verify",
       "cairn_fixtures_ensure",
       "cairn_fixtures_list",
       "cairn_fixtures_reset",
       "cairn_fixtures_status",
       "cairn_fixtures_sweep",
       "cairn_fixtures_teardown",
+      "cairn_import_playwright",
+      "cairn_import_playwright_trace",
       "cairn_investigate",
       "cairn_logs",
       "cairn_pin",
@@ -125,6 +130,8 @@ describe("Cairntrace MCP server", () => {
       "cairn_run_status",
       "cairn_secrets_status",
       "cairn_services_down",
+      "cairn_services_logs",
+      "cairn_services_restart",
       "cairn_services_status",
       "cairn_services_up",
       "cairn_snapshot",
@@ -1128,6 +1135,62 @@ exit 2
     expect(sc.errors.length).toBeGreaterThan(0);
     expect(r.isError).toBe(true);
     await c.close();
+  });
+
+  it("cairn_config_vars lists composed vars per environment (F7)", async () => {
+    const c = await connectInMemory();
+    const project = join(dir, "config-vars");
+    await mkdir(join(project, "flows"), { recursive: true });
+    const configPath = join(project, "cairntrace.config.yml");
+    await writeFile(
+      configPath,
+      [
+        "version: 1",
+        "vars:",
+        "  tenant: acme",
+        "  apiUrl: ${vars.host}/api",
+        "  orphan: nobody",
+        "environments:",
+        "  local:",
+        "    vars: { host: http://localhost:3000 }",
+        "  staging:",
+        "    extends: local",
+        "    vars: { host: https://staging.example.test }",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(project, "flows", "home.yml"),
+      [
+        "version: 1",
+        "name: home",
+        "intent: open home",
+        "coldStart: guest",
+        "steps:",
+        '  - open: "${vars.apiUrl}/${vars.tenant}"',
+        "outcomes:",
+        "  - id: ok",
+        "    description: d",
+        "    verify: { console: { errorsMax: 0 } }",
+        "",
+      ].join("\n"),
+    );
+    const r = await c.callTool({
+      name: "cairn_config_vars",
+      arguments: { config: configPath },
+    });
+    await c.close();
+    expect(r.isError).toBeFalsy();
+    const sc = ConfigVarsResultSchema.parse(r.structuredContent);
+    const byName = Object.fromEntries(sc.vars.map((row) => [row.name, row]));
+    expect(byName.apiUrl?.values.staging?.value).toBe(
+      "https://staging.example.test/api",
+    );
+    expect(byName.host?.usedBy).toEqual([
+      { kind: "var", name: "apiUrl", file: "cairntrace.config.yml" },
+    ]);
+    expect(byName.orphan?.unused).toBe(true);
+    expect(sc.totals.unused).toBe(1);
   });
 
   it("cairn_services_status returns a status result", async () => {

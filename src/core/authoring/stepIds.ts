@@ -70,7 +70,8 @@ function locatorWords(locator: unknown): string {
   if (typeof locator === "string") return locator;
   if (!locator || typeof locator !== "object") return "";
   const l = locator as Record<string, unknown>;
-  for (const key of ["name", "label", "text", "testid", "testId"]) {
+  // F15: `set: { field: country }` → set_country.
+  for (const key of ["field", "name", "label", "text", "testid", "testId"]) {
     if (typeof l[key] === "string") return l[key] as string;
   }
   if (typeof l["selector"] === "string") {
@@ -160,10 +161,21 @@ function stepWords(kind: string, step: Record<string, unknown>): string {
       const d = (body ?? {}) as Record<string, unknown>;
       return locatorWords(d);
     }
+    case "form": {
+      // F15: form_<first field> (the first key names the form's section).
+      const f = (body ?? {}) as Record<string, unknown>;
+      const fields = f["fields"];
+      return fields && typeof fields === "object"
+        ? (Object.keys(fields)[0] ?? "")
+        : "";
+    }
     case "snapshot":
     case "batch":
     case "monitor":
     case "transform":
+    // F14 control flow: the block's kind is the id (`repeat`, `if`).
+    case "repeat":
+    case "if":
       return "";
     default:
       return locatorWords(body);

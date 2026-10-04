@@ -1,9 +1,15 @@
 import { basename } from "node:path";
+import { describeWaitUrl } from "../locators";
 import {
   openPath,
+  widgetTargetRef,
+  type WidgetTarget,
+  type Condition,
   type Locator,
   type Step,
-  type WaitCondition,
+  describeAppWait,
+  type RunnerWaitCondition,
+  type WaitStepCondition,
 } from "../schema/spec.v1";
 
 /**
@@ -44,6 +50,15 @@ const STEP_KINDS = [
   "batch",
   "eval",
   "monitor",
+  // F14 control flow.
+  "repeat",
+  "if",
+  // F15 widget kit.
+  "set",
+  "check",
+  "uncheck",
+  "choose",
+  "form",
 ] as const;
 
 export function stepKind(step: Step): string {
@@ -57,10 +72,27 @@ export function describeStep(step: Step): StepDescription {
 
 function rawLabel(step: Step, kind: string): string {
   if ("open" in step) return `open ${withoutQuery(openPath(step))}`;
-  if ("click" in step) return `click ${locatorLabel(step.click)}`;
+  if ("click" in step) {
+    const flags = [
+      step.click.optional ? "optional" : "",
+      step.click.dispatch ? "dispatch" : "",
+      step.click.fallback ? `fallback ${step.click.fallback}` : "",
+    ].filter(Boolean);
+    return `click ${locatorLabel(step.click)}${
+      flags.length > 0 ? ` (${flags.join(", ")})` : ""
+    }`;
+  }
   if ("hover" in step) return `hover ${locatorLabel(step.hover)}`;
   if ("focus" in step) return `focus ${locatorLabel(step.focus)}`;
-  if ("fill" in step) return `fill ${locatorLabel(step.fill)}`;
+  if ("fill" in step) {
+    const flags = [
+      step.fill.mode === "set" ? "mode set" : "",
+      step.fill.optional ? "optional" : "",
+    ].filter(Boolean);
+    return `fill ${locatorLabel(step.fill)}${
+      flags.length > 0 ? ` (${flags.join(", ")})` : ""
+    }`;
+  }
   if ("type" in step) return `type ${locatorLabel(step.type)}`;
   if ("select" in step) return `select ${locatorLabel(step.select)}`;
   if ("upload" in step) return `upload ${locatorLabel(step.upload)}`;
@@ -92,9 +124,33 @@ function rawLabel(step: Step, kind: string): string {
       : "snapshot";
   }
   if ("use" in step) {
-    return `use ${typeof step.use === "string" ? step.use : step.use.action}`;
+    if (typeof step.use === "string") return `use ${step.use}`;
+    return step.use.retry
+      ? `use ${step.use.action} (retry ×${step.use.retry.times})`
+      : `use ${step.use.action}`;
+  }
+  if ("repeat" in step) {
+    return `repeat ≤${step.repeat.max}${
+      step.repeat.until !== undefined
+        ? ` until ${conditionLabel(step.repeat.until)}`
+        : ""
+    } (${step.repeat.steps.length} steps)`;
+  }
+  if ("if" in step) {
+    return `if ${conditionLabel(step.if.condition)} (then ${step.if.then.length}${
+      step.if.else ? `, else ${step.if.else.length}` : ""
+    })`;
   }
   if ("batch" in step) return `batch (${step.batch.length} sub-steps)`;
+  // F15: the target and driver only, never the value.
+  if ("set" in step) return `set ${widgetLabel(step.set)}`;
+  if ("check" in step) return `check ${widgetLabel(step.check)}`;
+  if ("uncheck" in step) return `uncheck ${widgetLabel(step.uncheck)}`;
+  if ("choose" in step) return `choose ${widgetLabel(step.choose)}`;
+  if ("form" in step) {
+    const count = Object.keys(step.form.fields).length;
+    return `form (${count} field${count === 1 ? "" : "s"})`;
+  }
   if ("eval" in step) {
     if (step.eval.file) return `eval ${basename(step.eval.file)}`;
     return step.eval.assign ? `eval → ${step.eval.assign}` : "eval (inline)";
@@ -110,6 +166,16 @@ function rawLabel(step: Step, kind: string): string {
       .join(" ");
   }
   return kind;
+}
+
+/** `field "country"` or the locator label, plus a forced driver. */
+function widgetLabel(target: WidgetTarget): string {
+  const ref = widgetTargetRef(target);
+  const base =
+    "field" in ref
+      ? `field ${JSON.stringify(ref.field)}`
+      : locatorLabel(ref.locator);
+  return target.driver ? `${base} via ${target.driver}` : base;
 }
 
 /** Locator → `role=button "Save"`, `label "Email"`, `selector "#id" nth=1`. */
@@ -129,8 +195,41 @@ function locatorLabel(locator: Locator): string {
   return locator.nth !== undefined ? `${base} nth=${locator.nth}` : base;
 }
 
-function waitLabel(wait: WaitCondition): string {
+/**
+ * A condition for labels: the predicate kind and its target, never a var's
+ * value (a `var` predicate shows only the name).
+ */
+function conditionLabel(condition: Condition): string {
+  if (typeof condition === "string") {
+    const colon = condition.indexOf(":");
+    return colon < 0
+      ? condition
+      : `${condition.slice(0, colon)} ${JSON.stringify(condition.slice(colon + 1))}`;
+  }
+  if (condition.var !== undefined) return `var ${condition.var}`;
+  if (condition.url !== undefined) {
+    return `url ${describeWaitUrl(condition.url)}`;
+  }
+  const entry = Object.entries(condition).find(
+    ([key, value]) => value !== undefined && key !== "hasText",
+  );
+  return entry ? `${entry[0]} ${JSON.stringify(entry[1])}` : "condition";
+}
+
+function waitLabel(wait: WaitStepCondition): string {
+  const optional = "optional" in wait && wait.optional ? " (optional)" : "";
+  if ("any" in wait) {
+    return `any of ${wait.any.map(waitLabel).join(" | ")}${optional}`;
+  }
+  if ("all" in wait) {
+    return `all of ${wait.all.map(waitLabel).join(" & ")}${optional}`;
+  }
+  return `${plainWaitLabel(wait)}${optional}`;
+}
+
+function plainWaitLabel(wait: RunnerWaitCondition): string {
   if ("ms" in wait) return `${wait.ms}ms`;
+  if ("app" in wait) return describeAppWait(wait);
   if ("text" in wait) return `text ${JSON.stringify(wait.text)}`;
   if ("notText" in wait) return `notText ${JSON.stringify(wait.notText)}`;
   if ("load" in wait) return `load=${wait.load}`;
@@ -151,6 +250,36 @@ function waitLabel(wait: WaitCondition): string {
     return `url equals ${JSON.stringify(withoutQuery(url.equals))}`;
   }
   return `url matches ${JSON.stringify(url.pattern ?? "")}`;
+}
+
+/**
+ * A step result as reports list it: the id, plus where an F14 nested
+ * execution ran (`#2` iteration, `[then]` branch) and what a block did
+ * (`×3` iterations, `→ else`). A flat spec's results print their id only.
+ */
+export function stepResultLabel(step: {
+  id: string;
+  iteration?: number;
+  branch?: string;
+  iterations?: number;
+  taken?: string;
+  matched?: boolean;
+  via?: string;
+  skipReason?: string;
+}): string {
+  return [
+    step.id,
+    ...(step.iteration !== undefined ? [`#${step.iteration}`] : []),
+    ...(step.branch !== undefined ? [`[${step.branch}]`] : []),
+    ...(step.iterations !== undefined ? [`×${step.iterations}`] : []),
+    ...(step.taken !== undefined ? [`→ ${step.taken}`] : []),
+    ...(step.matched === false ? ["(not matched)"] : []),
+    // F15: only the fallback paths are worth a reader's attention.
+    ...(step.via === "dispatch" || step.via === "dataTransfer"
+      ? [`via ${step.via}`]
+      : []),
+    ...(step.skipReason !== undefined ? [`(${step.skipReason})`] : []),
+  ].join(" ");
 }
 
 /** Drop a URL's query string and fragment; they can carry tokens. */

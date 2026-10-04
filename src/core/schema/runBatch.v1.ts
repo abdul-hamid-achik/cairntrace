@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RunResultSchema } from "./run.v1";
+import { InvocationOutcomeSchema, RunResultSchema } from "./run.v1";
 import { ExitCodeSchema } from "./shared";
 
 /**
@@ -21,9 +21,26 @@ export const BatchSummarySchema = z
      * fail the batch (exit 7) only under `--strict-requires`.
      */
     refused: z.number().int().positive().optional(),
+    /**
+     * Specs `--bail` never started (see `skipped`). Not part of `total`.
+     * Present when at least one was skipped.
+     */
+    skipped: z.number().int().positive().optional(),
   })
   .strict();
 export type BatchSummary = z.infer<typeof BatchSummarySchema>;
+
+/** A spec `--bail` never started because an earlier spec did not pass. */
+export const BatchSkippedSpecSchema = z
+  .object({
+    /** Spec path as the invocation expanded it. */
+    spec: z.string().min(1),
+    reason: z.literal("bailed"),
+    /** The spec whose failure stopped the scheduling. */
+    bailedBy: z.string().min(1),
+  })
+  .strict();
+export type BatchSkippedSpec = z.infer<typeof BatchSkippedSpecSchema>;
 
 export const BatchRunResultSchema = z
   .object({
@@ -38,7 +55,21 @@ export const BatchRunResultSchema = z
     summary: BatchSummarySchema,
     /** Per-spec results in *input order* (not completion order). */
     results: z.array(RunResultSchema),
+    /** Specs `--bail` skipped, in input order. Absent without `--bail` or when nothing was skipped. */
+    skipped: z.array(BatchSkippedSpecSchema).min(1).optional(),
+    /**
+     * The batch's exit code — for an invocation with a config `run:` policy
+     * or a critical teardown, the invocation's (8 / 9 included), as the
+     * process exits with it; see `invocationOutcome`.
+     */
     exitCode: ExitCodeSchema,
+    /**
+     * Present when the invocation's lifecycle could change the exit code
+     * after the specs ran (config `run:` policy, critical teardown): the
+     * document was held until that verdict. `results[]` keep each spec's
+     * own status. Additive.
+     */
+    invocationOutcome: InvocationOutcomeSchema.optional(),
   })
   .strict();
 export type BatchRunResult = z.infer<typeof BatchRunResultSchema>;

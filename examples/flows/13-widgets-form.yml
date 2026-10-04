@@ -1,0 +1,82 @@
+# Cairntrace example spec — custom form controls without eval files.
+#
+# Demonstrates the widget kit and the page prelude on /widgets.html:
+#   - `form` fills several fields in order through detected drivers
+#     (native-select, radio-group, checkbox-group, vue-multiselect,
+#     native-input), waits for a field that mounts later (`dependsOn`), reads
+#     every field back and re-reads them all at the end;
+#   - `choose` / `check` are idempotent: a field that already holds the value
+#     is never clicked again;
+#   - `click.optional` skips a control that is absent (`skipReason: absent`),
+#     and `fallback: dispatch` clicks Save with a DOM click when a leftover
+#     dialog mask swallows the pointer (`detail: pointer blocked by …`);
+#   - `fill.mode: set` writes through the native setter (no focus, no keys);
+#   - `wait: { app: … }` polls the page's own store through the config's
+#     `browser.appHandle` instead of an eval loop;
+#   - the `table` verifier reads the saved answers as rendered, and a browser
+#     `script` that mentions `__cairn` gets the prelude helpers (`rows`,
+#     `app.vendor`) instead of redeclaring them.
+#
+# Run against the demo app served at http://localhost:8787 (see examples/README.md).
+#
+version: 1
+name: widgets_form
+intent: a vendor profile filled through custom form controls is saved with every answer committed
+environment: local
+coldStart: guest
+outcomes:
+  - id: profile_saved
+    description: the page confirms the save
+    verify:
+      text:
+        contains: Profile saved
+  - id: saved_answers
+    description: the saved profile shows every answer the form committed
+    verify:
+      table:
+        locator: { by: role, role: table, name: Saved profile }
+        rows: { equals: 7 }
+        contains:
+          - { Field: region, Value: West }
+          - { Field: delivery_window, Value: Morning }
+          - { Field: preferred, Value: "No" }
+          - { Field: categories, Value: "Office supplies, Kitchen" }
+          - { Field: account_manager, Value: Jordan Lee }
+          - { Field: first_order, Value: "2026-11-30" }
+          - { Field: notes, Value: Deliveries via the loading dock }
+  - id: store_matches_page
+    description: the page's store holds exactly what the saved table shows
+    verify:
+      script:
+        run: |
+          const shown = {};
+          for (const row of __cairn.rows('table[aria-label="Saved profile"]')) {
+            shown[row.Field] = row.Value;
+          }
+          const stored = __cairn.app.vendor.profile;
+          const mismatched = Object.keys(shown).filter((key) => String(stored[key] ?? "") !== shown[key]);
+          return { ok: Object.keys(shown).length === 7 && mismatched.length === 0, evidence: { mismatched } };
+steps:
+  - id: open_profile
+    open: /widgets.html
+  - id: dismiss_tour_if_shown
+    click: { by: role, role: button, name: Dismiss tour, optional: true }
+  - id: answer_profile
+    form:
+      fields:
+        region: West
+        delivery_window: { value: Morning, dependsOn: region }
+        categories: [Office supplies, Kitchen]
+        account_manager: Jordan Lee
+        first_order: "2026-11-30"
+      onFailure: dumpUnanswered
+  - id: not_preferred
+    choose: { field: preferred, option: "No" }
+  - id: confirm_details
+    check: { field: terms }
+  - id: notes
+    fill: { by: label, name: Notes, value: Deliveries via the loading dock, mode: set }
+  - id: save
+    click: { by: role, role: button, name: Save profile, fallback: dispatch }
+  - id: store_saved
+    wait: { app: { path: vendor.saved, equals: true }, timeoutMs: 5000 }

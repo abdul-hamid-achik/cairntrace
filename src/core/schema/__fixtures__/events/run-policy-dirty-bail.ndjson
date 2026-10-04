@@ -1,0 +1,9 @@
+{"ts":"<ts>","type":"invocation.started","invocationId":"<invocationId>","planned":3}
+{"ts":"<ts>","type":"run.lock.acquired","path":"<lock path>","scope":"config"}
+{"ts":"<ts>","type":"cleanliness.clean","phase":"before","kind":"tmux","name":"golden-session"}
+{"ts":"<ts>","type":"invocation.bailed","spec":"<spec>","exitCode":1,"skipped":2}
+{"ts":"<ts>","type":"finally.started","index":1,"total":1}
+{"ts":"<ts>","type":"finally.finished","index":1,"exitCode":3,"durationMs":0}
+{"ts":"<ts>","type":"cleanliness.dirty","phase":"after","kind":"tmux","name":"golden-session","survivors":["tmux session \"golden-session\" exists"]}
+{"ts":"<ts>","type":"run.lock.released","path":"<lock path>","scope":"config","heldMs":0}
+{"ts":"<ts>","type":"invocation.finished","invocationId":"<invocationId>","status":"errored"}

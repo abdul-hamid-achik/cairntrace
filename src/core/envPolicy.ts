@@ -1,4 +1,5 @@
 import type { Config, EnvironmentPolicy } from "./schema/config.v1";
+import { canonicalEnvironment } from "./config/envAlias";
 import type { RunRefusal, RunRefusalCode } from "./schema/run.v1";
 import type { RequiresEnvEntry, SpecRequires } from "./schema/spec.v1";
 
@@ -125,6 +126,8 @@ export interface EnvironmentEligibility {
   optIn?: string;
   /** True when the config defines this environment. */
   defined: boolean;
+  /** The environment this name is an alias of: it is judged as that environment. */
+  alias?: string;
   trait?: EnvironmentPolicy["trait"];
   mutations?: EnvironmentPolicy["mutations"];
 }
@@ -148,10 +151,13 @@ export function environmentEligibility(
   ];
   return [...new Set(names)].map((name) => {
     const defined = Object.hasOwn(environments, name);
-    const policy = defined ? environments[name]?.policy : undefined;
+    // An alias is judged as its target: that is the name a run resolves to.
+    const canonical = canonicalEnvironment(environments, name);
+    const target = canonical.name;
+    const policy = defined ? environments[target]?.policy : undefined;
     const verdict = evaluateEnvPolicy({
       ...(requires ? { requires } : {}),
-      envName: name,
+      envName: target,
       ...(policy ? { policy } : {}),
       env,
     });
@@ -159,6 +165,7 @@ export function environmentEligibility(
       name,
       allowed: verdict.allowed,
       defined,
+      ...(canonical.alias !== undefined ? { alias: target } : {}),
       ...(verdict.allowed
         ? {}
         : { code: verdict.code, reason: verdict.reason }),

@@ -102,6 +102,11 @@ export interface ParsedStepOrigins {
   /** Absolute spec path. */
   path: string;
   origins: ReadonlyArray<{ filePath: string; fileStepIdx: number }>;
+  /** F14: origins of nested steps by resolved path (see parseSpec). */
+  nestedOrigins?: ReadonlyMap<
+    string,
+    { filePath: string; fileStepIdx: number }
+  >;
   actionsByName: ReadonlyMap<
     string,
     { path: string; action: { name: string } }
@@ -111,15 +116,21 @@ export interface ParsedStepOrigins {
 /**
  * The file scope of `resolved.steps[index]`: the spec's directory for a
  * spec step, the action's directory (plus its name and step index) for a
- * step that came from an imported action.
+ * step that came from an imported action. `index` may also be the resolved
+ * path of a step nested in a control-flow block (`"2/steps/0"`); a nested
+ * step without a recorded origin falls back to its top-level step's scope.
  */
 export function stepFileScopeAt(
   parsed: ParsedStepOrigins,
-  index: number,
+  index: number | string,
   warn: StepFileScope["warn"] = () => undefined,
 ): StepFileScope {
   const specDir = dirname(parsed.path);
-  const origin = parsed.origins[index];
+  const origin =
+    typeof index === "number"
+      ? parsed.origins[index]
+      : (parsed.nestedOrigins?.get(index) ??
+        parsed.origins[Number.parseInt(index, 10)]);
   const declaringFile = origin?.filePath ?? parsed.path;
   if (declaringFile === parsed.path) {
     return { specDir, declaringDir: specDir, warn };

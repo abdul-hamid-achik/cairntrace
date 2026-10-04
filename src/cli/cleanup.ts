@@ -143,6 +143,54 @@ export function closeTrackedBackends(): void {
   activeServices.clear();
 }
 
+/** The signal the cleanup started on; set once, never cleared. */
+let cleanupSignal: AbortSignal | undefined;
+let heldNoticePrinted = false;
+
+/**
+ * A SIGINT / SIGTERM / SIGHUP that lands while the signal cleanup runs. The
+ * cleanup is synchronous (suite `after` hooks, a provisioner's critical
+ * `down`, `run.finally`, the run lock), so no listener runs before it
+ * returns; what matters is that one stays registered: with none, a second
+ * Ctrl-C (or a closed terminal) gets the default action and kills cairn
+ * halfway through the teardown. The run engine prints the notice before
+ * the slow part (ResourceScope.terminateSync); this prints it only if a
+ * listener ever gets to run.
+ */
+function holdFurtherSignal(signal: NodeJS.Signals): void {
+  if (heldNoticePrinted) return;
+  heldNoticePrinted = true;
+  try {
+    process.stderr.write(
+      `cairn: ${signal} ignored: cleanup in progress; send SIGKILL to force\n`,
+    );
+  } catch {
+    // stderr may already be gone (a closed terminal).
+  }
+}
+
+function onSignal(signal: AbortSignal, code: number): void {
+  if (cleanupSignal !== undefined) {
+    holdFurtherSignal(signal);
+    return;
+  }
+  cleanupSignal = signal;
+  // SIGINT / SIGTERM keep their listener (below); SIGHUP gets one now,
+  // before anything slow starts.
+  process.on("SIGHUP", () => holdFurtherSignal("SIGHUP"));
+  process.stderr.write(
+    `\ncairn: received ${signal}, closing browser session…\n`,
+  );
+  cleanupAfterSignal(signal);
+  process.exit(code);
+}
+
+/**
+ * Persistent listeners, never `once`: the first SIGINT / SIGTERM runs the
+ * cleanup and exits 130 / 143; one that lands while it runs is held, never
+ * the default action (see {@link holdFurtherSignal}). The process always
+ * exits once the bounded cleanup returns, so nothing becomes unkillable.
+ */
 function installSignalHandlers(): void {
   if (handlersInstalled) return;
   handlersInstalled = true;
@@ -150,12 +198,6 @@ function installSignalHandlers(): void {
     ["SIGINT", 130],
     ["SIGTERM", 143],
   ] as const) {
-    process.once(signal, () => {
-      process.stderr.write(
-        `\ncairn: received ${signal}, closing browser session…\n`,
-      );
-      cleanupAfterSignal(signal);
-      process.exit(code);
-    });
+    process.on(signal, () => onSignal(signal, code));
   }
 }

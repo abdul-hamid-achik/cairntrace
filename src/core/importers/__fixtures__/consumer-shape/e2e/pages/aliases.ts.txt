@@ -1,0 +1,1 @@
+export { SignInPage as LoginPage } from "./sign-in-page";

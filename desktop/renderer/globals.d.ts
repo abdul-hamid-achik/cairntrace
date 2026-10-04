@@ -159,6 +159,7 @@ interface StudioActions {
   openRun(runDirOrId: string): Promise<any>;
   openSpec(file: string): Promise<any>;
   startRun(specPaths: string[], overrides?: Record<string, any>): Promise<any>;
+  startSuite(name: string, overrides?: Record<string, any>): Promise<any>;
   cancelRun(token: string): Promise<any>;
   loadLocks(): Promise<any>;
   loadVersions(): Promise<any>;
@@ -204,6 +205,12 @@ interface StudioDataEvidence {
   }> | null;
   attemptCount: number | null;
   polledMs: number | null;
+  /** F17 xlsx: one line per check the verifier ran. */
+  checks?: Array<{
+    ok: boolean | null;
+    label: string;
+    detail: string | null;
+  }> | null;
 }
 
 /** A `currentPhase` result as the phase banner paints it. */
@@ -214,6 +221,57 @@ interface StudioPhase {
   stale?: boolean;
   budgetMs?: number | null;
   elapsedMs?: number | null;
+}
+
+/** ops.js: run-policy badges and panels, metrics table and sparkline. */
+interface StudioOps {
+  svg(
+    tagName: string,
+    attrs?: Record<string, string | number>,
+    ...children: unknown[]
+  ): SVGElement;
+  formatMetric(
+    value: number | null | undefined,
+    unit?: string | null,
+    options?: { signed?: boolean },
+  ): string;
+  badge(item: {
+    key: string;
+    label: string;
+    tone: string;
+    glyph: string;
+    title: string;
+  }): HTMLElement;
+  badges(
+    model: Record<string, any> | null | undefined,
+    summary?: Record<string, any> | null,
+  ): HTMLElement | null;
+  exitBadge(code: number | null | undefined): HTMLElement | null;
+  lockHeadline(active: Array<Record<string, any>>): string;
+  lockSentence(lock: Record<string, any>): string;
+  policyPanel(input: {
+    policy?: Record<string, any> | null;
+    summary?: Record<string, any> | null;
+    services?: Array<Record<string, any>> | null;
+  }): HTMLElement | null;
+  sparkline(
+    points: Array<{ runId: string; at: string | null; value: number }>,
+    options: {
+      name: string;
+      unit?: string | null;
+      basis?: string;
+      currentRunId?: string | null;
+      onOpen?: ((runId: string) => void) | null;
+    },
+  ): HTMLElement;
+  metricsView(
+    doc: Record<string, any> | null,
+    options?: {
+      history?: Record<string, any> | null;
+      currentRunId?: string | null;
+      onOpen?: ((runId: string) => void) | null;
+    },
+  ): HTMLElement;
 }
 
 /**
@@ -451,11 +509,15 @@ interface StudioGlobal {
   ) => HTMLElement;
   // panes.js
   panes?: StudioPanes;
+  // ops.js
+  ops?: StudioOps;
   // View-private helpers a view exports for tests only.
   live?: any;
   invocationsView?: any;
   sessionsView?: any;
   catalogView?: any;
+  suitesView?: any;
+  configVarsView?: any;
   // specs.js: the Run path ⌘R shares with the Run button.
   specsView?: { runFocused(): Promise<void> };
 }

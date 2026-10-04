@@ -9,6 +9,9 @@ import {
   SpecSchema,
   useActionName,
   useActionVars,
+  useRetry,
+  type Condition,
+  type RetryUseStep,
   type ReusableAction,
   type Spec,
   type Step,
@@ -20,6 +23,12 @@ import {
   joinUrl,
 } from "../runner/url";
 import { findConfigFile } from "../config/loader";
+import { isStructuredVar, lookupVar, renderVarValue } from "../config/varValue";
+import { BUILTIN_LOGIN_ACTION } from "../schema/request.v1";
+import type { ConfigScalarVarValue, ConfigVarValue } from "../schema/config.v1";
+
+/** A `${vars.X}` bag: config (typed, F7), spec, use-site and CLI vars. */
+type VarsBag = Record<string, ConfigVarValue>;
 
 export interface ParseResult {
   /** Parsed spec as written on disk (with `use:` placeholders, no inlining). */
@@ -37,6 +46,12 @@ export interface ParseResult {
    * inside an imported action.
    */
   origins: StepOrigin[];
+  /**
+   * F14: origins of steps nested in control-flow blocks, keyed by resolved
+   * path — `<top index>/steps/<i>` (repeat), `…/then/<i>`, `…/else/<i>` (if),
+   * `…/use/<i>` (a `use:` with `retry`), recursively.
+   */
+  nestedOrigins?: Map<string, StepOrigin>;
   /** Actions loaded from `imports:`, keyed by action name. */
   actionsByName: Map<string, LoadedAction>;
   /**
@@ -44,7 +59,13 @@ export interface ParseResult {
    * `ParseOptions.vars`). Exporters use it to pass spec-level overrides into
    * parameterized action calls without re-expanding the action body.
    */
-  vars?: Record<string, string | number | boolean>;
+  vars?: VarsBag;
+  /**
+   * F18: every value a `${secrets.X}` resolved to while parsing (spec and
+   * imported actions). The runner registers them for redaction before it
+   * writes anything, whatever the secret's name.
+   */
+  secretValues?: string[];
 }
 
 export interface LoadedAction {
@@ -54,7 +75,7 @@ export interface LoadedAction {
   /** Unsubstituted action YAML, re-parsed per `use:` with merged vars. */
   rawSource: string;
   /** `vars:` defaults declared on the action file. */
-  actionDefaults: Record<string, string | number | boolean>;
+  actionDefaults: Record<string, ConfigScalarVarValue>;
   /** Actions this action imports (its own `imports:`), by name. */
   scope?: Map<string, LoadedAction>;
   /**
@@ -77,7 +98,7 @@ export interface ParseOptions {
   /** Defaults to process.cwd(). Used to resolve relative imports. */
   cwd?: string;
   /** Bag for `${vars.X}` substitution. */
-  vars?: Record<string, string | number | boolean>;
+  vars?: VarsBag;
   /** Override env for `${env.X}` / `${secrets.X}`. Defaults to process.env. */
   env?: Record<string, string | undefined>;
   /**
@@ -94,6 +115,19 @@ export interface ParseOptions {
    * never land in generated files and unresolved env stays late-bound.
    */
   secretRef?: (name: string) => string;
+  /**
+   * Exporter late binding for `${env.X:-default}`: resolves to
+   * `envDefaultRef(X, <default, already substituted>)` instead of the
+   * variable's value or the default, so the generated test reads the
+   * variable (and falls back) at run time. Needs `secretRef`.
+   */
+  envDefaultRef?: (name: string, fallback: string) => string;
+  /**
+   * Exporter late binding for plain `${env.X}`: stays `secretRef(X)` even
+   * when X is set while exporting, so no environment value is baked into
+   * generated code. Needs `secretRef`.
+   */
+  lateEnv?: boolean;
   /**
    * Directory of the resolved cairntrace.config.yml — the value of
    * `${config.dir}`. Pass it when the config was chosen explicitly
@@ -149,10 +183,8 @@ export async function parseSpec(
     );
     return discoveredConfigDir;
   };
-  const shared = (
-    source: string,
-    vars: Record<string, string | number | boolean>,
-  ): Promise<SharedSubstitution> =>
+  const secretValues = new Set<string>();
+  const shared = (source: string, vars: VarsBag): Promise<SharedSubstitution> =>
     configDirFor(source).then((configDir) => ({
       env,
       vars,
@@ -160,11 +192,17 @@ export async function parseSpec(
       configDir,
       runtime: opts.runtime,
       ...(opts.secretRef ? { secretRef: opts.secretRef } : {}),
+      ...(opts.envDefaultRef ? { envDefaultRef: opts.envDefaultRef } : {}),
+      ...(opts.lateEnv ? { lateEnv: true } : {}),
+      onEnvValue: (ref) => {
+        if (ref.ns === "secrets" && ref.value) secretValues.add(ref.value);
+      },
     }));
 
   const rawSource = await readFile(absPath, "utf8");
   const rawDocument = parseYaml(rawSource);
   assertBatchSelectorLocators(rawDocument, absPath);
+  assertNoAuthoredResolved(rawDocument, absPath);
   const rawSpec = SpecSchema.parse(rawDocument);
   const vars = { ...rawSpec.vars, ...opts.vars };
   const raw = loadAndParseSource(
@@ -198,6 +236,7 @@ export async function parseSpec(
       await shared(actionSource, { ...actionDefaults, ...vars }),
     );
     assertBatchSelectorLocators(importRaw, actionPath);
+    assertNoAuthoredResolved(importRaw, actionPath);
     const action = ReusableActionSchema.parse(importRaw);
     const clash = actionsByName.get(action.name);
     if (clash && clash.path !== actionPath) {
@@ -234,102 +273,193 @@ export async function parseSpec(
   // actions) while tracking origins so heal can map back from
   // `resolved.steps[N]` to (file, file-step-idx) — the innermost action
   // file for a step that came from a nested action.
+  //
+  // F14: control-flow blocks (repeat / if) keep their nested lists, expanded
+  // the same way (a nested `use:` inlines into that list); a `use:` with
+  // `retry` stays one step that carries its expanded `steps`. Nested steps'
+  // origins live in `nestedOrigins`, keyed by their resolved path
+  // (`<top index>/steps/<i>`, `…/then/<i>`, `…/else/<i>`, `…/use/<i>`).
   const origins: StepOrigin[] = [];
-  const expandSteps = async (
-    steps: readonly Step[],
-    filePath: string,
+  const nestedOrigins = new Map<string, StepOrigin>();
+  interface ExpandScope {
+    filePath: string;
     /** Lexical scopes, innermost first: the file's imports, then its importer's. */
-    scopes: ReadonlyArray<ReadonlyMap<string, LoadedAction>>,
+    scopes: ReadonlyArray<ReadonlyMap<string, LoadedAction>>;
     /** What the enclosing action saw (nested actions inherit it). */
-    callScope: Record<string, string | number | boolean>,
+    callScope: VarsBag;
     /** Action files being expanded (use-cycle detection). */
-    stack: readonly string[],
+    stack: readonly string[];
+    /** The declaring file's vars (F14 `var` predicates resolve against it). */
+    bag: VarsBag;
+  }
+  /**
+   * F18: `use: login` with no imported action of that name is the built-in
+   * environment login — kept as a step for the runner (and exporters).
+   */
+  const isBuiltinLogin = (useStep: UseStep, at: ExpandScope): boolean =>
+    useActionName(useStep) === BUILTIN_LOGIN_ACTION &&
+    findAction(BUILTIN_LOGIN_ACTION, at.scopes) === undefined;
+  const loadUse = async (
+    useStep: UseStep,
+    at: ExpandScope,
+  ): Promise<{ loaded: LoadedAction; steps: Step[]; scope: ExpandScope }> => {
+    const actionName = useActionName(useStep);
+    const loaded = findAction(actionName, at.scopes);
+    if (!loaded) {
+      throw new UnresolvedActionError(
+        actionName,
+        at.filePath === absPath
+          ? (spec.imports ?? [])
+          : [...new Set(at.scopes.flatMap((scope) => [...scope.keys()]))],
+      );
+    }
+    if (at.stack.includes(loaded.path)) {
+      throw new ActionImportCycleError([...at.stack, loaded.path], "use");
+    }
+    // Precedence: the call's own `with:` values, then — only for names
+    // this action does not default — what its caller saw, then the spec
+    // vars, then the action's defaults. An enclosing call never silently
+    // overrides a nested action's own default; pass it explicitly
+    // (`use: { action, vars: { name: ${vars.name} } }`) to do that.
+    const inherited = Object.fromEntries(
+      Object.entries(at.callScope).filter(
+        ([key]) => !Object.hasOwn(loaded.actionDefaults, key),
+      ),
+    );
+    const callVars = { ...inherited, ...useActionVars(useStep) };
+    const effective = {
+      ...loaded.actionDefaults,
+      ...vars,
+      ...callVars,
+    };
+    const expanded = ReusableActionSchema.parse(
+      loadAndParseSource(
+        loaded.rawSource,
+        loaded.path,
+        await shared(loaded.rawSource, effective),
+      ),
+    );
+    assertBatchSelectorLocators(expanded, loaded.path);
+    return {
+      loaded,
+      steps: expanded.steps,
+      scope: {
+        filePath: loaded.path,
+        scopes: [loaded.scope ?? new Map(), ...at.scopes],
+        // Nested actions inherit what this action saw (its defaults too).
+        callScope: effective,
+        stack: [...at.stack, loaded.path],
+        bag: effective,
+      },
+    };
+  };
+  const renderVar = (value: ConfigVarValue): string =>
+    renderRuntimePlaceholders(renderVarValue(value), opts.runtime);
+  /**
+   * Expand `steps` into `out`. `prefix` is the resolved path of the list
+   * (undefined for the top level); `record` keeps each step's origin.
+   */
+  const expandList = async (
+    steps: readonly Step[],
+    at: ExpandScope,
+    out: Step[],
+    prefix: string | undefined,
   ): Promise<void> => {
     for (let j = 0; j < steps.length; j++) {
       const step = steps[j]!;
-      if (!("use" in step)) {
-        origins.push({ step, filePath, fileStepIdx: j });
+      if (
+        "use" in step &&
+        useRetry(step) === undefined &&
+        !isBuiltinLogin(step, at)
+      ) {
+        const used = await loadUse(step, at);
+        const before = out.length;
+        await expandList(used.steps, used.scope, out, prefix);
+        if (prefix === undefined && at.filePath === absPath) {
+          used.loaded.expandedStepCount = out.length - before;
+        }
         continue;
       }
-      const useStep = step as UseStep;
-      const actionName = useActionName(useStep);
-      const loaded = scopes
-        .map((scope) => scope.get(actionName))
-        .find((candidate) => candidate !== undefined);
-      if (!loaded) {
-        throw new UnresolvedActionError(
-          actionName,
-          filePath === absPath
-            ? (spec.imports ?? [])
-            : [...new Set(scopes.flatMap((scope) => [...scope.keys()]))],
-        );
-      }
-      if (stack.includes(loaded.path)) {
-        throw new ActionImportCycleError([...stack, loaded.path], "use");
-      }
-      // Precedence: the call's own `with:` values, then — only for names
-      // this action does not default — what its caller saw, then the spec
-      // vars, then the action's defaults. An enclosing call never silently
-      // overrides a nested action's own default; pass it explicitly
-      // (`use: { action, vars: { name: ${vars.name} } }`) to do that.
-      const inherited = Object.fromEntries(
-        Object.entries(callScope).filter(
-          ([key]) => !Object.hasOwn(loaded.actionDefaults, key),
-        ),
-      );
-      const callVars = { ...inherited, ...useActionVars(useStep) };
-      const effective = {
-        ...loaded.actionDefaults,
-        ...vars,
-        ...callVars,
+      const path =
+        prefix === undefined ? String(out.length) : `${prefix}/${out.length}`;
+      const origin: StepOrigin = {
+        step,
+        filePath: at.filePath,
+        fileStepIdx: j,
       };
-      const expanded = ReusableActionSchema.parse(
-        loadAndParseSource(
-          loaded.rawSource,
-          loaded.path,
-          await shared(loaded.rawSource, effective),
-        ),
-      );
-      assertBatchSelectorLocators(expanded, loaded.path);
-      const before = origins.length;
-      await expandSteps(
-        expanded.steps,
-        loaded.path,
-        [loaded.scope ?? new Map(), ...scopes],
-        // Nested actions inherit what this action saw (its defaults too).
-        effective,
-        [...stack, loaded.path],
-      );
-      if (filePath === absPath) {
-        loaded.expandedStepCount = origins.length - before;
-      }
+      if (prefix === undefined) origins.push(origin);
+      else nestedOrigins.set(path, origin);
+      out.push(await resolveStep(step, at, path));
     }
   };
-  await expandSteps(spec.steps ?? [], absPath, [specScope], {}, []);
-
-  // Prepend baseUrl to relative-path `open:` steps so specs can be portable
-  // across environments without rewriting URLs by hand. This only affects
-  // `resolved.steps`; `origins[i].step` remains the raw file step so heal
-  // patches the file's actual content.
-  const stepsWithBaseUrl = origins.map(({ step }) => {
-    const path = "open" in step ? openPath(step) : "";
-    if (
-      !baseUrl ||
-      !("open" in step) ||
-      !isRelativeUrl(path) ||
-      hasRuntimeUrlPlaceholder(path)
-    ) {
-      return step;
+  /** One kept step: var predicates resolved, baseUrl, nested lists expanded. */
+  const resolveStep = async (
+    step: Step,
+    at: ExpandScope,
+    path: string,
+  ): Promise<Step> => {
+    const own = withBaseUrl(annotateStepVars(step, at.bag, renderVar), baseUrl);
+    const nestedList = async (
+      list: readonly Step[],
+      key: string,
+      scope: ExpandScope = at,
+    ): Promise<Step[]> => {
+      const out: Step[] = [];
+      await expandList(list, scope, out, `${path}/${key}`);
+      return out;
+    };
+    if ("repeat" in own) {
+      return {
+        ...own,
+        repeat: {
+          ...own.repeat,
+          steps: await nestedList(own.repeat.steps, "steps"),
+        },
+      };
     }
-    return typeof step.open === "string"
-      ? { ...step, open: joinUrl(baseUrl, step.open) }
-      : {
-          ...step,
-          open: { ...step.open, path: joinUrl(baseUrl, step.open.path) },
-        };
-  });
+    if ("if" in own) {
+      return {
+        ...own,
+        if: {
+          ...own.if,
+          // oxlint-disable-next-line unicorn/no-thenable -- `if.then` is a step list, never a function
+          then: await nestedList(own.if.then, "then"),
+          ...(own.if.else
+            ? { else: await nestedList(own.if.else, "else") }
+            : {}),
+        },
+      };
+    }
+    if ("use" in own && isBuiltinLogin(own, at)) return own;
+    if ("use" in own) {
+      // A `use:` + `retry` (others were inlined): the group to retry.
+      const used = await loadUse(own, at);
+      const retryUse: RetryUseStep = {
+        ...(own as RetryUseStep),
+        steps: await nestedList(used.steps, "use", used.scope),
+      };
+      return retryUse;
+    }
+    return own;
+  };
+  const specStepsResolved: Step[] = [];
+  await expandList(
+    spec.steps ?? [],
+    {
+      filePath: absPath,
+      scopes: [specScope],
+      callScope: {},
+      stack: [],
+      bag: vars,
+    },
+    specStepsResolved,
+    undefined,
+  );
 
-  const resolved: Spec = { ...spec, steps: stepsWithBaseUrl };
+  // `resolved.steps` carries baseUrl-prefixed `open:` paths (see
+  // withBaseUrl) and parser-resolved var predicates; `origins[i].step`
+  // remains the raw file step so heal patches the file's actual content.
+  const resolved: Spec = { ...spec, steps: specStepsResolved };
 
   let contractHashValid = false;
   if (rawSpec.contractHash) {
@@ -350,8 +480,10 @@ export async function parseSpec(
     path: absPath,
     contractHashValid,
     origins,
+    nestedOrigins,
     actionsByName,
     vars,
+    ...(secretValues.size > 0 ? { secretValues: [...secretValues] } : {}),
   };
 }
 
@@ -365,11 +497,13 @@ export function parseReusableAction(
   absPath: string,
   /** Value of `${config.dir}`; the process cwd when omitted. */
   opts: {
-    vars?: Record<string, string | number | boolean>;
+    vars?: VarsBag;
     env?: Record<string, string | undefined>;
     baseUrl?: string;
     runtime?: RuntimeTemplateContext;
     secretRef?: (name: string) => string;
+    envDefaultRef?: (name: string, fallback: string) => string;
+    lateEnv?: boolean;
     configDir?: string;
   } = {},
 ): ReusableAction {
@@ -380,9 +514,146 @@ export function parseReusableAction(
     configDir: opts.configDir,
     runtime: opts.runtime,
     ...(opts.secretRef ? { secretRef: opts.secretRef } : {}),
+    ...(opts.envDefaultRef ? { envDefaultRef: opts.envDefaultRef } : {}),
+    ...(opts.lateEnv ? { lateEnv: true } : {}),
   });
   assertBatchSelectorLocators(importRaw, absPath);
-  return ReusableActionSchema.parse(importRaw);
+  assertNoAuthoredResolved(importRaw, absPath);
+  const action = ReusableActionSchema.parse(importRaw);
+  // F14: `var` predicates read the vars this parse was given (the exporter
+  // binds declared action vars to late-bound sentinels).
+  return {
+    ...action,
+    steps: annotateVarPredicates(action.steps, opts.vars ?? {}, (value) =>
+      renderRuntimePlaceholders(renderVarValue(value), opts.runtime),
+    ),
+  };
+}
+
+/* ----- F14 helpers: var predicates, baseUrl ----- */
+
+/**
+ * Resolve the plain `var` predicates of a whole step list (nested repeat /
+ * if blocks included) against ONE vars bag — for steps that all live in one
+ * file, e.g. a spec's own steps as written (the --project exporter renders
+ * those, not `resolved`) or a re-parsed action. `use:` is not followed.
+ */
+export function annotateVarPredicates(
+  steps: readonly Step[],
+  bag: VarsBag,
+  render: (value: ConfigVarValue) => string = renderVarValue,
+): Step[] {
+  return steps.map((step) => {
+    const own = annotateStepVars(step, bag, render);
+    if ("repeat" in own) {
+      return {
+        ...own,
+        repeat: {
+          ...own.repeat,
+          steps: annotateVarPredicates(own.repeat.steps, bag, render),
+        },
+      };
+    }
+    if ("if" in own) {
+      return {
+        ...own,
+        if: {
+          ...own.if,
+          // oxlint-disable-next-line unicorn/no-thenable -- `if.then` is a step list, never a function
+          then: annotateVarPredicates(own.if.then, bag, render),
+          ...(own.if.else
+            ? { else: annotateVarPredicates(own.if.else, bag, render) }
+            : {}),
+        },
+      };
+    }
+    return own;
+  });
+}
+
+/**
+ * Attach the declaring file's value of a plain `var` predicate as
+ * `resolved` (dotted runtime names are read by the runner).
+ */
+function annotateCondition<T extends Condition | undefined>(
+  condition: T,
+  bag: VarsBag,
+  render: (value: ConfigVarValue) => string,
+): T {
+  const when = condition as Condition | undefined;
+  if (when === undefined || typeof when === "string") return condition;
+  // `resolved` is the parser's alone: whatever else reached here never keeps it.
+  const { resolved: _authored, ...rest } = when;
+  if (when.var === undefined || when.var.includes(".")) {
+    return (_authored === undefined ? condition : rest) as T;
+  }
+  const value = Object.hasOwn(bag, when.var) ? bag[when.var] : undefined;
+  return (
+    value === undefined ? rest : { ...rest, resolved: render(value) }
+  ) as T;
+}
+
+/**
+ * Resolve the `var` predicates a step owns (its `when`, `repeat.until`,
+ * `if.condition`, `use.retry.until`) against `bag`. Nested lists are left
+ * alone: each nested step is resolved in the scope of the file declaring it.
+ */
+export function annotateStepVars(
+  step: Step,
+  bag: VarsBag,
+  render: (value: ConfigVarValue) => string = renderVarValue,
+): Step {
+  let out: Step = step;
+  if (step.when !== undefined && typeof step.when !== "string") {
+    out = { ...out, when: annotateCondition(step.when, bag, render) };
+  }
+  if ("repeat" in out && out.repeat.until !== undefined) {
+    out = {
+      ...out,
+      repeat: {
+        ...out.repeat,
+        until: annotateCondition(out.repeat.until, bag, render),
+      },
+    };
+  }
+  if ("if" in out) {
+    out = {
+      ...out,
+      if: {
+        ...out.if,
+        condition: annotateCondition(out.if.condition, bag, render),
+      },
+    };
+  }
+  if ("use" in out && typeof out.use !== "string" && out.use.retry?.until) {
+    out = {
+      ...out,
+      use: {
+        ...out.use,
+        retry: {
+          ...out.use.retry,
+          until: annotateCondition(out.use.retry.until, bag, render),
+        },
+      },
+    } as Step;
+  }
+  return out;
+}
+
+/**
+ * Prepend baseUrl to a relative-path `open:` step so specs stay portable
+ * across environments without rewriting URLs by hand.
+ */
+function withBaseUrl(step: Step, baseUrl: string | undefined): Step {
+  if (!baseUrl || !("open" in step)) return step;
+  const path = openPath(step);
+  if (!isRelativeUrl(path) || hasRuntimeUrlPlaceholder(path)) return step;
+  return typeof step.open === "string"
+    ? { ...step, open: joinUrl(baseUrl, step.open) }
+    : {
+        ...step,
+        open: { ...step.open, path: joinUrl(baseUrl, step.open.path) },
+      };
 }
 
 /**
@@ -405,7 +676,7 @@ export function resolveTemplateString(
    * name, so callers can redact secret values from anything they display.
    */
   opts: {
-    vars?: Record<string, string | number | boolean>;
+    vars?: VarsBag;
     env?: Record<string, string | undefined>;
     baseUrl?: string;
     configDir?: string;
@@ -524,9 +795,9 @@ export class MissingTemplateVariableError extends Error {
 
 function extractPlainVars(
   value: unknown,
-): Record<string, string | number | boolean> {
+): Record<string, ConfigScalarVarValue> {
   if (!isRecord(value) || !isRecord(value.vars)) return {};
-  const out: Record<string, string | number | boolean> = {};
+  const out: Record<string, ConfigScalarVarValue> = {};
   for (const [key, entry] of Object.entries(value.vars)) {
     if (
       typeof entry === "string" ||
@@ -542,12 +813,20 @@ function extractPlainVars(
 /** Substitution inputs shared by every file of one parse. */
 interface SharedSubstitution {
   env: Record<string, string | undefined>;
-  vars: Record<string, string | number | boolean>;
+  vars: VarsBag;
   baseUrl: string | undefined;
   /** `${config.dir}`; undefined only when the file never references it. */
   configDir: string | undefined;
   runtime: RuntimeTemplateContext | undefined;
   secretRef?: (name: string) => string;
+  envDefaultRef?: (name: string, fallback: string) => string;
+  lateEnv?: boolean;
+  /** See resolveTemplateString: reports env/secret values as they resolve. */
+  onEnvValue?: (ref: {
+    ns: "env" | "secrets";
+    name: string;
+    value: string;
+  }) => void;
 }
 
 /** Per-file substitution context: shared inputs + the file's own location. */
@@ -556,12 +835,6 @@ interface SubstitutionContext extends SharedSubstitution {
   projectRoot: string;
   /** File named in MissingTemplateVariableError. */
   filePath: string;
-  /** See resolveTemplateString: reports env/secret values as they resolve. */
-  onEnvValue?: (ref: {
-    ns: "env" | "secrets";
-    name: string;
-    value: string;
-  }) => void;
 }
 
 function loadAndParseSource(
@@ -582,6 +855,12 @@ function loadAndParseSource(
     projectRoot: dirname(absPath),
     filePath: absPath,
   };
+  // F7: a typed (list / object) var spliced as a whole unquoted value keeps
+  // its structure. It is parked under a token (a NUL-delimited string no YAML
+  // text or env value can hold) and put back after toJS, so its strings are
+  // never substituted a second time.
+  const structuredToken = "\u0000cairn-structured-var:";
+  const structured: unknown[] = [];
   visit(doc, {
     Scalar(key, node) {
       if (typeof node.value !== "string" || !node.value.includes("${")) return;
@@ -595,13 +874,22 @@ function loadAndParseSource(
         node.type === Scalar.PLAIN &&
         isWholePlaceholder(original)
       ) {
+        const typed = structuredVarValue(original, ctx);
+        if (typed !== undefined) {
+          node.value = `${structuredToken}${structured.length}`;
+          structured.push(typed);
+          return;
+        }
         node.value = coerceScalarValue(resolved);
       } else {
         node.value = resolved;
       }
     },
   });
-  return doc.toJS();
+  const out: unknown = doc.toJS();
+  return structured.length > 0
+    ? restoreStructuredVars(out, structuredToken, structured)
+    : out;
 }
 
 /**
@@ -609,6 +897,55 @@ function loadAndParseSource(
  * deeply nested StepSchema union dump. This runs for both specs and imported
  * reusable actions before their respective schemas are parsed.
  */
+/**
+ * F14: `resolved` on a condition object is set by the parser (the plain
+ * var's value in the declaring file's scope) — an authored one would be
+ * read as that value. Refused in specs and actions as written.
+ */
+function assertNoAuthoredResolved(value: unknown, filePath: string): void {
+  if (!isRecord(value) || !Array.isArray(value.steps)) return;
+  const walk = (steps: unknown[], where: string): void => {
+    steps.forEach((step, index) => {
+      if (!isRecord(step)) return;
+      const at = `${where}[${index}]`;
+      const conditions: Array<[string, unknown]> = [
+        [`${at}.when`, step.when],
+        [
+          `${at}.repeat.until`,
+          isRecord(step.repeat) ? step.repeat.until : undefined,
+        ],
+        [
+          `${at}.if.condition`,
+          isRecord(step.if) ? step.if.condition : undefined,
+        ],
+        [
+          `${at}.use.retry.until`,
+          isRecord(step.use) && isRecord(step.use.retry)
+            ? step.use.retry.until
+            : undefined,
+        ],
+      ];
+      for (const [path, condition] of conditions) {
+        if (isRecord(condition) && Object.hasOwn(condition, "resolved")) {
+          throw new Error(
+            `${path}.resolved in ${filePath} is set by the parser (a plain var's value), never authored — remove it`,
+          );
+        }
+      }
+      if (isRecord(step.repeat) && Array.isArray(step.repeat.steps)) {
+        walk(step.repeat.steps, `${at}.repeat.steps`);
+      }
+      if (isRecord(step.if)) {
+        for (const key of ["then", "else"] as const) {
+          const list = step.if[key];
+          if (Array.isArray(list)) walk(list, `${at}.if.${key}`);
+        }
+      }
+    });
+  };
+  walk(value.steps, "steps");
+}
+
 export function assertBatchSelectorLocators(
   value: unknown,
   filePath: string,
@@ -617,6 +954,19 @@ export function assertBatchSelectorLocators(
 
   for (let stepIndex = 0; stepIndex < value.steps.length; stepIndex++) {
     const step = value.steps[stepIndex];
+    // F14: batches nested in repeat / if blocks follow the same rule.
+    if (isRecord(step)) {
+      const blocks = [
+        isRecord(step.repeat) ? step.repeat.steps : undefined,
+        isRecord(step.if) ? step.if.then : undefined,
+        isRecord(step.if) ? step.if.else : undefined,
+      ];
+      for (const nested of blocks) {
+        if (Array.isArray(nested)) {
+          assertBatchSelectorLocators({ steps: nested }, filePath);
+        }
+      }
+    }
     if (!isRecord(step) || !Array.isArray(step.batch)) continue;
 
     for (
@@ -658,6 +1008,16 @@ function semanticBatchLocator(
     }
   }
   return undefined;
+}
+
+/** The action `actionName` names in lexical scopes (innermost first). */
+function findAction(
+  actionName: string,
+  scopes: ReadonlyArray<ReadonlyMap<string, LoadedAction>>,
+): LoadedAction | undefined {
+  return scopes
+    .map((scope) => scope.get(actionName))
+    .find((candidate) => candidate !== undefined);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -753,6 +1113,13 @@ function resolvePlaceholder(body: string, ctx: SubstitutionContext): string {
     const defaultExpr =
       defaultIdx >= 0 ? rest.slice(defaultIdx + 2) : undefined;
     if (ns === "secrets" && secretRef) return secretRef(name);
+    if (ns === "env" && secretRef) {
+      // Exporter late binding: the generated test reads process.env itself.
+      if (defaultExpr !== undefined && ctx.envDefaultRef) {
+        return ctx.envDefaultRef(name, substituteString(defaultExpr, ctx));
+      }
+      if (defaultExpr === undefined && ctx.lateEnv) return secretRef(name);
+    }
     const val = env[name];
     if (val === undefined || val === "") {
       if (defaultExpr === undefined) {
@@ -767,14 +1134,71 @@ function resolvePlaceholder(body: string, ctx: SubstitutionContext): string {
   }
 
   if (ns === "vars") {
-    const v = vars[rest];
-    if (v === undefined) {
+    // F7: `${vars.name.key}` / `${vars.name.0}` read inside a typed var; in
+    // this (string) context a list or object renders as compact JSON.
+    const hit = lookupVar(vars, rest);
+    if (!hit.found) {
       throw new MissingTemplateVariableError(rest, ctx.filePath);
     }
-    return renderRuntimePlaceholders(String(v), runtime);
+    return renderRuntimePlaceholders(renderVarValue(hit.value), runtime);
   }
 
   return `\${${body}}`;
+}
+
+/**
+ * F7: the list / object an unquoted whole `${vars.X}` placeholder stands
+ * for (runtime placeholders inside it rendered), else undefined — scalars
+ * keep the YAML re-inference of {@link coerceScalarValue}.
+ */
+function structuredVarValue(
+  placeholder: string,
+  ctx: SubstitutionContext,
+): unknown {
+  const body = placeholder.slice(2, -1);
+  if (!body.startsWith("vars.")) return undefined;
+  const hit = lookupVar(ctx.vars, body.slice("vars.".length));
+  if (!hit.found || !isStructuredVar(hit.value)) return undefined;
+  const render = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return renderRuntimePlaceholders(value, ctx.runtime);
+    }
+    if (Array.isArray(value)) return value.map(render);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, render(item)]),
+      );
+    }
+    return value;
+  };
+  return render(hit.value);
+}
+
+/** Put the structured values parked under `token<i>` back into a parsed tree. */
+function restoreStructuredVars(
+  value: unknown,
+  token: string,
+  values: readonly unknown[],
+): unknown {
+  if (typeof value === "string") {
+    if (!value.startsWith(token)) return value;
+    const index = Number(value.slice(token.length));
+    return Number.isInteger(index) && index < values.length
+      ? values[index]
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => restoreStructuredVars(item, token, values));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        restoreStructuredVars(item, token, values),
+      ]),
+    );
+  }
+  return value;
 }
 
 /**

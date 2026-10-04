@@ -6,7 +6,8 @@
  * itself, and ipc.js validates every argument (known projects only, reads
  * and writes confined to project/artifact roots, native confirmations for
  * binary, artifact-root and launch-template changes, publishing, promoting a
- * draft, and services up/down). It is not a sandbox
+ * draft, services up/down/restart, and ending orphan browser sessions). It is
+ * not a sandbox
  * against command execution: editing a spec's preconditions and running it
  * is a feature, so a compromised renderer could do the same.
  */
@@ -91,6 +92,14 @@ const INVOKE_CHANNELS = new Set([
   "services:lock",
   "services:up",
   "services:down",
+  "services:windows",
+  "services:restart",
+  "services:logs",
+  "suites:list",
+  "config:vars",
+  "orphans:list",
+  "orphans:kill",
+  "metrics:history",
   "checkpoints:list",
   "clean:runs",
   "shell:open-external",

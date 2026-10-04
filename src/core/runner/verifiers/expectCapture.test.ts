@@ -675,7 +675,7 @@ describe("runner: expect references", () => {
 /* ----- export ----- */
 
 describe("export: expect, capture and data verifiers", () => {
-  it("renders expect as web-first assertions and skips capture/data verifiers with reasons", () => {
+  it("renders expect as web-first assertions, exports capture, poll, expect.request and network bodies, and skips datasource verifiers with reasons", () => {
     const spec: Spec = SpecSchema.parse({
       version: 1,
       name: "export_expect",
@@ -753,18 +753,26 @@ describe("export: expect, capture and data verifiers", () => {
     );
     expect(reasons).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/^step:hard:expect\.request not exported/),
-        expect.stringMatching(
-          /^step:hard:capture step not exportable \(rows\)/,
-        ),
         expect.stringMatching(
           /^outcome:hard:mongo verifier not exported: it queries config datasource "app"/,
         ),
-        expect.stringMatching(/^outcome:soft:poll not exported/),
-        expect.stringMatching(
-          /^outcome:hard:network body\/count matching not exported/,
-        ),
       ]),
+    );
+    // expect.request and a network body outcome export (typed data glue).
+    expect(reasons.join("\n")).not.toContain("expect.request not exported");
+    expect(reasons.join("\n")).not.toContain("network body/count");
+    expect(result.source).toContain(
+      'await cairnExpectRequest(page, { method: "GET", url: String(cairnCall.url) }, {}, 5000);',
+    );
+    expect(result.source).toContain("cairnAssertNetwork(requests,");
+    // The page-derived capture and the poll are exported, not skipped.
+    expect(reasons.join("\n")).not.toContain("capture step not exportable");
+    expect(reasons.join("\n")).not.toContain("poll not exported");
+    expect(result.source).toContain(
+      'cairnCapture(page, "table", { "by": "selector", "selector": "table" }',
+    );
+    expect(result.source).toContain(
+      "}).toPass({ timeout: 1000, intervals: [1000] });",
     );
   });
 

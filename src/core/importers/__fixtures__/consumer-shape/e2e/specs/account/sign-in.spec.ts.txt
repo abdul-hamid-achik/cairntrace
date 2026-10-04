@@ -1,0 +1,34 @@
+import { expect } from "@playwright/test";
+import { SignInPage } from "../../pages";
+import { LoginPage } from "../../pages/aliases";
+import { accountCredentials } from "../../support/accounts";
+import { test } from "../../support";
+
+const accountId = "A100002";
+
+test.use({ accountId });
+
+test("member signs in", async ({ accountPage }) => {
+  const page = await accountPage("regular", { login: false });
+  const { email, password } = accountCredentials(accountId, "regular");
+
+  const signInPage = new SignInPage(page);
+  await signInPage.goto();
+  await signInPage.signIn(email, password, false);
+
+  await page.getByRole("link", { name: "Customers" }).click();
+  await expect(page.getByRole("main")).toContainText("No search results found.");
+});
+
+test("legacy page API", async ({ page }) => {
+  const signIn = new LoginPage(page);
+  await signIn.goto();
+  await page.fill("#email", "ada@example.test");
+  await page.check("#remember");
+  await page.type("#note", "hello");
+  await page.click("text=Continue");
+  await page.waitForSelector("css=.welcome >> text=Welcome back");
+  await signIn.checkHeading("Welcome");
+  await signIn.clickButtonWithText("Continue", ".modal");
+  await expect(page).toHaveURL("/dashboard");
+});

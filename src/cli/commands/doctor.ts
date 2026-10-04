@@ -1,12 +1,17 @@
 import { access, constants, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { findConfigFile, loadConfig } from "../../core/config/loader";
+import { engineRequirementProblem } from "../../core/engineRequirements";
+import { CAIRN_ENGINE_VERSION } from "../../core/engineVersion";
+import { resolveNodeRuntime } from "../../core/runtimes";
 import { execa } from "execa";
 import { emit, resolveFormat } from "../format";
 import { type CodemapDeps, defaultCodemapDeps } from "./annotate.js";
 import { codemapProjects, codemapStatus } from "./codemap.js";
 import { resolveFcheapBinary } from "./fcheapClient.js";
 import { targetChildEnv } from "../../core/processEnv";
+import { findOrphans, renderOrphansMarkdown } from "./doctorOrphans";
 
 /** Injectable codemap seam for `cairn doctor` (FEATURES item 7). */
 export interface DoctorDeps {
@@ -31,6 +36,19 @@ export interface DoctorOptions {
   md?: boolean;
   /** Also probe iOS readiness (Xcode / Appium / xcuitest / simulators). */
   ios?: boolean;
+  /** List cairn-owned browser sessions whose invocation is gone (instead of the checks). */
+  orphans?: boolean;
+  /** With --orphans: end them (after a confirmation, or with --yes). */
+  kill?: boolean;
+  /** With --orphans --kill: no confirmation. */
+  yes?: boolean;
+  /** With --orphans: only these sessions / pids (comma-separated entries). */
+  only?: string[];
+  /**
+   * F19: the config whose `requires.cairntrace` and `runtimes.node` are
+   * checked (default: the cairntrace.config.yml found from the cwd, if any).
+   */
+  config?: string;
 }
 
 /** Minimum agent-browser cairn is verified against (wait --state, idle timeout). */
@@ -76,6 +94,18 @@ export async function doctorCommand(
   deps: DoctorDeps = { codemap: defaultCodemapDeps },
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
+  if (opts.orphans) {
+    const result = await findOrphans({
+      kill: opts.kill === true,
+      yes: opts.yes === true,
+      structured: format !== "md",
+      ...(opts.only && opts.only.length > 0 ? { only: opts.only } : {}),
+    });
+    process.stdout.write(emit(format, result, renderOrphansMarkdown));
+    if (format !== "json" && format !== "yaml") process.stdout.write("\n");
+    process.exitCode = result.exitCode;
+    return;
+  }
   const checks: DoctorReport["checks"] = [];
 
   checks.push({
@@ -196,12 +226,77 @@ export async function doctorCommand(
     checks.push(...(await resolveIosChecks()));
   }
 
+  // F19: what the project's config pins. Rows exist only for what it declares.
+  const configChecks = await resolveConfigPinChecks(opts.config);
+  checks.push(...configChecks);
+
   const ok = checks.every((c) => c.ok);
   const report: DoctorReport = { ok, checks };
 
   process.stdout.write(emit(format, report, toMarkdown));
   if (format !== "json" && format !== "yaml") process.stdout.write("\n");
-  process.exit(ok ? 0 : 2);
+  // A config pin that is not met is exit 4, like a refused run.
+  process.exit(configChecks.some((c) => !c.ok) ? 4 : ok ? 0 : 2);
+}
+
+/**
+ * `requires.cairntrace` and `runtimes.node` of the config (explicit, else
+ * discovered from `cwd`). No config, or none of the two declared: no rows.
+ */
+export async function resolveConfigPinChecks(
+  explicit?: string,
+  cwd: string = process.cwd(),
+): Promise<DoctorCheck[]> {
+  const configPath = explicit
+    ? resolve(cwd, explicit)
+    : await findConfigFile(cwd);
+  if (!configPath) return [];
+  let loaded;
+  try {
+    loaded = await loadConfig(configPath, configPath, { skipRequires: true });
+  } catch (error) {
+    return explicit
+      ? [
+          {
+            name: "config",
+            ok: false,
+            detail: `${configPath}: ${(error as Error).message.split("\n")[0]}`,
+          },
+        ]
+      : [];
+  }
+  if (!loaded) return [];
+  const checks: DoctorCheck[] = [];
+  const { config } = loaded;
+  if (config.requires?.cairntrace !== undefined) {
+    const problem = engineRequirementProblem(config, undefined, configPath);
+    checks.push({
+      name: "config-requires",
+      ok: problem === undefined,
+      detail:
+        problem ??
+        `cairntrace ${CAIRN_ENGINE_VERSION} satisfies ${config.requires.cairntrace}`,
+    });
+  }
+  if (config.runtimes?.node) {
+    try {
+      const node = resolveNodeRuntime(config.runtimes, {
+        configDir: dirname(configPath),
+      });
+      checks.push({
+        name: "config-node-runtime",
+        ok: true,
+        detail: `${node.command} (v${node.version}) via ${node.source}`,
+      });
+    } catch (error) {
+      checks.push({
+        name: "config-node-runtime",
+        ok: false,
+        detail: (error as Error).message,
+      });
+    }
+  }
+  return checks;
 }
 
 interface PlaywrightRuntime {

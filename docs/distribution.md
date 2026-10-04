@@ -42,7 +42,9 @@ the Homebrew formula via `.github/workflows/homebrew-tap.yml`.
 What does NOT get distributed:
 
 - The `node_modules/` tree (when shipped without `--standalone`).
-- Any `dev` dependency (TypeScript, Oxlint, Vitest, Knip).
+- Any `dev` dependency (Oxlint, Vitest, Knip). TypeScript is a runtime
+  dependency: `cairn import playwright` and the export's host profile read
+  code with its compiler API.
 - Project-local `~/.cairntrace/` caches or run dirs.
 
 ## Pinning a version

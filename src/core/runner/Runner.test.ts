@@ -79,6 +79,60 @@ function withoutNativeRequest(backend: MockBrowserBackend): BrowserBackend {
 }
 
 describe("runSpec e2e (mock backend)", () => {
+  it("judges a request whose response reaches the backend just after the last step (bounded settle)", async () => {
+    const specPath = await writeSpec(
+      "late_response",
+      `version: 1
+name: late_response
+intent: a response event that lags the page is still judged
+outcomes:
+  - id: no_failures
+    description: the API did not fail
+    verify: { noFailedRequests: { urlContains: "/api/" } }
+steps: []
+`,
+    );
+    const backend = new MockBrowserBackend();
+    let armed = false;
+    const lagging = new Proxy(backend, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop === "getNetworkRequests") {
+          return async (...args: unknown[]) => {
+            if (!armed) {
+              armed = true;
+              // The page saw the request fail; its response event lands
+              // 150ms after the end-of-steps snapshot was first read.
+              target.pushNetworkEntry({
+                url: "http://app.test/api/save",
+                method: "POST",
+              });
+              const [entry] = await target.getNetworkRequests();
+              setTimeout(() => {
+                entry!.status = 500;
+              }, 150);
+            }
+            return (value as (...a: unknown[]) => Promise<unknown>).apply(
+              target,
+              args,
+            );
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as BrowserBackend;
+    const started = Date.now();
+    const result = await runSpec({ specPath, backend: lagging, artifactRoot });
+    expect(result.status).toBe("failed");
+    expect(result.outcomes[0]?.status).toBe("failed");
+    const evidence = await readFile(
+      join(result.runDir, result.outcomes[0]!.evidence!),
+      "utf8",
+    );
+    expect(evidence).toContain("POST http://app.test/api/save → 500");
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
   it("does not expose the file.cheap ingest credential to preconditions", async () => {
     const specPath = await writeSpec(
       "protected_precondition_env",
@@ -1712,7 +1766,11 @@ steps:
       'fetch("http://host/api/test/login-as"',
     );
     expect(backend.lastEvaluatedScript).toContain("AbortSignal.timeout(1234)");
-    expect(backend.lastEvaluateOptions).toEqual({ timeoutMs: 1234 });
+    // The fallback script carries headers and body: never in a process argv.
+    expect(backend.lastEvaluateOptions).toEqual({
+      timeoutMs: 1234,
+      sensitive: true,
+    });
   });
 
   it("joins runtime request placeholders in open paths without double slashes", async () => {

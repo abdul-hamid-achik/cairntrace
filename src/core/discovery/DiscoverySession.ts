@@ -27,6 +27,7 @@ import {
   type LocatorInventory,
 } from "../snapshot/locatorInventory";
 import type { ConfigVarValue } from "../schema/config.v1";
+import { renderVarValue } from "../config/varValue";
 import {
   DEFAULT_DISCOVERY_SESSION_TTL_MS,
   type DiscoveryAction,
@@ -398,12 +399,17 @@ function makeRedactor(
 
 function redactVarInputs(
   vars: Record<string, ConfigVarValue> | undefined,
-): Record<string, ConfigVarValue> | undefined {
+): Record<string, string | number | boolean> | undefined {
   if (!vars || Object.keys(vars).length === 0) return undefined;
   return Object.fromEntries(
     Object.entries(vars).map(([key, value]) => [
       key,
-      isSensitiveEnvKey(key) ? "[redacted]" : value,
+      isSensitiveEnvKey(key)
+        ? "[redacted]"
+        : typeof value === "object"
+          ? // The journal keeps scalars; a typed (list / object) var is JSON.
+            renderVarValue(value)
+          : value,
     ]),
   );
 }

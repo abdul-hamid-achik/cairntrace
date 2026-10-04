@@ -1,0 +1,19 @@
+{"ts":"2026-10-03T10:00:00.000Z","type":"invocation.started","invocationId":"2026-10-03T10-00-00-000Z_4242_abc123","planned":2}
+{"ts":"2026-10-03T10:00:00.010Z","type":"suite.started","name":"both","env":"remote","specs":2}
+{"ts":"2026-10-03T10:00:00.050Z","type":"delegate.started","contract":"urn:cairntrace.dev:delegate:v1","command":["./tools/remote-run.sh","--slot","auto"],"cwd":"/project","pid":4300,"cancelGraceMs":180000}
+{"ts":"2026-10-03T10:00:00.060Z","type":"phase.changed","phase":"steps","item":"delegated runner"}
+{"ts":"2026-10-03T10:00:05.000Z","type":"delegate.progress","message":"remote machine ready","delegated":true}
+{"ts":"2026-10-03T10:00:06.000Z","type":"delegate.remote.started","remoteInvocationId":"2026-10-03T10-00-06-000Z_77_def456","planned":2}
+{"ts":"2026-10-03T10:00:06.100Z","type":"suite.started","name":"both","env":"worker","specs":2,"delegated":true}
+{"ts":"2026-10-03T10:00:07.000Z","type":"invocation.run.started","index":1,"spec":"/remote/flows/alpha.yml","runId":"2026-10-03T10-00-07-000Z_alpha_aaaaaa","delegated":true}
+{"ts":"2026-10-03T10:00:15.000Z","type":"run.heartbeat","phase":"steps","item":"spec 1/2 alpha.yml","elapsedMs":8000,"runElapsedMs":15000,"pid":4242}
+{"ts":"2026-10-03T10:00:20.000Z","type":"invocation.run.finished","index":1,"spec":"/remote/flows/alpha.yml","runId":"2026-10-03T10-00-07-000Z_alpha_aaaaaa","status":"passed","durationMs":13000,"delegated":true}
+{"ts":"2026-10-03T10:00:21.000Z","type":"invocation.run.started","index":2,"spec":"/remote/flows/bravo.yml","runId":"2026-10-03T10-00-21-000Z_bravo_bbbbbb","delegated":true}
+{"ts":"2026-10-03T10:00:30.000Z","type":"invocation.run.finished","index":2,"spec":"/remote/flows/bravo.yml","runId":"2026-10-03T10-00-21-000Z_bravo_bbbbbb","status":"failed","durationMs":9000,"delegated":true}
+{"ts":"2026-10-03T10:00:30.500Z","type":"suite.finished","name":"both","exitCode":1,"delegated":true}
+{"ts":"2026-10-03T10:00:31.000Z","type":"delegate.remote.finished","remoteInvocationId":"2026-10-03T10-00-06-000Z_77_def456","status":"failed"}
+{"ts":"2026-10-03T10:00:31.000Z","type":"invocation.summary","invocationId":"2026-10-03T10-00-06-000Z_77_def456","status":"failed","summary":{"total":2,"passed":1,"failed":1,"errored":0,"durationMs":25000,"exitCode":1},"delegated":true}
+{"ts":"2026-10-03T10:00:32.000Z","type":"delegate.diagnostic","level":"warn","code":"incomplete-run-dir","message":"/runs/2026-10-03T10-00-21-000Z_bravo_bbbbbb has no artifact-manifest.json (copy run.json and artifact-manifest.json last)","runId":"2026-10-03T10-00-21-000Z_bravo_bbbbbb"}
+{"ts":"2026-10-03T10:00:32.100Z","type":"delegate.finished","durationMs":32050,"exitCode":1,"relayed":9,"runs":2,"missingRunDirs":0,"diagnostics":1}
+{"ts":"2026-10-03T10:00:32.200Z","type":"suite.finished","name":"both","exitCode":1}
+{"ts":"2026-10-03T10:00:32.300Z","type":"invocation.finished","invocationId":"2026-10-03T10-00-00-000Z_4242_abc123","status":"failed"}

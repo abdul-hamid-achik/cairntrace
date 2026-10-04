@@ -113,7 +113,11 @@ export function renderCatalogMarkdown(c: CatalogResult): string {
     heading("Vars", "vars", c.vars.length);
     for (const v of c.vars) {
       const value = v.value === undefined ? "" : ` = \`${String(v.value)}\``;
-      const from = v.inheritedFrom ? ` (from ${v.inheritedFrom})` : "";
+      const from = v.inheritedFrom
+        ? ` (from ${v.inheritedFrom})`
+        : v.definedIn === "top-level"
+          ? ` (top-level${v.file ? `, ${v.file}` : ""})`
+          : "";
       lines.push(`- **${v.name}** [${v.env}]${value}${from}${why(v)}`);
       if (v.comment) lines.push(`  ${oneLine(v.comment)}`);
       if (v.usedBy.length > 0)
@@ -229,6 +233,35 @@ export function renderCatalogMarkdown(c: CatalogResult): string {
         lines.push(`  outputs: ${f.outputs.join(", ")}`);
       if (f.usedBy.length > 0)
         lines.push(`  used by: ${f.usedBy.map((u) => u.name).join(", ")}`);
+    }
+    lines.push("");
+  }
+  if (c.suites) {
+    heading("Suites", "suites", c.suites.length);
+    for (const suite of c.suites) {
+      const knobs = [
+        suite.parallel !== undefined ? `parallel ${suite.parallel}` : "",
+        suite.bail ? "bail" : "",
+        suite.tags ? `tags ${suite.tags.join("+")}` : "",
+        suite.requires?.env ? `env ${suite.requires.env.join("|")}` : "",
+      ].filter(Boolean);
+      lines.push(
+        `- **${suite.name}**${
+          knobs.length > 0 ? ` — ${knobs.join(", ")}` : ""
+        }${why(suite)}`,
+      );
+      if (suite.description) lines.push(`  ${oneLine(suite.description)}`);
+      for (const e of suite.envs) {
+        lines.push(
+          e.problem
+            ? `  ${e.env}: ${oneLine(e.problem)}`
+            : `  ${e.env}: ${e.specs.length} spec(s)${
+                e.before + e.after > 0
+                  ? ` (hooks: ${e.before} before, ${e.after} after)`
+                  : ""
+              }: ${e.specs.join(", ")}`,
+        );
+      }
     }
     lines.push("");
   }

@@ -382,7 +382,9 @@ export async function runShellDetached(
   { cwd, env }: SpawnOpts,
   onStart?: (started: { pid: number | undefined; outputFile: string }) => void,
   maxOutputBytes = 1024 * 1024,
-): Promise<ShellResult & { signal: string | null }> {
+  /** Kill the whole process group after this long (SIGTERM, then SIGKILL). */
+  timeoutMs?: number,
+): Promise<ShellResult & { signal: string | null; timedOut?: boolean }> {
   const outputFile = join(
     tmpdir(),
     `cairn-shell-${process.pid}-${Date.now()}-${Math.random()
@@ -407,6 +409,19 @@ export async function runShellDetached(
   // The child holds its own copy of the descriptor.
   closeSync(fd);
   onStart?.({ pid: child.pid, outputFile });
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  if (timeoutMs !== undefined && timeoutMs > 0 && child.pid !== undefined) {
+    const pgid = child.pid;
+    timer = setTimeout(() => {
+      timedOut = true;
+      signalGroup(pgid, "SIGTERM");
+      killTimer = setTimeout(() => signalGroup(pgid, "SIGKILL"), 2_000);
+      killTimer.unref?.();
+    }, timeoutMs);
+    timer.unref?.();
+  }
   const settled = await new Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
@@ -418,6 +433,8 @@ export async function runShellDetached(
     );
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
+  if (timer) clearTimeout(timer);
+  if (killTimer && !timedOut) clearTimeout(killTimer);
   const output = await readFileTail(outputFile, maxOutputBytes);
   await unlink(outputFile).catch(() => undefined);
   if (settled.error) throw settled.error;
@@ -430,7 +447,17 @@ export async function runShellDetached(
     signal: settled.signal,
     stdout: output.endsWith("\n") ? output.slice(0, -1) : output,
     stderr: "",
+    ...(timedOut ? { timedOut: true } : {}),
   };
+}
+
+/** Signal a process group; a group that is already gone is not an error. */
+function signalGroup(pgid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pgid, signal);
+  } catch {
+    // already gone
+  }
 }
 
 /** The last `maxBytes` of a file as UTF-8 (empty when it is unreadable). */

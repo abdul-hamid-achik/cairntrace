@@ -305,6 +305,23 @@ describe("noFailedRequests", () => {
     expect(r.actual).not.toContain("completed");
   });
 
+  it("says what a backend that never marks failed requests could not judge", async () => {
+    // agent-browser: a refused request looks exactly like a pending one.
+    const b = Object.assign(new MockBrowserBackend(), {
+      reportsRequestFailures: false,
+    });
+    b.pushNetworkEntry({ url: "/api/ok", method: "GET", status: 200 });
+    b.pushNetworkEntry({ url: "/api/refused", method: "GET" });
+    const r = await evaluateNoFailedRequests(
+      { noFailedRequests: { urlContains: "/api/" } },
+      b,
+    );
+    expect(r.passed).toBe(true);
+    expect(r.actual).toContain(
+      "1 matching request(s) never completed (no status): mock does not report failed or cancelled requests",
+    );
+  });
+
   it("uses the persisted snapshot for no-failure verdicts", async () => {
     const b = new MockBrowserBackend();
     b.pushNetworkEntry({ url: "/api/x", method: "GET", status: 200 });

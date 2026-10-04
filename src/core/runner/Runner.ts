@@ -5,7 +5,7 @@ import type {
   ArtifactRef,
   BrowserBackend,
   ConsoleEntry,
-  NetworkEntry,
+  InvocationResult,
   ResolvedElement,
 } from "../../adapters/browserBackend";
 import { runBoundedCommand } from "./boundedCommand";
@@ -33,6 +33,7 @@ import {
 } from "../artifacts/traceCapture";
 import {
   createLiveArtifactRedactor,
+  registerDerivedSecretValues,
   registerSecretValues,
 } from "../artifacts/redaction";
 import { LiveLog, logIndex, logSlug } from "../artifacts/liveLog";
@@ -53,7 +54,25 @@ import {
 } from "../processEnv";
 import { parseSpec } from "../parser/parseSpec";
 import { computeContractHash } from "../contractHash";
-import { evaluateWhen } from "./conditions";
+import {
+  evaluateWhen,
+  whenForEvidence,
+  type ConditionContext,
+} from "./conditions";
+import {
+  lookupControlRef,
+  nestedRequestName,
+  nestedStepInfo,
+  placeFields,
+  resolveControlPlaceholders,
+  runControlFlowStep,
+  topLevelPlace,
+  type ChildOutcome,
+  type StepPlace,
+  type WaitRecord,
+} from "./controlFlow";
+import { runRunnerDrivenWait, type RunnerWaitOptions } from "./waitGroups";
+import { withCairnPrelude, type AppHandles } from "../prelude/prelude";
 import {
   cutClipsWithVidtrace,
   isVidtraceAvailable,
@@ -62,21 +81,37 @@ import {
 } from "../clip/vidtraceClip";
 import type { ExitCode } from "../schema/shared";
 import {
+  fillLocator,
+  isBuiltinLoginUse,
+  isControlFlowStep,
+  isRunnerDrivenWait,
+  isWaitGroup,
+  isWidgetStep,
   openPath,
   teardownPlan,
+  widgetTargetRef,
+  type ClickStep,
+  type Condition,
+  type FillStep,
   type EvalStep,
+  type IfStep,
   type Locator,
   type MonitorStep,
+  type RepeatStep,
   type RequestStep,
+  type RetryUseStep,
   type Spec,
   type Step,
   type TransformStep,
+  type UseStep,
 } from "../schema/spec.v1";
 import type {
+  ConfigVarValue,
   MonitorTargetConfig,
   RetentionConfig,
   StashConfig,
 } from "../schema/config.v1";
+import { renderVarValue } from "../config/varValue";
 import type {
   OutcomeResult,
   RunArtifacts,
@@ -105,6 +140,7 @@ import { buildReplayManifest } from "../schema/replay.v1";
 import type { Outcome } from "../schema/spec.v1";
 import { CAIRN_VERSION } from "../../cli/version";
 import { type EvaluatedOutcome, evaluateOutcomes } from "./OutcomeEvaluator";
+import { judgedNetworkFilters, settledNetworkSnapshot } from "./networkSettle";
 import { runNodeScript } from "./nodeScripts";
 import {
   deepMapStrings,
@@ -154,11 +190,25 @@ import {
   resolveWaitScale,
   runResilientBrowserStep,
 } from "./interactionResilience";
-import { isRelativeUrl, joinUrl, resolveUrl } from "./url";
+import { isRelativeUrl, joinUrl } from "./url";
+import {
+  networkMatchToResponse,
+  runRequestStep,
+  type RequestStepResult,
+} from "./requestStep";
+import { runEnvLogin } from "./envAuth";
+
+export { DEFAULT_REQUEST_TIMEOUT_MS } from "./requestStep";
 import type { VerifierEvaluation } from "./verifiers/types";
 import type { ScriptVerifierContext } from "./verifiers/script";
 // F4/F16: datasources, ${captures.*} and expect/capture steps.
 import type { CaptureStep, ExpectStep } from "../schema/spec.v1";
+import {
+  executeWidgetStep,
+  needsInteractionRuntime,
+  runFlaggedInteraction,
+} from "../widgets/execute";
+import { prepareWidgets, type PreparedWidgets } from "../widgets/runtime";
 import { resolveEnvironmentDatasources } from "../datasources/resolve";
 import {
   FixtureRuntime,
@@ -195,6 +245,13 @@ import type {
  * The CLI attaches a TTY-aware listener for interactive `cairn run` output;
  * tests typically omit it.
  */
+/** F14: where a nested step ran (see ProgressListener.onStepStart). */
+export interface NestedStepInfo {
+  parentId: string;
+  iteration?: number;
+  branch?: "then" | "else";
+}
+
 export interface ProgressListener {
   onRunStart?(
     spec: Spec,
@@ -218,13 +275,23 @@ export interface ProgressListener {
     durationMs: number,
     details?: { timedOut?: boolean; signal?: string },
   ): void;
-  onStepStart?(idx: number, step: Step, stepId: string): void;
+  /**
+   * `idx` is the top-level step index; a step nested in a control-flow block
+   * (F14) also passes `nested` (its parent, iteration and branch).
+   */
+  onStepStart?(
+    idx: number,
+    step: Step,
+    stepId: string,
+    nested?: NestedStepInfo,
+  ): void;
   onStepFinish?(
     idx: number,
     stepId: string,
     status: StepResult["status"],
     durationMs: number,
     error: string | undefined,
+    nested?: NestedStepInfo,
   ): void;
   onOutcomesStart?(total: number): void;
   onOutcomeStart?(outcome: Outcome): void;
@@ -250,7 +317,7 @@ export interface RunOptions {
   /** Override default environment from spec. */
   environmentOverride?: string;
   /** ${vars.X} substitution bag. */
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, ConfigVarValue>;
   /** Override process.env. */
   env?: Record<string, string | undefined>;
   /** Environment authorized for shell target children; vault controls removed. */
@@ -424,6 +491,25 @@ export class RunCancelledError extends Error {
   }
 }
 
+/**
+ * runSpec was asked to run a spec locally in an environment that has a
+ * delegated runner (`environments.<name>.runner`): such an environment
+ * runs only through its runner (`cairn run --env <name>`). A config error,
+ * exit 4; nothing started.
+ */
+export class DelegatedEnvironmentError extends Error {
+  readonly exitCode = 4 as const;
+  constructor(
+    public readonly envName: string,
+    public readonly specPath: string,
+  ) {
+    super(
+      `environment "${envName}" has a runner (environments.${envName}.runner): its specs run only through that runner, in an invocation of that environment alone (${specPath})`,
+    );
+    this.name = "DelegatedEnvironmentError";
+  }
+}
+
 export type LocatorMissDecision =
   | { action: "abort" }
   | { action: "retry"; locator: Locator };
@@ -518,7 +604,9 @@ async function executeSpec(
     resolved,
     path: specPath,
     origins,
+    nestedOrigins,
     actionsByName,
+    secretValues: parsedSecretValues,
   } = await parseSpec(opts.specPath, {
     env: runEnv,
     vars: resolvedVars,
@@ -530,6 +618,12 @@ async function executeSpec(
   });
 
   const env = runtime.envName;
+  // An environment with a runner runs elsewhere: `cairn run` delegates a
+  // whole invocation of it (and refuses one that mixes it with others);
+  // this guards every other way a spec could reach a local browser.
+  if (runtime.config?.environments[env]?.runner) {
+    throw new DelegatedEnvironmentError(env, specPath);
+  }
   // Environment policy, before the run directory or anything else exists.
   // `cairn run` already filtered refused specs; this guards other callers.
   const envPolicy = runtime.config?.environments[env]?.policy;
@@ -560,6 +654,15 @@ async function executeSpec(
     runEnv["CAIRN_WAIT_SCALE"],
   );
   opts.backend.setWaitScale(waitScale);
+  // F20: `wait: { app }` reads config `browser.appHandle` accessors.
+  const waitOptions: RunnerWaitOptions = {
+    ...(runtime.browser?.appHandle
+      ? { appHandles: runtime.browser.appHandle }
+      : {}),
+    ...(runtime.browser?.testIdAttribute
+      ? { testIdAttribute: runtime.browser.testIdAttribute }
+      : {}),
+  };
   // The actual backend that ran is authoritative — spec.backend is only
   // advisory metadata that may not match the CLI's --backend choice.
   const backendName = opts.backend.name;
@@ -575,6 +678,10 @@ async function executeSpec(
   // finishes. Register spec-declared literals process-wide so those post-run
   // text artifacts use the same redaction boundary as the main artifact pack.
   registerSecretValues(spec.redaction?.values ?? []);
+  // F18: whatever its name, a `${secrets.X}` value the spec (or an action)
+  // spliced — a header, a body field — never reaches an artifact. Values too
+  // short to be told apart from ordinary text are left to key-based masking.
+  registerDerivedSecretValues(parsedSecretValues ?? []);
   // Live: values registered later in the run (F3b secret fixture outputs,
   // login tokens, outputs under a sensitive key) are scrubbed from every
   // artifact written after they are known — steps and outcomes included.
@@ -786,6 +893,10 @@ async function executeSpec(
         : {}),
     }),
   });
+  /** F15: widget config + custom driver modules, read on first use. */
+  let widgetsPromise: Promise<PreparedWidgets> | undefined;
+  const loadWidgets = (): Promise<PreparedWidgets> =>
+    (widgetsPromise ??= prepareWidgets(runtime.browser, runtime.configDir));
   const executeTeardownStep = async (
     step: Step,
     runStatus: TeardownRunStatus,
@@ -823,9 +934,14 @@ async function executeSpec(
       };
     }
     if ("when" in prepared && prepared.when) {
-      if (!(await evaluateWhen(prepared.when, opts.backend))) {
-        return { status: "skipped" };
-      }
+      const holds = await evaluateWhen(prepared.when, opts.backend, {
+        // F14: plain vars only; teardown has no loops or wait assigns.
+        lookupVar: (name) =>
+          name.includes(".") || resolvedVars[name] === undefined
+            ? undefined
+            : renderVarValue(resolvedVars[name]),
+      });
+      if (!holds) return { status: "skipped" };
     }
     const bounded = async (
       work: Promise<TeardownItemResult>,
@@ -855,6 +971,7 @@ async function executeSpec(
           backend: opts.backend,
           requestIndex: 0,
           baseUrl: runtime.baseUrl,
+          registerSecrets: registerSecretValues,
         }).then((requested) => {
           if (!requested.ok) {
             return { status: "failed" as const, error: requested.error };
@@ -872,6 +989,7 @@ async function executeSpec(
           specDir: dirname(specPath),
           fileScope: specFileScope(dirname(specPath)),
           writer,
+          appHandles: runtime.browser?.appHandle,
         }).then((ev) => {
           if (!ev.ok) return { status: "failed" as const, error: ev.error };
           if (ev.assign) splice.evals[ev.assign] = { value: ev.value };
@@ -887,8 +1005,37 @@ async function executeSpec(
       applySpecClickSettle(browserStep, resolved.settleMs),
       waitScale,
     );
+    if (needsInteractionRuntime(browserStep)) {
+      // F15: an optional / dispatch click or a fill mode: set in cleanup.
+      return bounded(
+        runFlaggedInteraction(browserStep as ClickStep | FillStep, {
+          backend: opts.backend,
+          widgets: loadWidgets,
+          waitScale,
+          browserStep: (plain) =>
+            runResilientBrowserStep(
+              plain,
+              opts.backend,
+              waitScale,
+              waitOptions,
+            ),
+        }).then((flagged) =>
+          flagged.status === "failed"
+            ? {
+                status: "failed" as const,
+                error: flagged.error ?? "failed",
+              }
+            : { status: flagged.status },
+        ),
+      );
+    }
     return bounded(
-      runResilientBrowserStep(browserStep, opts.backend, waitScale).then((r) =>
+      runResilientBrowserStep(
+        browserStep,
+        opts.backend,
+        waitScale,
+        waitOptions,
+      ).then((r) =>
         r.ok
           ? { status: "passed" as const }
           : {
@@ -964,6 +1111,7 @@ async function executeSpec(
       runId,
       runDir,
       environment: env,
+      ...(runtime.envAlias ? { envAlias: runtime.envAlias } : {}),
       backend: backendName,
       coldStart,
       labels: opts.labels,
@@ -1599,23 +1747,208 @@ async function executeSpec(
     }
   };
   maybeStartSampler();
-  // F13: relative paths of a step resolve against the file that declares it.
-  const stepFileScope = (index: number): StepFileScope =>
+  // F13: relative paths of a step resolve against the file that declares it
+  // (F14: a nested step's scope is looked up by its resolved path).
+  const stepFileScope = (index: number | string): StepFileScope =>
     stepFileScopeAt(
-      { path: specPath, origins, actionsByName },
+      { path: specPath, origins, nestedOrigins, actionsByName },
       index,
       (key, message) =>
         reportDeprecation(key, message, { runLog, listener: opts.listener }),
     );
+  /**
+   * Record a request result: `requests/<assign>.json` + `artifact.request`.
+   * A passed request binds `${requests.<assign>.…}`; a failed one keeps its
+   * evidence (a matrix's per-combination statuses, an until's last answer)
+   * without binding it. Returns the run-relative paths written.
+   */
+  const recordRequest = async (
+    requested: RequestStepResult,
+    stepId: string,
+  ): Promise<string[]> => {
+    const assign = requested.assign;
+    const response = requested.response;
+    if (!assign || !response) return [];
+    const relativePath = `requests/${assign}.json`;
+    await writer.writeJson(relativePath, response, "request");
+    if (requested.ok) {
+      responses[assign] = response;
+      requests[assign] = relativePath;
+      namedArtifacts[assign] = {
+        kind: "request",
+        path: writer.resolve(relativePath),
+        relativePath,
+      };
+    }
+    const mismatches = response.matrix?.filter((r) => !r.matched).length;
+    await writer.appendEvent({
+      ts: new Date().toISOString(),
+      type: "artifact.request",
+      stepId,
+      path: relativePath,
+      assign,
+      status: response.status,
+      ...(response.attempts !== undefined
+        ? { attempts: response.attempts }
+        : {}),
+      ...(response.matrix
+        ? { combinations: response.matrix.length, mismatches }
+        : {}),
+    });
+    return [relativePath];
+  };
+  /** F14: `${waits.<assign>.…}` recorded by wait steps with `assign`. */
+  const waitValues: Record<string, WaitRecord> = {};
+  /** F14: every executed step by id (failure brief of a nested step). */
+  const executedSteps = new Map<string, Step>();
+  /** F14 retry: `didError` when an attempt started (by results mark). */
+  const errorAtMark = new Map<number, boolean>();
+  /** Splice every runtime reference a condition or `var` may read. */
+  const spliceRuntimeText = (text: string, place: StepPlace): string => {
+    let out = resolveControlPlaceholders(text, place, waitValues);
+    if (fixtures) out = resolveFixturePlaceholders(out, fixtures.outputs());
+    out = resolveEvalPlaceholders(
+      resolveResponsePlaceholders(out, responses),
+      evalValues,
+    );
+    out = resolveRunPlaceholders(out, runValues);
+    return resolveCapturePlaceholders(out, captureValues);
+  };
+  /** What a `when:` / control condition may read besides the page. */
+  const conditionContext = (place: StepPlace): ConditionContext => ({
+    lookupVar: (name) => {
+      if (!name.includes(".")) {
+        const value = resolvedVars[name];
+        return value === undefined ? undefined : renderVarValue(value);
+      }
+      const control = lookupControlRef(name, place, waitValues);
+      if (control !== undefined) return control;
+      const placeholder = `\${${name}}`;
+      const spliced = spliceRuntimeText(placeholder, place);
+      return spliced === placeholder ? undefined : spliced;
+    },
+  });
+  const controlConditionHolds = (
+    condition: Condition,
+    place: StepPlace,
+  ): Promise<boolean> =>
+    evaluateWhen(
+      deepMapStrings(condition, (s) => spliceRuntimeText(s, place)),
+      opts.backend,
+      conditionContext(place),
+    );
   const totalSteps = (resolved.steps ?? []).length;
   if (totalSteps > 0) await tracker.enter("steps");
-  for (let i = 0; i < totalSteps; i++) {
-    // No session (failed resume) or a cancel: the remaining steps never run.
-    if (resumeFailed || cancelled()) break;
-    const step = resolved.steps![i]!;
-    const stepId = step.id ?? `step_${i + 1}`;
+  /**
+   * F14: run a repeat / if / retried use. Its nested steps run through
+   * executeStep (their own results and events); the block's result is
+   * recorded after them (post-order).
+   */
+  const executeControlStep = async (
+    step: RepeatStep | IfStep | RetryUseStep,
+    place: StepPlace,
+    stepStart: number,
+  ): Promise<ChildOutcome> => {
+    const i = place.top;
+    const stepId = place.id;
+    let result;
+    try {
+      result = await runControlFlowStep(step, place, {
+        executeChild: (child, childAt) => executeStep(child, childAt),
+        holds: controlConditionHolds,
+        stopped: () => cancelled() || opts.backend.isWedged?.() === true,
+        mark: () => {
+          errorAtMark.set(stepResults.length, didError);
+          return stepResults.length;
+        },
+        dropSince: (mark) => {
+          // A retried attempt that threw no longer errors the run.
+          didError = errorAtMark.get(mark) ?? didError;
+          const dropped = stepResults.splice(mark);
+          return dropped.flatMap((entry) => entry.artifacts ?? []);
+        },
+        sleep: (ms) =>
+          new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+      });
+    } catch (e) {
+      result = {
+        status: "failed" as const,
+        error: `${
+          "repeat" in step ? "repeat" : "if" in step ? "if" : "use"
+        }: ${(e as Error).message}`,
+      };
+    }
+    const durationMs = Date.now() - stepStart;
+    const extra = {
+      ...(result.iterations !== undefined
+        ? { iterations: result.iterations }
+        : {}),
+      ...(result.branch !== undefined ? { taken: result.branch } : {}),
+    };
+    stepResults.push({
+      id: stepId,
+      status: result.status,
+      durationMs,
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.artifacts && result.artifacts.length > 0
+        ? { artifacts: [...new Set(result.artifacts)] }
+        : {}),
+      ...placeFields(place),
+      ...extra,
+      ...(result.retries ? { retries: result.retries } : {}),
+    });
+    const { taken: _taken, ...endExtra } = extra;
+    await writer.appendEvent(
+      result.status === "passed"
+        ? {
+            ts: new Date().toISOString(),
+            type: "step.finished",
+            stepId,
+            durationMs,
+            ...placeFields(place),
+            ...extra,
+          }
+        : {
+            ts: new Date().toISOString(),
+            type: "step.failed",
+            stepId,
+            durationMs,
+            ...placeFields(place),
+            ...endExtra,
+            ...(result.error ? { error: result.error } : {}),
+          },
+    );
+    listener.onStepFinish?.(
+      i,
+      stepId,
+      result.status,
+      durationMs,
+      result.error,
+      nestedStepInfo(place),
+    );
+    if (result.status === "passed") lastSuccessfulStep = step;
+    return {
+      status: result.status,
+      ...(result.error ? { error: result.error } : {}),
+    };
+  };
+  const executeStep = async (
+    step: Step,
+    place: StepPlace,
+  ): Promise<ChildOutcome> => {
+    // A cancel stops nested steps too (the top level checks before each step).
+    if (place.parentId !== undefined && cancelled()) {
+      return { status: "failed", error: RUN_CANCELLED_MESSAGE };
+    }
+    const i = place.top;
+    const stepId = place.id;
+    /** Artifact file stem: unique per execution (F14 loops add a suffix). */
+    const artifactStem = `${pad(i + 1)}_${stepId}${place.suffix}`;
+    executedSteps.set(stepId, step);
     const stepStart = Date.now();
-    const fileScope = stepFileScope(i);
+    const fileScope = stepFileScope(
+      place.parentId === undefined ? i : place.path,
+    );
     const described =
       "run" in step
         ? { kind: "run", label: runStepLabel(step) }
@@ -1625,18 +1958,21 @@ async function executeSpec(
       ts: new Date().toISOString(),
       type: "step.started",
       stepId,
-      index: i + 1,
-      total: totalSteps,
+      index: place.index,
+      total: place.total,
       kind: described.kind,
       label: described.label,
+      ...placeFields(place),
     });
-    listener.onStepStart?.(i, step, stepId);
+    listener.onStepStart?.(i, step, stepId, nestedStepInfo(place));
 
     // Optional when: predicate — skip the step if the page doesn't match.
     if ("when" in step && step.when) {
       let conditionHolds = false;
       try {
-        conditionHolds = await evaluateWhen(step.when, opts.backend);
+        // F14: the gate reads loop indexes, wait results and earlier
+        // captures/requests like any other step field.
+        conditionHolds = await controlConditionHolds(step.when, place);
       } catch (e) {
         // Treat parse errors as a step failure so they surface clearly.
         const durationMs = Date.now() - stepStart;
@@ -1645,6 +1981,7 @@ async function executeSpec(
           status: "failed",
           durationMs,
           error: `when: ${(e as Error).message}`,
+          ...placeFields(place),
         });
         await writer.appendEvent({
           ts: new Date().toISOString(),
@@ -1652,6 +1989,7 @@ async function executeSpec(
           stepId,
           durationMs,
           error: `when: ${(e as Error).message}`,
+          ...placeFields(place),
         });
         listener.onStepFinish?.(
           i,
@@ -1659,23 +1997,42 @@ async function executeSpec(
           "failed",
           durationMs,
           `when: ${(e as Error).message}`,
+          nestedStepInfo(place),
         );
-        break;
+        return { status: "failed", error: `when: ${(e as Error).message}` };
       }
       if (!conditionHolds) {
         const durationMs = Date.now() - stepStart;
-        stepResults.push({ id: stepId, status: "skipped", durationMs });
+        stepResults.push({
+          id: stepId,
+          status: "skipped",
+          durationMs,
+          ...placeFields(place),
+        });
         await writer.appendEvent({
           ts: new Date().toISOString(),
           type: "step.finished",
           stepId,
           durationMs,
           skipped: true,
-          when: step.when,
+          when: whenForEvidence(step.when),
+          ...placeFields(place),
         });
-        listener.onStepFinish?.(i, stepId, "skipped", durationMs, undefined);
-        continue;
+        listener.onStepFinish?.(
+          i,
+          stepId,
+          "skipped",
+          durationMs,
+          undefined,
+          nestedStepInfo(place),
+        );
+        return { status: "skipped" };
       }
+    }
+
+    // F14: repeat / if / a retried use run their nested steps.
+    if (isControlFlowStep(step)) {
+      return executeControlStep(step, place, stepStart);
     }
 
     const stepArtifacts: string[] = [];
@@ -1683,12 +2040,20 @@ async function executeSpec(
     // eval return values (${evals.<name>.…}) into any string field of the
     // step before it runs — the hybrid-flow hook ("fetch token via API, fill
     // it into the UI" / "read store value, fill it into the form").
+    // F14: ${repeat.*} of the enclosing loops and ${waits.<name>.…} first —
+    // plain values, so expect/capture see them spliced too.
+    const controlSpliced =
+      Object.keys(place.repeat).length > 0 || Object.keys(waitValues).length > 0
+        ? deepMapStrings(step, (s) =>
+            resolveControlPlaceholders(s, place, waitValues),
+          )
+        : step;
     // F3b: ${fixtures.<name>.<key>} from the spec's fixtures.
     const withFixtures = fixtures
-      ? deepMapStrings(step, (s) =>
+      ? deepMapStrings(controlSpliced, (s) =>
           resolveFixturePlaceholders(s, fixtures.outputs()),
         )
-      : step;
+      : controlSpliced;
     // F16: `expect` / `capture` resolve their own references (typed whole
     // references, unknown names reported instead of spliced as ""), so the
     // text splices below skip them.
@@ -1759,12 +2124,43 @@ async function executeSpec(
 
     let stepStatus: StepResult["status"] = "passed";
     let stepError: string | undefined;
+    /** F14 optional / grouped wait: whether its condition held. */
+    let stepMatched: boolean | undefined;
+    /** F15: interaction path, widget driver, why, and a ran-but-skipped reason. */
+    let stepVia: string | undefined;
+    let stepDriver: string | undefined;
+    let stepDetail: string | undefined;
+    let stepSkipReason: string | undefined;
     let stepResolved: ResolvedElement | undefined;
     let stepScreenshot: string | undefined;
     // Best-known page URL after the step, only where it is free (no extra
     // backend round-trip): the diagnostics capture of a failed step, or the
     // navigation target of an open step that passed.
     let stepUrl: string | undefined;
+    /** `postcondition.network.assign`: the matched response as a request. */
+    const recordNetworkAssign = async (r: InvocationResult): Promise<void> => {
+      const assign = stepToRun.postcondition?.network?.assign;
+      if (!assign || !r.networkMatch) return;
+      const response = networkMatchToResponse(r.networkMatch);
+      const relativePath = `requests/${assign}.json`;
+      await writer.writeJson(relativePath, response, "request");
+      responses[assign] = response;
+      requests[assign] = relativePath;
+      namedArtifacts[assign] = {
+        kind: "request",
+        path: writer.resolve(relativePath),
+        relativePath,
+      };
+      stepArtifacts.push(relativePath);
+      await writer.appendEvent({
+        ts: new Date().toISOString(),
+        type: "artifact.request",
+        stepId,
+        path: relativePath,
+        assign,
+        status: response.status,
+      });
+    };
     try {
       if ("run" in stepToRun) {
         // F3a: a host process with a process-tree deadline; a cancel kills it.
@@ -1785,35 +2181,47 @@ async function executeSpec(
           runValues[ran.assign] = ran.value;
         }
       } else if ("request" in stepToRun) {
+        const nestedName = nestedRequestName(place);
         const requested = await runRequestStep({
           step: stepToRun,
           backend: opts.backend,
           requestIndex: i + 1,
+          ...(nestedName ? { defaultAssign: nestedName } : {}),
           baseUrl: runtime.baseUrl,
+          registerSecrets: registerSecretValues,
+          ...(opts.signal ? { signal: opts.signal } : {}),
         });
+        stepArtifacts.push(...(await recordRequest(requested, stepId)));
         if (!requested.ok) {
           stepStatus = "failed";
           stepError = requested.error;
-        } else {
-          const relativePath = `requests/${requested.assign}.json`;
-          await writer.writeJson(relativePath, requested.response, "request");
-          const absolutePath = writer.resolve(relativePath);
-          responses[requested.assign] = requested.response;
-          requests[requested.assign] = relativePath;
-          namedArtifacts[requested.assign] = {
-            kind: "request",
-            path: absolutePath,
-            relativePath,
-          };
-          stepArtifacts.push(relativePath);
-          await writer.appendEvent({
-            ts: new Date().toISOString(),
-            type: "artifact.request",
-            stepId,
-            path: relativePath,
-            assign: requested.assign,
-            status: requested.response.status,
-          });
+        }
+      } else if (isBuiltinLoginUse(stepToRun)) {
+        // F18: `use: login` — the environment's API sign-in.
+        const loggedIn = await runEnvLogin({
+          step: stepToRun as UseStep,
+          auth: runtime.config?.environments[env]?.auth,
+          envName: env,
+          backend: opts.backend,
+          baseUrl: runtime.baseUrl,
+          env: runEnv,
+          vars: resolvedVars,
+          configDir: runtime.configDir,
+          responses,
+          requestIndex: i + 1,
+          registerSecrets: registerDerivedSecretValues,
+          holds: (when) => controlConditionHolds(when, place),
+          record: (result) => recordRequest(result, stepId),
+          ...(opts.signal ? { signal: opts.signal } : {}),
+          ...(runtime.browser?.appHandle
+            ? { appHandles: runtime.browser.appHandle }
+            : {}),
+        });
+        stepArtifacts.push(...loggedIn.artifacts);
+        stepDetail = loggedIn.detail;
+        if (!loggedIn.ok) {
+          stepStatus = "failed";
+          stepError = loggedIn.error;
         }
       } else if ("transform" in stepToRun) {
         const transformed = await runTransformStep({
@@ -1855,6 +2263,7 @@ async function executeSpec(
           specDir: dirname(specPath),
           fileScope,
           writer,
+          appHandles: runtime.browser?.appHandle,
         });
         if (!ev.ok) {
           stepStatus = "failed";
@@ -1934,6 +2343,7 @@ async function executeSpec(
                 step: stepToRun as ExpectStep,
                 stepId,
                 index: i + 1,
+                ...(place.suffix ? { fileSuffix: place.suffix } : {}),
                 writer,
                 deps: checkDeps,
               })
@@ -1979,12 +2389,86 @@ async function executeSpec(
             ...(mon.assign ? { assign: mon.assign } : {}),
           });
         }
+      } else if (isWidgetStep(stepToRun)) {
+        // F15: set / check / uncheck / choose / form through the in-page
+        // widget runtime, with read-back evidence in widgets/.
+        const widget = await executeWidgetStep(stepToRun, {
+          backend: opts.backend,
+          widgets: loadWidgets,
+          waitScale,
+          writer,
+          stepId,
+          index: i + 1,
+          ...(place.suffix ? { fileSuffix: place.suffix } : {}),
+          place: placeFields(place),
+        });
+        stepArtifacts.push(...widget.artifacts);
+        stepStatus = widget.status;
+        stepError = widget.error;
+        stepVia = widget.via;
+        stepDriver = widget.driver;
+        stepDetail = widget.detail;
+        stepSkipReason = widget.skipReason;
+      } else if (needsInteractionRuntime(stepToRun)) {
+        // F15: click optional / dispatch / fallback, fill mode: set / optional.
+        const flagged = await runFlaggedInteraction(
+          stepToRun as ClickStep | FillStep,
+          {
+            backend: opts.backend,
+            widgets: loadWidgets,
+            waitScale,
+            browserStep: (plain) =>
+              runResilientBrowserStep(
+                plain,
+                opts.backend,
+                waitScale,
+                waitOptions,
+              ),
+          },
+        );
+        stepResolved = flagged.invocation?.resolvedElement;
+        stepStatus = flagged.status;
+        stepError = flagged.error;
+        stepVia = flagged.via ?? flagged.invocation?.via;
+        stepDetail = flagged.detail ?? flagged.invocation?.detail;
+        stepSkipReason = flagged.skipReason;
+        if (flagged.status === "passed" && flagged.invocation) {
+          await recordNetworkAssign(flagged.invocation);
+        }
+      } else if ("wait" in stepToRun && isRunnerDrivenWait(stepToRun.wait)) {
+        // F14: wait.any / wait.all / optional — polled by the runner so a
+        // miss never stops the browser; an optional miss passes the step.
+        const waited = await runRunnerDrivenWait(
+          stepToRun.wait,
+          opts.backend,
+          waitOptions,
+        );
+        stepMatched = waited.matched;
+        if (!waited.ok) {
+          stepStatus = "failed";
+          stepError = waited.detail;
+        }
+        const waitAssign =
+          "assign" in stepToRun.wait ? stepToRun.wait.assign : undefined;
+        if (waitAssign) {
+          waitValues[waitAssign] = {
+            matched: waited.matched,
+            ...(waited.index !== undefined ? { index: waited.index } : {}),
+          };
+        }
       } else {
         let current: Step = stepToRun;
-        let r = await runResilientBrowserStep(current, opts.backend, waitScale);
+        let r = await runResilientBrowserStep(
+          current,
+          opts.backend,
+          waitScale,
+          waitOptions,
+        );
         while (
           !r.ok &&
           opts.onLocatorMiss &&
+          // F14: a miss inside a control-flow block is not parked.
+          place.parentId === undefined &&
           isInteractiveLocatorStep(current) &&
           isLocatorMissError(r.stderr.trim() || `exit ${r.exitCode}`)
         ) {
@@ -2001,9 +2485,16 @@ async function executeSpec(
           });
           if (decision.action === "abort") break;
           current = replaceStepLocator(current, decision.locator);
-          r = await runResilientBrowserStep(current, opts.backend, waitScale);
+          r = await runResilientBrowserStep(
+            current,
+            opts.backend,
+            waitScale,
+            waitOptions,
+          );
         }
         stepResolved = r.resolvedElement;
+        stepVia = r.via;
+        stepDetail = r.detail;
         if (!r.ok) {
           stepStatus = "failed";
           stepError = r.stderr.trim() || `exit ${r.exitCode}`;
@@ -2024,27 +2515,15 @@ async function executeSpec(
               assign: pendingDownload.assign,
             });
           }
-          const assign = stepToRun.postcondition?.network?.assign;
-          if (assign && r.networkMatch) {
-            const response = networkMatchToResponse(r.networkMatch);
-            const relativePath = `requests/${assign}.json`;
-            await writer.writeJson(relativePath, response, "request");
-            responses[assign] = response;
-            requests[assign] = relativePath;
-            namedArtifacts[assign] = {
-              kind: "request",
-              path: writer.resolve(relativePath),
-              relativePath,
-            };
-            stepArtifacts.push(relativePath);
-            await writer.appendEvent({
-              ts: new Date().toISOString(),
-              type: "artifact.request",
-              stepId,
-              path: relativePath,
-              assign,
-              status: response.status,
-            });
+          await recordNetworkAssign(r);
+          // F14: a plain wait with `assign` that held.
+          if (
+            "wait" in stepToRun &&
+            !isWaitGroup(stepToRun.wait) &&
+            "assign" in stepToRun.wait &&
+            stepToRun.wait.assign
+          ) {
+            waitValues[stepToRun.wait.assign] = { matched: true };
           }
         }
       }
@@ -2068,7 +2547,7 @@ async function executeSpec(
     if (cancelled()) {
       // No post-step capture after a cancel.
     } else if (opts.backend.isWedged?.()) {
-      const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
+      const rel = `diagnostics/${artifactStem}.json`;
       await writer.writeJson(
         rel,
         {
@@ -2094,9 +2573,9 @@ async function executeSpec(
       // Capture snapshot and (on failure or always) screenshot.
       if (
         policy.snapshots === "always" ||
-        (policy.snapshots === "on-failure" && stepStatus !== "passed")
+        (policy.snapshots === "on-failure" && stepStatus === "failed")
       ) {
-        const rel = `snapshots/${pad(i + 1)}_${stepId}.txt`;
+        const rel = `snapshots/${artifactStem}.txt`;
         const snap = await safe(() => opts.backend.snapshot());
         if (snap && snap.ok) {
           await writer.writeText(rel, snap.text, "snapshot");
@@ -2112,9 +2591,9 @@ async function executeSpec(
       }
       const shouldShoot =
         policy.screenshots === "always" ||
-        (policy.screenshots === "on-failure" && stepStatus !== "passed");
+        (policy.screenshots === "on-failure" && stepStatus === "failed");
       if (shouldShoot) {
-        const rel = `screenshots/${pad(i + 1)}_${stepId}.png`;
+        const rel = `screenshots/${artifactStem}.png`;
         const screenshotPath = await writer.preparePath(rel, "screenshot");
         const shot = await opts.backend
           .screenshot({ path: screenshotPath })
@@ -2141,7 +2620,7 @@ async function executeSpec(
           const error =
             shot.error ??
             "screenshot capture failed without backend diagnostics";
-          const diagnosticRel = `diagnostics/${pad(i + 1)}_${stepId}_screenshot.json`;
+          const diagnosticRel = `diagnostics/${artifactStem}_screenshot.json`;
           await writer.writeJson(
             diagnosticRel,
             {
@@ -2178,8 +2657,8 @@ async function executeSpec(
           // naturally on its next real interaction.
         }
       }
-      if (stepStatus !== "passed" && !opts.backend.isWedged?.()) {
-        const rel = `diagnostics/${pad(i + 1)}_${stepId}.json`;
+      if (stepStatus === "failed" && !opts.backend.isWedged?.()) {
+        const rel = `diagnostics/${artifactStem}.json`;
         const captured = await captureDiagnostics(
           opts.backend,
           step,
@@ -2202,6 +2681,11 @@ async function executeSpec(
     }
 
     const durationMs = Date.now() - stepStart;
+    const interactionFields = {
+      ...(stepVia ? { via: stepVia } : {}),
+      ...(stepDriver ? { driver: stepDriver } : {}),
+      ...(stepDetail ? { detail: stepDetail.slice(0, 500) } : {}),
+    };
     stepResults.push({
       id: stepId,
       status: stepStatus,
@@ -2209,6 +2693,10 @@ async function executeSpec(
       ...(stepError ? { error: stepError } : {}),
       ...(stepArtifacts.length > 0 ? { artifacts: stepArtifacts } : {}),
       ...(stepResolved ? { resolved: stepResolved } : {}),
+      ...placeFields(place),
+      ...(stepMatched !== undefined ? { matched: stepMatched } : {}),
+      ...interactionFields,
+      ...(stepSkipReason ? { skipReason: stepSkipReason } : {}),
     });
 
     if (stepStatus === "passed" && "open" in stepToRun) {
@@ -2221,10 +2709,23 @@ async function executeSpec(
       ...(stepResolved ? { resolved: stepResolved } : {}),
       ...(stepUrl ? { url: withoutQuery(stepUrl) } : {}),
       ...(stepScreenshot ? { screenshot: stepScreenshot } : {}),
+      ...placeFields(place),
+      ...interactionFields,
     };
     await writer.appendEvent(
-      stepStatus === "passed"
-        ? { ts: stepEndTs, type: "step.finished", ...stepEnd }
+      stepStatus !== "failed"
+        ? {
+            ts: stepEndTs,
+            type: "step.finished",
+            ...stepEnd,
+            ...(stepMatched !== undefined ? { matched: stepMatched } : {}),
+            ...(stepStatus === "skipped"
+              ? {
+                  skipped: true,
+                  ...(stepSkipReason ? { skipReason: stepSkipReason } : {}),
+                }
+              : {}),
+          }
         : {
             ts: stepEndTs,
             type: "step.failed",
@@ -2232,14 +2733,28 @@ async function executeSpec(
             ...(stepError ? { error: stepError } : {}),
           },
     );
-    listener.onStepFinish?.(i, stepId, stepStatus, durationMs, stepError);
+    listener.onStepFinish?.(
+      i,
+      stepId,
+      stepStatus,
+      durationMs,
+      stepError,
+      nestedStepInfo(place),
+    );
 
-    if (stepStatus === "passed") {
-      lastSuccessfulStep = step;
-    } else {
-      // Stop on first failure to avoid cascading noise.
-      break;
-    }
+    if (stepStatus === "passed") lastSuccessfulStep = step;
+    return {
+      status: stepStatus,
+      ...(stepError ? { error: stepError } : {}),
+    };
+  };
+  for (let i = 0; i < totalSteps; i++) {
+    // No session (failed resume) or a cancel: the remaining steps never run.
+    if (resumeFailed || cancelled()) break;
+    const step = resolved.steps![i]!;
+    const outcome = await executeStep(step, topLevelPlace(step, i, totalSteps));
+    // Stop on first failure to avoid cascading noise.
+    if (outcome.status === "failed") break;
   }
 
   // A child-timeout kill leaves the adapter's command channel untrustworthy.
@@ -2289,9 +2804,16 @@ async function executeSpec(
   const consoleEntries = backendWedgedAfterSteps
     ? []
     : await safe(() => opts.backend.getConsole()).then((x) => x ?? []);
+  // A judged request whose response event has not reached the backend yet
+  // would read as <pending>: the snapshot waits (bounded) for those only.
   const networkEntries = backendWedgedAfterSteps
     ? []
-    : await safe(() => opts.backend.getNetworkRequests()).then((x) => x ?? []);
+    : await safe(() =>
+        settledNetworkSnapshot(
+          opts.backend,
+          judgedNetworkFilters(resolved.outcomes),
+        ),
+      ).then((x) => x ?? []);
   let capturedConsoleErrors: ConsoleEntry[] | undefined;
   let consoleUnavailable: string | undefined;
   if (backendWedgedAfterSteps) {
@@ -2409,6 +2931,10 @@ async function executeSpec(
     ...(fixtures ? { fixtureOutputs: fixtures.outputs() } : {}),
     ...(runtime.browser?.testIdAttribute
       ? { testIdAttribute: runtime.browser.testIdAttribute }
+      : {}),
+    // F20: browser script verifiers that use __cairn get the prelude.
+    ...(runtime.browser?.appHandle
+      ? { appHandles: runtime.browser.appHandle }
       : {}),
   };
   listener.onOutcomesStart?.(resolved.outcomes.length);
@@ -2662,10 +3188,14 @@ async function executeSpec(
       (s) => s.id === failedStepResult.id,
     );
     const specSteps = resolved.steps ?? [];
+    // F14: a nested step is found by the id it ran under (its index in the
+    // results is not a resolved-step index).
     const specStep =
-      specSteps.find(
-        (s, i) => (s.id ?? `step_${i + 1}`) === failedStepResult.id,
-      ) ?? (failedIndex >= 0 ? specSteps[failedIndex] : undefined);
+      failedStepResult.parentId !== undefined
+        ? executedSteps.get(failedStepResult.id)
+        : (specSteps.find(
+            (s, i) => (s.id ?? `step_${i + 1}`) === failedStepResult.id,
+          ) ?? (failedIndex >= 0 ? specSteps[failedIndex] : undefined));
     failure = {
       step: failedStepResult.id,
       message: stepMsg,
@@ -2912,6 +3442,7 @@ async function executeSpec(
       contractHash: spec.contractHash ?? computeContractHash(spec),
     },
     environment: env,
+    ...(runtime.envAlias ? { envAlias: runtime.envAlias } : {}),
     backend: backendName as RunResult["backend"],
     coldStart,
     ...(labels ? { labels } : {}),
@@ -3271,6 +3802,7 @@ interface PreconditionFailureInput {
   runId: string;
   runDir: string;
   environment: string;
+  envAlias?: string;
   backend: string;
   coldStart: boolean;
   labels?: Record<string, string>;
@@ -3429,6 +3961,7 @@ async function finalizePreconditionFailure(
       contractHash: input.spec.contractHash ?? computeContractHash(input.spec),
     },
     environment: input.environment,
+    ...(input.envAlias ? { envAlias: input.envAlias } : {}),
     backend: input.backend as RunResult["backend"],
     coldStart: input.coldStart,
     ...(labels ? { labels } : {}),
@@ -3631,18 +4164,26 @@ export function generateRunToken(): string {
 }
 
 function resolveRuntimeVars(
-  vars: Record<string, string | number | boolean>,
+  vars: Record<string, ConfigVarValue>,
   runtime: { workerIndex: number; runToken: string },
-): Record<string, string | number | boolean> {
-  const out: Record<string, string | number | boolean> = {};
-  for (const [key, value] of Object.entries(vars)) {
-    out[key] =
-      typeof value === "string"
-        ? value
-            .replace(/\$\{worker\.index\}/g, String(runtime.workerIndex))
-            .replace(/\$\{run\.token\}/g, runtime.runToken)
-        : value;
-  }
+): Record<string, ConfigVarValue> {
+  // F7: typed vars carry `${run.token}` / `${worker.index}` in nested strings too.
+  const render = (value: ConfigVarValue): ConfigVarValue => {
+    if (typeof value === "string") {
+      return value
+        .replace(/\$\{worker\.index\}/g, String(runtime.workerIndex))
+        .replace(/\$\{run\.token\}/g, runtime.runToken);
+    }
+    if (Array.isArray(value)) return value.map(render);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, render(item)]),
+      );
+    }
+    return value;
+  };
+  const out: Record<string, ConfigVarValue> = {};
+  for (const [key, value] of Object.entries(vars)) out[key] = render(value);
   return out;
 }
 
@@ -3675,241 +4216,6 @@ function applySpecClickSettle(step: Step, settleMs: number | undefined): Step {
   return { ...step, settleMs };
 }
 
-/** The captured envelope a request step produces. */
-interface RequestResponse {
-  url: string;
-  method: string;
-  status: number;
-  ok: boolean;
-  headers: Record<string, string>;
-  body: unknown;
-  id?: string;
-}
-
-function networkMatchToResponse(entry: NetworkEntry): RequestResponse {
-  let body: unknown;
-  if (entry.postData) {
-    try {
-      body = JSON.parse(entry.postData);
-    } catch {
-      body = entry.postData;
-    }
-  }
-  const status = entry.status ?? 0;
-  return {
-    url: entry.url,
-    method: entry.method,
-    status,
-    ok: status >= 200 && status < 400,
-    headers: {},
-    body: body ?? null,
-    ...(entry.id ? { id: entry.id } : {}),
-  };
-}
-
-/**
- * Execute a `request` step through the backend's out-of-page request primitive
- * when available, falling back to bounded page-context fetch for older backends.
- */
-async function runRequestStep(opts: {
-  step: RequestStep;
-  backend: BrowserBackend;
-  requestIndex: number;
-  baseUrl?: string;
-}): Promise<
-  | { ok: true; assign: string; response: RequestResponse }
-  | { ok: false; error: string }
-> {
-  const req = opts.step.request;
-  const assign = req.assign ?? `request_${opts.requestIndex}`;
-  const resolved = await resolveRequestUrl(req.url, opts);
-  if (!resolved.ok) return resolved;
-  const timeoutMs = req.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const request = { ...req, url: resolved.url, timeoutMs };
-
-  if (typeof opts.backend.request === "function") {
-    const backendResponse = await opts.backend.request({
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-      body: request.body,
-      timeoutMs,
-    });
-    if (!backendResponse.ok) {
-      return {
-        ok: false,
-        error: `request failed: ${backendResponse.error ?? "unknown error"} (${request.method} ${request.url})`,
-      };
-    }
-    return applyExpectStatus(assign, request, {
-      url: request.url,
-      method: request.method,
-      status: backendResponse.status,
-      ok: backendResponse.status >= 200 && backendResponse.status < 400,
-      headers: backendResponse.headers,
-      body: backendResponse.body,
-    });
-  }
-
-  const origin = await ensureRequestOrigin(opts.backend, request.url);
-  if (!origin.ok) return origin;
-
-  const result = await opts.backend.evaluate(buildRequestScript(request), {
-    timeoutMs,
-  });
-  if (!result.ok) {
-    return {
-      ok: false,
-      error: `request eval failed: ${result.stderr.trim() || `exit ${result.exitCode}`}`,
-    };
-  }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(result.stdout) as Record<string, unknown>;
-  } catch {
-    return {
-      ok: false,
-      error: `request returned non-JSON eval output: ${result.stdout.slice(0, 200)}`,
-    };
-  }
-  if (parsed && typeof parsed["requestError"] === "string") {
-    return {
-      ok: false,
-      error: `request failed: ${parsed["requestError"]} (${request.method} ${request.url})`,
-    };
-  }
-
-  const response: RequestResponse = {
-    url: request.url,
-    method: request.method,
-    status: typeof parsed["status"] === "number" ? parsed["status"] : 0,
-    ok: Boolean(parsed["ok"]),
-    headers:
-      parsed["headers"] && typeof parsed["headers"] === "object"
-        ? (parsed["headers"] as Record<string, string>)
-        : {},
-    body: parsed["body"],
-  };
-
-  return applyExpectStatus(assign, request, response);
-}
-
-function applyExpectStatus(
-  assign: string,
-  request: RequestStep["request"],
-  response: RequestResponse,
-):
-  | { ok: true; assign: string; response: RequestResponse }
-  | {
-      ok: false;
-      error: string;
-    } {
-  if (request.expectStatus !== undefined) {
-    const allowed = Array.isArray(request.expectStatus)
-      ? request.expectStatus
-      : [request.expectStatus];
-    if (!allowed.includes(response.status)) {
-      const bodyExcerpt = JSON.stringify(response.body)?.slice(0, 300) ?? "";
-      return {
-        ok: false,
-        error: `request status ${response.status} not in expectStatus [${allowed.join(", ")}] (${request.method} ${request.url}) body: ${bodyExcerpt}`,
-      };
-    }
-  }
-
-  return { ok: true, assign, response };
-}
-
-export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-
-async function resolveRequestUrl(
-  url: string,
-  opts: { baseUrl?: string; backend: BrowserBackend },
-): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
-  if (!isRelativeUrl(url)) return { ok: true, url };
-  if (opts.baseUrl) return { ok: true, url: joinUrl(opts.baseUrl, url) };
-
-  const currentUrl = await opts.backend.getUrl().catch(() => "about:blank");
-  if (currentUrl === "about:blank" || currentUrl.startsWith("about:blank")) {
-    return {
-      ok: false,
-      error: `request: relative URL "${url}" needs a baseUrl (config environments.<env>.baseUrl) or a prior open`,
-    };
-  }
-  return { ok: true, url: resolveUrl(currentUrl, url) };
-}
-
-async function ensureRequestOrigin(
-  backend: BrowserBackend,
-  requestUrl: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const currentUrl = await backend.getUrl().catch(() => "about:blank");
-  if (!(currentUrl === "about:blank" || currentUrl.startsWith("about:blank"))) {
-    return { ok: true };
-  }
-  if (!/^https?:\/\//i.test(requestUrl)) return { ok: true };
-
-  let origin: string;
-  try {
-    origin = new URL(requestUrl).origin;
-  } catch {
-    return { ok: true };
-  }
-
-  const opened = await backend.runStep({ open: origin });
-  if (!opened.ok) {
-    return {
-      ok: false,
-      error: `request: could not establish app origin ${origin} before fetch: ${
-        opened.stderr.trim() ||
-        opened.stdout.trim() ||
-        `exit ${opened.exitCode}`
-      }`,
-    };
-  }
-  return { ok: true };
-}
-
-function buildRequestScript(req: RequestStep["request"]): string {
-  const headers: Record<string, string> = { ...req.headers };
-  let bodyExpr: string | undefined;
-  if (req.body !== undefined) {
-    if (typeof req.body === "string") {
-      bodyExpr = JSON.stringify(req.body);
-    } else {
-      bodyExpr = JSON.stringify(JSON.stringify(req.body));
-      const hasContentType = Object.keys(headers).some(
-        (h) => h.toLowerCase() === "content-type",
-      );
-      if (!hasContentType) headers["content-type"] = "application/json";
-    }
-  }
-  return [
-    `(async () => {`,
-    `  try {`,
-    `    const res = await fetch(${JSON.stringify(req.url)}, {`,
-    `      method: ${JSON.stringify(req.method)},`,
-    `      credentials: "include",`,
-    `      headers: ${JSON.stringify(headers)},`,
-    ...(bodyExpr !== undefined ? [`      body: ${bodyExpr},`] : []),
-    ...(req.timeoutMs !== undefined
-      ? [`      signal: AbortSignal.timeout(${req.timeoutMs}),`]
-      : []),
-    `    });`,
-    `    const text = await res.text();`,
-    `    let body = null;`,
-    `    try { body = JSON.parse(text); } catch (_) { body = text; }`,
-    `    const headers = {};`,
-    `    res.headers.forEach((v, k) => { headers[k] = v; });`,
-    `    return { status: res.status, ok: res.ok, headers, body };`,
-    `  } catch (e) {`,
-    `    return { requestError: String((e && e.message) || e) };`,
-    `  }`,
-    `})()`,
-  ].join("\n");
-}
-
 async function runTransformStep(opts: {
   step: TransformStep;
   writer: ArtifactWriter;
@@ -3917,7 +4223,7 @@ async function runTransformStep(opts: {
   /** Where the step's relative paths resolve (an action's own directory). */
   fileScope?: StepFileScope;
   artifacts: Record<string, ArtifactRef>;
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, ConfigVarValue>;
   childEnv?: Record<string, string | undefined>;
   selectedTvaultKeys?: Iterable<string>;
   /** Kills the transform's process tree on abort. */
@@ -4057,6 +4363,8 @@ async function runEvalStep(opts: {
   /** Where the step's relative paths resolve (an action's own directory). */
   fileScope?: StepFileScope;
   writer: ArtifactWriter;
+  /** F20: config `browser.appHandle` for a source that uses `__cairn`. */
+  appHandles?: AppHandles | undefined;
 }): Promise<
   { ok: true; assign?: string; value: unknown } | { ok: false; error: string }
 > {
@@ -4101,7 +4409,9 @@ async function runEvalStep(opts: {
     };
   }
   const argsJson = JSON.stringify(pageArgs);
-  const wrapped = `(async (args) => { ${source} })(${argsJson})`;
+  // F20: a source that mentions `__cairn` gets the page prelude first.
+  const body = withCairnPrelude(source, opts.appHandles);
+  const wrapped = `(async (args) => { ${body} })(${argsJson})`;
 
   let result;
   try {
@@ -4416,10 +4726,7 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   if ("click" in step) return { kind: "click", locator: step.click };
   if ("hover" in step) return { kind: "hover", locator: step.hover };
   if ("focus" in step) return { kind: "focus", locator: step.focus };
-  if ("fill" in step) {
-    const { value: _value, ...locator } = step.fill;
-    return { kind: "fill", locator };
-  }
+  if ("fill" in step) return { kind: "fill", locator: fillLocator(step) };
   if ("select" in step) {
     const { value: _value, label: _label, ...locator } = step.select;
     return { kind: "select", locator };
@@ -4500,6 +4807,22 @@ function diagnosticStepDescriptor(step: Step): Record<string, unknown> {
   }
   if ("capture" in step) {
     return { kind: "capture", assign: step.capture.assign };
+  }
+  if ("repeat" in step) return { kind: "repeat", max: step.repeat.max };
+  if ("if" in step) return { kind: "if" };
+  // F15: the target only — never the value a widget step writes.
+  if ("set" in step) return { kind: "set", target: widgetTargetRef(step.set) };
+  if ("check" in step) {
+    return { kind: "check", target: widgetTargetRef(step.check) };
+  }
+  if ("uncheck" in step) {
+    return { kind: "uncheck", target: widgetTargetRef(step.uncheck) };
+  }
+  if ("choose" in step) {
+    return { kind: "choose", target: widgetTargetRef(step.choose) };
+  }
+  if ("form" in step) {
+    return { kind: "form", fields: Object.keys(step.form.fields) };
   }
   return {
     kind: "use",

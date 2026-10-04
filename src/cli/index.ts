@@ -15,7 +15,10 @@ import { docsCommand, DOC_TOPICS } from "./commands/docs";
 import { explainCommand } from "./commands/explain";
 import { exportPlaywrightCommand } from "./commands/export";
 import { exportBriefCommand } from "./commands/exportBrief";
-import { importPlaywrightCommand } from "./commands/import";
+import {
+  importPlaywrightCommand,
+  importPlaywrightTraceCommand,
+} from "./commands/import";
 import { loginCommand } from "./commands/login";
 import { mcpCommand } from "./commands/mcp";
 import { configureRunCommand, runCommand } from "./commands/run";
@@ -45,14 +48,19 @@ import { investigateCommand, auditCommand } from "./commands/investigate";
 import { annotateCommand } from "./commands/annotate";
 import { isTvaultAvailable, getTvaultKeys } from "./commands/secrets";
 import { configValidateCommand } from "./commands/config/validate";
+import { configVarsCommand } from "./commands/config/vars";
 import { servicesStatusCommand } from "./commands/services/status";
 import { servicesUpCommand } from "./commands/services/up";
 import { servicesDownCommand } from "./commands/services/down";
+import { servicesRestartCommand } from "./commands/services/restart";
+import { servicesLogsCommand } from "./commands/services/logs";
 import { waitCommand } from "./commands/wait";
 import { fixturesCommand } from "./commands/fixtures";
+import { suitesListCommand } from "./commands/suites";
 import { verifierSchemaCommand } from "./commands/verifier";
 import { CAIRN_VERSION } from "./version";
 import { configureLoggerFromFlags } from "./logger";
+import { applyUsageExitCodes } from "./usageExit";
 
 const program = new Command();
 
@@ -97,7 +105,7 @@ function addFormatFlags(c: Command): Command {
     .option("--md", "shorthand for --format md");
 }
 
-configureRunCommand(program.command("run <spec...>")).action(
+configureRunCommand(program.command("run [spec...]")).action(
   (specs: string[], opts) => runCommand(specs, opts),
 );
 
@@ -109,6 +117,27 @@ addFormatFlags(
       "--ios",
       "also probe iOS readiness (Xcode / Appium / xcuitest / simulators)",
       false,
+    )
+    .option(
+      "--orphans",
+      "list the browser sessions cairn started whose cairn run is gone but whose processes survive (found through the owned-session ledger, never by pattern); exit 1 when any, 0 when none",
+      false,
+    )
+    .option(
+      "--kill",
+      "with --orphans: end those processes (asks on a terminal; structured or non-interactive runs need --yes)",
+      false,
+    )
+    .option("--yes", "with --orphans --kill: do not ask", false)
+    .option(
+      "--only <sessions-or-pids>",
+      "with --orphans: only these sessions and/or pids (comma-separated, repeatable); with --kill, what is no longer an orphan by then is left alone",
+      collectRepeatable,
+      [],
+    )
+    .option(
+      "--config <path>",
+      "also check the config's requires.cairntrace and runtimes.node (default: the cairntrace.config.yml found from the cwd; exit 4 when a pin is not met)",
     ),
 ).action((opts) => doctorCommand(opts));
 
@@ -364,6 +393,10 @@ addFormatFlags(
       [] as string[],
     )
     .option(
+      "--invocation <id>",
+      "only include runs of this cairn run invocation (the id of _invocations/<id>, run.json invocation.id)",
+    )
+    .option(
       "--metric <field>",
       "harvest this numeric field from outcomes/*.raw.json (default: processingDurationMS)",
     )
@@ -404,7 +437,7 @@ addFormatFlags(
     )
     .option(
       "--kind <kinds>",
-      "actions | vars | verifiers | envs | flows | checkpoints | fixtures (repeatable or comma-separated)",
+      "actions | vars | verifiers | envs | flows | checkpoints | fixtures | suites (repeatable or comma-separated)",
       collectRepeatable,
       [] as string[],
     )
@@ -439,7 +472,18 @@ program
     "--log <name>",
     "live log instead of events: run|precondition|outcome|<file>; with --invocation: narration|services|hook|<file>",
   )
-  .option("--invocation <id>", "invocation journal: <id> | latest | previous")
+  .option(
+    "--invocation <id>",
+    "invocation journal: <id> | latest | previous | label:<key>=<value> (newest with that label; waited for with --follow)",
+  )
+  .option(
+    "--relay",
+    "with --invocation: print the delegated-runner events stream (journal events + invocation.run.* + invocation.summary) for CAIRN_DELEGATE_EVENTS",
+  )
+  .option(
+    "--wait-timeout <duration>",
+    "with --invocation label:<key>=<value> --follow: wait at most this long for the journal to appear (ms or 30s/10m/1h; default 10m; 0 = no end); exit 2 when it never does",
+  )
   .option("--format <fmt>", "invocation summary format: json|yaml|md")
   .option("--json", "shorthand for --format json")
   .action((ref: string | undefined, opts) => logsCommand(ref, opts));
@@ -479,7 +523,7 @@ addFormatFlags(
       "--out-dir <dir>",
       "batch-write exported specs into this directory (required for directory input)",
     )
-    .option("--lang <js|ts>", "output language (default: ts)", "ts")
+    .option("--lang <js|ts>", "output language (default: ts)")
     .option("--stdout", "print source to stdout (single-spec only)", false)
     .option(
       "--config <path>",
@@ -501,10 +545,91 @@ addFormatFlags(
       "write actions/lib/tests/verifiers into an existing Playwright tree (no package.json or playwright.config)",
     )
     .option(
+      "--host-config <playwright.config.ts>",
+      "with --into: adapt the generated code to this existing Playwright tree. The config is read statically (never executed) with its tsconfig and package.json: module system (__dirname vs import.meta.url), test timeouts (no test.setTimeout the host already covers), testIdAttribute, bypassCSP (refuses page evals when the host does not set it, unless --allow-eval-without-bypass), testDir / testMatch (where and how tests are named), tsconfig path aliases, import order, and the host's local prettier",
+    )
+    .option(
+      "--map <export.map.yml>",
+      "with --into / --project: the export map that binds cairn actions to the host's constructs. A `fixture` mapping destructures a host Playwright fixture in the test signature instead of inlining the action's steps; a `method` mapping calls a host page object (`new SomePage(page).openThing(arg)`); an `apiLogin` writes a request-based login as a storageState; actions the map leaves alone become generated page objects over the host's base page (lib/pages). `strict: true` makes an unmapped action an error. See `cairn docs export`",
+    )
+    .option(
+      "--target <name>",
+      "an export.targets.<name> profile of the cairntrace config (into, hostConfig, input, preconditions, verifiers, gateEnv, lang, env, mapFile, maxEvalRatio, allowEvalWithoutBypass, strictLocators, verifyProject); a flag given here overrides the profile",
+    )
+    .option(
+      "--max-eval-ratio <0..1>",
+      "refuse a spec whose share of page eval steps (inside actions and blocks included) is above this; other specs are still exported, exit 1 when any was refused",
+    )
+    .option(
+      "--allow-eval-without-bypass",
+      "with --host-config: export page evals even though the host config does not set use.bypassCSP: true",
+    )
+    .option(
+      "--strict-locators",
+      "emit no .first() on a locator without nth: an ambiguous locator fails the exported test (Playwright strict mode), exactly as cairn run --backend playwright does. Default: .first() on every such locator (the agent-browser first-match semantics, so an exported test can pass where the Playwright-backend run fails). With --verify the manifest's mode is regenerated; export.targets.<name>.strictLocators sets it per profile",
+    )
+    .option(
+      "--no-strict-locators",
+      "keep .first() (the default) even when the target profile sets strictLocators: true",
+    )
+    .option(
+      "--preconditions <mode>",
+      "host commands (preconditions, run: steps, teardown:, fixtures, gates): inline = bounded helper in the generated runtime (beforeAll + test body); global = once in the project's global-setup (--project/--into; fixtures and gates call the cairn CLI); skip = list only; manifest = list in .cairn-export.json for the host to run. Default: standalone files skip, --project/--into run preconditions in each file's beforeAll",
+    )
+    .option(
+      "--verifiers <mode>",
+      "node / datasource verifiers: keep (default: node file verifiers run, datasource ones are test.fixme) | gate (run only when the required env is present; otherwise the test ends skipped, never passed) | drop (omit with a diagnostic)",
+    )
+    .option(
+      "--gate-env <names>",
+      "env var names every gated node verifier requires with --verifiers gate (repeatable or comma-separated)",
+      (v: string, prev: string[] = []) => [...prev, v],
+    )
+    .option(
       "--check <exportDir>",
       "verify an export against its .cairn-export.json (regenerates in memory; writes nothing; exit 0 fresh, 1 stale, 2 error)",
+    )
+    .option(
+      "--verify [dirOrMode]",
+      "prove an export faithful: static gates (no leaked sentinels, tsc with the target tsconfig, the host's eslint, playwright test --list == exported specs, manifest freshness), each passed | failed | skipped(reason). A value is an export directory (--verify ./export) or a mode (static | differential) for the export this command writes. On a host config with several projects every Playwright run uses one project (--verify-project). Writes .cairn-export-verify.json/.md and the manifest's verify field; exit 0 all pass, 1 a gate / differential / mutant failed, 2 usage or environment error, 3 inconclusive (nothing proven: neither tsc nor playwright --list ran, the differential matched no spec, no mutant was killed or survived; never a pass)",
+    )
+    .option(
+      "--differential",
+      "with --verify: also run cairn run --backend playwright and the exported test with the same CAIRN_RUN_TOKEN against the running app (sequentially) and compare per-step / per-outcome verdicts, network evidence and duration",
+      false,
+    )
+    .option(
+      "--mutate [scope]",
+      "with --verify: invert one assertion per spec (scope all: every outcome) in a temp copy of each exported test; the test must fail at that outcome, a mutant that passes is an 'assertion not effective' finding",
+    )
+    .option(
+      "--verify-strict",
+      "with --verify: a skipped gate or an inconclusive result counts as a failure (exit 1)",
+      false,
+    )
+    .option(
+      "--verify-only <spec>",
+      "with --differential / --mutate: only the specs whose path or test file contains this (repeatable); the static gates still cover the whole export",
+      (v: string, prev: string[] = []) => [...prev, v],
+    )
+    .option(
+      "--duration-ratio <n>",
+      "with --differential: warn when the slower side exceeds the faster by more than this ratio (default 3)",
+    )
+    .option(
+      "--verify-project <name>",
+      "with --verify on a host config with several projects: the Playwright project the list gate, the differential and the mutants run under (passed as --project; Playwright still runs its dependencies, a setup project included). Default: the one recorded in .cairn-export.json, else the first project that discovers the exported tests and runs Chromium. Recorded in the manifest when given at export time (profile field verifyProject)",
     ),
-).action((p: string | undefined, opts) => exportPlaywrightCommand(p, opts));
+).action(
+  (p: string | undefined, opts: Record<string, unknown> & { map?: string }) => {
+    // `--map <file>` is the profile's `mapFile`.
+    const { map, ...rest } = opts;
+    return exportPlaywrightCommand(p, {
+      ...rest,
+      ...(map !== undefined ? { mapFile: map } : {}),
+    });
+  },
+);
 
 addFormatFlags(
   exportCmd
@@ -543,8 +668,36 @@ addFormatFlags(
       "--out <file>",
       "where to write (defaults to <source-dir>/<test-title>.yml)",
     )
-    .option("--stdout", "print YAML to stdout instead of writing", false),
+    .option(
+      "--test <title|n>",
+      "import this test (title substring or 1-based index) instead of the first",
+    )
+    .option("--stdout", "print YAML to stdout instead of writing", false)
+    .option("--force", "overwrite an existing --out file", false)
+    .option(
+      "--allow-empty",
+      "write the placeholder draft even when nothing mapped (default: refuse, exit 1)",
+      false,
+    ),
 ).action((p: string, opts) => importPlaywrightCommand(p, opts));
+
+addFormatFlags(
+  importCmd
+    .command("playwright-trace <trace.zip>")
+    .description(
+      "Convert a Playwright trace archive into a DRAFT Cairntrace spec (steps from the recorded actions, draft outcomes from expects, final URL and API calls)",
+    )
+    .option("--out <file>", "where to write (defaults to ./<name>.yml)")
+    .option("--name <name>", "spec name (default: the trace's test title)")
+    .option("--intent <text>", "spec intent (default: the trace's test title)")
+    .option("--stdout", "print YAML to stdout instead of writing", false)
+    .option("--force", "overwrite an existing --out file", false)
+    .option(
+      "--allow-empty",
+      "write the placeholder draft even when nothing mapped (default: refuse, exit 1)",
+      false,
+    ),
+).action((p: string, opts) => importPlaywrightTraceCommand(p, opts));
 
 program
   .command("login <name>")
@@ -1178,6 +1331,24 @@ addFormatFlags(
     ),
 ).action((opts) => configValidateCommand(opts));
 
+addFormatFlags(
+  configCmd
+    .command("vars")
+    .description(
+      "List config vars: kind, effective value per environment (secret-looking values masked), where defined, overrides and what uses them",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option("--env <name>", "only this environment")
+    .option("--unused", "only vars nothing uses")
+    .option(
+      "--used-by <spec>",
+      "only vars a spec (path or name) reaches through its actions, fixtures, script verifiers and login",
+    ),
+).action((opts) => configVarsCommand(opts));
+
 /* ----- services (status / up / down) ----- */
 
 const servicesCmd = program
@@ -1232,6 +1403,60 @@ addFormatFlags(
       "environment (default: config defaultEnvironment, else local)",
     ),
 ).action((opts) => servicesDownCommand(opts));
+
+addFormatFlags(
+  servicesCmd
+    .command("restart <window...>")
+    .description(
+      "Restart service windows of the configured tmux session: Ctrl-C, wait for the process to exit, clear the history, resend the command and wait for readyOn of the NEW output (refuses windows the config does not own; exit 4)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--env <name>",
+      "environment (default: config defaultEnvironment, else local)",
+    )
+    .option(
+      "--stop-timeout <duration>",
+      "wait this long for the old process to exit after Ctrl-C (default 30s)",
+    )
+    .option(
+      "--ready-timeout <duration>",
+      "wait this long for the new process to be ready (default: tmux readyTimeoutMs, else 90s)",
+    ),
+).action((windows: string[], opts) => servicesRestartCommand(windows, opts));
+
+addFormatFlags(
+  servicesCmd
+    .command("logs <window>")
+    .description(
+      "Show the captured text of a service window (redacted, wrapped lines joined); --since-restart keeps the current restart generation, --wait <regex> waits for a line, --follow streams",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (overrides auto-discovery)",
+    )
+    .option(
+      "--env <name>",
+      "environment (default: config defaultEnvironment, else local)",
+    )
+    .option(
+      "--since-restart",
+      "only the output after the last `services restart` of this window",
+    )
+    .option("--lines <n>", "show the last N lines (default 200)")
+    .option(
+      "--wait <regex>",
+      "wait until a line matches (exit 0), or --timeout passes (exit 1)",
+    )
+    .option("--timeout <duration>", "budget of --wait (default 30s)")
+    .option(
+      "--follow",
+      "keep printing new lines until interrupted (text output only)",
+    ),
+).action((window: string, opts) => servicesLogsCommand(window, opts));
 
 const verifierCmd = program
   .command("verifier")
@@ -1290,6 +1515,30 @@ addFormatFlags(
       "override the consecutive passing attempts required (default: the gate's stable, else 1)",
     ),
 ).action((targets: string[], opts) => waitCommand(targets, opts));
+
+/* ----- suites (config suites: registry) ----- */
+
+const suites = program
+  .command("suites")
+  .description(
+    "Inspect the config suites: registry that `cairn run --suite <name>` runs",
+  );
+
+addFormatFlags(
+  suites
+    .command("list")
+    .description(
+      "List the suites with the specs each resolves to per environment (and why one does not)",
+    )
+    .option(
+      "--config <path>",
+      "explicit cairntrace.config.yml (default: discovered from the cwd)",
+    )
+    .option(
+      "--env <name>",
+      "only this environment (default: every environment of the config)",
+    ),
+).action((opts) => suitesListCommand(opts));
 
 /* ----- fixtures (config fixtures: registry) ----- */
 
@@ -1400,5 +1649,8 @@ addFormatFlags(
       "write on an environment whose policy trait is shared (otherwise teardowns are dry-run there)",
     ),
 ).action((opts) => fixturesCommand("sweep", [], opts));
+
+// A commander usage error is exit 2 (errored), never 1 (failed outcome).
+applyUsageExitCodes(program);
 
 await program.parseAsync(process.argv);

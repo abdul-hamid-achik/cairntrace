@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PrimeVue replica</title>
+    <style>
+      body { font: 14px sans-serif; padding: 16px; }
+      .question { margin: 12px 0; }
+      .p-calendar, .p-autocomplete { display: inline-flex; position: relative; }
+      .p-inputtext { padding: 6px; width: 220px; }
+      .p-datepicker { position: absolute; background: #fff; border: 1px solid #ccc; padding: 8px; z-index: 10; }
+      .p-datepicker-header { display: flex; justify-content: space-between; }
+      .p-datepicker-calendar td span { display: inline-block; width: 24px; text-align: center; cursor: pointer; }
+      .p-datepicker-other-month { color: #aaa; }
+      .p-autocomplete-panel { position: absolute; background: #fff; border: 1px solid #ccc; z-index: 10; }
+      .p-autocomplete-items { list-style: none; margin: 0; padding: 0; }
+      .p-autocomplete-item { padding: 4px 8px; cursor: pointer; }
+      .p-autocomplete-multiple-container { display: inline-flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 4px; border: 1px solid #ccc; min-width: 260px; }
+      .p-autocomplete-token { background: #eee; padding: 2px 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="question" data-field-key="form.start_date">
+      <label class="question-label">Start date *</label>
+      <span class="cal-mount" data-name="start_date"></span>
+    </div>
+    <div class="question" data-field-key="form.end_date">
+      <label class="question-label">End date (picker only)</label>
+      <span class="cal-mount" data-name="end_date" data-manual-input="false"></span>
+    </div>
+    <div class="question" data-field-key="form.address">
+      <label class="question-label">Address</label>
+      <span class="ac-mount" data-name="address"></span>
+    </div>
+    <div class="question" data-field-key="form.tags">
+      <label class="question-label">Tags</label>
+      <span class="ac-mount" data-name="tags" data-multiple="true"></span>
+    </div>
+
+    <script>
+      // Minimal replicas of PrimeVue 3 Calendar and AutoComplete: the same
+      // markup (overlay portaled to <body>, found through aria-controls),
+      // data-pc-* attributes and model behavior — typed text commits only
+      // when it parses (mm/dd/yyyy) and the input re-renders from the model
+      // on blur; a manualInput=false calendar is read-only and needs the
+      // picker; autocomplete suggests after a 300ms debounce.
+      window.__models = {};
+      let uid = 0;
+      const pad = (n) => (n < 10 ? "0" + n : String(n));
+      const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
+        "September", "October", "November", "December"];
+
+      function calendar(mount) {
+        const name = mount.dataset.name;
+        const manual = mount.dataset.manualInput !== "false";
+        const id = "pv_id_" + ++uid;
+        const root = document.createElement("span");
+        root.className = "p-calendar p-component p-inputwrapper p-calendar-w-btn";
+        root.setAttribute("data-pc-name", "calendar");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "p-inputtext p-component";
+        input.setAttribute("role", "combobox");
+        input.setAttribute("aria-haspopup", "dialog");
+        input.setAttribute("aria-expanded", "false");
+        input.setAttribute("aria-controls", id + "_panel");
+        input.placeholder = "mm/dd/yyyy";
+        if (!manual) input.readOnly = true;
+        const trigger = document.createElement("button");
+        trigger.type = "button";
+        trigger.className = "p-datepicker-trigger p-button p-component p-button-icon-only";
+        trigger.setAttribute("aria-label", "Choose Date");
+        trigger.setAttribute("data-pc-name", "dropdownbutton");
+        trigger.textContent = "📅";
+        root.appendChild(input);
+        root.appendChild(trigger);
+        mount.appendChild(root);
+
+        let model = null;
+        let panel = null;
+        let view = null;
+        const format = (d) => (d ? pad(d.getMonth() + 1) + "/" + pad(d.getDate()) + "/" + d.getFullYear() : "");
+        const parse = (text) => {
+          const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(text.trim());
+          if (!m) return null;
+          const d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+          return d.getMonth() === Number(m[1]) - 1 ? d : null;
+        };
+        const setModel = (d) => {
+          model = d;
+          window.__models[name] = d ? d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) : null;
+          input.value = format(model);
+        };
+        const hide = () => {
+          if (panel) panel.remove();
+          panel = null;
+          input.setAttribute("aria-expanded", "false");
+        };
+        const renderPanel = () => {
+          panel.textContent = "";
+          const header = document.createElement("div");
+          header.className = "p-datepicker-header";
+          const prev = document.createElement("button");
+          prev.type = "button";
+          prev.className = "p-datepicker-prev p-link";
+          prev.textContent = "‹";
+          const title = document.createElement("div");
+          title.className = "p-datepicker-title";
+          const month = document.createElement("button");
+          month.type = "button";
+          month.className = "p-datepicker-month p-link";
+          month.textContent = MONTHS[view.getMonth()];
+          const year = document.createElement("button");
+          year.type = "button";
+          year.className = "p-datepicker-year p-link";
+          year.textContent = String(view.getFullYear());
+          title.appendChild(month);
+          title.appendChild(year);
+          const next = document.createElement("button");
+          next.type = "button";
+          next.className = "p-datepicker-next p-link";
+          next.textContent = "›";
+          // Vue re-renders asynchronously after a navigation click.
+          prev.addEventListener("click", () => {
+            view = new Date(view.getFullYear(), view.getMonth() - 1, 1);
+            setTimeout(renderPanel, 30);
+          });
+          next.addEventListener("click", () => {
+            view = new Date(view.getFullYear(), view.getMonth() + 1, 1);
+            setTimeout(renderPanel, 30);
+          });
+          header.appendChild(prev);
+          header.appendChild(title);
+          header.appendChild(next);
+          panel.appendChild(header);
+          const table = document.createElement("table");
+          table.className = "p-datepicker-calendar";
+          const body = document.createElement("tbody");
+          const first = new Date(view.getFullYear(), view.getMonth(), 1);
+          const start = new Date(first);
+          start.setDate(1 - first.getDay());
+          for (let w = 0; w < 6; w++) {
+            const tr = document.createElement("tr");
+            for (let d = 0; d < 7; d++) {
+              const date = new Date(start);
+              date.setDate(start.getDate() + w * 7 + d);
+              const td = document.createElement("td");
+              if (date.getMonth() !== view.getMonth()) td.className = "p-datepicker-other-month";
+              const span = document.createElement("span");
+              span.textContent = String(date.getDate());
+              span.setAttribute("data-date", date.getFullYear() + "-" + date.getMonth() + "-" + date.getDate());
+              span.addEventListener("click", () => {
+                setModel(date);
+                hide();
+              });
+              td.appendChild(span);
+              tr.appendChild(td);
+            }
+            body.appendChild(tr);
+          }
+          table.appendChild(body);
+          panel.appendChild(table);
+          const bar = document.createElement("div");
+          bar.className = "p-datepicker-buttonbar";
+          const today = document.createElement("button");
+          today.type = "button";
+          today.textContent = "Today";
+          today.setAttribute("data-pc-name", "todaybutton");
+          today.addEventListener("click", () => {
+            const now = new Date();
+            setModel(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+            hide();
+          });
+          const clear = document.createElement("button");
+          clear.type = "button";
+          clear.textContent = "Clear";
+          clear.setAttribute("data-pc-name", "clearbutton");
+          clear.addEventListener("click", () => {
+            setModel(null);
+            hide();
+          });
+          bar.appendChild(today);
+          bar.appendChild(clear);
+          panel.appendChild(bar);
+        };
+        const show = () => {
+          if (panel) return;
+          view = model ? new Date(model.getFullYear(), model.getMonth(), 1) : new Date();
+          view = new Date(view.getFullYear(), view.getMonth(), 1);
+          panel = document.createElement("div");
+          panel.id = id + "_panel";
+          panel.className = "p-datepicker p-component";
+          panel.setAttribute("role", "dialog");
+          const rect = root.getBoundingClientRect();
+          panel.style.top = rect.bottom + window.scrollY + "px";
+          panel.style.left = rect.left + window.scrollX + "px";
+          document.body.appendChild(panel);
+          input.setAttribute("aria-expanded", "true");
+          renderPanel();
+        };
+        input.addEventListener("focus", show);
+        input.addEventListener("click", show);
+        trigger.addEventListener("click", () => (panel ? hide() : show()));
+        input.addEventListener("input", () => {
+          if (!manual) return;
+          const d = parse(input.value);
+          if (d) {
+            model = d;
+            window.__models[name] = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+          }
+        });
+        // onBlur: the input shows the model again (unparsed text is dropped).
+        input.addEventListener("blur", () => {
+          input.value = format(model);
+        });
+        document.addEventListener("mousedown", (e) => {
+          if (panel && !panel.contains(e.target) && !root.contains(e.target)) hide();
+        });
+      }
+
+      const ADDRESSES = ["10 Main Street, Springfield", "10 Maple Avenue, Shelbyville", "22 Oak Road, Capital City"];
+      const TAGS = ["alpha", "beta", "gamma", "delta"];
+
+      function autocomplete(mount) {
+        const name = mount.dataset.name;
+        const multiple = mount.dataset.multiple === "true";
+        const items = multiple ? TAGS : ADDRESSES;
+        const id = "pv_id_" + ++uid;
+        const root = document.createElement("div");
+        root.className = "p-autocomplete p-component p-inputwrapper" + (multiple ? " p-autocomplete-multiple" : "");
+        root.setAttribute("data-pc-name", "autocomplete");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "p-autocomplete-input p-inputtext p-component";
+        input.setAttribute("role", "combobox");
+        input.setAttribute("aria-autocomplete", "list");
+        input.setAttribute("aria-expanded", "false");
+        input.setAttribute("aria-controls", id + "_list");
+        input.autocomplete = "off";
+        let container = null;
+        let inputToken = null;
+        const chosen = [];
+        if (multiple) {
+          container = document.createElement("ul");
+          container.className = "p-autocomplete-multiple-container p-component p-inputtext";
+          inputToken = document.createElement("li");
+          inputToken.className = "p-autocomplete-input-token";
+          inputToken.appendChild(input);
+          container.appendChild(inputToken);
+          root.appendChild(container);
+        } else {
+          root.appendChild(input);
+        }
+        mount.appendChild(root);
+        let panel = null;
+        let timer = null;
+        const hide = () => {
+          if (panel) panel.remove();
+          panel = null;
+          input.setAttribute("aria-expanded", "false");
+        };
+        const pick = (label) => {
+          if (multiple) {
+            if (!chosen.includes(label)) chosen.push(label);
+            const token = document.createElement("li");
+            token.className = "p-autocomplete-token";
+            const span = document.createElement("span");
+            span.className = "p-autocomplete-token-label";
+            span.textContent = label;
+            token.appendChild(span);
+            container.insertBefore(token, inputToken);
+            input.value = "";
+            window.__models[name] = chosen.slice();
+          } else {
+            input.value = label;
+            window.__models[name] = label;
+          }
+          hide();
+        };
+        const show = (suggestions) => {
+          hide();
+          if (!suggestions.length) return;
+          panel = document.createElement("div");
+          panel.className = "p-autocomplete-panel p-component";
+          const ul = document.createElement("ul");
+          ul.className = "p-autocomplete-items";
+          ul.id = id + "_list";
+          ul.setAttribute("role", "listbox");
+          suggestions.forEach((label, i) => {
+            const li = document.createElement("li");
+            li.className = "p-autocomplete-item";
+            li.id = id + "_" + i;
+            li.setAttribute("role", "option");
+            li.textContent = label;
+            li.addEventListener("click", () => pick(label));
+            ul.appendChild(li);
+          });
+          panel.appendChild(ul);
+          const rect = root.getBoundingClientRect();
+          panel.style.top = rect.bottom + window.scrollY + "px";
+          panel.style.left = rect.left + window.scrollX + "px";
+          document.body.appendChild(panel);
+          input.setAttribute("aria-expanded", "true");
+        };
+        input.addEventListener("input", () => {
+          const query = input.value;
+          if (!multiple) window.__models[name] = query;
+          clearTimeout(timer);
+          if (!query) return hide();
+          timer = setTimeout(() => {
+            show(items.filter((label) => label.toLowerCase().includes(query.toLowerCase())));
+          }, 300);
+        });
+        document.addEventListener("mousedown", (e) => {
+          if (panel && !panel.contains(e.target) && !root.contains(e.target)) hide();
+        });
+      }
+
+      document.querySelectorAll(".cal-mount").forEach(calendar);
+      document.querySelectorAll(".ac-mount").forEach(autocomplete);
+    </script>
+  </body>
+</html>

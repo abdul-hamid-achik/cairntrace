@@ -173,6 +173,14 @@ function buildMenu() {
           click: () => send("menu:navigate", { view: "catalog" }),
         },
         {
+          label: "Suites",
+          click: () => send("menu:navigate", { view: "suites" }),
+        },
+        {
+          label: "Config vars",
+          click: () => send("menu:navigate", { view: "config-vars" }),
+        },
+        {
           label: "Stashes",
           accelerator: "CmdOrCtrl+7",
           click: () => send("menu:navigate", { view: "stashes" }),

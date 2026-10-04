@@ -313,9 +313,32 @@ export interface WorkbookSheet {
   name: string;
   /** rows[r][c], 0-based, empty cells "". */
   rows: string[][];
-  validations: Array<{ type?: string; sqref: string }>;
+  /** Data validations: type, target ranges and formulas. */
+  validations: Array<{
+    type?: string;
+    sqref: string;
+    operator?: string;
+    formula1?: string;
+    formula2?: string;
+  }>;
   /** Value of an A1 reference, or undefined when empty. */
   cell(ref: string): string | undefined;
+  /**
+   * Number format of an A1 reference (the cell's style, else its row's,
+   * else its column's; General when none). `{ id: 49, code: "@" }` is text.
+   */
+  numFmt(ref: string): { id: number; code?: string };
+  /**
+   * Header columns: label from `labelRow` (1-based, default 1), key from
+   * `keyRow` when given; columns whose label and key are both blank are
+   * left out.
+   */
+  columns(options?: { labelRow?: number; keyRow?: number }): Array<{
+    index: number;
+    letter: string;
+    label: string;
+    key?: string;
+  }>;
   /** Rows after the header row as objects keyed by header text. */
   records(options?: { headerRow?: number }): Array<Record<string, string>>;
 }
@@ -339,10 +362,19 @@ export interface ArtifactRef {
   [extra: string]: unknown;
 }
 
+/** A config var: a scalar, or (typed config vars) a list or object of them. */
+export type VerifierVarValue =
+  | string
+  | number
+  | boolean
+  | VerifierVarValue[]
+  | { [key: string]: VerifierVarValue };
+
 export interface VerifierContext<F> {
   /** Fixtures parsed by the contract: typed, defaults applied. */
   fixtures: F;
-  vars: Record<string, string | number | boolean>;
+  /** Resolved config/CLI vars; config vars may be lists or objects (F7). */
+  vars: Record<string, VerifierVarValue>;
   run: VerifierRun;
   specDir?: string;
   runDir?: string;

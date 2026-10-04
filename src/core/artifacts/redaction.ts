@@ -3,7 +3,7 @@ import { isWithheldFromTargetChildren } from "../processEnv";
 import type { RedactionConfig } from "../schema/spec.v1";
 
 const SENSITIVE_KEY_RE =
-  /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion/i;
+  /authorization|cookie|set-cookie|token|secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|code[_-]?verifier|otp|passcode|credential|assertion|jwt|bearer/i;
 
 export function isSensitiveEnvKey(key: string): boolean {
   return SENSITIVE_KEY_RE.test(key);
@@ -11,7 +11,7 @@ export function isSensitiveEnvKey(key: string): boolean {
 const STRUCTURED_POST_DATA_KEY_RE = /^postData$/i;
 const BUILT_IN_SENSITIVE_HEADERS = ["Authorization", "Cookie", "Set-Cookie"];
 const BUILT_IN_QUERY_PARAM_RE =
-  /^(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|password|secret|code[_-]?verifier|otp|passcode|credential|assertion)$/i;
+  /^(?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|password|secret|code[_-]?verifier|otp|passcode|credential|assertion|jwt)$/i;
 
 /**
  * Credentials embedded in URL userinfo (`scheme://user:pass@host`). Seed
@@ -60,6 +60,27 @@ export function registerSecretValues(values: Iterable<string>): void {
       registeredSecretValuesVersion++;
     }
   }
+}
+
+/**
+ * Values a run derives on its own — every `${secrets.X}` the parser spliced,
+ * the environment login's secrets, tokens read from responses — shorter than
+ * this are not registered for literal redaction: a test OTP `000`, a tenant
+ * id `1` or a flag `true` would otherwise be replaced in every artifact
+ * string (event timestamps, step ids, URLs). Key-based masking (a
+ * `password` / `token` field, a sensitive header) still covers them.
+ * Explicit values (`redaction.values`, provider-injected secrets) are
+ * registered whatever their length.
+ */
+export const MIN_DERIVED_SECRET_CHARS = 6;
+
+/** {@link registerSecretValues} for derived values (see MIN_DERIVED_SECRET_CHARS). */
+export function registerDerivedSecretValues(values: Iterable<string>): void {
+  const kept: string[] = [];
+  for (const value of values) {
+    if (value.trim().length >= MIN_DERIVED_SECRET_CHARS) kept.push(value);
+  }
+  registerSecretValues(kept);
 }
 
 /** Clear the registered-secret-value set. Intended for test isolation. */

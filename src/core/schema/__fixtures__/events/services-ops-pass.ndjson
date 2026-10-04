@@ -1,0 +1,14 @@
+{"ts":"<ts>","type":"services.provisioner.start","message":"true"}
+{"ts":"<ts>","type":"services.provisioner.ready","message":"provisioner up","data":{"exports":["OPS_HOST"]}}
+{"ts":"<ts>","type":"services.provisioner.exports","message":"exported 1 value(s)","data":{"names":["OPS_HOST"]}}
+{"ts":"<ts>","type":"services.tunnel.start","message":"tunnel \"db\" started","data":{"tunnel":"db","pid":0}}
+{"ts":"<ts>","type":"services.tunnel.ready","message":"tunnel \"db\" ready","data":{"tunnel":"db","pid":0}}
+{"ts":"<ts>","type":"services.files.write","message":"generated.json written","data":{"path":"generated.json","changed":true,"existed":false,"after":"<fingerprint>","afterBytes":25}}
+{"ts":"<ts>","type":"services.seed.phase.start","message":"phase import","data":{"phase":"import"}}
+{"ts":"<ts>","type":"services.seed.phase.complete","message":"phase import complete","data":{"phase":"import","durationMs":0}}
+{"ts":"<ts>","type":"services.seed.start","message":"postCommand: echo ensured"}
+{"ts":"<ts>","type":"services.seed.complete","message":"postCommand ok: echo ensured"}
+{"ts":"<ts>","type":"services.seed.postcommand.skip","message":"postCommand other-env-only skipped","data":{"postCommand":"other-env-only","reason":"when.env staging (this run: local)"}}
+{"ts":"<ts>","type":"services.seed.commit","message":"seed committed after its post-commands","data":{"committed":true,"phases":["import"]}}
+{"ts":"<ts>","type":"services.tunnel.stop","message":"tunnel \"db\" stopped","data":{"tunnel":"db"}}
+{"ts":"<ts>","type":"services.teardown.complete","message":"teardown[0] completed","data":{"index":0,"exitCode":0,"durationMs":0,"critical":true,"provisioner":true}}

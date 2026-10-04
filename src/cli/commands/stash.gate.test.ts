@@ -35,7 +35,15 @@ interface Fake {
 }
 
 async function useFakeFcheap(
-  opts: { meta?: boolean; fail?: boolean } = {},
+  /**
+   * Mimic fcheap's `--meta` validation: `reject-all` refuses any pair,
+   * `limit-bytes` refuses a value over 256 bytes (Go's `len(value)`).
+   */
+  opts: {
+    meta?: boolean;
+    fail?: boolean;
+    metaRule?: "reject-all" | "limit-bytes";
+  } = {},
 ): Promise<Fake> {
   const root = await mkdtemp(join(tmpdir(), "cairntrace-fake-fcheap-"));
   const args = join(root, "args.log");
@@ -54,6 +62,20 @@ if [ "$1" = "save" ] && [ "$2" = "--help" ]; then
   exit 0
 fi
 if [ "$1" = "save" ]; then
+  ${
+    opts.metaRule
+      ? `prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--meta" ]; then
+      if [ "${opts.metaRule}" = "reject-all" ] || [ "$(printf '%s' "\${arg#*=}" | wc -c | tr -d ' ')" -gt 256 ]; then
+        echo 'invalid_input: metadata value for "spec" exceeds 256 bytes' >&2
+        exit 1
+      fi
+    fi
+    prev="$arg"
+  done`
+      : ""
+  }
   ${
     opts.fail
       ? `echo "save failed: stat /Users/someone/private/run: permission denied" >&2; exit 3`
@@ -79,7 +101,7 @@ exit 2
   };
 }
 
-async function failedRun(): Promise<string> {
+async function failedRun(specName = "checkout"): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "cairntrace-gate-run-"));
   const runDir = join(root, "2026-10-02T10-00-00-000Z_checkout_a1b2c3");
   const writer = new ArtifactWriter(runDir, createArtifactRedactor(undefined));
@@ -90,7 +112,7 @@ async function failedRun(): Promise<string> {
       status: "failed",
       environment: "local",
       backend: "playwright",
-      spec: { name: "checkout" },
+      spec: { name: specName },
       labels: { round: "r1" },
     })}\n`,
     "run",
@@ -144,9 +166,16 @@ describe("auto-stash decision", () => {
     ).toBe(false);
   });
 
-  it("resolves pass/fail TTLs (passes default to 7d, failures keep forever)", () => {
+  it("resolves pass/fail TTLs (passes default to 7d, failures to 90d, failTtl never opts out)", () => {
     expect(autoStashTtl("passed", undefined)).toBe("7d");
-    expect(autoStashTtl("failed", undefined)).toBeUndefined();
+    expect(autoStashTtl("failed", undefined)).toBe("90d");
+    expect(autoStashTtl("errored", {})).toBe("90d");
+    expect(autoStashTtl("failed", { failTtl: "never" })).toBeUndefined();
+    expect(
+      autoStashTtl("failed", { ttl: "30d", failTtl: "never" }),
+    ).toBeUndefined();
+    // passes are unaffected by failTtl
+    expect(autoStashTtl("passed", { failTtl: "never" })).toBe("7d");
     expect(autoStashTtl("failed", { ttl: "30d" })).toBe("30d");
     expect(autoStashTtl("failed", { ttl: "30d", failTtl: "90d" })).toBe("90d");
     expect(autoStashTtl("passed", { ttl: "30d", passTtl: "2d" })).toBe("2d");
@@ -268,6 +297,27 @@ describe("gated auto-stash", () => {
     expect(await fake.calls()).toHaveLength(0);
   });
 
+  it("gives a failed run a 90d TTL unless failTtl is never", async () => {
+    const fake = await useFakeFcheap({ meta: true });
+    const runDir = await failedRun();
+    await maybeAutoStash(runDir, basename(runDir), "checkout", {
+      status: "failed",
+      configStash: { enabled: true, autoStash: "on-failure" },
+    });
+    const optOutDir = await failedRun();
+    await maybeAutoStash(optOutDir, basename(optOutDir), "checkout", {
+      status: "failed",
+      configStash: {
+        enabled: true,
+        autoStash: "on-failure",
+        failTtl: "never",
+      },
+    });
+    const [defaulted, optedOut] = await fake.calls();
+    expect(defaulted).toContain("--ttl 90d");
+    expect(optedOut).not.toContain("--ttl");
+  });
+
   it("records a failed save as an artifact.stash error event with a reason code", async () => {
     await useFakeFcheap({ fail: true });
     const runDir = await failedRun();
@@ -302,6 +352,73 @@ describe("gated auto-stash", () => {
     expect(await events(runDir)).toContainEqual(
       expect.objectContaining({ status: "error", reason: "fcheap-missing" }),
     );
+  });
+
+  it("byte-truncates a multi-byte spec name so fcheap accepts the --meta value", async () => {
+    const fake = await useFakeFcheap({ meta: true, metaRule: "limit-bytes" });
+    const spec = "検".repeat(150); // 450 bytes, 150 UTF-16 units
+    const runDir = await failedRun(spec);
+    const result = await stashRunDirectory(runDir, {
+      action: "manual",
+      tags: [],
+      meta: true,
+    });
+    expect(result).toMatchObject({ ok: true, stashId: "stash-gate-1" });
+    expect(result.metaDropped).toBeUndefined();
+    const calls = await fake.calls();
+    expect(calls).toHaveLength(1);
+    const value = / --meta spec=(\S+)/.exec(calls[0]!)![1]!;
+    expect(Buffer.byteLength(value)).toBe(255);
+    expect(spec.startsWith(value)).toBe(true);
+    expect(await events(runDir)).toContainEqual(
+      expect.not.objectContaining({ metaDropped: true }),
+    );
+  });
+
+  it("retries once without --meta when fcheap refuses it, and records that", async () => {
+    const fake = await useFakeFcheap({ meta: true, metaRule: "reject-all" });
+    const runDir = await failedRun();
+    const result = await stashRunDirectory(runDir, {
+      action: "manual",
+      tags: ["keep"],
+      meta: true,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      stashId: "stash-gate-1",
+      metaDropped: true,
+    });
+    expect(result.warning).toMatch(/run metadata was not saved/);
+    expect(result.warning).toContain("exceeds 256 bytes");
+    const calls = await fake.calls();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain("--meta ");
+    expect(calls[1]).not.toContain("--meta");
+    expect(calls[1]).toContain("--tag keep");
+    const receipt = StashReceiptSchema.parse(
+      JSON.parse(await readFile(join(runDir, "stash-receipt.json"), "utf8")),
+    );
+    expect(receipt.metaDropped).toBe(true);
+    expect(await events(runDir)).toContainEqual(
+      expect.objectContaining({
+        type: "artifact.stash",
+        status: "saved",
+        metaDropped: true,
+      }),
+    );
+  });
+
+  it("does not retry a save that fails for another reason", async () => {
+    const fake = await useFakeFcheap({ meta: true, fail: true });
+    const runDir = await failedRun();
+    const result = await stashRunDirectory(runDir, {
+      action: "manual",
+      tags: [],
+      meta: true,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "save-failed" });
+    expect(result.metaDropped).toBeUndefined();
+    expect(await fake.calls()).toHaveLength(1);
   });
 
   it("writes a manual receipt for stash save and saves in place when nothing is excluded", async () => {

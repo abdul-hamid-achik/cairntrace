@@ -157,7 +157,7 @@ cairn stats --group-by workers --baseline 1 --metric rootMs
 - With both flags, repeats are the outer loop and matrix combinations the inner one (a, b, a, b, …), so slow machine drift does not bias a single cohort.
 - Services and the web server start once per invocation; `--before` hooks run again before every run.
 - `--stop-on-fail` stops at the first run that does not pass. Without it every run executes.
-- A plain-text summary (one line per run: status, labels, exit code, run dirs) is printed to **stderr** at the end, so `--json`/`--yaml` stdout stays one document per run. The process exit code is the most severe code across runs (6, then 1, then 2, then 7, then 0).
+- A plain-text summary (one line per run: status, labels, exit code, run dirs) is printed to **stderr** at the end, so `--json`/`--yaml` stdout stays one document per run. The process exit code is the most severe code across runs (6, then 1, then 2, then 7, then 0; `--bail` only leaves out the specs it skipped, and a critical teardown or dirty state after the run overrides it with 8 or 9).
 - Auto-prune (`retention.keepRuns`, default 3 per spec) is raised to at least the number of runs in the invocation, so earlier repeats are not deleted mid-benchmark. Runs from a _previous_ invocation still count against the normal limit.
 
 ## After hooks and external metrics

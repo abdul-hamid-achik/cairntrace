@@ -222,7 +222,7 @@ export interface FixtureRuntimeOptions {
   selectedTvaultKeys?: Iterable<string>;
   /** Non-secret CAIRN_* context for exec children. */
   contextEnv?: Record<string, string>;
-  vars?: Record<string, string | number | boolean>;
+  vars?: Record<string, unknown>;
   baseUrl?: string;
   runToken?: string;
   datasourceSet?: EnvironmentDatasourceSet;

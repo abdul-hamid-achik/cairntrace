@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SafeStashIdSchema } from "./stash.v1";
+import { ConfigFindingSchema } from "./configVars.v1";
 
 /**
  * Wire schemas for MCP tool results that don't already have a declared v1
@@ -160,6 +161,11 @@ export const ConfigValidateResultSchema = z
     path: z.string(),
     errors: z.array(z.string()).optional(),
     keys: z.array(z.string()).optional(),
+    warnings: z.array(z.string()).optional(),
+    /** F7: included config files (relative to the config directory). */
+    includes: z.array(z.string()).optional(),
+    /** F7: include overrides (info), empty include globs and unused vars (warnings). */
+    findings: z.array(ConfigFindingSchema).optional(),
     services: z
       .object({
         docker: z.boolean().optional(),

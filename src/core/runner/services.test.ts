@@ -583,19 +583,19 @@ describe("startServices — indefinite wait + live output", () => {
 
   it("streams the tmux pane tail while waiting for a window to become ready", async () => {
     // capture-pane returns a non-ready tail; has-session says it doesn't exist.
-    // display-message returns zsh then node so send-keys is accepted once.
+    // list-panes returns zsh then node so send-keys is accepted once.
     let mainSent = false;
     execaImpl = async (cmd, args) => {
       const base = tmuxBaseImpl(cmd, args);
       if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn serve")
         mainSent = true;
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return {
           exitCode: 0,
           stdout: mainSent ? "node" : "zsh",
           stderr: "",
         };
-      if (base && args[0] !== "display-message") return base;
+      if (base && args[0] !== "list-panes") return base;
       if (cmd === "tmux" && args[0] === "capture-pane") {
         return {
           exitCode: 0,
@@ -701,11 +701,11 @@ describe("startServices — indefinite wait + live output", () => {
         mainSent = true;
         return { exitCode: 0, stdout: "", stderr: "" };
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
+      if (cmd === "tmux" && args[0] === "list-panes") {
         const format = args.at(-1);
         if (
           format ===
-          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_pid}"
         ) {
           // The interactive pane itself remains alive, but the service has
           // returned to zsh before its readyOn URL ever answered.
@@ -794,10 +794,10 @@ describe("startServices — indefinite wait + live output", () => {
         mainSent = true;
         return { exitCode: 0, stdout: "", stderr: "" };
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
+      if (cmd === "tmux" && args[0] === "list-panes") {
         if (
           args.at(-1) ===
-          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_pid}"
         ) {
           return { exitCode: 0, stdout: "1\t17\tnode", stderr: "" };
         }
@@ -1079,6 +1079,11 @@ describe("startServices — seed phase", () => {
   });
 });
 
+/** The window of an exact tmux target (`=session:=window`). */
+function windowOf(target: string): string {
+  return target.split(":").at(-1)!.replace(/^=/, "");
+}
+
 /**
  * Default tmux mock bits shared by create/reuse tests. Callers layer
  * has-session / capture-pane / list-windows on top as needed.
@@ -1088,8 +1093,8 @@ function tmuxBaseImpl(
   args: string[],
 ): { exitCode: number; stdout: string; stderr: string } | undefined {
   if (cmd !== "tmux") return undefined;
-  // Shell settle polls use display-message for #{pane_current_command}.
-  if (args[0] === "display-message")
+  // Shell settle polls use list-panes for #{pane_current_command}.
+  if (args[0] === "list-panes")
     return { exitCode: 0, stdout: "zsh", stderr: "" };
   if (args[0] === "clear-history")
     return { exitCode: 0, stdout: "", stderr: "" };
@@ -1152,8 +1157,8 @@ describe("startServices — tmux phase", () => {
     expect(newWindowCall).toBeDefined();
     const targetIdx = newWindowCall!.args.indexOf("-t");
     expect(targetIdx).toBeGreaterThan(-1);
-    expect(newWindowCall!.args[targetIdx + 1]).toBe("test-sess");
-    expect(newWindowCall!.args[targetIdx + 1]).not.toContain(":");
+    // Exact (`=`): never a prefix match on another session.
+    expect(newWindowCall!.args[targetIdx + 1]).toBe("=test-sess:");
     // Should have sent commands
     expect(
       execaCalls.some((c) => c.cmd === "tmux" && c.args.includes("send-keys")),
@@ -1179,14 +1184,14 @@ describe("startServices — tmux phase", () => {
         const command = String(args[3]);
         if (command === "start web" || command === "start api") {
           started.add(target);
-          order.push(`send:${target.split(":").at(-1)}`);
+          order.push(`send:${windowOf(target)}`);
         }
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
-        const target = String(args[3]);
+      if (cmd === "tmux" && args[0] === "list-panes") {
+        const target = String(args[2]);
         if (
           args.at(-1) ===
-          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_pid}"
         ) {
           return { exitCode: 0, stdout: "0\t\tnode", stderr: "" };
         }
@@ -1200,10 +1205,10 @@ describe("startServices — tmux phase", () => {
         const target = String(args[3]);
         const count = (captureCount.get(target) ?? 0) + 1;
         captureCount.set(target, count);
-        if (target.endsWith(":web") && count < 3) {
+        if (target.endsWith(":=web") && count < 3) {
           return { exitCode: 0, stdout: "web booting", stderr: "" };
         }
-        const window = target.split(":").at(-1)!;
+        const window = windowOf(target);
         order.push(`ready:${window}`);
         return { exitCode: 0, stdout: `${window} ready`, stderr: "" };
       }
@@ -1258,11 +1263,11 @@ describe("startServices — tmux phase", () => {
         const command = String(args[3]);
         if (command.startsWith("start ")) {
           started.add(target);
-          order.push(`send:${target.split(":").at(-1)}`);
+          order.push(`send:${windowOf(target)}`);
         }
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
-        const target = String(args[3]);
+      if (cmd === "tmux" && args[0] === "list-panes") {
+        const target = String(args[2]);
         return {
           exitCode: 0,
           stdout: started.has(target) ? "node" : "zsh",
@@ -1270,7 +1275,7 @@ describe("startServices — tmux phase", () => {
         };
       }
       if (cmd === "tmux" && args[0] === "capture-pane") {
-        const window = String(args[3]).split(":").at(-1)!;
+        const window = windowOf(String(args[3]));
         order.push(`ready:${window}`);
         return { exitCode: 0, stdout: `${window} ready`, stderr: "" };
       }
@@ -1313,11 +1318,11 @@ describe("startServices — tmux phase", () => {
         const target = String(args[2]);
         if (args[3] === "start web") started.add(target);
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
-        const target = String(args[3]);
+      if (cmd === "tmux" && args[0] === "list-panes") {
+        const target = String(args[2]);
         if (
           args.at(-1) ===
-          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}"
+          "#{pane_dead}\t#{pane_dead_status}\t#{pane_current_command}\t#{pane_pid}"
         ) {
           return { exitCode: 0, stdout: "1\t23\tnode", stderr: "" };
         }
@@ -1388,7 +1393,7 @@ describe("startServices — tmux phase", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" }; // service running
       if (cmd === "tmux" && args[0] === "capture-pane")
         return { exitCode: 0, stdout: "listening", stderr: "" };
@@ -1441,7 +1446,7 @@ describe("startServices — tmux phase", () => {
       }
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" }; // looks live
       if (cmd === "tmux" && args[0] === "capture-pane")
         return { exitCode: 0, stdout: "listening on", stderr: "" };
@@ -1495,7 +1500,7 @@ describe("startServices — tmux phase", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "warehouse", stderr: "" };
-      // display-message from tmuxBaseImpl returns zsh → idle shell
+      // list-panes from tmuxBaseImpl returns zsh → idle shell
       if (cmd === "tmux" && args[0] === "capture-pane")
         return {
           exitCode: 0,
@@ -1554,7 +1559,7 @@ describe("startServices — tmux phase", () => {
       // Only web exists; chronos is missing.
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message") {
+      if (cmd === "tmux" && args[0] === "list-panes") {
         // web is live; chronos won't be queried until created
         return { exitCode: 0, stdout: "node", stderr: "" };
       }
@@ -1657,7 +1662,7 @@ describe("startServices — tmux phase", () => {
         return { exitCode: 0, stdout: "", stderr: "" }; // session exists → reuse
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };
@@ -1970,7 +1975,7 @@ describe("startServices — teardown", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" };
       if (cmd === "docker")
         return {
@@ -3054,7 +3059,7 @@ describe("startServices — tmux pre-commands", () => {
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
         mainSent = true;
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return {
           exitCode: 0,
           stdout: mainSent ? "node" : "zsh",
@@ -3090,7 +3095,7 @@ describe("startServices — tmux pre-commands", () => {
     );
 
     // Collect all send-keys calls for the "answers" window in order.
-    // tmux send-keys args: ["send-keys", "-t", "test-sess:answers", "<command>", "Enter"]
+    // tmux send-keys args: ["send-keys", "-t", "=test-sess:=answers", "<command>", "Enter"]
     const sendKeysCalls = execaCalls.filter(
       (c) =>
         c.cmd === "tmux" &&
@@ -3111,7 +3116,7 @@ describe("startServices — tmux pre-commands", () => {
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
         mainSent = true;
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: mainSent ? "node" : "zsh", stderr: "" };
       if (cmd === "tmux" && args[0] === "has-session")
         return { exitCode: 1, stdout: "", stderr: "" };
@@ -3272,7 +3277,7 @@ describe("startServices — tmux window with both url and text readyOn", () => {
     execaImpl = async (cmd, args) => {
       if (cmd === "tmux" && args[0] === "send-keys" && args[3] === "yarn start")
         mainSent = true;
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return {
           exitCode: 0,
           stdout: mainSent ? "node" : "zsh",
@@ -3732,7 +3737,7 @@ describe("startServices — deprecated services.stash fixes", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" };
       if (cmd === "tmux" && args[0] === "capture-pane")
         return { exitCode: 0, stdout: "reused pane output", stderr: "" };
@@ -3828,7 +3833,7 @@ describe("startServices — bounded run artifact capture", () => {
       if (cmd === "tmux" && args[0] === "list-windows") {
         return { exitCode: 0, stdout: "web api", stderr: "" };
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
+      if (cmd === "tmux" && args[0] === "list-panes") {
         return { exitCode: 0, stdout: "node", stderr: "" };
       }
       if (cmd === "tmux" && args[0] === "capture-pane") {
@@ -3986,7 +3991,7 @@ describe("startServices — bounded run artifact capture", () => {
       if (cmd === "tmux" && args[0] === "list-windows") {
         return { exitCode: 0, stdout: "worker", stderr: "" };
       }
-      if (cmd === "tmux" && args[0] === "display-message") {
+      if (cmd === "tmux" && args[0] === "list-panes") {
         return { exitCode: 0, stdout: "node", stderr: "" };
       }
       if (cmd === "tmux" && args[0] === "capture-pane") {
@@ -4511,7 +4516,7 @@ describe("startServices — ctx.log callback coverage", () => {
         return { exitCode: 0, stdout: "", stderr: "" };
       if (cmd === "tmux" && args[0] === "list-windows")
         return { exitCode: 0, stdout: "web", stderr: "" };
-      if (cmd === "tmux" && args[0] === "display-message")
+      if (cmd === "tmux" && args[0] === "list-panes")
         return { exitCode: 0, stdout: "node", stderr: "" };
       return { exitCode: 0, stdout: "", stderr: "" };
     };

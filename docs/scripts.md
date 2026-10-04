@@ -97,7 +97,7 @@ fixtures:
 | `ctx.deadline` / `ctx.remainingMs()` | when `run` must be done (a margin before `script.timeoutMs`) |
 | `ctx.signal` | aborted at the deadline and when the run is cancelled |
 | `ctx.progress(message)` | a live progress line (`outcome.progress` event) |
-| `ctx.xlsx(path)` | read a workbook: `sheets`, `sheet(name).rows`, `.cell("B2")`, `.records()` |
+| `ctx.xlsx(path)` | read a workbook (the parser the `xlsx` verifier uses): `sheets`, `sheet(name).rows`, `.cell("B2")`, `.records()`, `.columns({ labelRow, keyRow })` (`{ index, letter, label, key }`), `.numFmt("C3")` (`{ id: 49, code: "@" }`), `.validations` (`type`, `sqref`, `formula1`, `formula2`) |
 | `ctx.log(...)` | a line in the outcome log |
 | `ctx.result.ok(details)` / `ctx.result.fail(message, details)` | the verdict |
 | `ctx.fail(message, details)` | fail right now (throws) |

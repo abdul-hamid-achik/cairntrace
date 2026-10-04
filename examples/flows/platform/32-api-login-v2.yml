@@ -1,0 +1,96 @@
+# Platform API v2 — sign in through the environment's auth block and drive an
+# async job with typed request steps instead of fetch glue in an eval.
+#
+# Demonstrates: `use: login` (config `environments.local.auth`: an
+# `alreadyAuthenticated` probe, then POST /api/login; it satisfies the
+# cold-start contract), request `retry` on 5xx / network failures, `capture`
+# with a JSONPath filter, `until` polling a background job until it is done
+# (instead of a sleep loop), `credentials: omit` + `matrix` + `expectStatus`
+# for anonymous callers (one request per combination; the step lists every
+# mismatch), and `value` outcomes over request results.
+version: 1
+name: api_login_v2
+intent: an operator signed in through the API restocks a product and sees the job finish, while anonymous callers are refused
+environment: local
+preconditions:
+  wait: demo_api_ready
+fixtures:
+  - demo_product
+outcomes:
+  - id: starting_stock_captured
+    description: the catalog listed the fixture product with its starting stock
+    verify:
+      value:
+        actual: "${requests.catalog.captures}"
+        expect:
+          stock: 5
+  - id: job_finished
+    description: the restock job for the fixture product reached done
+    verify:
+      value:
+        actual: "${requests.job.body}"
+        expect:
+          status: done
+          sku: "${fixtures.demo_product.sku}"
+          quantity: 3
+  - id: stock_raised
+    description: the API reports the restocked stock
+    verify:
+      http:
+        source: demo_api
+        url: "/api/products?sku=${fixtures.demo_product.sku}"
+        expect:
+          json: { total: 1, "products[0].stock": 8 }
+  - id: anonymous_refused
+    description: every anonymous call was answered 401
+    verify:
+      value:
+        actual: "${requests.anonymous}"
+        expect:
+          ok: true
+          "matrix[*].status": { each: { equals: 401 } }
+steps:
+  - id: sign_in
+    use: login
+  - id: find_product
+    request:
+      url: /api/products
+      retry: { times: 2, on: [5xx, network], delayMs: 250 }
+      capture:
+        stock: '$.products[?(@.sku == "${fixtures.demo_product.sku}")].stock'
+      expectStatus: 200
+      assign: catalog
+  - id: queue_restock
+    request:
+      method: POST
+      url: /api/restock
+      headers: { content-type: application/json }
+      body: { sku: "${fixtures.demo_product.sku}", quantity: 3 }
+      expectStatus: 202
+      capture: { jobId: $.id }
+      assign: restock
+  - id: wait_for_job
+    request:
+      url: "/api/restock/${requests.restock.captures.jobId}"
+      until:
+        json: { status: done }
+        every: 250
+        timeoutMs: 15000
+      assign: job
+  - id: anonymous_calls_refused
+    request:
+      method: "${matrix.route.method}"
+      url: "${matrix.route.path}"
+      credentials: omit
+      headers: { content-type: application/json }
+      body: "${matrix.route.body}"
+      matrix:
+        route:
+          - { method: GET, path: /api/session }
+          - method: POST
+            path: /api/restock
+            body: { sku: "${fixtures.demo_product.sku}", quantity: 1 }
+          - { method: DELETE, path: "/api/products/${fixtures.demo_product.sku}" }
+      expectStatus: 401
+      assign: anonymous
+contractHash: sha256:4f8f716501f92e29ecfb61b1ef49050b9e438e90024e8acf42f416309f6471e9

@@ -440,55 +440,184 @@ describe("export manifest is relocatable and stable", () => {
 });
 
 describe("examples/flows --project export (E4)", () => {
-  it("type-checks under strict + noUnusedLocals with only used imports", async () => {
-    const outDir = await tempDir("cairn-export-examples-");
+  // lib ES2022: hosts whose tsconfig predates ES2023 (no toSorted /
+  // toReversed) compile the vendored runtime, the command helper and the
+  // global setup too. inline / global emit the host-command runtime.
+  it.each([undefined, "inline", "global"] as const)(
+    "type-checks under strict + noUnusedLocals and lib ES2022 with only used imports (preconditions %s)",
+    async (preconditions) => {
+      const outDir = await tempDir("cairn-export-examples-");
+      const flows = join(REPO_ROOT, "examples", "flows");
+      const built = await buildProjectExport(
+        await expandSpecArgs([flows]),
+        "ts",
+        { project: true, outDir, ...(preconditions ? { preconditions } : {}) },
+        flows,
+      );
+      for (const file of built.generated) {
+        const abs = join(outDir, file.relPath);
+        await mkdir(dirname(abs), { recursive: true });
+        await writeFile(abs, file.content);
+      }
+      await symlink(
+        join(REPO_ROOT, "node_modules"),
+        join(outDir, "node_modules"),
+      );
+      for (const file of built.result.files) {
+        expect(file.source, file.relPath).not.toMatch(/__CAIRN_[A-Z_]+__/i);
+      }
+
+      const tsFiles = built.generated
+        .map((file) => join(outDir, file.relPath))
+        .filter((path) => path.endsWith(".ts"));
+      const program = ts.createProgram(tsFiles, {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        lib: ["lib.es2022.d.ts", "lib.dom.d.ts", "lib.dom.iterable.d.ts"],
+        types: ["node"],
+        typeRoots: [join(REPO_ROOT, "node_modules", "@types")],
+        strict: true,
+        noUnusedLocals: true,
+        noEmit: true,
+        allowImportingTsExtensions: true,
+        resolveJsonModule: true,
+        skipLibCheck: true,
+      });
+      const diagnostics = ts
+        .getPreEmitDiagnostics(program)
+        .filter((d) => d.file?.fileName.startsWith(outDir))
+        .map(
+          (d) =>
+            `${d.file?.fileName.slice(outDir.length + 1)}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`,
+        );
+      expect(diagnostics).toEqual([]);
+      expect(built.result.specs.length).toBeGreaterThanOrEqual(10);
+    },
+    60_000,
+  );
+});
+
+describe("examples/flows coverage: what stays test.fixme per host mode", () => {
+  async function fixmeSpecs(
+    preconditions: "inline" | "global" | undefined,
+  ): Promise<string[]> {
+    const outDir = await tempDir("cairn-export-fixme-");
     const flows = join(REPO_ROOT, "examples", "flows");
     const built = await buildProjectExport(
       await expandSpecArgs([flows]),
       "ts",
-      { project: true, outDir },
+      { project: true, outDir, ...(preconditions ? { preconditions } : {}) },
       flows,
     );
-    for (const file of built.generated) {
-      const abs = join(outDir, file.relPath);
-      await mkdir(dirname(abs), { recursive: true });
-      await writeFile(abs, file.content);
-    }
-    await symlink(
-      join(REPO_ROOT, "node_modules"),
-      join(outDir, "node_modules"),
-    );
-    for (const file of built.result.files) {
-      expect(file.source, file.relPath).not.toMatch(/__CAIRN_[A-Z_]+__/i);
-    }
+    return built.result.specs
+      .filter((spec) => spec.coverage.fixme)
+      .map((spec) => spec.name)
+      .toSorted();
+  }
 
-    const tsFiles = built.generated
-      .map((file) => join(outDir, file.relPath))
-      .filter((path) => path.endsWith(".ts"));
-    const program = ts.createProgram(tsFiles, {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      lib: ["lib.es2023.d.ts", "lib.dom.d.ts", "lib.dom.iterable.d.ts"],
-      types: ["node"],
-      typeRoots: [join(REPO_ROOT, "node_modules", "@types")],
-      strict: true,
-      noUnusedLocals: true,
-      noEmit: true,
-      allowImportingTsExtensions: true,
-      resolveJsonModule: true,
-      skipLibCheck: true,
-    });
-    const diagnostics = ts
-      .getPreEmitDiagnostics(program)
-      .filter((d) => d.file?.fileName.startsWith(outDir))
-      .map(
-        (d) =>
-          `${d.file?.fileName.slice(outDir.length + 1)}: TS${d.code} ${ts.flattenDiagnosticMessageText(d.messageText, " ")}`,
-      );
-    expect(diagnostics).toEqual([]);
-    expect(built.result.specs.length).toBeGreaterThanOrEqual(10);
+  it("data verifiers, xlsx, file and transform export; only run: steps and fixtures need a host mode", async () => {
+    // Default: the specs that need a `run:` step or a config fixture.
+    expect(await fixmeSpecs(undefined)).toEqual([
+      "api_login_v2",
+      "restock_job",
+      "run_step_teardown",
+    ]);
+    // inline runs the `run:` step; fixtures still need the global setup.
+    expect(await fixmeSpecs("inline")).toEqual(["api_login_v2", "restock_job"]);
+    // global ensures the fixtures too.
+    expect(await fixmeSpecs("global")).toEqual([]);
   }, 60_000);
+});
+
+describe("http datasources in an export", () => {
+  it("keep every ${env.X} / ${secrets.X} late-bound: no environment value reaches the generated code", async () => {
+    const root = await tempDir("cairn-export-datasource-");
+    await mkdir(join(root, "flows"), { recursive: true });
+    await writeFile(
+      join(root, "cairntrace.config.yml"),
+      [
+        "version: 1",
+        "vars: { svc: svc-name }",
+        "environments:",
+        "  local: { baseUrl: 'http://localhost:8787' }",
+        "datasources:",
+        "  api:",
+        "    kind: http",
+        '    baseUrl: "${env.DS_BASE:-http://localhost:8787}"',
+        '    headers: { x-svc: "${vars.svc}", x-key: "${secrets.DS_KEY}" }',
+        '    auth: { bearer: "${secrets.DS_TOKEN}" }',
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      join(root, "flows", "a.yml"),
+      [
+        "version: 1",
+        "name: ds_check",
+        "intent: datasource export",
+        "environment: local",
+        "outcomes:",
+        "  - id: health",
+        "    description: health",
+        "    verify:",
+        "      http: { source: api, url: /api/health, expect: { json: { status: ok } } }",
+        "steps:",
+        "  - { id: open, open: / }",
+        "",
+      ].join("\n"),
+    );
+    // Values that must never be written into generated code (built at run time).
+    const base = ["http://baked", ".example.test:9"].join("");
+    const token = ["tk", "-", "abc123"].join("");
+    const key = ["k", "ey", "-777"].join("");
+    const saved = {
+      DS_BASE: process.env["DS_BASE"],
+      DS_TOKEN: process.env["DS_TOKEN"],
+      DS_KEY: process.env["DS_KEY"],
+    };
+    process.env["DS_BASE"] = base;
+    process.env["DS_TOKEN"] = token;
+    process.env["DS_KEY"] = key;
+    try {
+      const outDir = await tempDir("cairn-export-datasource-out-");
+      const flows = join(root, "flows");
+      const built = await buildProjectExport(
+        await expandSpecArgs([flows]),
+        "ts",
+        { project: true, outDir },
+        flows,
+      );
+      const test = built.result.files.find(
+        (file) => file.relPath === "tests/ds_check.spec.ts",
+      )!.source;
+      expect(test).toContain(
+        'source: { name: "api", baseUrl: cairnDatasourceEnv("api", "env.DS_BASE", "DS_BASE", "http://localhost:8787"), headers: { "x-svc": "svc-name", "x-key": cairnDatasourceEnv("api", "secrets.DS_KEY", "DS_KEY") }, bearer: cairnDatasourceEnv("api", "secrets.DS_TOKEN", "DS_TOKEN") }',
+      );
+      for (const file of [
+        ...built.result.files,
+        ...built.generated.map((g) => ({
+          relPath: g.relPath,
+          source: g.content,
+        })),
+      ]) {
+        for (const value of [base, token, key]) {
+          expect(
+            file.source,
+            `${file.relPath} must not hold ${value.slice(0, 4)}…`,
+          ).not.toContain(value);
+        }
+      }
+      expect(built.result.requiredEnv).toEqual(
+        expect.arrayContaining(["DS_KEY", "DS_TOKEN"]),
+      );
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
 });
 
 describe("${config.dir} in exports honours --config", () => {
@@ -549,5 +678,230 @@ steps:
     );
     expect(action?.source).toContain(`${configRoot}/fixtures/`);
     expect(action?.source).not.toContain(`${process.cwd()}/fixtures/`);
+  });
+});
+
+const SPEC_HOST = `version: 1
+name: host_flow
+intent: preconditions, env defaults and verifier modes through the CLI
+coldStart: guest
+vars:
+  region: "\${env.EXPORT_TEST_REGION:-eu}"
+preconditions:
+  commands:
+    - name: reset
+      run: bun run reset
+      cwd: ../tools
+      timeoutMs: 45000
+    - run: deploy --token \${env.EXPORT_TEST_TOKEN} | cat
+outcomes:
+  - id: region
+    description: the region shows
+    verify:
+      text: { contains: "\${vars.region}" }
+steps:
+  - id: open_host
+    open: "http://localhost:8787/host.html?r=\${vars.region}"
+`;
+
+describe("E10 modes through the CLI code paths", () => {
+  it("rejects the flag combinations that cannot work", async () => {
+    const { resolveExportModes } = await import("./export");
+    expect(() => resolveExportModes({ preconditions: "global" })).toThrow(
+      /needs --project or --into/,
+    );
+    expect(() =>
+      resolveExportModes({ preconditions: "global", into: "x" }),
+    ).not.toThrow();
+    expect(() =>
+      resolveExportModes({ preconditions: "manifest", stdout: true }),
+    ).toThrow(/needs --project, --into or --out-dir/);
+    expect(() =>
+      resolveExportModes({ preconditions: "manifest", out: "a.spec.ts" }),
+    ).toThrow(/needs --project, --into or --out-dir/);
+    expect(() => resolveExportModes({ gateEnv: ["MONGO_URI"] })).toThrow(
+      /--gate-env only applies with --verifiers gate/,
+    );
+    expect(() => resolveExportModes({ preconditions: "later" })).toThrow(
+      /--preconditions must be/,
+    );
+    expect(
+      resolveExportModes({
+        verifiers: "gate",
+        gateEnv: ["B,A", "A"],
+        project: true,
+      }),
+    ).toEqual({ verifiers: "gate", gateEnv: ["A", "B"] });
+  });
+
+  it("exits 2 naming the flag when the CLI is given a bad mode", async () => {
+    const { root, flows } = await sourceTree();
+    const run = (args: string[]) =>
+      execa(CAIRN, ["export", "playwright", ...args], {
+        reject: false,
+        timeout: 30_000,
+        env: { NO_COLOR: "1", CAIRN_LOG_LEVEL: "silent" },
+      });
+    const global = await run([
+      join(flows, "alpha.yml"),
+      "--preconditions",
+      "global",
+      "--stdout",
+    ]);
+    expect(global.exitCode).toBe(2);
+    expect(global.stderr).toContain(
+      "--preconditions global needs --project or --into",
+    );
+    const bad = await run([
+      flows,
+      "--project",
+      "--out-dir",
+      join(root, "o"),
+      "--verifiers",
+      "hide",
+    ]);
+    expect(bad.exitCode).toBe(2);
+    expect(bad.stderr).toContain("--verifiers must be keep|gate|drop");
+  });
+
+  it("manifest mode lists the commands in .cairn-export.json (authored placeholders, no env values) and --check follows them", async () => {
+    const { root, flows } = await sourceTree();
+    await writeFile(join(flows, "host.yml"), SPEC_HOST);
+    await mkdir(join(root, "tools"), { recursive: true });
+    const outDir = join(root, "exports");
+    const secret = `tok-${Math.random().toString(36).slice(2)}`;
+    const previous = {
+      region: process.env.EXPORT_TEST_REGION,
+      token: process.env.EXPORT_TEST_TOKEN,
+    };
+    process.env.EXPORT_TEST_REGION = "us";
+    process.env.EXPORT_TEST_TOKEN = secret;
+    try {
+      await writeProjectExport(
+        await expandSpecArgs([flows]),
+        "ts",
+        { project: true, outDir, preconditions: "manifest" },
+        flows,
+      );
+      const manifestText = await readFile(
+        join(outDir, EXPORT_MANIFEST_FILE),
+        "utf8",
+      );
+      // Neither the manifest nor any generated file carries an env value.
+      expect(manifestText).not.toContain(secret);
+      const manifest = JSON.parse(manifestText) as ExportManifestV1;
+      expect(manifest.source).toMatchObject({
+        preconditions: "manifest",
+        projectRoot: "../flows",
+      });
+      expect(manifest.preconditions).toEqual([
+        {
+          spec: "../flows/host.yml",
+          name: "reset",
+          run: "bun run reset",
+          cwd: "../tools",
+          timeoutMs: 45_000,
+        },
+        {
+          spec: "../flows/host.yml",
+          run: "deploy --token ${env.EXPORT_TEST_TOKEN} | cat",
+          cwd: ".",
+          timeoutMs: 120_000,
+        },
+      ]);
+      const testSource = await readFile(
+        join(outDir, "tests", "host_flow.spec.ts"),
+        "utf8",
+      );
+      expect(testSource).not.toContain(secret);
+      expect(testSource).not.toContain('"us"');
+      expect(testSource).toContain('process.env.EXPORT_TEST_REGION || "eu"');
+      expect(testSource).not.toContain("test.beforeAll");
+
+      // Fresh while nothing changed, even with a different env at check time.
+      delete process.env.EXPORT_TEST_REGION;
+      expect(
+        (await checkPlaywrightExport(outDir, undefined, {})).exitCode,
+      ).toBe(0);
+
+      // A changed command is drift even though no generated file changes.
+      await writeFile(
+        join(flows, "host.yml"),
+        SPEC_HOST.replace("timeoutMs: 45000", "timeoutMs: 90000"),
+      );
+      const stale = await checkPlaywrightExport(outDir, undefined, {});
+      expect(stale.exitCode).toBe(1);
+      expect(stale.report.preconditionsStale).toBe(true);
+    } finally {
+      for (const [key, value] of [
+        ["EXPORT_TEST_REGION", previous.region],
+        ["EXPORT_TEST_TOKEN", previous.token],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it("records the modes in the manifest and --check regenerates with the same ones", async () => {
+    const { root, flows } = await sourceTree();
+    await writeFile(join(flows, "host.yml"), SPEC_HOST);
+    const outDir = join(root, "exports");
+    await writeProjectExport(
+      await expandSpecArgs([flows]),
+      "ts",
+      {
+        project: true,
+        outDir,
+        preconditions: "inline",
+        verifiers: "gate",
+        gateEnv: ["MONGO_URI"],
+      },
+      flows,
+    );
+    const manifest = JSON.parse(
+      await readFile(join(outDir, EXPORT_MANIFEST_FILE), "utf8"),
+    ) as ExportManifestV1;
+    expect(manifest.source).toMatchObject({
+      preconditions: "inline",
+      verifiers: "gate",
+      gateEnv: ["MONGO_URI"],
+    });
+    expect(manifest.preconditions).toBeUndefined();
+    const testSource = await readFile(
+      join(outDir, "tests", "host_flow.spec.ts"),
+      "utf8",
+    );
+    expect(testSource).toContain("test.beforeAll");
+    expect(testSource).toContain('{ argv: ["bun", "run", "reset"] }');
+    // No flags on the check: the manifest's modes apply.
+    expect((await checkPlaywrightExport(outDir, undefined, {})).exitCode).toBe(
+      0,
+    );
+  });
+
+  it("a batch --out-dir export honors --preconditions and writes the manifest list", async () => {
+    const { root, flows } = await sourceTree();
+    await writeFile(join(flows, "host.yml"), SPEC_HOST);
+    const outDir = join(root, "batch");
+    const written = await writeBatchExport(
+      await expandSpecArgs([join(flows, "host.yml")]),
+      "ts",
+      { outDir, preconditions: "manifest" },
+      join(flows, "host.yml"),
+    );
+    expect(written.failed).toBe(0);
+    const manifest = JSON.parse(
+      await readFile(join(outDir, EXPORT_MANIFEST_FILE), "utf8"),
+    ) as ExportManifestV1;
+    expect(manifest.mode).toBe("files");
+    expect(manifest.preconditions?.map((p) => p.run)).toEqual([
+      "bun run reset",
+      "deploy --token ${env.EXPORT_TEST_TOKEN} | cat",
+    ]);
+    expect(manifest.preconditions?.[0]?.cwd).toBe("../tools");
+    expect((await checkPlaywrightExport(outDir, undefined, {})).exitCode).toBe(
+      0,
+    );
   });
 });

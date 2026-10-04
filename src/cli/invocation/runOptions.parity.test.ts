@@ -51,13 +51,24 @@ function schemaKey(longFlag: string): string {
 }
 
 function runCommandDefinition(): Command {
-  return configureRunCommand(new Command("run").argument("<spec...>"));
+  // `[spec...]`: `--suite` runs without spec paths.
+  return configureRunCommand(new Command("run").argument("[spec...]"));
 }
 
+/**
+ * The long flags of a command. A commander negation of a registered flag
+ * (`--no-bail` next to `--bail`) sets the same key to false, so it is
+ * listed as that flag; a standalone `--no-X` (`--no-services`) is its own key.
+ */
 function registeredLongFlags(command: Command): string[] {
-  return command.options
+  const flags = command.options
     .map((option) => option.long)
     .filter((flag): flag is string => typeof flag === "string");
+  return flags.map((flag) =>
+    flag.startsWith("--no-") && flags.includes(`--${flag.slice(5)}`)
+      ? `--${flag.slice(5)}`
+      : flag,
+  );
 }
 
 const BIN = join(import.meta.dirname, "..", "..", "..", "bin", "cairn");
@@ -95,12 +106,38 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
     expect(orphan).toEqual([]);
   });
 
+  it("accepts only identifier-safe run tokens (they reach child env and file names)", () => {
+    for (const ok of ["a", "tok_1.a-b", "x".repeat(64)]) {
+      expect(
+        RunInvocationOptionsSchema.safeParse({ runToken: ok }).success,
+      ).toBe(true);
+    }
+    for (const bad of [
+      "",
+      "has space",
+      "a/b",
+      "semi;colon",
+      "x".repeat(65),
+      "$(id)",
+    ]) {
+      expect(
+        RunInvocationOptionsSchema.safeParse({ runToken: bad }).success,
+      ).toBe(false);
+    }
+  });
+
   it("matches the flags the real binary registers (`cairn run --help`)", async () => {
     const help = await runHelp();
     const flags = new Set<string>();
     for (const line of help.split("\n")) {
       const m = /^ {2}(?:-[A-Za-z], )?(--[a-z0-9][a-z0-9-]*)/.exec(line);
       if (m) flags.add(m[1]!);
+    }
+    // `--no-bail` negates `--bail` (same key).
+    for (const flag of flags) {
+      if (flag.startsWith("--no-") && flags.has(`--${flag.slice(5)}`)) {
+        flags.delete(flag);
+      }
     }
     expect(flags.size).toBeGreaterThan(20);
     const schemaKeys = new Set(Object.keys(RunInvocationOptionsShape));
@@ -154,6 +191,8 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
         "--since-codemap",
         "HEAD~1",
         "--select-only",
+        "--suite",
+        "checkout",
         "--tag",
         "smoke",
         "--label",
@@ -169,8 +208,11 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
         "--matrix",
         "cfg=a,b",
         "--stop-on-fail",
+        "--bail",
         "--strict-requires",
         "--allow-fixture-writes",
+        "--run-token",
+        "tok_1.a-b",
         "--progress",
         "plain",
         "--json",
@@ -192,13 +234,44 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
       autoAnnotate: "on-run",
       label: ["suite=ab"],
       allowFixtureWrites: true,
+      runToken: "tok_1.a-b",
+      bail: true,
+      suite: "checkout",
     });
     // The journal's argv for a non-CLI invocation round-trips the flags.
     const argv = runOptionsToArgv(["a.yml"], options);
     expect(argv).toContain("--no-web-server");
     expect(argv).toContain("--stop-on-fail");
+    expect(argv).toContain("--bail");
     expect(argv).toContain("--strict-requires");
     expect(argv).toContain("--allow-fixture-writes");
+    expect(argv).toEqual(expect.arrayContaining(["--suite", "checkout"]));
+  });
+
+  it("maps --no-bail to bail: false and leaves bail unset unless given", async () => {
+    const parse = async (args: string[]) => {
+      const command = runCommandDefinition();
+      command.exitOverride();
+      let captured: RunCommandOptions | undefined;
+      command.action((_specs: string[], opts: RunCommandOptions) => {
+        captured = opts;
+      });
+      await command.parseAsync(["a.yml", ...args], { from: "user" });
+      return runInvocationOptionsFromCli(captured!);
+    };
+    expect(await parse([])).not.toHaveProperty("bail");
+    expect(await parse(["--bail"])).toMatchObject({ bail: true });
+    const off = await parse(["--no-bail"]);
+    expect(off).toMatchObject({ bail: false });
+    expect(runOptionsToArgv(["a.yml"], off)).toContain("--no-bail");
+    expect(runOptionsToArgv(["a.yml"], off)).not.toContain("--bail");
+  });
+
+  it("leaves --parallel unset unless given, so a suite's parallel can apply", () => {
+    expect(runInvocationOptionsFromCli({})).not.toHaveProperty("parallel");
+    expect(runInvocationOptionsFromCli({ parallel: "4" })).toMatchObject({
+      parallel: 4,
+    });
   });
 
   it("keeps the legacy flag errors (exit-2 messages) in the mapping", () => {
@@ -257,5 +330,20 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
         sinceCodemap: "HEAD~2",
       },
     });
+  });
+});
+
+describe("defaults stay with the engine", () => {
+  it("does not forward --hook-timeout-ms unless the caller passed it", () => {
+    expect(runInvocationOptionsFromCli({}).hookTimeoutMs).toBeUndefined();
+    expect(runOptionsToArgv([], runInvocationOptionsFromCli({}))).not.toContain(
+      "--hook-timeout-ms",
+    );
+    expect(
+      runInvocationOptionsFromCli({ hookTimeoutMs: "1500" }).hookTimeoutMs,
+    ).toBe(1500);
+    expect(() => runInvocationOptionsFromCli({ hookTimeoutMs: "x" })).toThrow(
+      /--hook-timeout-ms/,
+    );
   });
 });

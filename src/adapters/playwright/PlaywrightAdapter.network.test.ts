@@ -104,7 +104,7 @@ describe("PlaywrightAdapter native network evidence", () => {
     expect(JSON.stringify(entry)).not.toContain("do-not-persist");
   });
 
-  it("waits for a terminal event and correlates identical URLs by Request identity", async () => {
+  it("publishes the status at the response headers, stamps timing at the terminal event, and correlates identical URLs by Request identity", async () => {
     const adapter = new PlaywrightAdapter();
     const page = fakePage();
     attachListeners(adapter, page.value);
@@ -130,10 +130,13 @@ describe("PlaywrightAdapter native network evidence", () => {
       expect(entry).not.toHaveProperty("durationMs");
     }
 
+    // The status is final at the headers: an outcome judged before the body
+    // finished downloading must not read it as <pending>.
     page.emit("response", fakeResponse(finishedRequest.value, 202));
     let entries = await adapter.getNetworkRequests();
-    expect(entries[1]).not.toHaveProperty("status");
+    expect(entries[1]).toMatchObject({ status: 202 });
     expect(entries[1]).not.toHaveProperty("responseTimestamp");
+    expect(entries[0]).not.toHaveProperty("status");
 
     page.emit("requestfinished", finishedRequest.value);
     entries = await adapter.getNetworkRequests();

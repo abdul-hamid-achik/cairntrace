@@ -1,6 +1,6 @@
 import type { BrowserBackend } from "../../../adapters/browserBackend";
 import type { CaptureStep, Expect } from "../../schema/spec.v1";
-import type { StatusMatcher } from "../../schema/verifier.v1";
+import type { PathMatchers } from "../../schema/verifier.v1";
 import { textContains, textEquals } from "../../textMatching";
 import {
   describeProbeLocator,
@@ -10,8 +10,8 @@ import {
   type ProbeResult,
 } from "./domProbe";
 import { boundValue } from "./evidence";
-import { matchPaths, matchValue, show, type MatchOutcome } from "./matchers";
-import { describeStatus, matchesStatus } from "./network";
+import { matchValue, show, type MatchOutcome } from "./matchers";
+import { judgeResponse } from "./responseJudge";
 import { resolveRefsDeep, resolveRefsText, type RefScope } from "./refs";
 
 /**
@@ -436,7 +436,7 @@ async function runRequestExpect(
       }
       const checks = judgeResponse(
         spec.status,
-        resolved.value.json as Record<string, unknown> | undefined,
+        resolved.value.json as PathMatchers | undefined,
         result.response,
       );
       const failing = checks.filter((check) => !check.passed);
@@ -465,45 +465,6 @@ async function runRequestExpect(
     durationMs,
     ...(last.observed !== undefined ? { observed: last.observed } : {}),
   };
-}
-
-function judgeResponse(
-  status: number | StatusMatcher | undefined,
-  json: Record<string, unknown> | undefined,
-  response: { status: number; body: unknown },
-): MatchOutcome[] {
-  const checks: MatchOutcome[] = [];
-  const ok =
-    status === undefined
-      ? response.status >= 200 && response.status < 300
-      : typeof status === "number"
-        ? response.status === status
-        : matchesStatus(response.status, status);
-  checks.push({
-    passed: ok,
-    expected: `status ${
-      status === undefined
-        ? "2xx"
-        : typeof status === "number"
-          ? `== ${status}`
-          : describeStatus(status)
-    }`,
-    actual: `status ${response.status}`,
-  });
-  if (json) {
-    const report = matchPaths(
-      response.body,
-      json as Parameters<typeof matchPaths>[1],
-    );
-    for (const result of report.results) {
-      checks.push({
-        passed: result.passed,
-        expected: result.expected,
-        actual: `${result.path || "$"}=${result.actual}`,
-      });
-    }
-  }
-  return checks;
 }
 
 /* ----- capture ----- */

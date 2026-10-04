@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type {
   BrowserBackend,
@@ -277,4 +281,71 @@ describe("cleanup registry — abort reporters", () => {
     expect(() => cleanupAfterSignal("SIGINT")).not.toThrow();
     expect(calls).toEqual(["throwing", "after"]);
   });
+});
+
+describe("the signal handler (a real process)", () => {
+  /**
+   * A process whose abort reporter takes ~1.5s synchronously (a detached
+   * child, like the suite `after` hooks / a provisioner's `down`), hit by
+   * a second SIGINT, a SIGTERM and a SIGHUP while it runs.
+   */
+  it("holds further SIGINT / SIGTERM / SIGHUP until the synchronous cleanup returned, then exits 130", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cairn-cleanup-signal-"));
+    try {
+      const marks = join(dir, "marks.txt");
+      const script = join(dir, "victim.ts");
+      await writeFile(
+        script,
+        `import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
+import { trackAbortReporter } from ${JSON.stringify(join(import.meta.dirname, "cleanup.ts"))};
+trackAbortReporter((signal) => {
+  appendFileSync(${JSON.stringify(marks)}, "reporter " + signal + "\\n");
+  spawnSync("/bin/sh", ["-c", "sleep 1.5"], { detached: true, stdio: "ignore" });
+  appendFileSync(${JSON.stringify(marks)}, "critical teardown done\\n");
+});
+process.stdout.write("ready\\n");
+setInterval(() => undefined, 1000);
+`,
+      );
+      const child = spawn("bun", [script], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr!.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+      const exited = new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve) =>
+        child.once("close", (code, signal) => resolve({ code, signal })),
+      );
+      await new Promise<void>((resolve) =>
+        child.stdout!.on("data", (chunk: Buffer) => {
+          if (chunk.toString().includes("ready")) resolve();
+        }),
+      );
+      const startedAt = Date.now();
+      child.kill("SIGINT");
+      // The reporter is now inside its synchronous cleanup.
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const text = await readFile(marks, "utf8").catch(() => "");
+        if (text.includes("reporter SIGINT")) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      child.kill("SIGINT");
+      child.kill("SIGTERM");
+      child.kill("SIGHUP");
+      const result = await exited;
+      expect(result, stderr).toEqual({ code: 130, signal: null });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(1_400);
+      expect((await readFile(marks, "utf8")).trim().split("\n")).toEqual([
+        "reporter SIGINT",
+        "critical teardown done",
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

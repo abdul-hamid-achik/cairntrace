@@ -1,0 +1,46 @@
+# The same environments with composition: shared vars at the top level (one
+# of them from an included file), `extends` instead of anchors, and vars
+# built from other vars.
+version: 1
+defaultEnvironment: local
+include:
+  - vars/*.yml
+vars:
+  connectionPath: /connection/${vars.connectionId}/overview
+environments:
+  local:
+    baseUrl: http://localhost:8080
+    services: false
+    vars:
+      envName: local
+      e2eEmail: "${env.CAIRN_FIXTURE_E2E_EMAIL:-e2e@example.test}"
+      supplierName: Example Supplier
+      supplierId: 5f0000000000000000000001
+      connectionId: 5f0000000000000000000002
+      tableViewportPath: /connection/${vars.connectionId}/table?view=kit
+      taskDeepLinkPath: /profile?element=task-1
+      websiteFieldDeepLinkPath: /profile?element=website-1
+      apiBase: http://localhost:8080/api
+      uploadDir: "${config.dir}/fixtures"
+      retryCount: 3
+      useSandbox: true
+  remote:
+    extends: local
+    baseUrl: http://localhost:9080
+    waitScale: 3
+  dev:
+    extends: local
+    baseUrl: https://dev.example.test
+    vars:
+      envName: dev
+      supplierId: 6a0000000000000000000001
+      connectionId: 6a0000000000000000000002
+      apiBase: https://dev.example.test/api
+      devOnlyFlag: true
+  test:
+    baseUrl: https://test.example.test
+    services: false
+    vars:
+      envName: test
+      supplierName: Test Supplier
+      connectionId: 7b0000000000000000000002

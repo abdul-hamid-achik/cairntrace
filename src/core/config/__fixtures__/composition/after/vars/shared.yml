@@ -1,0 +1,4 @@
+# Vars every environment shares.
+vars:
+  kitAnswerKey: answer.status
+  defaultTimeoutMs: 30000

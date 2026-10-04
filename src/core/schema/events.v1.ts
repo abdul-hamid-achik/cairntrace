@@ -1,6 +1,14 @@
 import { z } from "zod";
-import { IsoTimestampSchema, RelativePathSchema } from "./shared";
-import { RunInvocationRefSchema, RunRefusalCodeSchema } from "./run.v1";
+import {
+  DELEGATE_CONTRACT,
+  IsoTimestampSchema,
+  RelativePathSchema,
+} from "./shared";
+import {
+  InvocationRunPolicySchema,
+  RunInvocationRefSchema,
+  RunRefusalCodeSchema,
+} from "./run.v1";
 
 /**
  * Wire schema for `events.ndjson` (events contract v1).
@@ -150,19 +158,37 @@ export const RunHeartbeatEventSchema = z
 
 /* ----- steps ----- */
 
+/**
+ * F14: where a step nested in a control-flow block (repeat / if / a `use:`
+ * with retry) ran. Absent on top-level steps, so flat specs keep their
+ * events byte-identical.
+ */
+const nestedStepShape = {
+  /** Id of the enclosing repeat / if / retried use step. */
+  parentId: nonEmpty.optional(),
+  /** 1-based iteration (repeat) or attempt (retry) of the innermost loop. */
+  iteration: z.number().int().positive().optional(),
+  /** The if branch the step ran in. */
+  branch: z.enum(["then", "else"]).optional(),
+};
+
 export const StepStartedEventSchema = z
   .object({
     ts,
     type: z.literal("step.started"),
     stepId: nonEmpty,
-    /** 1-based position of the step in the resolved spec. */
+    /**
+     * 1-based position of the step in the resolved spec (for a nested step:
+     * in its enclosing block).
+     */
     index: z.number().int().positive().optional(),
-    /** Number of top-level steps in the resolved spec. */
+    /** Number of top-level steps in the resolved spec (nested: in the block). */
     total: z.number().int().positive().optional(),
     /** Step kind: the step's action key (open, click, fill, wait, …). */
     kind: nonEmpty.optional(),
     /** Short human label, e.g. `click role=button "Save"`. Never carries fill values. */
     label: nonEmpty.optional(),
+    ...nestedStepShape,
   })
   .strict();
 
@@ -175,6 +201,19 @@ const stepEndShape = {
   url: nonEmpty.optional(),
   /** Screenshot captured for this step, relative to the run directory. */
   screenshot: RelativePathSchema.optional(),
+  ...nestedStepShape,
+  /** F14 repeat: iterations that ran; use retry: attempts that ran. */
+  iterations: z.number().int().nonnegative().optional(),
+  /**
+   * F15: the interaction path the step took — click `pointer` | `dispatch`,
+   * fill `set`, upload `setInputFiles` | `dataTransfer`, a widget driver's
+   * write path (`picker`, `typed`).
+   */
+  via: nonEmpty.optional(),
+  /** F15: the widget driver of a single-field set / check / choose step. */
+  driver: nonEmpty.optional(),
+  /** F15: why the interaction took that path (`pointer blocked by …`). */
+  detail: nonEmpty.optional(),
 };
 
 export const StepFinishedEventSchema = z
@@ -184,6 +223,15 @@ export const StepFinishedEventSchema = z
     /** true when the step's `when:` gate did not hold and the step was skipped. */
     skipped: z.boolean().optional(),
     when: WhenSchema.optional(),
+    /** F14 optional / grouped wait: whether its condition held. */
+    matched: z.boolean().optional(),
+    /** F14 if step: the branch that ran (`none`: false without else). */
+    taken: z.enum(["then", "else", "none"]).optional(),
+    /**
+     * F15: why a step that ran was skipped — `absent` for an optional click,
+     * fill or widget field that was not on the page.
+     */
+    skipReason: nonEmpty.optional(),
   })
   .strict();
 
@@ -192,6 +240,30 @@ export const StepFailedEventSchema = z
     ...stepEndShape,
     type: z.literal("step.failed"),
     error: z.string().optional(),
+  })
+  .strict();
+
+/* ----- F15 widget fields ----- */
+
+/**
+ * One field a set / check / uncheck / choose / form step handled. Carries
+ * the field key (or a locator description) and the driver, never the value;
+ * expected and committed values live in the step's evidence file (`path`,
+ * written through the run's redactor).
+ */
+export const WidgetFieldEventSchema = z
+  .object({
+    ts,
+    type: z.literal("widget.field"),
+    stepId: nonEmpty,
+    field: nonEmpty,
+    driver: nonEmpty.optional(),
+    status: z.enum(["committed", "already", "written", "skipped", "failed"]),
+    via: nonEmpty.optional(),
+    durationMs,
+    /** The step's `widgets/<n>_<id>.json` evidence. */
+    path: RelativePathSchema.optional(),
+    ...nestedStepShape,
   })
   .strict();
 
@@ -358,7 +430,14 @@ export const LogOpenedEventSchema = z
   .object({
     ts,
     type: z.literal("log.opened"),
-    kind: z.enum(["precondition", "hook", "outcome", "services", "narration"]),
+    kind: z.enum([
+      "precondition",
+      "hook",
+      "outcome",
+      "services",
+      "narration",
+      "delegate",
+    ]),
     name: nonEmpty,
     /** Relative to the directory holding the events.ndjson that announces it. */
     path: RelativePathSchema,
@@ -458,13 +537,48 @@ export const InvocationSummarySchema = z
      * a `run.refused` event instead). Present only when > 0. Additive.
      */
     refused: z.number().int().nonnegative().optional(),
+    /**
+     * Specs `--bail` never started (reported as skipped, reason `bailed`).
+     * Present only when > 0. Additive.
+     */
+    skipped: z.number().int().nonnegative().optional(),
     durationMs,
     exitCode: z.number().int(),
     iterations: z.array(InvocationIterationSummarySchema).optional(),
+    /**
+     * What the config `run:` block did, when it did anything notable: the
+     * lock, critical teardown entries that failed (exit 8), what survived the
+     * run (exit 9) and `finally` commands that failed. Additive.
+     */
+    runPolicy: InvocationRunPolicySchema.optional(),
     /** Invocation-level failure (services boot, a fatal `--before` hook). */
     error: z.string().optional(),
   })
   .strict();
+
+/** `invocation.json` `delegate`: the delegated runner of the invocation. */
+export const InvocationDelegateSchema = z
+  .object({
+    contract: z.literal(DELEGATE_CONTRACT),
+    /** The runner argv, redacted. */
+    command: z.array(z.string()),
+    /** The runner process (absent until it is spawned, or when it could not be). */
+    pid: z.number().int().positive().optional(),
+    /** The invocation the runner executes elsewhere, once its stream named it. */
+    remoteInvocationId: nonEmpty.optional(),
+    remoteStatus: InvocationStatusSchema.optional(),
+    /** The runner's own exit code (absent while it runs, or when a signal ended it). */
+    exitCode: z.number().int().optional(),
+    signal: nonEmpty.optional(),
+    cancelled: z.literal(true).optional(),
+    timedOut: z.literal(true).optional(),
+    /** Cancelled after `runner.idleTimeoutMs` without a stream line. Additive. */
+    idle: z.literal(true).optional(),
+    /** `delegate.diagnostic` events recorded so far. */
+    diagnostics: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type InvocationDelegate = z.infer<typeof InvocationDelegateSchema>;
 
 /**
  * `invocation.json`: one per `cairn run` process, rewritten atomically
@@ -485,8 +599,12 @@ export const InvocationJournalSchema = z
     configPath: nonEmpty.optional(),
     /** Resolved environment name, when known. */
     env: nonEmpty.optional(),
+    /** The `environments.<name>: { alias }` name `--env` used (then `env` is its target). Additive. */
+    envAlias: nonEmpty.optional(),
     /** `--label key=value` pairs. */
     labels: z.record(z.string(), z.string()).optional(),
+    /** `cairn run --suite <name>`: the config suite the specs came from. Additive. */
+    suite: nonEmpty.optional(),
     parallel: z.number().int().positive(),
     planned: z.array(InvocationPlannedRunSchema),
     status: InvocationStatusSchema,
@@ -505,6 +623,12 @@ export const InvocationJournalSchema = z
     summary: InvocationSummarySchema.optional(),
     /** Set with status "aborted" when a signal ended the invocation. */
     signal: z.enum(["SIGINT", "SIGTERM"]).optional(),
+    /**
+     * The environment has a runner (`urn:cairntrace.dev:delegate:v1`): this
+     * process owns the invocation and relays the remote one into it.
+     * Additive.
+     */
+    delegate: InvocationDelegateSchema.optional(),
   })
   .strict();
 export type InvocationJournalFile = z.infer<typeof InvocationJournalSchema>;
@@ -593,6 +717,11 @@ export const ArtifactRequestEventSchema = z
     type: z.literal("artifact.request"),
     assign: nonEmpty,
     status: z.number().int(),
+    /** F18 `retry` / `until`: requests sent, when more than one. */
+    attempts: z.number().int().min(2).optional(),
+    /** F18 `matrix`: combinations sent and how many missed expectStatus. */
+    combinations: z.number().int().min(1).optional(),
+    mismatches: z.number().int().min(0).optional(),
   })
   .strict();
 
@@ -695,6 +824,8 @@ export const ArtifactStashEventSchema = z
     excluded: z.array(z.string()).optional(),
     /** Secret-scanner findings file.cheap reported for the saved copy. */
     secretsFound: z.number().int().nonnegative().optional(),
+    /** fcheap rejected the run-identity `--meta`; the stash has none. */
+    metaDropped: z.literal(true).optional(),
     ttl: z.string().optional(),
     expiresAt: IsoTimestampSchema.optional(),
     tags: z.array(z.string()).optional(),
@@ -793,6 +924,12 @@ export const ServicesEventTypeSchema = z.enum([
   "services.seed.complete",
   "services.seed.fail",
   "services.seed.freshness-check",
+  "services.seed.phase.start",
+  "services.seed.phase.skip",
+  "services.seed.phase.complete",
+  "services.seed.phase.fail",
+  "services.seed.postcommand.skip",
+  "services.seed.commit",
   "services.tmux.start",
   "services.tmux.session-created",
   "services.tmux.recreate",
@@ -804,6 +941,25 @@ export const ServicesEventTypeSchema = z.enum([
   "services.tmux.ready",
   "services.tmux.fail",
   "services.tmux.healthcheck",
+  "services.restart.start",
+  "services.restart.stop",
+  "services.restart.ready",
+  "services.restart.fail",
+  "services.restart.giveup",
+  "services.tunnel.start",
+  "services.tunnel.ready",
+  "services.tunnel.exit",
+  "services.tunnel.restart",
+  "services.tunnel.giveup",
+  "services.tunnel.stop",
+  "services.tunnel.fail",
+  "services.provisioner.start",
+  "services.provisioner.ready",
+  "services.provisioner.exports",
+  "services.provisioner.fail",
+  "services.files.write",
+  "services.files.unchanged",
+  "services.files.fail",
   "services.teardown.complete",
   "services.teardown.fail",
   "services.teardown.failure-cleanup",
@@ -975,61 +1131,564 @@ export const FixtureTeardownEventSchema = z
   .object({ ...fixtureEventShape, type: z.literal("fixture.teardown") })
   .strict();
 
+/* ----- run policy (F8): lock, preflight, cleanliness, finally, bail ----- */
+
+/**
+ * Invocation-journal events of the config `run:` block (and `--bail`). They
+ * are written to `_invocations/<id>/events.ndjson` only. A lock owner is
+ * described without argv (the lock file holds the redacted argv).
+ */
+const RunLockOwnerSchema = z
+  .object({
+    pid: z.number().int().positive(),
+    startedAt: ts,
+    ageSeconds: z.number().int().nonnegative(),
+    /** The owner process still exists. */
+    alive: z.boolean().optional(),
+    invocationId: nonEmpty.optional(),
+    origin: z.enum(["cli", "mcp"]).optional(),
+    env: nonEmpty.optional(),
+  })
+  .strict();
+
+const runLockShape = {
+  ts,
+  /** The lock file. */
+  path: nonEmpty,
+  scope: z.enum(["project", "config"]),
+};
+
+export const RunLockAcquiredEventSchema = z
+  .object({
+    ...runLockShape,
+    type: z.literal("run.lock.acquired"),
+    /** A dead owner's lock was taken over (see `run.lock.reclaimed`). */
+    reclaimed: z.literal(true).optional(),
+  })
+  .strict();
+
+export const RunLockReclaimedEventSchema = z
+  .object({
+    ...runLockShape,
+    type: z.literal("run.lock.reclaimed"),
+    previousOwner: RunLockOwnerSchema,
+  })
+  .strict();
+
+export const RunLockRefusedEventSchema = z
+  .object({
+    ...runLockShape,
+    type: z.literal("run.lock.refused"),
+    /** `held`: a live owner. `stale`: a dead owner and `staleAfterPidDead: false`. `unreadable`: not a lock file. */
+    reason: z.enum(["held", "stale", "unreadable"]),
+    owner: RunLockOwnerSchema.optional(),
+    message: z.string(),
+  })
+  .strict();
+
+export const RunLockReleasedEventSchema = z
+  .object({
+    ...runLockShape,
+    type: z.literal("run.lock.released"),
+    heldMs: durationMs,
+  })
+  .strict();
+
+const preflightKind = z.enum(["json", "secret", "command", "gate"]);
+
+export const PreflightStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("preflight.started"),
+    total: z.number().int().positive(),
+  })
+  .strict();
+
+export const PreflightPassedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("preflight.passed"),
+    /** 1-based position in `run.preflight`. */
+    index: z.number().int().positive(),
+    check: preflightKind,
+    name: nonEmpty.optional(),
+    durationMs,
+  })
+  .strict();
+
+export const PreflightFailedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("preflight.failed"),
+    index: z.number().int().positive(),
+    check: preflightKind,
+    name: nonEmpty.optional(),
+    durationMs,
+    /** Redacted; never a secret value. */
+    reason: z.string(),
+  })
+  .strict();
+
+const cleanlinessKind = z.enum(["browsers", "tmux", "docker-project"]);
+
+const cleanlinessShape = {
+  ts,
+  /** `before` the run (a dirty machine refuses it) or `after` it (exit 9). */
+  phase: z.enum(["before", "after"]),
+  kind: cleanlinessKind,
+  /** The tmux session or compose project the check looked at. */
+  name: nonEmpty.optional(),
+};
+
+export const CleanlinessCleanEventSchema = z
+  .object({ ...cleanlinessShape, type: z.literal("cleanliness.clean") })
+  .strict();
+
+export const CleanlinessDirtyEventSchema = z
+  .object({
+    ...cleanlinessShape,
+    type: z.literal("cleanliness.dirty"),
+    /** What survived: one redacted line each (`pid 4242 agent-browser …`). */
+    survivors: z.array(z.string()),
+  })
+  .strict();
+
+export const FinallyStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("finally.started"),
+    index: z.number().int().positive(),
+    total: z.number().int().positive(),
+  })
+  .strict();
+
+export const FinallyFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("finally.finished"),
+    index: z.number().int().positive(),
+    /** Absent when the child was killed by a signal or could not start. */
+    exitCode: z.number().int().optional(),
+    durationMs,
+    timedOut: z.boolean().optional(),
+    /** TAIL of the redacted combined output (last 2000 characters). */
+    outputTail: z.string().optional(),
+  })
+  .strict();
+
+/** `--bail`: the first failed or errored spec stopped the scheduling. */
+export const InvocationBailedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("invocation.bailed"),
+    /** The spec whose result tripped it. */
+    spec: nonEmpty,
+    exitCode: z.number().int(),
+    /** Specs that never started because of it. */
+    skipped: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/* ----- suites (F9) and metrics (F11) ----- */
+
+/**
+ * Invocation-journal events of `cairn run --suite` and of the config
+ * `metrics:` probes (`_invocations/<id>/events.ndjson` only). A suite hook is
+ * announced like a `--before` / `--after` hook, with the suite's name.
+ */
+export const SuiteStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("suite.started"),
+    name: nonEmpty,
+    env: nonEmpty.optional(),
+    /** Specs the suite resolved to. */
+    specs: z.number().int().nonnegative(),
+    parallel: z.number().int().positive().optional(),
+    bail: z.literal(true).optional(),
+  })
+  .strict();
+
+const suiteHookKind = z.enum(["before", "after"]);
+
+export const SuiteHookStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("suite.hook.started"),
+    name: nonEmpty,
+    hook: suiteHookKind,
+    /** 1-based position among the suite's hooks of this kind. */
+    index: z.number().int().positive(),
+    total: z.number().int().positive(),
+    /** The command line, redacted. */
+    command: z.string(),
+    timeoutMs: z.number().int().positive(),
+    logPath: RelativePathSchema.optional(),
+  })
+  .strict();
+
+export const SuiteHookFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("suite.hook.finished"),
+    name: nonEmpty,
+    hook: suiteHookKind,
+    index: z.number().int().positive(),
+    ok: z.boolean(),
+    /** Absent when the child was killed by a signal or could not start. */
+    exitCode: z.number().int().optional(),
+    durationMs,
+    timedOut: z.boolean().optional(),
+    /** TAIL of the redacted combined output (last 2000 characters). */
+    outputTail: z.string().optional(),
+  })
+  .strict();
+
+export const SuiteFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("suite.finished"),
+    name: nonEmpty,
+    /** The exit code the invocation settled on. */
+    exitCode: z.number().int(),
+    /** Suite hooks that failed (a before hook failure stops the run; an after hook failure never changes the exit code). */
+    hooksFailed: z.number().int().positive().optional(),
+  })
+  .strict();
+
+/** One `before` / `after` metric sample (ticks of `every:` are only in metrics.json). */
+export const MetricSampledEventSchema = z
+  .object({
+    ts,
+    type: z.literal("metric.sampled"),
+    name: nonEmpty,
+    scope: z.enum(["spec", "invocation"]),
+    phase: z.enum(["before", "after"]),
+    /** Absent when the sample failed. */
+    value: z.number().finite().optional(),
+    /** Why it failed (redacted). */
+    error: z.string().optional(),
+    durationMs,
+    /** Spec scope: the run the sample belongs to (after-samples; before-samples precede the run). */
+    runId: nonEmpty.optional(),
+    iteration: z.number().int().positive().optional(),
+  })
+  .strict();
+
+/* ----- delegated runner (urn:cairntrace.dev:delegate:v1) ----- */
+
+/**
+ * The delegate events stream carries a remote invocation's journal events
+ * plus these lines, which `cairn logs --invocation <ref> --relay` derives
+ * from the remote `invocation.json`: one planned run started / settled
+ * (what `runs[]` records), and the remote invocation's final summary. A
+ * delegated local journal keeps them as relayed (`delegated: true`) events.
+ */
+export const InvocationRunStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("invocation.run.started"),
+    /** 1-based position in the (remote) invocation plan. */
+    index: z.number().int().positive(),
+    spec: nonEmpty,
+    /** The run directory name (`<artifactRoot>/<runId>`). */
+    runId: nonEmpty,
+  })
+  .strict();
+
+export const InvocationRunFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("invocation.run.finished"),
+    index: z.number().int().positive(),
+    spec: nonEmpty,
+    runId: nonEmpty,
+    status: z.enum(["passed", "failed", "errored"]),
+    /** No run directory was ever written (errored or cancelled before it started). */
+    synthetic: z.literal(true).optional(),
+    durationMs: durationMs.optional(),
+  })
+  .strict();
+
+export const InvocationSummaryEventSchema = z
+  .object({
+    ts,
+    type: z.literal("invocation.summary"),
+    invocationId: nonEmpty,
+    status: InvocationStatusSchema,
+    summary: InvocationSummarySchema,
+  })
+  .strict();
+
+/** A line the runner itself writes: what it is doing before / around the remote invocation. */
+export const DelegateProgressEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.progress"),
+    message: nonEmpty,
+    /** Moves the local invocation's phase (heartbeats report it). */
+    phase: RunPhaseSchema.optional(),
+  })
+  .strict();
+
+/** The local engine spawned the runner. */
+export const DelegateStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.started"),
+    contract: z.literal(DELEGATE_CONTRACT),
+    /** The runner's argv, redacted. */
+    command: z.array(z.string()),
+    cwd: nonEmpty,
+    pid: z.number().int().positive().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    cancelGraceMs: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** The stream announced the remote invocation (its `invocation.started`). */
+export const DelegateRemoteStartedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.remote.started"),
+    remoteInvocationId: nonEmpty,
+    planned: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+/** The stream reported the remote invocation settled (its `invocation.finished`). */
+export const DelegateRemoteFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.remote.finished"),
+    remoteInvocationId: nonEmpty,
+    status: InvocationStatusSchema,
+    signal: z.enum(["SIGINT", "SIGTERM"]).optional(),
+  })
+  .strict();
+
+export const DelegateDiagnosticCodeSchema = z.enum([
+  /** A line that is not one JSON object. */
+  "malformed-line",
+  /** A line longer than the stream allows (1 MiB). */
+  "line-too-long",
+  /** A known event type whose fields do not validate. */
+  "invalid-event",
+  /** An event type this cairn does not know (newer runner); not relayed. */
+  "unknown-event",
+  /** A run finished that never started, or a second remote invocation. */
+  "unknown-run",
+  /** A remote run outside the local plan (or another spec at its index). */
+  "plan-mismatch",
+  /** A finished run without `<artifactRoot>/<runId>/run.json`. */
+  "missing-run-dir",
+  /** A run directory without `artifact-manifest.json` (copied out of order). */
+  "incomplete-run-dir",
+  /** A run that started and never finished. */
+  "unfinished-run",
+  /** The runner exited with a code that is not a cairn exit code. */
+  "invalid-exit-code",
+  /** The runner's exit code disagrees with the runs it relayed. */
+  "exit-mismatch",
+  /** A signal cairn did not send ended the runner. */
+  "runner-signal",
+  /** The runner could not be started. */
+  "spawn-failed",
+  /** The runner outlived `runner.timeoutMs`. */
+  "timeout",
+  /** Further diagnostics of this invocation were dropped. */
+  "suppressed",
+  /** A planned run the stream never settled (and the remote summary does not account for). */
+  "missing-run",
+  /** A copied run.json that does not carry `labels["cairn.delegate"]` = the local invocation id. */
+  "foreign-run",
+  /** A relayed run whose directory was under the local artifact root before the runner started. */
+  "stale-run",
+  /** The stream's status of a run disagrees with its run.json (or with an earlier line). */
+  "status-mismatch",
+  /** A `synthetic` run reported passed: a pass needs a run directory. */
+  "synthetic-pass",
+  /** A remote run of a spec the local environment policy refused. */
+  "refused-run",
+  /** The events stream stayed silent (`runner.idleTimeoutMs`, or a long-silence warning). */
+  "idle",
+]);
+export type DelegateDiagnosticCode = z.infer<
+  typeof DelegateDiagnosticCodeSchema
+>;
+
+/** Something about the runner or its stream was wrong; never fatal to the relay. */
+export const DelegateDiagnosticEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.diagnostic"),
+    level: z.enum(["warn", "error"]),
+    code: DelegateDiagnosticCodeSchema,
+    /** Redacted, bounded description (a malformed line is quoted in part). */
+    message: nonEmpty,
+    /** 1-based line of the events stream. */
+    line: z.number().int().positive().optional(),
+    runId: nonEmpty.optional(),
+  })
+  .strict();
+
+/** A cancel reached the runner: SIGINT to its process group. */
+export const DelegateCancelRequestedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.cancel.requested"),
+    /**
+     * `signal`: Ctrl-C, SIGTERM, Studio's Stop (SIGINT) or Live Cancel
+     * (SIGINT for a delegated run); `cancel`: MCP cancel; `timeout`:
+     * `runner.timeoutMs`; `idle`: `runner.idleTimeoutMs` without a stream line.
+     */
+    reason: z.enum(["signal", "cancel", "timeout", "idle"]),
+    /** The signal cairn received (reason `signal`). */
+    trigger: z.enum(["SIGINT", "SIGTERM"]).optional(),
+    signal: z.literal("SIGINT"),
+    graceMs: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** The runner outlived the grace: the next signal went to its process group. */
+export const DelegateCancelEscalatedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.cancel.escalated"),
+    signal: z.enum(["SIGTERM", "SIGKILL"]),
+    afterMs: durationMs,
+  })
+  .strict();
+
+export const DelegateCancelFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.cancel.finished"),
+    durationMs,
+    /** The runner exited before any escalation. */
+    graceful: z.boolean(),
+    /** The runner was still running after SIGKILL's wait (an unkillable process). */
+    stillRunning: z.literal(true).optional(),
+  })
+  .strict();
+
+/** The runner is gone; what the relay saw and verified. */
+export const DelegateFinishedEventSchema = z
+  .object({
+    ts,
+    type: z.literal("delegate.finished"),
+    durationMs,
+    /** The runner's own exit code (absent when a signal ended it). */
+    exitCode: z.number().int().optional(),
+    signal: nonEmpty.optional(),
+    cancelled: z.literal(true).optional(),
+    timedOut: z.literal(true).optional(),
+    /** Cancelled after `runner.idleTimeoutMs` without a stream line. Additive. */
+    idle: z.literal(true).optional(),
+    /** Events relayed into this journal. */
+    relayed: z.number().int().nonnegative(),
+    /**
+     * Runs the stream reported finished, and those without a run directory
+     * of this invocation (none, or a foreign / stale one).
+     */
+    runs: z.number().int().nonnegative(),
+    missingRunDirs: z.number().int().nonnegative(),
+    diagnostics: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/**
+ * Additive marker on an event a delegated runner relayed into the local
+ * invocation journal: it happened on the remote side (paths in it are the
+ * remote machine's, relative to the remote journal or run directory).
+ */
+const relayed = { delegated: z.literal(true).optional() };
+
 /* ----- the union ----- */
 
 export const RunEventSchema = z.discriminatedUnion("type", [
-  RunStartedEventSchema,
-  RunPassedEventSchema,
-  RunFailedEventSchema,
-  RunErroredEventSchema,
-  RunRefusedEventSchema,
-  PhaseChangedEventSchema,
-  RunHeartbeatEventSchema,
-  StepStartedEventSchema,
-  StepFinishedEventSchema,
-  StepFailedEventSchema,
-  OutcomeStartedEventSchema,
-  OutcomeProgressEventSchema,
-  OutcomePassedEventSchema,
-  OutcomeFailedEventSchema,
-  OutcomeSkippedEventSchema,
-  ExpectPassedEventSchema,
-  ExpectFailedEventSchema,
-  PreconditionStartedEventSchema,
-  PreconditionRunEventSchema,
-  PreconditionProgressEventSchema,
-  HookStartedEventSchema,
-  HookFinishedEventSchema,
-  LogOpenedEventSchema,
-  InvocationStartedEventSchema,
-  InvocationFinishedEventSchema,
-  ArtifactScreenshotEventSchema,
-  ArtifactSnapshotEventSchema,
-  ArtifactDownloadEventSchema,
-  ArtifactTransformEventSchema,
-  ArtifactEvalEventSchema,
-  ArtifactRequestEventSchema,
-  ArtifactDiagnosticsEventSchema,
-  ArtifactClipEventSchema,
-  ArtifactMonitorEventSchema,
-  ArtifactVideoEventSchema,
-  ArtifactServicesEventSchema,
-  ArtifactStashEventSchema,
-  ArtifactPublishEventSchema,
-  ArtifactRetentionEventSchema,
-  ArtifactTraceEventSchema,
-  ViewportSetEventSchema,
-  ServicesLifecycleEventSchema,
-  GateStartedEventSchema,
-  GateAttemptEventSchema,
-  GatePassedEventSchema,
-  GateFailedEventSchema,
-  TeardownStartedEventSchema,
-  TeardownFinishedEventSchema,
-  FixtureEnsureEventSchema,
-  FixtureResetEventSchema,
-  FixtureVerifyEventSchema,
-  FixtureTeardownEventSchema,
+  RunStartedEventSchema.extend(relayed),
+  RunPassedEventSchema.extend(relayed),
+  RunFailedEventSchema.extend(relayed),
+  RunErroredEventSchema.extend(relayed),
+  RunRefusedEventSchema.extend(relayed),
+  PhaseChangedEventSchema.extend(relayed),
+  RunHeartbeatEventSchema.extend(relayed),
+  StepStartedEventSchema.extend(relayed),
+  StepFinishedEventSchema.extend(relayed),
+  StepFailedEventSchema.extend(relayed),
+  WidgetFieldEventSchema.extend(relayed),
+  OutcomeStartedEventSchema.extend(relayed),
+  OutcomeProgressEventSchema.extend(relayed),
+  OutcomePassedEventSchema.extend(relayed),
+  OutcomeFailedEventSchema.extend(relayed),
+  OutcomeSkippedEventSchema.extend(relayed),
+  ExpectPassedEventSchema.extend(relayed),
+  ExpectFailedEventSchema.extend(relayed),
+  PreconditionStartedEventSchema.extend(relayed),
+  PreconditionRunEventSchema.extend(relayed),
+  PreconditionProgressEventSchema.extend(relayed),
+  HookStartedEventSchema.extend(relayed),
+  HookFinishedEventSchema.extend(relayed),
+  LogOpenedEventSchema.extend(relayed),
+  InvocationStartedEventSchema.extend(relayed),
+  InvocationFinishedEventSchema.extend(relayed),
+  ArtifactScreenshotEventSchema.extend(relayed),
+  ArtifactSnapshotEventSchema.extend(relayed),
+  ArtifactDownloadEventSchema.extend(relayed),
+  ArtifactTransformEventSchema.extend(relayed),
+  ArtifactEvalEventSchema.extend(relayed),
+  ArtifactRequestEventSchema.extend(relayed),
+  ArtifactDiagnosticsEventSchema.extend(relayed),
+  ArtifactClipEventSchema.extend(relayed),
+  ArtifactMonitorEventSchema.extend(relayed),
+  ArtifactVideoEventSchema.extend(relayed),
+  ArtifactServicesEventSchema.extend(relayed),
+  ArtifactStashEventSchema.extend(relayed),
+  ArtifactPublishEventSchema.extend(relayed),
+  ArtifactRetentionEventSchema.extend(relayed),
+  ArtifactTraceEventSchema.extend(relayed),
+  ViewportSetEventSchema.extend(relayed),
+  ServicesLifecycleEventSchema.extend(relayed),
+  GateStartedEventSchema.extend(relayed),
+  GateAttemptEventSchema.extend(relayed),
+  GatePassedEventSchema.extend(relayed),
+  GateFailedEventSchema.extend(relayed),
+  TeardownStartedEventSchema.extend(relayed),
+  TeardownFinishedEventSchema.extend(relayed),
+  FixtureEnsureEventSchema.extend(relayed),
+  FixtureResetEventSchema.extend(relayed),
+  FixtureVerifyEventSchema.extend(relayed),
+  FixtureTeardownEventSchema.extend(relayed),
+  RunLockAcquiredEventSchema.extend(relayed),
+  RunLockReclaimedEventSchema.extend(relayed),
+  RunLockRefusedEventSchema.extend(relayed),
+  RunLockReleasedEventSchema.extend(relayed),
+  PreflightStartedEventSchema.extend(relayed),
+  PreflightPassedEventSchema.extend(relayed),
+  PreflightFailedEventSchema.extend(relayed),
+  CleanlinessCleanEventSchema.extend(relayed),
+  CleanlinessDirtyEventSchema.extend(relayed),
+  FinallyStartedEventSchema.extend(relayed),
+  FinallyFinishedEventSchema.extend(relayed),
+  InvocationBailedEventSchema.extend(relayed),
+  SuiteStartedEventSchema.extend(relayed),
+  SuiteHookStartedEventSchema.extend(relayed),
+  SuiteHookFinishedEventSchema.extend(relayed),
+  SuiteFinishedEventSchema.extend(relayed),
+  MetricSampledEventSchema.extend(relayed),
+  InvocationRunStartedEventSchema.extend(relayed),
+  InvocationRunFinishedEventSchema.extend(relayed),
+  InvocationSummaryEventSchema.extend(relayed),
+  DelegateProgressEventSchema.extend(relayed),
+  DelegateStartedEventSchema.extend(relayed),
+  DelegateRemoteStartedEventSchema.extend(relayed),
+  DelegateRemoteFinishedEventSchema.extend(relayed),
+  DelegateDiagnosticEventSchema.extend(relayed),
+  DelegateCancelRequestedEventSchema.extend(relayed),
+  DelegateCancelEscalatedEventSchema.extend(relayed),
+  DelegateCancelFinishedEventSchema.extend(relayed),
+  DelegateFinishedEventSchema.extend(relayed),
 ]);
 export type RunEvent = z.infer<typeof RunEventSchema>;
 export type FixtureEvent = Extract<
@@ -1047,6 +1706,29 @@ export type GateEvent = Extract<
   { type: "gate.started" | "gate.attempt" | "gate.passed" | "gate.failed" }
 >;
 export type RunEventType = RunEvent["type"];
+
+const lenientEventSchemas = new Map<string, z.ZodTypeAny>();
+
+/**
+ * The producer (strict) schema of one events.v1 type, or its lenient twin
+ * that drops unknown fields at every object level (an event a newer cairn
+ * wrote). Undefined for a type this build does not know.
+ */
+export function runEventSchemaOf(
+  type: string,
+  mode: "strict" | "lenient" = "strict",
+): z.ZodTypeAny | undefined {
+  const strict = RunEventSchema.optionsMap.get(type) as
+    | z.ZodTypeAny
+    | undefined;
+  if (!strict || mode === "strict") return strict;
+  let lenient = lenientEventSchemas.get(type);
+  if (!lenient) {
+    lenient = ignoreUnknownKeys(strict);
+    lenientEventSchemas.set(type, lenient);
+  }
+  return lenient;
+}
 
 /* ----- discovery / accompany session journal (`_sessions/<id>/events.ndjson`) ----- */
 

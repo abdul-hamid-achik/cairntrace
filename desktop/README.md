@@ -15,16 +15,18 @@ changes, Studio follows automatically.
 | View          | Purpose                                                                                                            |
 | ------------- | ------------------------------------------------------------------------------------------------------------------ |
 | **Runs**      | The artifact-root history: every run, newest first, filterable by status/spec/text/labels (label keys and values discovered from `run.json`), a labels column, and optional grouping by invocation (each group links to its invocation). Rows are one Tab stop: arrow keys move, Enter opens the run. Only run-shaped directories count (the CLI's `RUN_DIR_PATTERN`); `_invocations/` and other folders are ignored. In-flight rows show liveness (heartbeat / pid / quiet / dead). Pinned runs carry a **pinned** tag (when and why in the tooltip) and an edge mark. A spec the environment policy refuses gets **no run directory**, so it never lists here (it shows in Live and Invocations) and there is no `refused` status filter; should a refused record ever be written, it gets its own violet, dashed style, never the failure red, with the refusal as its detail. |
-| **Run detail**| One run's whole directory, **failure first**: a failed/errored run opens on a Failure panel (failing step id/kind/label + error, its screenshot, the `diagnostics/<step>.json` summary — url, title, visible buttons/links/inputs — outcome expected/actual from `outcomes/*.md`, the failed precondition output from `logs/` or the event tail, the failed hook output from the invocation journal, links to `services/*`). Hooks are read from the run's invocation journal (`_invocations/<id>/`), where the runner writes them: the run's own `--after` hooks and the `--before` hooks of its iteration, with their `logs/hook-*.log`. Tabs: Overview, Steps, Outcomes, Teardown, Preconditions, Gates, Fixtures, Hooks, Services, Video & trace, Logs (`run.log`, `logs/*`), Artifacts, Events, Console, Network, Compare (Teardown, Gates and Fixtures only when the run has them; see **Verification evidence** below for what they show, and for the expect / capture entries in Steps and the datasource tables and poll attempts in Outcomes). A per-spec history strip (last 20 statuses/durations) and refused/pin/stash/publish/retention/label badges sit under the title. A **refused** record (none is written today; forward compatible) would open on a refusal box (environment, reason, the spec's `requires`) instead of a failure panel. Overview has an **Evidence** panel: the stash (status, reason code and what it means, members left out with the `stash.include` hint, secret findings, TTL/expiry, tags, file count/size/content hash from `stash-receipt.json`), the published package (`publish-receipt.json`: artifact ref, expiry, size; a failed re-publish newer than the receipt shows as the failure, and a package past its `expiresAt` shows **publish expired** in warning tone with nothing to open; **Open in file.cheap** when the receipt has a stable https web URL, labelled with the host when it is not file.cheap) and retention (pinned or not). **Pin** / **Unpin** run `cairn pin <runDir> [--reason=…] --json` / `cairn unpin <runDir> --json` (the reason prompt is optional; restored stashes cannot be pinned). **Publish to file.cheap** asks in a native dialog (a sanitized private package, kept `retention.publish.retentionDays` days, default 7), runs `cairn publish <runDir> --json`, then shows the receipt or the `artifact.publish` failure reason. While the upload runs the button reads **Publishing…** and stays disabled (also across re-renders), and main refuses a second publish of the same run. The tabs are an ARIA tablist (Left/Right/Home/End); "back" returns to the view that opened the run (Runs, Live, or the invocation). |
+| **Run detail**| One run's whole directory, **failure first**: a failed/errored run opens on a Failure panel (failing step id/kind/label + error, its screenshot, the `diagnostics/<step>.json` summary — url, title, visible buttons/links/inputs — outcome expected/actual from `outcomes/*.md`, the failed precondition output from `logs/` or the event tail, the failed hook output from the invocation journal, links to `services/*`). Hooks are read from the run's invocation journal (`_invocations/<id>/`), where the runner writes them: the run's own `--after` hooks and the `--before` hooks of its iteration, with their `logs/hook-*.log`. Tabs: Overview, Steps, Outcomes, Teardown, Preconditions, Gates, Fixtures, Hooks, Run policy, Metrics, Services, Video & trace, Logs (`run.log`, `logs/*`), Artifacts, Events, Console, Network, Compare (Teardown, Gates and Fixtures only when the run has them; see **Verification evidence** below for what they show, and for the expect / capture entries in Steps and the datasource tables and poll attempts in Outcomes; Steps nests repeat iterations, if branches and retried attempts as collapsible groups and shows widget fields, interaction paths, requests and environment auth, and Outcomes the xlsx checks — see **Control flow, widgets, requests and environment auth**). A run whose invocation hit exit 8 or 9 carries a callout above the tabs and a badge under the title (see **Run policy, suites and metrics**). A per-spec history strip (last 20 statuses/durations) and refused/pin/stash/publish/retention/label badges sit under the title. A **refused** record (none is written today; forward compatible) would open on a refusal box (environment, reason, the spec's `requires`) instead of a failure panel. Overview has an **Evidence** panel: the stash (status, reason code and what it means, members left out with the `stash.include` hint, secret findings, TTL/expiry, tags, file count/size/content hash from `stash-receipt.json`), the published package (`publish-receipt.json`: artifact ref, expiry, size; a failed re-publish newer than the receipt shows as the failure, and a package past its `expiresAt` shows **publish expired** in warning tone with nothing to open; **Open in file.cheap** when the receipt has a stable https web URL, labelled with the host when it is not file.cheap) and retention (pinned or not). **Pin** / **Unpin** run `cairn pin <runDir> [--reason=…] --json` / `cairn unpin <runDir> --json` (the reason prompt is optional; restored stashes cannot be pinned). **Publish to file.cheap** asks in a native dialog (a sanitized private package, kept `retention.publish.retentionDays` days, default 7), runs `cairn publish <runDir> --json`, then shows the receipt or the `artifact.publish` failure reason. While the upload runs the button reads **Publishing…** and stays disabled (also across re-renders), and main refuses a second publish of the same run. The tabs are an ARIA tablist (Left/Right/Home/End); "back" returns to the view that opened the run (Runs, Live, or the invocation). |
 | **Specs**     | List/read/edit specs; save runs `cairn spec verify` and shows its findings (including contract-hash refusals, exit 6); stamp hashes behind a confirm; run, run headed, cold-start run, and `cairn spec heal` (dry run or `--apply`); scaffold new specs. Discovery skips the artifact root, run-dir copies, `spec.resolved.yml` / `run.yaml`, and `runs/` / `exports/` / `playwright-export/` / `reports/` at the project root; deeper folders with those names are skipped only when they hold cairn output (run folders, `_invocations/`, `spec.resolved.yml`, `run.json`, `.cairn-export.json`), so an authored `flows/exports/` still lists, matching what `cairn run flows/` runs. Run, Run headed, Cold-start run and Heal disable while a configured suite lock exists (heal re-runs the spec). The spec list is a listbox: arrows move, Enter opens. Each spec shows its `requires` (environments with opt-in variables, mutates). A **run on** picker chooses the environment for Run / Run headed / Cold-start run / Heal (default: what the CLI resolves — Settings env, the spec's `environment:`, `defaultEnvironment`, `local`); when the environment policy would refuse the spec there, a warning says why and Run asks once. **⌘R** (Run Focused Spec) takes the same path: the picked environment, the warning, the unsaved-edits question. Save re-reads `requires` and its opt-ins from what it wrote, so the warning follows the file on disk. It never blocks: the CLI decides, and a refused run ends as `refused` (exit 7) — with no run directory, so its Live card offers no Open evidence. |
-| **Live**      | Runs started from the app and runs started *outside* it (a terminal `cairn run`, an agent), grouped by invocation when the runner journals one ("spec 3/7", planned list, ETA from local p50 history, pid, origin: CLI / MCP agent + client / Studio, liveness, and a Details link to the Invocations view). Each card: a phase banner (`phase.changed`/`run.heartbeat`, e.g. `precondition quiesce · 4m 12s of 25m 0s`; while a readiness gate waits, `gate api-health (precondition) — GET …/health → 503 (want 2xx|3xx) · 12s of 2m 0s · attempt 6`; during teardown, `teardown 1/2 clear_order · run ./clear.sh`), gate rows next to the preconditions and hooks, fixture rows (each verb's status, `dry-run` on a shared environment with its reason, the non-secret outputs), `i/N kind label` step rows with the error inline (an expect step's verdict, `expected …; got …`, instead of the error; a `run` step's output tail), outcome "verifying…" rows with progress (a poll's `attempt 4/~31` leads) and, once settled, `polled · 7 attempts in 2.70s`, a Teardown section (item, status, `CAIRN_RUN_STATUS` it saw, error), the latest screenshot, output tabs for every announced log (`log.opened`, tailed incrementally), the event stream, and stash/retention badges. Incremental: pushes repaint only changed sections once per frame; panes follow the bottom and offer "jump to latest" when scrolled up. Finished runs keep tailing ~10s for late stash/retention events, and longer (up to 10 min) while the run's process is still alive, so a slow auto-stash upload still shows its badge. A stash saved with post-save failures or secret findings shows as a warning, not a green "stashed"; a failed stash names its reason code (`fcheap-missing`, `auth`, …), and the tooltip lists everything the event carried (left-out members, TTL, tags). A refused run (exit 7, `run.refused`, or a batch whose every spec was refused) shows a refusal box, not a failure, and no Open evidence (the CLI's `refused_…` run id names no directory); Re-run repeats the run's overrides (environment, headed, cold start). An invocation group whose every planned spec was refused, or that exited 7, reads `refused`, not `failed`. No layout jumps: the phase banner always holds one line (idle text between phases); when it is too narrow only the phase and item shorten, while the elapsed time against the budget and a "no heartbeat for …" warning stay visible (the full line is its tooltip, and a stale phase gets its own style); the elapsed clock has a fixed width, the screenshot sits in a fixed-ratio frame from the start, and log panes have a fixed height. |
-| **Invocations** | One row per `cairn run` process (a terminal, an agent through MCP, or this app), newest first, finished ones included, read from `<artifactRoot>/_invocations/*/invocation.json`. The list (an ARIA listbox: arrows move, selection follows focus) shows status, origin, start time, elapsed, `done/planned`, and liveness (heartbeat → pid → mtime). The detail shows the current phase (`phase.changed` / `run.heartbeat` from the journal's `events.ndjson`, read with the offset reader), the invocation error or abort signal, the planned specs with their status (`passed`, `running`, `pending`, `not run`, `interrupted`) and **Open run** links into Run detail (a refused spec shows its refusal reason, and the result line counts refused specs). An invocation the environment policy refused entirely (every planned spec refused, or exit 7) reads **refused** in the list and the head, not a red `failed` (the runner journals `failed` for a refused single spec and `passed` for an all-refused batch); `done/planned` counts refused specs as settled. The journal summary has no refused count, so Studio derives it (`total − passed − failed − errored`) and, in the detail, also from the `run.refused` events, and tabs tailing `logs/narration.log`, `logs/services-*.log`, and `logs/hook-*.log` (auto-follow; a finished invocation loads each tab once, when shown). A **Gates & fixtures** list under the plan shows the journal's `gate.*` waits (services, web server: attempt, last answer, verdict) and suite / seed `fixture.*` verbs (skipped-as-fresh and dry-run reasons in the tooltip), and the banner names a waiting gate like Live does. **Stop** is described below. |
+| **Suites**    | The config's `suites:` registry (`cairn suites list --json`): each suite with its tags, `parallel`, `bail` and `requires`, a per-environment table (spec count, before/after hook counts, var *names*, and why the suite cannot run there), and the specs it resolves to in run order. A **run on** picker chooses the environment (default: what the CLI resolves); **Run** spawns `cairn run --suite=<name> [--env <env>]` through the same launch path as every Run: main asks `cairn suites list` for the resolution first, refuses an unknown suite or an environment the suite's `requires` rules out before anything spawns, and tails the suite's spec names. Disabled while a suite lock file or the config run lock is held (the owner is in the tooltip), and while a launch template is set (a template runs one spec at a time). An older cairn without `suites` reads as a message. Re-run on a finished suite card repeats the suite. |
+| **Config vars** | `cairn config vars --json`: every composed var with its kind, the effective value per environment, where it is defined (`file:line`, `extends` / `include:` origin), what overrides it, what uses it (specs, actions, scripts, fixtures, datasources, gates, suites, login), and an **unused** flag. A filter by name (local), an environment picker and an unused-only switch (both re-ask the CLI), plus the findings (include overrides, var references) and composition errors. A value the CLI masked stays masked (bullets and a **masked** tag; the value never reaches the renderer), and main also masks any var whose *name* looks like a credential and any credential-shaped text (URI userinfo, `Bearer` values, JWTs). |
+| **Live**      | Runs started from the app and runs started *outside* it (a terminal `cairn run`, an agent), grouped by invocation when the runner journals one ("spec 3/7", planned list, ETA from local p50 history, pid, origin: CLI / MCP agent + client / Studio, liveness, and a Details link to the Invocations view). Each card: a phase banner (`phase.changed`/`run.heartbeat`, e.g. `precondition quiesce · 4m 12s of 25m 0s`; while a readiness gate waits, `gate api-health (precondition) — GET …/health → 503 (want 2xx|3xx) · 12s of 2m 0s · attempt 6`; during teardown, `teardown 1/2 clear_order · run ./clear.sh`), gate rows next to the preconditions and hooks, fixture rows (each verb's status, `dry-run` on a shared environment with its reason, the non-secret outputs), `i/N kind label` step rows with the error inline (an expect step's verdict, `expected …; got …`, instead of the error; a `run` step's output tail; nested steps grouped under their repeat / if / retried use by iteration, branch or attempt, with widget-field and request chips), outcome "verifying…" rows with progress (a poll's `attempt 4/~31` leads) and, once settled, `polled · 7 attempts in 2.70s`, a Teardown section (item, status, `CAIRN_RUN_STATUS` it saw, error), the latest screenshot, output tabs for every announced log (`log.opened`, tailed incrementally), the event stream, and stash/retention badges. Incremental: pushes repaint only changed sections once per frame; panes follow the bottom and offer "jump to latest" when scrolled up. Finished runs keep tailing ~10s for late stash/retention events, and longer (up to 10 min) while the run's process is still alive, so a slow auto-stash upload still shows its badge. A stash saved with post-save failures or secret findings shows as a warning, not a green "stashed"; a failed stash names its reason code (`fcheap-missing`, `auth`, …), and the tooltip lists everything the event carried (left-out members, TTL, tags). A refused run (exit 7, `run.refused`, or a batch whose every spec was refused) shows a refusal box, not a failure, and no Open evidence (the CLI's `refused_…` run id names no directory); Re-run repeats the run's overrides (environment, headed, cold start). An invocation group whose every planned spec was refused, or that exited 7, reads `refused`, not `failed`. An invocation group also shows its **run policy** (the config `run:` block, `--bail`, `--suite`; see **Run policy, suites and metrics**): the suite tag, a collapsible panel with the run lock, preflight checks, verifyClean findings, `finally` hooks, critical teardown failures and the latest metric samples (open by default when something needs attention), and, once the journal ended, the specs `--bail` never started as **skipped · bailed**. A finished app run that exited **8** or **9** carries that exit's badge on its card. No layout jumps: the phase banner always holds one line (idle text between phases); when it is too narrow only the phase and item shorten, while the elapsed time against the budget and a "no heartbeat for …" warning stay visible (the full line is its tooltip, and a stale phase gets its own style); the elapsed clock has a fixed width, the screenshot sits in a fixed-ratio frame from the start, and log panes have a fixed height. |
+| **Invocations** | One row per `cairn run` process (a terminal, an agent through MCP, or this app), newest first, finished ones included, read from `<artifactRoot>/_invocations/*/invocation.json`. The list (an ARIA listbox: arrows move, selection follows focus) shows status, origin, start time, elapsed, `done/planned`, and liveness (heartbeat → pid → mtime). The detail shows the current phase (`phase.changed` / `run.heartbeat` from the journal's `events.ndjson`, read with the offset reader), the invocation error or abort signal, the planned specs with their status (`passed`, `running`, `pending`, `not run`, `interrupted`) and **Open run** links into Run detail (a refused spec shows its refusal reason, and the result line counts refused specs). An invocation the environment policy refused entirely (every planned spec refused, or exit 7) reads **refused** in the list and the head, not a red `failed` (the runner journals `failed` for a refused single spec and `passed` for an all-refused batch); `done/planned` counts refused specs as settled. The journal summary has no refused count, so Studio derives it (`total − passed − failed − errored`) and, in the detail, also from the `run.refused` events, and tabs tailing `logs/narration.log`, `logs/services-*.log`, and `logs/hook-*.log` (auto-follow; a finished invocation loads each tab once, when shown). A **Gates & fixtures** list under the plan shows the journal's `gate.*` waits (services, web server: attempt, last answer, verdict) and suite / seed `fixture.*` verbs (skipped-as-fresh and dry-run reasons in the tooltip), and the banner names a waiting gate like Live does. The head names the suite (`--suite`), the plan marks specs `--bail` never started as **skipped · bailed after <spec>** (they are not "refused": Studio subtracts `summary.skipped` before it derives a refused count), the result line says `N skipped (bailed)` and what exit 8 / 9 mean, and a **Run policy** section lists the lock, preflight, cleanliness, `finally`, critical teardown, suite hooks and metric samples. **Stop** is described below. |
 | **Stashes**   | file.cheap archives via `cairn stash list --format json` (tool `cairntrace` by default, tag filters), `cairn stash info`, and **Restore & open**: `cairn stash restore <id> --to <fresh temp dir>`, then the restored run opens in the normal Run detail / Compare. A stash whose run is still in the artifact root links back to it (its `stash-receipt.json`): secret findings, members left out, pinned, and the receipt's lines in Info; fcheap's own `custom.secrets_found` flag also shows as a warning. Every action shows its CLI line with a copy button. |
 | **Sessions**  | Discovery and accompany sessions an agent (or `cairn discover`) runs, read from `<artifactRoot>/_sessions/*/session.json` — the config's `artifactRoot` (or `~/.cairntrace/runs`) where the CLI and MCP write journals, never Studio's artifact-root override — newest first: kind, origin (CLI / MCP agent + client), status, start URL, age, and liveness judged by main (`live`, `idle past TTL`, `process gone`, `stale`; from the pid, `lastActivityAt` and `ttlMs`). The detail tails the journal's `events.ndjson` with the offset reader: an action timeline (ok/error, URL changes, network mutations such as `PATCH /api/answers 204`, recorded / removed steps), a large preview of the latest screenshot with clickable thumbnails (Follow latest returns to the newest), the selected action's accessibility snapshot (`snapshots/NNN.txt`) and network log (`network/NNN.json`), both collapsible and loaded when opened, the recorded steps (`step.recorded` minus `step.removed`), the draft (`draft.spec.yml`) with a diff since the previous `draft.updated` (when Studio saw that version; otherwise the steps the latest one added), and the exports (`export.written`) with their verify findings; an export whose file moved since (promoted, renamed) reads **moved** and offers no Promote. **Export draft** re-exports a session the agent already exported: `cairn discover export --from-session=<journal> --intent=… --outcomes=<file> [--path=<its last export>] --json` with the intent and outcomes session.json kept from that export, passed explicitly so the dialog shows exactly what is written (Studio never invents a contract, so the first export stays the agent's `cairn_discover_export`; the button is disabled until then, and for accompany sessions). When it would rewrite an existing file, a native dialog names the file and shows the contract first. **Promote…** on an exported draft runs `cairn spec promote <draft> --expect-content-hash=<sha256> --json` after a native dialog that shows the intent and every outcome with its `verify:` parameters (compact YAML; a parameter longer than 400 characters is cut and marked). The dialog pins the draft's exact text: if the file changes while it is open, nothing is promoted and Studio says so. A refusal shows the CLI's message whole, and **Promote anyway (--force)…** (which asks again) appears only when the refusal is the missing or stale green `cairn spec finish`; the result lists the CLI's warnings (rebased paths, a forced promote). Only a CLI that does not know the command or flag (commander's own "unknown command/option" as its first line) reads as an older cairn. |
-| **Catalog**   | `cairn catalog --json`: what the project already has, for people authoring specs. A search box ranks rows with `--query` (debounced; Enter runs it now) and an environment picker passes `--env`; tabs (an ARIA tablist) switch between actions (inputs, steps, uses, last green run, a copyable `use:` snippet with the required vars), vars grouped per environment (credential-looking values only ever read **masked**; a `${vars.…}` snippet), verifiers (fixture contract, uses with missing/unknown keys), environments (policy, services, secret key names), flows (drafts tagged, `requires`, actions, last run) and checkpoints (health, scope, problem). **Datasources**, **Gates** and **Fixtures** tabs come from the catalog payload when the CLI reports those kinds, else from the config summary main sends with the project (only when the config declares them; filtered by the search text; the environment picker resolves each environment's datasource overrides); they render even when `cairn catalog` fails, with copyable `verify:` / `preconditions.wait` / `fixtures:` snippets. Files reveal in Finder, flows open in Specs, runs open in Run detail. |
+| **Catalog**   | `cairn catalog --json`: what the project already has, for people authoring specs. A search box ranks rows with `--query` (debounced; Enter runs it now) and an environment picker passes `--env`; tabs (an ARIA tablist) switch between actions (inputs, steps, uses, last green run, a copyable `use:` snippet with the required vars), vars grouped per environment (credential-looking values only ever read **masked**; a `${vars.…}` snippet), verifiers (fixture contract, uses with missing/unknown keys), environments (policy, services, secret key names), flows (drafts tagged, `requires`, actions, last run) and checkpoints (health, scope, problem). A **Widgets** tab (drivers in detection order, field roots, app handles), an **auth** column on Environments and the **built-in `login`** action come from the config summary (see **Control flow, widgets, requests and environment auth**). **Datasources**, **Gates** and **Fixtures** tabs come from the catalog payload when the CLI reports those kinds, else from the config summary main sends with the project (only when the config declares them; filtered by the search text; the environment picker resolves each environment's datasource overrides); they render even when `cairn catalog` fails, with copyable `verify:` / `preconditions.wait` / `fixtures:` snippets. Files reveal in Finder, flows open in Specs, runs open in Run detail. |
 | **Cohorts**   | `cairn stats --group-by`: pass rate, duration p50/p95, harvested domain metric, and baseline deltas for A/B labels (a refused column would appear for a cohort with refused runs; `stats.v1` has no refused count today, so it stays hidden); the group-by field suggests the label keys found in `run.json`. |
 | **Docs**      | The authoring reference read live from the binary: `cairn docs <topic>` plus the full `cairn explain` surface (commands, step kinds, verifiers, rules). |
-| **Environment**| `cairn doctor` checks, the config cairn discovered for the open project, **environments & policy** (each environment's baseUrl, trait `owned`/`shared`/`protected`, mutations allow/deny, description, and — when the config declares services — its `services up` owner lock (held/stale, by whom, pid, since) from `cairn services status --env <name> --json` with **Services up** / **Services down** buttons that run `cairn services up|down --env <name> --json` after a native dialog naming the current lock owner; refused while a suite lock is held or a run/heal Studio started uses that environment — both checked again after the dialog — and one command per environment at a time. While one runs, Run and Heal on that environment are refused: `services up` writes its lock only after the boot, so a run started meanwhile would boot and later tear down its own copy; a run whose environment cannot be told before it starts (no `--env`, no spec `environment:`, no `defaultEnvironment`) counts as any), services, **datasources, gates & fixtures** (one row per environment × datasource with its kind, redacted target, details — database, mode, guard, namespace, auth kind, header names — and state `inherited` / `override` / `disabled` / `this env only`; the gates registry with probe, target, policy and who waits on it — services, the web server, specs whose `preconditions.wait` names it; the fixtures registry with kind, scope, verbs, ownership, output names and the live state per environment folded from `~/.cairntrace/fixtures/<project>.ledger.jsonl` the way `cairn fixtures status` folds it; the panel is left out when the config declares none of them), browser-state checkpoints (env, baseUrl, created, expiry with the TTL in its tooltip, health `ok` / `expired` / `unscoped` (captured before checkpoints recorded a scope; still resumable) / `missing` — read when `cairn checkpoint list --json` reports them, "—" until then), and retention/clean controls (the prune dialogs say pinned runs are kept, and name the uploads when `retention.archiveToStash` or `retention.publish.enabled` makes `cairn clean` archive or publish every run it prunes; main then confirms that upload in a native dialog, and Cancel prunes nothing). |
+| **Environment**| `cairn doctor` checks, the config cairn discovered for the open project, **environments & policy** (each environment's baseUrl, trait `owned`/`shared`/`protected`, mutations allow/deny, description, and — when the config declares services — its `services up` owner lock (held/stale, by whom, pid, since) from `cairn services status --env <name> --json` with **Services up** / **Services down** buttons that run `cairn services up|down --env <name> --json` after a native dialog naming the current lock owner; refused while a suite lock is held or a run/heal Studio started uses that environment — both checked again after the dialog — and one command per environment at a time. While one runs, Run and Heal on that environment are refused: `services up` writes its lock only after the boot, so a run started meanwhile would boot and later tear down its own copy; a run whose environment cannot be told before it starts (no `--env`, no spec `environment:`, no `defaultEnvironment`) counts as any), services, **datasources, gates & fixtures** (one row per environment × datasource with its kind, redacted target, details — database, mode, guard, namespace, auth kind, header names — and state `inherited` / `override` / `disabled` / `this env only`; the gates registry with probe, target, policy and who waits on it — services, the web server, specs whose `preconditions.wait` names it; the fixtures registry with kind, scope, verbs, ownership, output names and the live state per environment folded from `~/.cairntrace/fixtures/<project>.ledger.jsonl` the way `cairn fixtures status` folds it; the panel is left out when the config declares none of them), **orphan browser sessions** (`cairn doctor --orphans --json`: sessions whose cairn run is gone but whose browsers survive, found through the owned-session ledger) with **End these processes…**, **service windows, tunnels & provisioner** per environment when the config declares services (see **Run policy, suites and metrics**), browser-state checkpoints (env, baseUrl, created, expiry with the TTL in its tooltip, health `ok` / `expired` / `unscoped` (captured before checkpoints recorded a scope; still resumable) / `missing` — read when `cairn checkpoint list --json` reports them, "—" until then), and retention/clean controls (the prune dialogs say pinned runs are kept, and name the uploads when `retention.archiveToStash` or `retention.publish.enabled` makes `cairn clean` archive or publish every run it prunes; main then confirms that upload in a native dialog, and Cancel prunes nothing). |
 | **Settings**  | cairn binary override (a file not named `cairn…` is confirmed in a native dialog), artifact-root override (never `/`, your home folder, or a parent of it; a folder typed by hand rather than picked with Browse… is confirmed), default run options (backend, env, headed, cold-start, monitor, parallel, labels, vars), **launch safety** per project (launch template + suite lock files), **interface** (density, screenshot max width, live tail poll, refresh Runs on finish), recent projects. |
 
 The topbar shows the resolved `cairn --version` and warns (⚠) when the `cairn`
@@ -38,7 +40,11 @@ speaks the runner's vocabulary — `step.failed`, `step.finished{skipped}`,
 `outcome.passed|failed|skipped`, `run.passed|failed|errored`, `precondition.*`,
 `services.*`, `artifact.*` — plus the additive v1 contract (`phase.changed`,
 `run.heartbeat`, `outcome.started|progress`, `log.opened`, `hook.*`,
-`invocation.*`). Everything new is optional: older run directories render
+`invocation.*`, and wave 5: `widget.field`, the nested-step fields
+`parentId` / `iteration` / `branch`, block results `iterations` / `taken` /
+`matched`, interaction paths `via` / `driver` / `detail` / `skipReason`,
+and `artifact.request` `attempts` / `combinations` / `mismatches`; and wave 6: the run-policy events `run.lock.*`, `preflight.*`, `cleanliness.*`, `finally.*` and `invocation.bailed`, the suite events `suite.started` / `suite.hook.*` / `suite.finished`, `metric.sampled`, and the service-operation events `services.restart.*`, `services.tunnel.*`, `services.provisioner.*`, `services.files.*`, `services.seed.phase.*` and `services.seed.commit`, with `critical` / `provisioner` on `services.teardown.fail`).
+Everything new is optional: older run directories render
 exactly as before. Unknown types render as `type · key=value …`, never as a
 bare label. `test/events.test.js` runs every line of the runner's goldens
 (`src/core/schema/__fixtures__/events/`) through it.
@@ -71,6 +77,8 @@ Per project (Settings → launch safety):
   lock file's content, or `owner`/`owner.json`/`owner.txt`/`info`/`pid` inside
   a lock directory). Removing a lock file from the list, or resetting Studio's
   settings, while that lock is held asks for confirmation in a native dialog.
+
+- **The config run lock** (`run: { lock }`, top-level or per environment). When the project's config takes it, Studio reads `~/.cairntrace/locks/*.run.lock.json` (bounded, no shell) and matches each file on the `key` it stores: the config file's canonical path, or `project:<name>` for `scope: project`. A lock whose owner pid is alive and is the process that took it (a process younger than the lock is a recycled pid, the CLI's own rule) is **held**: it joins the suite-lock entries in `project:locks` (`kind: "run-lock"`, the owner as `pid 4242 (cli, invocation …, env "local"), running for 5m` and the redacted command), so every gate that already handles a held suite lock handles it: the topbar reads **run in progress** (a suite lock file reads **suite in progress**), Run buttons disable with the owner in the tooltip, and `run:start`, `spec:heal`, `services:up|down|restart` refuse with the owner and age ("a cairn run holds this project's run lock (…) — Run is disabled until it finishes"). A dead owner's lock does not block, because `cairn run` reclaims it. A run Studio itself started holds the lock too, so a second Run is refused the way the CLI would refuse it (exit 4). Studio polls it every 5s while the config declares one. It only reads the lock: it never removes one.
 
 Unset, Studio spawns `cairn run` directly, exactly as before.
 
@@ -140,6 +148,88 @@ every field is optional (an older run renders exactly as before).
   for cairn (`.env.local` over `.env.<NODE_ENV|development>` over `.env`;
   no `.env.local` when NODE_ENV is `test`). A launch template's own
   environment is not visible to it.
+
+### Run policy, suites and metrics
+
+Studio renders the wave-6 contract from what the runner wrote and the commands
+print; every field is optional, an older cairn degrades to a message, and a
+run from before the run policy renders exactly as before.
+
+- **Run policy** (`run.lock.*`, `preflight.*`, `cleanliness.*`, `finally.*`,
+  `invocation.bailed` in the invocation journal's `events.ndjson`;
+  `invocation.json` `summary.runPolicy` / `skipped` / `exitCode`): the events
+  model (`lib/events.js`) folds them into `model.policy` (`lock`, `preflight`,
+  `cleanliness`, `finally`, `bailed`, `suite`, `suiteHooks`, `metrics`), the same
+  reducer main and the renderer use. Run detail reads the run's own
+  invocation journal (`lib/runs.js` `readRunPolicy`) into a **Run policy** tab
+  (it describes the whole invocation; the run is one spec of it); Live's
+  invocation group and the Invocations detail show the same panel
+  (`renderer/ops.js` `policyPanel`). Every row is a glyph, a word and the detail
+  (never colour alone): preflight checks (passed / FAILED, the redacted reason),
+  verifyClean findings before and after the run with the survivors listed,
+  `finally` hooks (a failure is "non-fatal"), the lock (held / reclaimed /
+  refused with its owner / released), and **Bail** (how many specs were skipped
+  and after which spec).
+- **Exit 8 and exit 9.** Exit 8 (a critical teardown, or the provisioner's
+  `down`, failed) outranks every verdict; exit 9 (`verifyClean` found what the
+  run left behind) is a warning that is not the run's verdict, so a green run
+  can still carry it. Both are shown as a **callout above the run's tabs** and a
+  badge, and a finished app run's Live card carries the badge of its exit code.
+  They differ by shape as well as colour: exit 8 is a heavy solid border with a
+  stop sign (⛔), exit 9 a dashed border with a warning sign (⚠), each with its
+  words (`critical teardown failed · exit 8`, `dirty state after the run · exit 9`).
+  A refused lock, a failed preflight check and a dirty machine before the run
+  (all exit 4, nothing started) are badges too.
+- **Suites.** The Suites view, `run:start { suite, overrides }` and the
+  `suites:list` channel; see the Suites row above. A suite run is
+  `cairn run --suite=<name>` with no spec paths, so the live tail looks for the
+  spec names the suite resolved to.
+- **Metrics** (`diagnostics/metrics.json`, `urn:cairntrace.dev:metrics:v1`):
+  `lib/metrics.js` validates the document field by field (finite numbers only,
+  strings masked, at most 200 metrics, a series thinned to 120 points) into the
+  run's **Metrics** tab: before, after, a signed **delta** with ▲ / ▼ and words
+  for the direction, min / max / mean for `every:` probes, failed samples with
+  their (masked) error, and, per metric, a **sparkline** of the same value
+  (delta, else `after`) across the same spec's earlier runs (`metrics:history`,
+  at most 150 runs scanned and 40 points kept, oldest first; points of another
+  basis than the newest are dropped). The chart is an `img` with a complete text
+  label ("queue_depth (delta) across 3 runs: min 2 jobs, max 8 jobs, latest 8
+  jobs"), a labelled y axis (max, min) and x axis (first and last run time),
+  the current run ringed, a caption and a **values** table (each earlier run
+  opens that run). It is plain SVG built in `renderer/ops.js`, no chart library,
+  and uses only the theme's CSS variables. A failed history read leaves the
+  table alone. Live shows the `metric.sampled` before / after samples in the
+  invocation's policy panel.
+- **Service operations.** Environment → **service windows, tunnels &
+  provisioner** (only when the config declares services; an environment picker):
+  from `cairn services status --env <name> --json`, each tmux window's health,
+  the tunnels cairn supervises (state, running, pid, restarts), the
+  provisioner's export **names** (never values) and the docker / seed state.
+  **Logs** reads `cairn services logs <window> --lines=200 [--since-restart]
+  --json` (read-only, bounded; never `--follow` or `--wait`) into a focusable
+  `role="log"` pane with a "since last restart" switch. **Restart…** asks in a
+  native dialog the renderer cannot answer (the window, the environment and its
+  trait, the services lock owner, the exact command), then runs `cairn services
+  restart <window> --env <name> --json` and, on success, shows the window's log
+  since the restart. Main refuses a restart, before any dialog, unless the window
+  is one the CLI's own status lists for that environment; while a suite lock or
+  the run lock is held, or a run Studio started uses that environment (checked
+  again after the dialog); and while another services command runs for it. The
+  `services.restart.*`, `services.tunnel.*`, `services.provisioner.*`,
+  `services.files.*` and `services.seed.phase.*` events read in the Live
+  timeline as `service web restarted · 1.2s`, `tunnel db gave up after 5
+  restart(s)`, `seed phase import FAILED (exit 1)`, `provisioner down FAILED (exit 3)
+  — exit 8`; an event that lacks the name it is about falls back to the generic
+  `services <phase> <event> · message` line, and an unknown kind to `type · key=value`.
+- **Orphan browser sessions.** Environment → **orphan browser sessions**:
+  `cairn doctor --orphans --json` (exit 1 means "orphans listed", not a failure)
+  with each session, backend, invocation, the gone owner pid, age and processes.
+  **End these processes…** re-lists, shows every session and process in a native
+  dialog the renderer cannot answer, and only then runs `cairn doctor --orphans
+  --kill --yes --json`. Sessions whose run is still going are never touched (the
+  CLI's ledger rule), and survivors after the kill are reported.
+- **Config vars.** See the Config vars row above; `config:vars` takes only an
+  environment name (validated) and the `unused` flag.
 
 ### Verification evidence: datasources, polls, gates, teardown, fixtures
 
@@ -226,6 +316,79 @@ is optional, and a run without them renders exactly as before.
   `project:inspect` no longer sends the parsed config document (`raw`) to
   the renderer at all, since its env-substituted values may be credentials,
   and each environment's env-substituted `baseUrl` goes out redacted.
+
+### Control flow, widgets, requests and environment auth
+
+Studio renders the wave-5 primitives from what the runner wrote; every
+field is optional, and a flat spec's run renders exactly as before.
+
+- **Nested steps** (F14 `repeat`, `if`, `use: {action, retry}`): a nested
+  step's `step.*` events and run.json result carry `parentId`, `iteration`
+  and `branch`; a block's own result carries `iterations`, `taken` and
+  `matched`, and a retried use its dropped attempts in `retries`. The
+  reducer (`lib/events.js`) keeps one row per execution (`key` is the step id
+  for the first, `<id>#2` … after it; `stepIndex` names the newest, so
+  artifact, widget and request events land on the execution that is
+  running), hangs each under its block's open row, and returns the current
+  step to the block when a nested one ends. `stepTotal` and `Steps (n/N)`
+  count top-level steps only. Run detail's Steps tab lays run.json out as a
+  tree (`resultStepTree`: results are post-order, a block's steps before
+  the block): each block row (`×3`, `→ then`, `not matched`) has one
+  collapsible group per iteration (`iteration 2`), attempt (`attempt 1`) or
+  branch (`then` / `else`), open when it failed or is the only one; a
+  retried use shows its dropped attempts as `retried` groups with their
+  error (their step results are gone from run.json; the events keep them).
+  Live groups the same way as events stream (`modelStepTree`); an earlier
+  attempt a later one superseded reads `retried`, never failed. Expects,
+  captures and widget files are matched to an execution by its own
+  artifacts, so each iteration shows its own evidence. The Failure panel
+  picks the failed execution of a looped step and says where it ran
+  (`in each_profile #2`). At most 5000 execution rows are kept per run
+  (`stepsDropped` counts the rest).
+- **Widgets and interaction flags** (F15): `widgets/NNN_<id>.json` under
+  its step (and in the Failure panel) as a table — field, status
+  (`committed` / `already` / `written` / `skipped` / `failed`), driver and
+  path, expected, committed, and for a form the value each field still
+  showed after every field was set —, each failed field's error, and the
+  unanswered-fields dump a failed form asked for (`onFailure:
+  dumpUnanswered`: key, label, driver, required). A field whose name looks
+  like a credential, or whose value the runner already redacted, reads
+  `••••••`, its root text and notes dropped. Steps show the interaction
+  path (`via dispatched click`, `via native setter`, `upload rebuilt in
+  page`), the driver, why (`pointer blocked by div.p-dialog-mask`) and why a
+  step that ran was skipped (`skipped · absent`, an optional target). Live
+  shows `widget.field` events as chips (the field key and status, never the
+  value).
+- **Requests** (F18): `requests/<assign>.json` under its step — the call
+  (query dropped, userinfo masked), status, `3 attempts` when a retry or an
+  until sent it again, the `${requests.<name>.captures.<key>}` it bound
+  (masked by name), and a matrix's status per combination (values masked by
+  name, mismatches marked). Bodies and headers stay in the file, one click
+  away. Live shows `artifact.request` as chips (`tasks → 200 · 3 attempts`,
+  `4 combination(s), 1 mismatched`).
+- **Environment auth** (`use: login`): the step's `detail` (`logged in
+  (POST /api/login → 200); 1 follow-up(s); hydrated`) and its requests by
+  role (`already authenticated?`, `login`, `follow-up`), method, path and
+  status — never a body, a header, a capture or a token.
+- **xlsx v2** (F17): the verifier's raw sidecar (`{path, sheets, sheet,
+  columns, checks}`) reads as the workbook's file name, its sheets and the
+  checked sheet, the header columns (letter, label, key) as a table, and
+  one line per check (sheet text, headers present / absent / labels /
+  `includesInOrder` / `withinListInOrder`, data rows, a row match, cells with
+  their number format, validations), the failed ones in red.
+- **Catalog**: a **Widgets** tab when the config declares
+  `browser.widgets`, `browser.fieldRoot` or `browser.appHandle` — the
+  drivers in detection order (built-in, project driver module, the native
+  ones the runner appends), the field-root templates (or the defaults) and
+  the app handle names, with `set:` / `wait: { app }` snippets. Environments
+  gain an **auth** column when any environment declares `auth:`: the
+  requests `use: login` sends by method and path, the follow-ups with the
+  var their `when` reads, the hydrate kind and the `${secrets.X}` names it
+  reads (summarized by main from the unsubstituted config: bodies, header
+  values and literals never reach the renderer). Actions list the
+  **built-in `login`** while an environment declares auth and no imported
+  action is named `login`; an imported one is tagged **overrides
+  built-in**.
 
 ### Authoring: sessions, drafts, catalog
 
@@ -388,8 +551,9 @@ markdown.js) is declared, so a misspelt member or a wrong argument fails,
 and dom.js / state.js / components.js publish their members through a
 `Partial<StudioGlobal>`-typed object, so an implementation that drifts from
 its declaration fails too. Only `Studio.live`, `Studio.invocationsView`,
-`Studio.sessionsView` and `Studio.catalogView` (view helpers exported for
-tests) are `any`. Both programs run with
+`Studio.sessionsView`, `Studio.catalogView`, `Studio.suitesView` and
+`Studio.configVarsView` (view helpers exported for tests) are `any`;
+`Studio.ops` (run-policy and metrics components) is typed. Both programs run with
 `strict: false`, so null checks are not enforced; the DOM tests cover what
 that leaves out. The tests that load renderer scripts into a DOM
 (`dom.test.js`, `state.test.js`, `*.dom.test.js`, `dom-env.js`) are in
@@ -424,7 +588,16 @@ Environment and Catalog over the config registries), and every one of
 those tests plants a credential that must never reach the structured views
 (`verification.test.js` does the same for lib/, and
 `fixtures/events-gates-teardown.ndjson` is a strict events.v1 stream with
-gates, an expect step, a polled outcome, fixtures and teardown).
+gates, an expect step, a polled outcome, fixtures and teardown);
+`primitives.test.js` and `primitives.dom.test.js` cover wave 5 (the
+reducer and step trees over `fixtures/events-control-flow.ndjson`, a
+strict events.v1 stream with repeat iterations, an if branch, a retried
+use, widget fields, interaction flags, polled and matrix requests and
+environment auth; Run detail Steps / Failure / Outcomes, Live grouping,
+and Catalog widgets / auth / built-in login over the run directories
+`primitives-fixture.js` builds, each planting credentials that must never
+reach lib/ or the DOM).
+`ops.test.js` (argv builders, normalizers, the run lock, metrics and their history, the run policy in run detail) and `ops.dom.test.js` cover wave 6 (Suites, Config vars, the Environment view's service windows and orphan sessions, Run detail's Run policy and Metrics tabs with the sparkline, exit 8 / 9 styling, and the Live / Invocations policy panel and bail plan); the run-policy goldens in `src/core/schema/__fixtures__/events/` are reduced in `events.test.js`, `cli.test.js` checks every flag the new commands send against the real `--help`, and `ipc.test.js` drives the new channels against a fake `cairn` and, when `bun` is present, the repo's own `bin/cairn` (suites, config vars, orphan ledger in a temp `$HOME`).
 Compare DOM nodes by identity (`assert.ok(a === b)`): on failure,
 `assert.equal` inspects both values, and inspecting a happy-dom node walks
 the document synchronously and hangs the test process.
@@ -455,14 +628,22 @@ desktop/
     stash.js     `cairn stash` argv, stash-id validation, restored-run lookup
     evidence.js  `cairn publish` / `pin` / `unpin` argv, publish receipts,
                  https-only web URLs, run.json `pinned`
-    dataEvidence.js  outcome raw evidence → tables / attempts, expects/,
-                 captures/, fixtures.json, the project fixture ledger fold
+    dataEvidence.js  outcome raw evidence → tables / attempts (and xlsx
+                 checks), expects/, captures/, widgets/, requests/,
+                 fixtures.json, the project fixture ledger fold
     registries.js  config datasources (per environment) / gates / fixtures,
+                 widget drivers / app handles, environment auth blocks,
                  redacted, from the unsubstituted config
     authoring.js session journals (`_sessions/<id>/`: listing, liveness, the
                  files a renderer may read), `discover export` / `spec
                  promote` / `catalog` / `services up|down|status` argv,
                  draft resolution, the promote and services dialog texts
+    ops.js       wave 6 plumbing: allow-listed argv for suites / config vars / orphans /
+                 services restart|logs, payload normalizers (credentials masked,
+                 a missing document reads as null), the native confirmations, and
+                 the config run lock (`~/.cairntrace/locks`)
+    metrics.js   diagnostics/metrics.json validation and the per-metric history
+                 across runs
     policy.js    environment policy: requires/policy normalizing, the refusal
                  rules, refusal text (also a renderer script)
     media.js     the cairn-artifact:// protocol (opaque tokens, byte ranges)
@@ -471,11 +652,12 @@ desktop/
   renderer/      classic <script> files, no bundler, no innerHTML anywhere
     globals.d.ts window.Studio / window.cairn / CairnFormat / CairnEvents /
                  CairnPolicy types
+    ops.js       run-policy badges and panel, metrics table and sparkline, lock wording
     panes.js     follow panes, output tab strips, offset-reader log tails
                  (shared by Live and Invocations)
-    views/       one script per view (runs, run-detail, specs, catalog, live,
-                 invocations, sessions, stashes, stats, docs, environment,
-                 settings)
+    views/       one script per view (runs, run-detail, specs, catalog, suites,
+                 config-vars, live, invocations, sessions, stashes, stats, docs,
+                 environment, settings)
   test/          node:test suites over lib/ (temp-fixture artifact roots) and
                  the renderer in happy-dom (dom-env.js, *.dom.test.js)
 ```
@@ -512,6 +694,7 @@ Design rules that keep it honest:
   with `-` is refused, so it cannot smuggle a flag into `cairn run`); the
   cairn binary, artifact root and launch template go through their own
   handlers and native confirmations.
+- **Wave 6 channels are allow-listed too.** `suites:list`, `config:vars`, `orphans:list`, `orphans:kill`, `services:windows|restart|logs` and `metrics:history` take only validated values: an environment name (`/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/`), a suite name (one printable line, not a flag), a service window name (`/^[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,79}$/` and one the CLI's status lists), a bounded line count and booleans; each becomes one argv entry joined to its flag, never a shell string. Ending processes and restarting a service go through native dialogs; the renderer never receives a masked var's value, a pane's raw text beyond the redacted `services logs` lines, or a provisioner export's value.
 - **Not a sandbox against command execution.** Specs can declare
   `preconditions.commands` and the project config can declare services, and
   Run executes them by design. A compromised renderer that edits a spec in the
@@ -529,7 +712,18 @@ Design rules that keep it honest:
 - **Spawned children die with their tree.** `lib/cli.js execCairn` runs each
   cairn in its own process group and escalates SIGTERM → SIGKILL on deadline or
   cancel, because cairn spawns browsers/docker/tmux whose inherited pipes would
-  otherwise keep a "cancelled" run alive.
+  otherwise keep a "cancelled" run alive. **Except a delegated run** (its
+  environment has a `runner`, from the config or from the run's own journal):
+  Live **Cancel** sends it SIGINT, like Ctrl-C, and never SIGKILLs it early —
+  cairn needs up to the runner's `cancelGraceMs` to cancel the remote
+  invocation, copy the results back, mark the journal aborted and run
+  `run.finally`. A SIGKILL comes only as a safety net (grace + 15s + 60s).
+  Quitting Studio sends a delegated run SIGINT too, and cairn (its own process
+  group) finishes that cancel without it.
+- **Delegated run directories.** A run a delegated runner copies into the
+  artifact root names an invocation and a pid on the other machine; its
+  liveness comes from the local delegated invocation that lists it (that
+  cairn's pid and journal status), never from the remote heartbeat's pid.
 - **macOS GUI PATH.** Finder-launched apps get a near-empty PATH, so
   `augmentedEnv()` adds `/opt/homebrew/bin`, `/usr/local/bin`, `~/.bun/bin`,
   `~/.local/bin`, `~/.volta/bin`, and friends before resolving `cairn`.

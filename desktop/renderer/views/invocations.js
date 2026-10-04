@@ -72,9 +72,10 @@
    * (`refusals`, the reduced model's list) makes it "refused".
    * @param {Record<string, any> | null} journal
    * @param {Array<Record<string, any>>} [refusals] model.refusals
-   * @returns {Array<{ index: number, spec: string, labels: Record<string, string> | null, status: string, runId: string | null, refusal: ReturnType<typeof CairnPolicy.normalizeRefusal> }>}
+   * @param {Record<string, any> | null} [bailed] model.policy.bailed
+   * @returns {Array<{ index: number, spec: string, labels: Record<string, string> | null, status: string, reason: string | null, runId: string | null, refusal: ReturnType<typeof CairnPolicy.normalizeRefusal> }>}
    */
-  function plannedRows(journal, refusals = []) {
+  function plannedRows(journal, refusals = [], bailed = null) {
     const runs = new Map(
       (journal?.runs ?? []).map((/** @type {any} */ entry) => [
         entry.index,
@@ -93,8 +94,18 @@
         (refused ? "refused" : isCurrent ? "running" : "pending");
       // A run still "running" in an ended journal was cut off.
       if (ended && status === "running") status = "interrupted";
-      if (ended && status === "pending") status = "not run";
+      // --bail: specs the first failure kept from starting are skipped, not
+      // "not run" (an invocation.bailed event or the settled summary says so)
+      let reason = null;
+      if (ended && status === "pending") {
+        const skipped =
+          Boolean(bailed) || Number(journal?.summary?.skipped) > 0;
+        status = skipped ? "skipped" : "not run";
+        if (skipped)
+          reason = bailed?.spec ? `bailed after ${bailed.spec}` : "bailed";
+      }
       return {
+        reason,
         index: entry.index,
         spec: entry.spec,
         labels: entry.labels ?? null,
@@ -279,6 +290,7 @@
       journal.current?.index,
       (journal.runs ?? []).map((/** @type {any} */ entry) => entry.status),
       journal.endedAt,
+      journal.delegate?.remoteInvocationId ?? null,
     ]);
   }
 
@@ -305,6 +317,7 @@
           statusDot(shown, journal.alive),
           Studio.tag(shown, statusTone(shown)),
           Studio.originBadge(journal, { fromApp: pids.has(journal.pid) }),
+          delegateTag(journal),
           progress.total
             ? h("span", {
                 class: "tag",
@@ -330,6 +343,29 @@
         ),
       ),
     );
+  }
+
+  /**
+   * "delegated" on an invocation whose environment has a runner: its runs
+   * execute elsewhere; this process relays them and owns Stop.
+   * @param {Record<string, any>} journal
+   * @returns {HTMLElement | null}
+   */
+  function delegateTag(journal) {
+    const delegate = journal?.delegate;
+    if (!delegate) return null;
+    const remote = delegate.remoteInvocationId
+      ? `remote invocation ${delegate.remoteInvocationId}`
+      : "remote invocation not announced yet";
+    return h("span", {
+      class: delegate.diagnostics > 0 ? "tag tag-warn" : "tag tag-info",
+      title: `runs on a delegated runner (${delegate.command.join(" ")}); ${remote}${
+        delegate.diagnostics > 0
+          ? `; ${delegate.diagnostics} runner diagnostic(s) in the journal`
+          : ""
+      }. Stop cancels the runner, which cancels the remote invocation.`,
+      text: "delegated",
+    });
   }
 
   function paintList() {
@@ -489,6 +525,7 @@
     let polling = false;
     let headSig = "";
     let planSig = "";
+    let policySig = "";
     let setupSig = "";
     let destroyed = false;
 
@@ -545,6 +582,14 @@
     );
     const setupList = h("div", { class: "timeline inv-setup hidden" });
     const output = Studio.panes.createOutputPanel({ title: "Logs" });
+    // what the config run: block, --bail and --suite did (journal events)
+    const policyTitle = h(
+      "div",
+      { class: "section-title hidden", style: { marginTop: "0" } },
+      "Run policy",
+    );
+    const policyHost = h("div", { class: "inv-policy hidden" });
+    const suiteTag = h("span", { class: "tag hidden" });
     const root = h(
       "section",
       {
@@ -560,6 +605,8 @@
         originSlot,
         livenessSlot,
         pidTag,
+        suiteTag,
+        delegateTag(journal),
         elapsed,
         h("div", { class: "card-actions" }, stopButton, revealButton),
       ),
@@ -569,6 +616,8 @@
         { class: "panel-body" },
         failure,
         facts,
+        policyTitle,
+        policyHost,
         h(
           "div",
           { class: "inv-detail-grid" },
@@ -584,6 +633,42 @@
         ),
       ),
     );
+
+    /** The run policy's findings, from the journal's events and summary. */
+    function paintPolicy() {
+      const summary = journal?.summary ?? null;
+      const services = model.services.filter(
+        (/** @type {any} */ row) =>
+          row.phase === "teardown" &&
+          row.event === "fail" &&
+          (row.data?.critical || row.data?.provisioner),
+      );
+      const suite = journal?.suite ?? model.policy.suite?.name ?? null;
+      const sig = JSON.stringify([
+        { ...model.policy, metrics: model.policy.metrics.length },
+        summary?.runPolicy ?? null,
+        summary?.skipped ?? null,
+        summary?.exitCode ?? null,
+        services.length,
+        suite,
+      ]);
+      if (sig === policySig) return;
+      policySig = sig;
+      if (suite) {
+        suiteTag.textContent = `suite ${suite}`;
+        suiteTag.title = "cairn run --suite";
+        suiteTag.className = "tag tag-info";
+      } else suiteTag.className = "tag hidden";
+      Studio.clear(policyHost);
+      const panel = Studio.ops.policyPanel({
+        policy: model.policy,
+        summary,
+        services,
+      });
+      policyTitle.classList.toggle("hidden", !panel);
+      policyHost.classList.toggle("hidden", !panel);
+      if (panel) policyHost.appendChild(panel);
+    }
 
     /** Gate waits and fixture verbs from the journal (repainted on change). */
     function paintSetup() {
@@ -793,10 +878,16 @@
           "result",
           `${summary.passed ?? 0} passed · ${summary.failed ?? 0} failed · ${
             summary.errored ?? 0
-          } errored${refused ? ` · ${refused} refused` : ""} of ${
-            summary.total ?? "?"
-          } · exit ${summary.exitCode ?? "?"}${
-            summary.exitCode === 7 ? " (refused by the environment policy)" : ""
+          } errored${refused ? ` · ${refused} refused` : ""}${
+            summary.skipped ? ` · ${summary.skipped} skipped (bailed)` : ""
+          } of ${summary.total ?? "?"} · exit ${summary.exitCode ?? "?"}${
+            summary.exitCode === 7
+              ? " (refused by the environment policy)"
+              : summary.exitCode === 8
+                ? " (critical teardown failed)"
+                : summary.exitCode === 9
+                  ? " (dirty state after the run)"
+                  : ""
           }`,
         ]);
       }
@@ -823,7 +914,7 @@
     }
 
     function paintPlan() {
-      const rows = plannedRows(journal, model.refusals);
+      const rows = plannedRows(journal, model.refusals, model.policy.bailed);
       const sig = JSON.stringify(rows);
       if (sig === planSig) return;
       planSig = sig;
@@ -869,7 +960,7 @@
                 row.status === "refused"
                   ? CairnPolicy.refusalText(row.refusal)
                   : null,
-              text: row.status,
+              text: row.reason ? `${row.status} · ${row.reason}` : row.status,
             }),
             row.status === "refused" && row.refusal?.reason
               ? h("span", {
@@ -961,9 +1052,10 @@
         syncSources();
         paintEvents();
         paintSetup();
+        paintPolicy();
         // run.refused events settle planned specs that never got a run (and
         // may make the whole invocation "refused").
-        if (journal && model.refusals.length) {
+        if (journal && (model.refusals.length || model.policy.bailed)) {
           paintHead();
           paintPlan();
         }

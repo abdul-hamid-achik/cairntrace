@@ -240,9 +240,18 @@ export async function openAccompany(
     ...runOpts,
     listener: {
       ...callerListener,
-      onStepFinish: (idx, stepId, status, durationMs, error) => {
-        session.recorder?.stepFinished(idx, status, error);
-        callerListener?.onStepFinish?.(idx, stepId, status, durationMs, error);
+      onStepFinish: (idx, stepId, status, durationMs, error, nested) => {
+        // F14: the recorder tracks top-level steps; a nested step's block
+        // reports for it when the block finishes.
+        if (!nested) session.recorder?.stepFinished(idx, status, error);
+        callerListener?.onStepFinish?.(
+          idx,
+          stepId,
+          status,
+          durationMs,
+          error,
+          nested,
+        );
       },
     },
     onLocatorMiss: async (ctx) => {

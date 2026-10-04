@@ -402,9 +402,36 @@
       return started;
     },
 
+    /**
+     * `cairn run --suite <name>` through the same launch path as Run (main
+     * resolves the suite's specs, refuses an environment its `requires`
+     * rules out, and spawns the CLI).
+     * @param {string} name
+     * @param {Record<string, any>} [overrides] e.g. `{ env }`
+     */
+    async startSuite(name, overrides) {
+      const started = await api.call(
+        "run:start",
+        { suite: name, overrides },
+        null,
+      );
+      const record = started?.token ? state.live.get(started.token) : null;
+      if (record) record.overrides = overrides ?? null;
+      setStatus(`running suite ${name}…`);
+      toast("Suite started", name, "info", 3000);
+      return started;
+    },
+
     async cancelRun(token) {
       const result = await api.call("run:cancel", token);
-      if (result?.cancelled) toast("Run cancelled", null, "info", 2600);
+      if (result?.cancelled && result.delegated)
+        toast(
+          "Cancelling the delegated run",
+          "SIGINT sent: cairn gives its runner up to cancelGraceMs to cancel the remote invocation and copy the results back",
+          "info",
+          5000,
+        );
+      else if (result?.cancelled) toast("Run cancelled", null, "info", 2600);
       return result;
     },
 

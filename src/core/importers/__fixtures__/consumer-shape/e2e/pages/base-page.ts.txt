@@ -1,0 +1,27 @@
+import { expect, Page } from "@playwright/test";
+
+export class BasePage {
+  constructor(public page: Page) {}
+
+  async click(selector: string): Promise<void> {
+    await this.page.click(selector);
+  }
+
+  async waitForSelector(selector: string) {
+    return await this.page.waitForSelector(selector);
+  }
+
+  async fillInput(fieldKey: string, value: string): Promise<void> {
+    const selector = `css=[data-field-key="${fieldKey}"] >> input`;
+    await this.page.fill(selector, value, { strict: true });
+  }
+
+  async clickButtonWithText(text: string, parentSelector?: string): Promise<void> {
+    const prefix = parentSelector ? `${parentSelector} >> ` : "";
+    await this.page.click(`${prefix}button:has-text("${text}")`);
+  }
+
+  async checkHeading(text: string): Promise<void> {
+    await expect(this.page.locator(".heading .text")).toHaveText(text);
+  }
+}

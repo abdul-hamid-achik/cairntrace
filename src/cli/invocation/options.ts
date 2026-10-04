@@ -158,6 +158,7 @@ export function runOptionsToArgv(
   flag("--monitor", opts.monitor);
   flag("--since-codemap", opts.sinceCodemap);
   flag("--select-only", opts.selectOnly);
+  flag("--suite", opts.suite);
   each("--tag", opts.tag);
   each("--label", opts.label);
   each("--before", opts.before);
@@ -166,7 +167,10 @@ export function runOptionsToArgv(
   flag("--repeat", opts.repeat);
   flag("--matrix", opts.matrix);
   flag("--stop-on-fail", opts.stopOnFail);
+  flag("--bail", opts.bail);
+  if (opts.bail === false) argv.push("--no-bail");
   flag("--strict-requires", opts.strictRequires);
   flag("--allow-fixture-writes", opts.allowFixtureWrites);
+  flag("--run-token", opts.runToken);
   return argv;
 }

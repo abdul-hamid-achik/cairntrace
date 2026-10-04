@@ -105,11 +105,13 @@ describe("importPlaywright", () => {
       ].join("\n"),
     );
 
+    // Unmapped constructs carry their reason; the statement text is verbatim.
     expect(imported.todos).toEqual([
-      "await expect.poll(async () => 42).toBe(42);",
+      "await expect.poll(async () => 42).toBe(42); — expect.poll(...) is not imported; use a verifier poll: or wait: step",
       "No Playwright expect() assertion mapped; replace placeholder outcome.",
     ]);
     expect(imported.yaml).toContain("# TODO: await expect.poll");
+    expect(imported.coverage).toMatchObject({ mapped: 1, unmapped: 1 });
     expect(imported.spec.outcomes[0]).toMatchObject({
       id: "todo_assertion",
       verify: { text: { contains: "TODO_replace_me" } },
@@ -147,9 +149,11 @@ describe("importPlaywright", () => {
         },
       },
       {
-        id: "role_visible_2",
-        description: "expected role is visible",
-        verify: { count: { role: "button", atLeast: 1 } },
+        // A role with a name cannot be counted by name: the closest verifier
+        // is the visible text, reported as an approximation.
+        id: "text_visible_2",
+        description: "expected text is visible",
+        verify: { text: { contains: "Start" } },
       },
       {
         id: "text_visible_3",
@@ -197,7 +201,7 @@ describe("importPlaywright", () => {
     expect(imported.yaml).toContain("second case");
   });
 
-  it("drops .nth(N) on a selector locator with an explicit TODO", () => {
+  it("keeps .nth(N) on a selector locator (the schema supports it)", () => {
     const imported = importPlaywright(
       [
         "test('Rows', async ({ page }) => {",
@@ -206,15 +210,11 @@ describe("importPlaywright", () => {
       ].join("\n"),
     );
 
-    // SelectorLocatorSchema doesn't support nth, so the locator stays valid
-    // (no nth) and the dropped position is surfaced loudly instead of silently
-    // retargeting the element.
     expect(imported.spec.steps).toEqual([
-      { click: { by: "selector", selector: ".row" } },
+      { click: { by: "selector", selector: ".row", nth: 2 } },
     ]);
-    expect(
-      imported.todos.some((t) => t.includes(".nth(2)") && t.includes(".row")),
-    ).toBe(true);
+    // No nth-related TODO; only the missing-assertion placeholder remains.
+    expect(imported.todos.some((t) => t.includes("nth"))).toBe(false);
   });
 
   it("imports page.request.fetch with an explicit method", () => {
@@ -336,7 +336,9 @@ describe("importPlaywright", () => {
 
     const imported = importPlaywright(source);
     expect(imported.spec.name).toBe("checkout_succeeds");
+    // The beforeEach hook runs before the test, so its steps come first.
     expect(imported.spec.steps).toEqual([
+      { open: "/warmup" },
       { open: "/cart" },
       { click: { by: "role", role: "button", name: "Pay" } },
     ]);
@@ -415,7 +417,7 @@ describe("importPlaywright", () => {
     expect(SpecSchema.safeParse(imported.spec).success).toBe(true);
   });
 
-  it("imports a POM-style test: real title, expect mapped, page-object calls left as TODOs", () => {
+  it("imports a POM-style test: the page-object method is inlined, a typed password becomes a secret placeholder", () => {
     const source = [
       `import { expect, test, type Page } from "@playwright/test";`,
       ``,
@@ -441,7 +443,16 @@ describe("importPlaywright", () => {
 
     const imported = importPlaywright(source);
     expect(imported.spec.name).toBe("user_sees_the_dashboard_after_login");
-    expect(imported.spec.steps).toEqual([{ open: "/login" }]);
+    expect(imported.spec.steps).toEqual([
+      { open: "/login" },
+      {
+        id: "log_in",
+        fill: { by: "label", name: "Email", value: "demo@example.test" },
+      },
+      {
+        fill: { by: "label", name: "Password", value: "${secrets.PASSWORD}" },
+      },
+    ]);
     expect(imported.spec.outcomes).toEqual([
       {
         id: "text_visible",
@@ -449,11 +460,7 @@ describe("importPlaywright", () => {
         verify: { text: { contains: "Dashboard" } },
       },
     ]);
-    expect(imported.todos).toContain(
-      `await loginPage.login("demo@example.test", "pw");`,
-    );
-    expect(imported.todos.some((todo) => todo.includes("Skipped test"))).toBe(
-      false,
-    );
+    expect(imported.todos).toEqual([]);
+    expect(imported.yaml).not.toContain("pw");
   });
 });

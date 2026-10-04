@@ -8,6 +8,12 @@
  *   bounds `observed` (≤20 rows, ≤4KB per row, a `truncated` flag);
  * - `expects/NNN_<id>.json` (the `expect` step's verdict);
  * - `captures/<assign>.json` (the `capture` step's value);
+ * - `widgets/NNN_<id>.json` (F15: a set / check / choose / form step's
+ *   per-field expected vs committed values, driver and failures, plus the
+ *   unanswered-fields dump) and `requests/<assign>.json` (F18: status,
+ *   retry / poll attempts, captures, matrix combinations);
+ * - the xlsx verifier's raw sidecar (F17: sheets, header columns and every
+ *   check it ran);
  * - `fixtures.json` (the run's fixture ledger) and the per-project
  *   `~/.cairntrace/fixtures/<project>.ledger.jsonl` (folded into the live
  *   state per environment and fixture, like `cairn fixtures status`).
@@ -36,6 +42,14 @@ const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_STEP_FILES = 300;
 /** Tail of a fixtures ledger read for the latest state per fixture. */
 const MAX_LEDGER_BYTES = 512 * 1024;
+/** One widgets/ or requests/ file at most (the runner bounds values). */
+const MAX_STEP_FILE_BYTES = 512 * 1024;
+/** All widgets/ (or requests/) files of one run together. */
+const MAX_STEP_EVIDENCE_BYTES = 8 * 1024 * 1024;
+/** Widget fields listed per step file. */
+const MAX_WIDGET_FIELDS = 100;
+/** Matrix combinations listed per request (the schema allows 200). */
+const MAX_MATRIX_ROWS = 200;
 
 /**
  * @param {unknown} value
@@ -374,7 +388,9 @@ function normalizeAttempts(list) {
  *   attempts: ReturnType<typeof normalizeAttempts>,
  *   attemptCount: number | null,
  *   polledMs: number | null,
+ *   checks?: EvidenceCheck[] | null,
  * }} DataEvidence
+ * @typedef {{ ok: boolean | null, label: string, detail: string | null }} EvidenceCheck
  */
 
 /**
@@ -399,6 +415,7 @@ function normalizeRawEvidence(raw) {
  */
 function normalizeRawEvidenceOf(raw) {
   if (!isRecord(raw)) return null;
+  if (isXlsxRaw(raw)) return normalizeXlsxEvidence(raw);
   const kind = str(raw.kind) ?? "evidence";
   const observed = raw.observed;
   const attempts = normalizeAttempts(raw.attempts);
@@ -613,16 +630,282 @@ function normalizeRawEvidenceOf(raw) {
   };
 }
 
+// ── F17 xlsx verifier evidence ────────────────────────────────────────────
+
+/**
+ * The xlsx verifier's raw sidecar: `{path, sheets, sheet?, columns?,
+ * checks}` (no `kind`; a poll adds `attempts` / `polledMs`).
+ * @param {Record<string, any>} raw
+ * @returns {boolean}
+ */
+function isXlsxRaw(raw) {
+  return (
+    (str(raw.kind) === null || raw.kind === "xlsx") &&
+    Array.isArray(raw.checks) &&
+    Array.isArray(raw.sheets)
+  );
+}
+
+/**
+ * @param {unknown} list
+ * @param {number} [max]
+ * @returns {string}
+ */
+function listText(list, max = 12) {
+  const items = Array.isArray(list)
+    ? list.map((item) =>
+        typeof item === "string" ? item : CairnEvents.maskValue(null, item, 80),
+      )
+    : [];
+  const shown = items.slice(0, max).join(", ");
+  return items.length > max ? `${shown}, … +${items.length - max}` : shown;
+}
+
+/**
+ * One xlsx check as display lines (a headers or rows block holds several).
+ * @param {unknown} check
+ * @returns {EvidenceCheck[]}
+ */
+function xlsxChecks(check) {
+  if (!isRecord(check)) return [];
+  /** @type {EvidenceCheck[]} */
+  const out = [];
+  const line = (
+    /** @type {boolean | null} */ ok,
+    /** @type {string} */ label,
+    /** @type {string | null} */ detail = null,
+  ) =>
+    out.push({
+      ok,
+      label: CairnEvents.maskValue(null, label, 300),
+      detail: detail ? CairnEvents.maskValue(null, detail, 600) : null,
+    });
+  if (Array.isArray(check.contains) && "scope" in check) {
+    const missing = Array.isArray(check.missingText) ? check.missingText : [];
+    line(
+      missing.length === 0,
+      `${str(check.scope) ?? "workbook"} contains ${listText(check.contains)}`,
+      missing.length ? `missing ${listText(missing)}` : null,
+    );
+  } else if ("sheet" in check && "found" in check && !("cell" in check)) {
+    const missing = Array.isArray(check.missingText) ? check.missingText : [];
+    if (check.found === false)
+      line(false, `sheet ${check.sheet}`, "no such sheet");
+    else
+      line(
+        missing.length === 0,
+        `sheet ${check.sheet}${
+          Array.isArray(check.contains) && check.contains.length
+            ? ` contains ${listText(check.contains)}`
+            : ""
+        }`,
+        missing.length ? `missing ${listText(missing)}` : null,
+      );
+  } else if (isRecord(check.headers)) {
+    const headers = check.headers;
+    const rows = `label row ${headers.labelRow ?? 1}${
+      headers.keyRow !== undefined ? `, key row ${headers.keyRow}` : ""
+    }`;
+    if (num(headers.columnCount) === 0)
+      line(false, "header columns", `none in ${rows}`);
+    if (isRecord(headers.present)) {
+      const missing = Array.isArray(headers.present.missing)
+        ? headers.present.missing
+        : [];
+      line(
+        missing.length === 0,
+        "headers present",
+        missing.length ? `missing ${listText(missing)}` : rows,
+      );
+    }
+    if (isRecord(headers.absent)) {
+      const found = Array.isArray(headers.absent.found)
+        ? headers.absent.found
+        : [];
+      line(
+        found.length === 0,
+        "headers absent",
+        found.length ? `found ${listText(found)}` : null,
+      );
+    }
+    if (isRecord(headers.labels)) {
+      const mismatches = Array.isArray(headers.labels.mismatches)
+        ? headers.labels.mismatches
+        : [];
+      line(
+        mismatches.length === 0,
+        "header labels by key",
+        mismatches.length ? listText(mismatches, 6) : null,
+      );
+    }
+    for (const key of ["includesInOrder", "withinListInOrder"]) {
+      const result = headers[key];
+      if (!isRecord(result)) continue;
+      const missing = Array.isArray(result.missing) ? result.missing : [];
+      const extra = Array.isArray(result.extra) ? result.extra : [];
+      const outOfOrder = Array.isArray(result.outOfOrder)
+        ? result.outOfOrder
+        : [];
+      const problems = [
+        missing.length ? `missing ${listText(missing)}` : null,
+        extra.length ? `not in the list ${listText(extra)}` : null,
+        outOfOrder.length ? `out of order ${listText(outOfOrder)}` : null,
+      ].filter(Boolean);
+      line(
+        problems.length === 0,
+        `${key} ${listText(result.list)}`,
+        problems.length
+          ? problems.join("; ")
+          : Array.isArray(result.positions)
+            ? `at ${listText(result.positions)}`
+            : null,
+      );
+    }
+  } else if (isRecord(check.rows)) {
+    const rows = check.rows;
+    if (isRecord(rows.afterKeyRow)) {
+      const expected = isRecord(rows.afterKeyRow.expected)
+        ? rows.afterKeyRow.expected
+        : {};
+      const want =
+        expected.count !== undefined
+          ? `count ${expected.count}`
+          : [
+              expected.atLeast !== undefined ? `≥ ${expected.atLeast}` : null,
+              expected.atMost !== undefined ? `≤ ${expected.atMost}` : null,
+            ]
+              .filter(Boolean)
+              .join(" and ") || "any";
+      const actual = num(rows.afterKeyRow.actual);
+      const ok =
+        actual === null
+          ? null
+          : expected.count !== undefined
+            ? actual === expected.count
+            : (expected.atLeast === undefined || actual >= expected.atLeast) &&
+              (expected.atMost === undefined || actual <= expected.atMost);
+      line(
+        ok,
+        `data rows after row ${(num(rows.firstDataRow) ?? 2) - 1}: ${want}`,
+        `${actual ?? "?"} row(s)`,
+      );
+    }
+    if (isRecord(rows.match)) {
+      line(
+        rows.match.matched === true,
+        `a row where ${str(rows.match.wanted) ?? "?"}`,
+        rows.match.matched === true
+          ? `row ${rows.match.row ?? "?"}`
+          : `no match in ${num(rows.dataRows) ?? "?"} row(s)`,
+      );
+    }
+  } else if ("cell" in check) {
+    if (check.found === false)
+      line(false, `cell ${check.cell}`, "sheet not found");
+    else {
+      const fmtCode = isRecord(check.numFmt)
+        ? (str(check.numFmt.code) ?? `#${check.numFmt.id ?? "?"}`)
+        : null;
+      line(
+        typeof check.passed === "boolean" ? check.passed : null,
+        `cell ${check.cell}`,
+        `${JSON.stringify(String(check.value ?? ""))}${
+          fmtCode ? ` · numFmt ${fmtCode}` : ""
+        }`,
+      );
+    }
+  } else if (isRecord(check.validation)) {
+    const v = check.validation;
+    const covering = Array.isArray(check.covering) ? check.covering : [];
+    line(
+      check.found === true,
+      `validation ${str(v.column) ?? "?"}${v.type ? ` (${v.type})` : ""}${
+        v.formulaMatches !== undefined
+          ? ` formula ~ ${listText([v.formulaMatches].flat())}`
+          : ""
+      }`,
+      covering.length
+        ? `covering: ${covering
+            .slice(0, 4)
+            .map((entry) =>
+              isRecord(entry)
+                ? `${entry.type ?? "any"} ${entry.sqref ?? ""}${
+                    entry.formula1 !== undefined ? ` ${entry.formula1}` : ""
+                  }`
+                : String(entry),
+            )
+            .join("; ")}`
+        : check.columnIndex === undefined
+          ? "column not found"
+          : "none covers the column",
+    );
+  }
+  return out;
+}
+
+/**
+ * F17 xlsx evidence: the workbook (file name only), its sheets, the checked
+ * sheet's header columns as a table, and one line per check.
+ * @param {Record<string, any>} raw
+ * @returns {DataEvidence}
+ */
+function normalizeXlsxEvidence(raw) {
+  /** @type {Array<[string, string]>} */
+  const facts = [];
+  const fact = (/** @type {string} */ label, /** @type {unknown} */ item) => {
+    if (item === null || item === undefined || item === "") return;
+    facts.push([label, CairnEvents.maskValue(label, item, 300)]);
+  };
+  const file = str(raw.path);
+  fact("workbook", file ? path.basename(file) : null);
+  fact("sheets", listText(raw.sheets));
+  fact("checked sheet", str(raw.sheet));
+  const columns = Array.isArray(raw.columns)
+    ? raw.columns.filter(isRecord)
+    : [];
+  const table = columns.length
+    ? tableFromObjects(
+        columns.map((column) => ({
+          column: column.letter,
+          label: column.label,
+          ...(column.key !== undefined ? { key: column.key } : {}),
+        })),
+        { unit: "columns", prefer: ["column", "label", "key"] },
+      )
+    : null;
+  const checks = raw.checks.flatMap(xlsxChecks).slice(0, 120);
+  const failed = checks.filter((entry) => entry.ok === false).length;
+  fact(
+    "checks",
+    `${checks.length}${failed ? ` (${failed} failed)` : " passed"}`,
+  );
+  return {
+    kind: "xlsx",
+    source: null,
+    request: null,
+    facts,
+    table,
+    value: null,
+    truncated: false,
+    note: null,
+    attempts: normalizeAttempts(raw.attempts),
+    attemptCount: num(raw.attemptCount),
+    polledMs: num(raw.polledMs),
+    checks,
+  };
+}
+
 /**
  * Read and parse a JSON file inside a run directory (bounded); null when it
  * is missing, too big or not JSON.
  * @param {string} file
+ * @param {number} [maxBytes]
  * @returns {unknown}
  */
-function readJsonBounded(file) {
+function readJsonBounded(file, maxBytes = MAX_JSON_BYTES) {
   try {
     const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size > MAX_JSON_BYTES) return null;
+    if (!stat.isFile() || stat.size > maxBytes) return null;
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return null;
@@ -685,6 +968,209 @@ function readExpects(runDir) {
       table,
       observed:
         observed === undefined || table ? null : preview(observed, 1600),
+      readable: isRecord(doc),
+    };
+  });
+}
+
+// ── F15 widget evidence / F18 request evidence ────────────────────────────
+
+/** A masked value, as the runner masks one. */
+const MASKED = "••••••";
+
+/**
+ * One widget value (expected / committed) as a display line: masked when
+ * the field looks like a credential or the runner already redacted it.
+ * @param {unknown} value
+ * @param {boolean} masked
+ * @returns {string | null}
+ */
+function widgetValue(value, masked) {
+  if (value === undefined) return null;
+  if (masked || value === "[redacted]") return MASKED;
+  // an empty read-back is the evidence: say so instead of a blank cell
+  if (value === "") return '""';
+  return CairnEvents.maskValue(null, value, 300);
+}
+
+/**
+ * The step's `widgets/NNN_<id>.json` evidence (F15): per field, what the
+ * spec asked for and what the page committed, the driver and path it took,
+ * the form verify pass, and — when a form failed with `dumpUnanswered` —
+ * the fields still empty. Values of credential-looking fields never show.
+ * @param {string} runDir
+ */
+function readWidgets(runDir) {
+  let budget = MAX_STEP_EVIDENCE_BYTES;
+  return jsonFilesIn(runDir, "widgets").map((file) => {
+    const target = insideRun(runDir, file);
+    let doc = null;
+    if (target && budget > 0) {
+      doc = readJsonBounded(target, Math.min(MAX_STEP_FILE_BYTES, budget));
+      try {
+        budget -= fs.statSync(target).size;
+      } catch {
+        // gone meanwhile
+      }
+    }
+    const record = isRecord(doc) ? doc : {};
+    const list = Array.isArray(record.fields) ? record.fields : [];
+    const fields = list
+      .filter(isRecord)
+      .slice(0, MAX_WIDGET_FIELDS)
+      .map((entry) => {
+        const field = str(entry.field) ?? "?";
+        const masked =
+          CairnEvents.isSecretKey(field) ||
+          entry.expected === "[redacted]" ||
+          entry.actual === "[redacted]";
+        const final = isRecord(entry.final) ? entry.final : null;
+        return {
+          field: CairnEvents.maskValue(null, field, 200),
+          status: str(entry.status) ?? "unknown",
+          driver: str(entry.driver),
+          via: str(entry.via),
+          expected: widgetValue(entry.expected, masked),
+          actual: widgetValue(entry.actual, masked),
+          final: final
+            ? {
+                status: str(final.status) ?? "?",
+                actual: widgetValue(final.actual, masked),
+                matches:
+                  typeof final.matches === "boolean" ? final.matches : null,
+              }
+            : null,
+          error: str(entry.error)
+            ? CairnEvents.maskValue(null, entry.error, 600)
+            : null,
+          reason: str(entry.reason)
+            ? CairnEvents.maskValue(null, entry.reason, 200)
+            : null,
+          root: str(entry.root)
+            ? CairnEvents.maskValue(null, entry.root, 120)
+            : null,
+          rootText:
+            !masked && str(entry.rootText)
+              ? CairnEvents.maskValue(null, entry.rootText, 300)
+              : null,
+          notes:
+            !masked && Array.isArray(entry.notes)
+              ? entry.notes
+                  .slice(0, 8)
+                  .map((note) => CairnEvents.maskValue(null, note, 200))
+              : [],
+          durationMs: num(entry.durationMs),
+          masked,
+        };
+      });
+    const dump = isRecord(record.unanswered) ? record.unanswered : null;
+    return {
+      path: file,
+      stepId: str(record.stepId),
+      kind: str(record.kind),
+      status: str(record.status) ?? "unknown",
+      error: str(record.error)
+        ? CairnEvents.maskValue(null, record.error, 1200)
+        : null,
+      fields,
+      fieldsTotal: list.length,
+      unanswered: dump
+        ? {
+            total: num(dump.total),
+            error: str(dump.error)
+              ? CairnEvents.maskValue(null, dump.error, 300)
+              : null,
+            fields: (Array.isArray(dump.fields) ? dump.fields : [])
+              .filter(isRecord)
+              .slice(0, MAX_ROWS)
+              .map((entry) => ({
+                key: CairnEvents.maskValue(null, entry.key ?? "?", 160),
+                driver: str(entry.driver),
+                required: entry.required === true,
+                label: str(entry.label)
+                  ? CairnEvents.maskValue(null, entry.label, 160)
+                  : null,
+              })),
+            listed: Array.isArray(dump.fields) ? dump.fields.length : 0,
+          }
+        : null,
+      readable: isRecord(doc),
+    };
+  });
+}
+
+/**
+ * A matrix combination's values as one line (`route={…} auth=••••••`).
+ * @param {unknown} values
+ * @returns {string}
+ */
+function combinationText(values) {
+  if (!isRecord(values)) return "";
+  return Object.entries(values)
+    .map(([key, value]) => `${key}=${CairnEvents.maskValue(key, value, 120)}`)
+    .join(" ")
+    .slice(0, 400);
+}
+
+/**
+ * The run's `requests/<assign>.json` envelopes (F18), summarized: method,
+ * URL (query dropped, userinfo masked), status, attempts a retry / until
+ * sent, capture names with masked values, and a matrix's combinations with
+ * their status. Bodies and headers stay in the file, one click away.
+ * @param {string} runDir
+ */
+function readRequests(runDir) {
+  let budget = MAX_STEP_EVIDENCE_BYTES;
+  return jsonFilesIn(runDir, "requests").map((file) => {
+    const target = insideRun(runDir, file);
+    let doc = null;
+    if (target && budget > 0) {
+      doc = readJsonBounded(target, Math.min(MAX_STEP_FILE_BYTES, budget));
+      try {
+        budget -= fs.statSync(target).size;
+      } catch {
+        // gone meanwhile
+      }
+    }
+    const record = isRecord(doc) ? doc : {};
+    const matrix = Array.isArray(record.matrix)
+      ? record.matrix.filter(isRecord)
+      : null;
+    return {
+      path: file,
+      assign: path.basename(file, ".json"),
+      method: str(record.method)
+        ? CairnEvents.maskValue(null, record.method, 40)
+        : null,
+      url: redactUrl(record.url),
+      status: num(record.status),
+      ok: typeof record.ok === "boolean" ? record.ok : null,
+      attempts: num(record.attempts),
+      captures: isRecord(record.captures)
+        ? Object.entries(record.captures)
+            .slice(0, 30)
+            .map(([key, value]) => [
+              key,
+              CairnEvents.maskValue(key, value, 160),
+            ])
+        : [],
+      matrix: matrix
+        ? {
+            total: matrix.length,
+            mismatched: matrix.filter((entry) => entry.matched === false)
+              .length,
+            rows: matrix.slice(0, MAX_MATRIX_ROWS).map((entry) => ({
+              values: combinationText(entry.values),
+              method: str(entry.method) ?? "?",
+              url: redactUrl(entry.url),
+              status: num(entry.status),
+              matched: entry.matched !== false,
+              error: str(entry.error)
+                ? CairnEvents.maskValue(null, entry.error, 300)
+                : null,
+            })),
+          }
+        : null,
       readable: isRecord(doc),
     };
   });
@@ -954,6 +1440,8 @@ module.exports = {
   readJsonBounded,
   readExpects,
   readCaptures,
+  readWidgets,
+  readRequests,
   readRunFixtures,
   readFixtureLedger,
   foldLedgerRecords,

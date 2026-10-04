@@ -16,13 +16,18 @@ import type {
   WaitCondition,
   WaitStep,
 } from "../../core/schema/spec.v1";
-import { clickLocator } from "../../core/schema/spec.v1";
+import {
+  backendWaitCondition,
+  clickLocator,
+  fillLocator,
+} from "../../core/schema/spec.v1";
 import { resolveTestIdAttribute, testIdSelector } from "../../core/locators";
 import {
   normalizeNearText,
   pickNearestSnapshotMatches,
 } from "../../core/locatorNear";
 import { accessibleNameMatches } from "../../core/textMatching";
+import { ensureUploadReadable, uploadMarkJs } from "./uploadFallback";
 import type {
   BrowserBackend,
   ConsoleEntry,
@@ -202,8 +207,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
     if ("focus" in step) return this.runInteractiveStep(step.focus, "focus");
     if ("fill" in step) {
-      const { value, ...locator } = step.fill;
-      return this.runInteractiveStep(locator as Locator, "fill", value);
+      return this.runInteractiveStep(
+        fillLocator(step),
+        "fill",
+        step.fill.value,
+      );
     }
     if ("type" in step) {
       const { value, delayMs, ...locator } = step.type;
@@ -233,7 +241,24 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
     if ("upload" in step) {
       const { path, ...locator } = step.upload;
-      return this.runInteractiveStep(locator as Locator, "upload", path);
+      // Mark the file inputs first so the readability probe (and a rebuild)
+      // touch only the input this upload changed. Best effort.
+      await this.evaluate(uploadMarkJs(), { timeoutMs: 5_000 }).catch(
+        () => undefined,
+      );
+      const uploaded = await this.runInteractiveStep(
+        locator as Locator,
+        "upload",
+        path,
+      );
+      if (!uploaded.ok) return uploaded;
+      // F15: a renderer that cannot read the CDP-set file gets it rebuilt
+      // from bytes in the page (DataTransfer); `via` records which path won.
+      return ensureUploadReadable(
+        (js, opts) => this.evaluate(js, opts),
+        uploaded,
+        path,
+      );
     }
     if ("scroll" in step && "to" in step.scroll) {
       return this.runScrollToStep(step.scroll.to);
@@ -291,7 +316,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * without a spec budget keep the single-invocation path.
    */
   private async runWaitStep(step: WaitStep): Promise<InvocationResult> {
-    const w = step.wait;
+    const w = backendWaitCondition(step.wait);
     const budgetMs = "timeoutMs" in w ? w.timeoutMs : undefined;
     if ("load" in w || budgetMs === undefined) {
       // Cairn enforces the wait deadline itself: the child gets the spec's
@@ -721,6 +746,15 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   /* ----- network ----- */
 
+  /**
+   * agent-browser's `network requests` (0.38) lists a refused, blocked or
+   * cancelled request with neither a status nor an error — exactly like one
+   * still in flight; `network request <id>` adds nothing. Only a HAR capture
+   * (`network har start` … `stop`) carries the failure (status 0 with a
+   * `net::ERR_*` statusText), and only for requests made while it ran.
+   */
+  readonly reportsRequestFailures = false;
+
   async getNetworkRequests(filter?: NetworkFilter): Promise<NetworkEntry[]> {
     const argv = ["network", "requests", "--json"];
     if (filter?.method) argv.push("--method", filter.method);
@@ -834,9 +868,20 @@ export class AgentBrowserAdapter implements BrowserBackend {
    */
   async evaluate(
     js: string,
-    opts: { timeoutMs?: number } = {},
+    opts: { timeoutMs?: number; sensitive?: boolean } = {},
   ): Promise<InvocationResult> {
-    return this.invoke(["eval", js], opts);
+    const { sensitive, ...invokeOpts } = opts;
+    // Large scripts (the widget runtime with custom drivers, an upload's
+    // bytes) go through stdin: one argv string is capped (128 KiB on Linux,
+    // counted in bytes). So does any script that carries a credential: argv
+    // is visible to other local users (`ps`, process accounting).
+    if (
+      sensitive === true ||
+      Buffer.byteLength(js, "utf8") > EVAL_STDIN_THRESHOLD_BYTES
+    ) {
+      return this.invoke(["eval", "--stdin"], { ...invokeOpts, input: js });
+    }
+    return this.invoke(["eval", js], invokeOpts);
   }
 
   /* ----- state / checkpoint support ----- */
@@ -2211,6 +2256,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // cannot run (for example, during a blocked event loop).
       timeout: timeoutMs + EXECA_TIMEOUT_FALLBACK_MS,
       env: targetChildEnv(process.env),
+      ...(invokeOpts.input !== undefined ? { input: invokeOpts.input } : {}),
     });
     // A soft deadline (optional evidence such as a screenshot) kills only
     // this client's process tree: the session daemon and its browser stay.
@@ -2235,7 +2281,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
         ok: false,
         stdout: typeof result.stdout === "string" ? result.stdout : "",
         stderr: [
-          `timed out after ${timeoutMs}ms — killed \`${this.binary} ${argv.join(" ")}\` ${
+          `timed out after ${timeoutMs}ms — killed \`${this.binary} ${describeArgv(argv)}\` ${
             invokeOpts.softTimeout
               ? "(the session daemon and browser were left running)"
               : "(agent-browser daemon may be unresponsive)"
@@ -2265,6 +2311,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
 interface InvokeOptions {
   /** Hard per-invocation deadline (default: the adapter's command budget). */
   timeoutMs?: number;
+  /** Written to the child's stdin (`eval --stdin`). */
+  input?: string;
   /**
    * The deadline kills only the client: no daemon kill, and the session is
    * not marked wedged. For optional evidence (screenshots), never steps.
@@ -2274,6 +2322,15 @@ interface InvokeOptions {
 
 const DEFAULT_LOCATOR_TIMEOUT_MS = 10000;
 const POLL_INTERVAL_MS = 250;
+/** `eval` scripts larger than this (UTF-8 bytes) are sent on stdin instead of argv. */
+const EVAL_STDIN_THRESHOLD_BYTES = 96 * 1024;
+
+/** argv for messages: long arguments (eval scripts) shown by size only. */
+function describeArgv(argv: string[]): string {
+  return argv
+    .map((arg) => (arg.length > 200 ? `<${arg.length}-char argument>` : arg))
+    .join(" ");
+}
 
 /**
  * Hard per-invocation deadline when nothing more specific applies. This is a

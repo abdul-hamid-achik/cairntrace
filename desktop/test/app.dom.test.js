@@ -101,7 +101,7 @@ describe("app shell", () => {
     const items = [
       ...document.querySelectorAll("#sidebar button.nav-item[data-view]"),
     ];
-    assert.equal(items.length, 11);
+    assert.equal(items.length, 13);
     const current = items.filter((item) => item.getAttribute("aria-current"));
     assert.deepEqual(
       current.map((item) => /** @type {HTMLElement} */ (item).dataset.view),
@@ -334,6 +334,75 @@ describe("app shell: refused runs and ⌘R", () => {
     const record = g.Studio.state.live.get(token);
     assert.equal(record.runId, null, "no run id that names nothing");
     g.Studio.state.live.delete(token);
+    await env.settle();
+  });
+
+  it("reads a Studio run that exited 8 / 9 as errored though its events say passed", async () => {
+    const g = /** @type {any} */ (globalThis);
+    const cases = [
+      // The process exit code (what main forwards for `cairn run`).
+      { token: "tok-app-exit8", exitCode: 8, outcome: 8, badge: /exit 8/ },
+      // No usable exit code: the printed document's invocationOutcome.
+      { token: "tok-app-exit9", exitCode: null, outcome: 9, badge: /exit 9/ },
+    ];
+    for (const item of cases) {
+      g.cairn.push("run:started", {
+        token: item.token,
+        specs: ["/tmp/home/flows/green.yml"],
+        argv: ["run", "/tmp/home/flows/green.yml", "--format", "json"],
+        command: "cairn",
+        launcher: "cairn",
+        cwd: "/tmp/home",
+        runsRoot: "/tmp/no-runs",
+        startedAt: new Date().toISOString(),
+      });
+      // The spec itself passed: its events say so.
+      g.cairn.push("run:events", {
+        token: item.token,
+        events: [
+          { type: "run.passed", ts: new Date().toISOString(), durationMs: 5 },
+        ],
+      });
+      g.cairn.push("run:done", {
+        token: item.token,
+        kind: "run",
+        ok: false,
+        exitCode: item.exitCode,
+        meaning: "critical teardown failed",
+        timedOut: false,
+        runDir: null,
+        stderr: "",
+        payload: {
+          $schema: "urn:cairntrace.dev:run:v1",
+          status: "errored",
+          exitCode: item.outcome,
+          failure: {
+            phase: "invocation",
+            message: "a critical teardown failed",
+          },
+          invocationOutcome: {
+            exitCode: item.outcome,
+            specsExitCode: 0,
+            error: "a critical teardown failed",
+          },
+        },
+      });
+    }
+    g.Studio.navigate("live");
+    for (const item of cases) {
+      const selector = `.live-card[data-key="app:${item.token}"]`;
+      await env.waitFor(
+        () => text(document.querySelector(`${selector} .panel-head .tag`)),
+        `the ${item.token} card's status`,
+      );
+      const card = document.querySelector(selector);
+      assert.equal(text(card?.querySelector(".panel-head .tag")), "errored");
+      const exit = card?.querySelector(".ops-exit");
+      assert.ok(exit && !exit.classList.contains("hidden"), "exit badge shown");
+      assert.match(text(exit), item.badge);
+    }
+    for (const item of cases) g.Studio.state.live.delete(item.token);
+    g.Studio.navigate("runs");
     await env.settle();
   });
 

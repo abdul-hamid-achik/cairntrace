@@ -5,12 +5,12 @@ description: Reference typed Cairntrace steps for navigation, semantic interacti
 
 # Steps
 
-The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the 19 steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
+The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
 
 Every step also accepts two optional common keys:
 
 - `id: <name>` — a stable step label for cross-referencing in artifacts.
-- `when: <condition>` — skip the whole step (do not run, do not capture) when the condition string is false. Conditions are simple names like `notAuthenticated`, resolved by the runner.
+- `when: <condition>` — skip the whole step (do not run, do not capture) when the condition is false: the string form (`text:Saved`, `urlContains:/done`, `selector:#banner`) or an object (`{ selector, hasText }`, `{ url: { includes } }`, `{ var: mode, equals: fast }`). See [Conditions](#conditions-when-until-condition).
 - `postcondition.network` — arm a response wait before the action and require a matching response after exactly one mutation.
 
 ## Navigation
@@ -47,6 +47,7 @@ An explicit polling step. Hard-bounded at 30000 ms by default; real Chromium run
 - wait: { url: { includes: "/connection/" } }
 - wait: { url: { equals: "http://localhost:8080/dash" } }
 - wait: { url: { pattern: "/app/?$" } }
+- wait: { app: { path: store.user.id, equals: 7 }, timeoutMs: 15000 }
 - wait: { ms: 20000 }
 ```
 
@@ -61,6 +62,7 @@ Condition shapes, exactly one per step:
 | `value: <locator + equals>`                 | a form control's live value exactly equals the string                                                                                                                                                                                                                                                                                                                                    |
 | `url: { includes \| equals \| pattern }`    | the current page URL matches; `pattern` is a JS regex                                                                                                                                                                                                                                                                                                                                    |
 | `ms: <n>`                                   | pause with no predicate (search-index catch-up); max 300000                                                                                                                                                                                                                                                                                                                              |
+| `app: { path, equals \| in \| exists }`      | a config [`browser.appHandle`](/configuration#browser) value holds; see [Page prelude and app handles](#page-prelude-and-app-handles)                                                                                                                                                                                                                                                     |
 
 `text` and `notText` collapse whitespace and match case-insensitively by
 default. Set `caseSensitive: true` when rendered casing is significant.
@@ -112,6 +114,21 @@ values and otherwise keeps its native action/navigation waits. A resolved
 link-delivery probe (you are declaring that the next step waits on the
 destination itself).
 
+Runner-owned click flags handle the controls a pointer cannot reach reliably:
+
+```yaml
+- click: { by: role, role: button, name: Start task, optional: true }   # skipped when absent
+- click: { by: role, role: button, name: Save, fallback: dispatch }     # pointer, else DOM click
+- click: { by: selector, selector: ".dialog-close", dispatch: true }     # DOM click only
+```
+
+`optional: true` records the step as `skipped` (`skipReason: absent`) when no
+visible target exists. `dispatch: true` fires a DOM click with no pointer and no
+actionability wait. `fallback: dispatch` hit-tests the target first: when
+another element would receive the pointer it dispatches directly and records
+`detail: pointer blocked by <element>`, otherwise it tries the pointer click and
+falls back when that fails. See [Widgets](/widgets#click-and-fill-flags).
+
 ### `hover`
 
 Move the pointer over a locator to reveal hover-only UI.
@@ -143,6 +160,16 @@ Date-ish inputs (`type=date|time|datetime-local`) are value-set natively — val
 
 ```yaml
 - fill: { by: selector, selector: "#birth-date", value: "1990-04-01" }
+```
+
+`mode: set` writes through the native value setter and fires input/change only
+— no focus, no keydown — so an autocomplete or address overlay that opens on
+typing stays closed; the value is still re-read. `optional: true` skips the step
+when the control is absent.
+
+```yaml
+- fill: { by: label, name: Address line 1, value: 10 Main Street, mode: set }
+- fill: { by: label, name: Referral code, value: SPRING, optional: true }
 ```
 
 ### `select`
@@ -200,6 +227,13 @@ Set a file input from a local path.
 ```yaml
 - upload: { by: label, name: File, path: ./fixtures/sample.xlsx }
 ```
+
+On agent-browser the page then checks that the uploaded file is readable. When
+the renderer cannot read the CDP-set file (`net::ERR_ACCESS_DENIED`,
+`NotReadableError`), Cairntrace rebuilds it from the host bytes inside the page
+(DataTransfer) on the input the upload changed and fires input/change again;
+`run.json` records `via: setInputFiles | dataTransfer`. Playwright keeps
+`setInputFiles`.
 
 For an upload that starts asynchronous server work, attach a typed network
 postcondition. Cairntrace observes the response before dispatching
@@ -272,6 +306,71 @@ Typed authenticated API call. Cookies are inherited from the browser session, so
 
 `assign` captures the response: the full envelope is written to `requests/<name>.json` (also addressable as `${artifacts.<name>.path}`), and later steps splice response fields with `${requests.<name>.body.<field>}` or `${requests.<name>.status}`. `expectStatus` accepts a single int or a non-empty array; omit it to accept any completed response. `body` objects are JSON-encoded (content-type `application/json` unless `headers` overrides); strings are sent raw. Playwright runs `request` out of page with browser-context cookie sharing; under Bun an isolated subprocess bridge enforces `timeoutMs` even if native fetch stalls; backends without native request support fall back to a bounded page-fetch.
 
+#### Credentials, polling, retries, captures and matrices
+
+Everything below is optional; a request without these fields behaves as above.
+
+```yaml
+- request:                       # a bearer from an earlier response
+    method: PUT
+    url: /api/otp/verify
+    headers: { authorization: "Bearer ${requests.login.body.token}" }
+    expectStatus: 200
+- request:                       # poll until the task exists, then capture its id
+    url: /api/tasks
+    until:
+      json: { "$.tasks[?(@.title == 'Report')]": { exists: true } }
+      every: 1000                # ms between attempts (default 1000)
+      timeoutMs: 60000           # the whole poll (default 30000)
+    capture: { taskId: "$.tasks[?(@.title == 'Report')].id" }
+    assign: tasks
+- open: "/tasks/${requests.tasks.captures.taskId}"
+- request:                       # warming endpoint
+    url: /api/report
+    retry: { times: 3, on: [5xx, network], delayMs: 500 }
+    expectStatus: 200
+- request:                       # anonymous callers are refused everywhere
+    method: ${matrix.route.method}
+    url: ${matrix.route.path}
+    body: ${matrix.route.body}
+    headers: { authorization: "${matrix.auth}" }
+    credentials: omit
+    matrix:
+      route:
+        - { method: GET, path: /api/admin/list }
+        - { method: POST, path: /api/admin/items, body: { name: denied } }
+      auth: ["", "Bearer invalid"]
+    expectStatus: 401
+```
+
+- `credentials: include` (default) sends the browser session's cookies and keeps any `Set-Cookie`; `omit` sends none and keeps none.
+- `until: { status?, json?, every?, timeoutMs? }` re-sends the request until the answer satisfies `status` and every `json` [matcher](/verifiers#matchers). The request's own `timeoutMs` bounds each attempt. A transport error counts as "not yet". When the poll runs out, the step fails and the last answer stays in `requests/<name>.json` (with `attempts`).
+- `retry: { times (1–10), on?: [5xx, network], delayMs? }` re-sends after a 5xx answer or a transport failure (both by default), `delayMs` (default 500) apart. Any 2xx–4xx answer is final. Not combined with `until`.
+- `capture: { <key>: <path> }` reads the JSON body into `${requests.<name>.captures.<key>}`. Paths are the [shared ones](/verifiers#matchers) plus filters: `$.tasks[?(@.title == "x")].id` with `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!` and a bare `@.field` for presence. A wildcard or filter captures its first match. A path that matches nothing fails the step.
+- `matrix: { <key>: [values] }` sends one request per combination (the cartesian product, at most 200). `${matrix.<key>}` and `${matrix.<key>.<field>}` splice into `method`, `url`, `headers` and `body`; a value that is exactly one reference keeps its type, so `body: ${matrix.route.body}` sends an object (or nothing). Every combination runs. Each status is recorded under `matrix` in `requests/<name>.json`, and the step fails listing every combination whose status is not in `expectStatus`. Not combined with `until` or `capture`.
+
+Every `${secrets.X}` value, every sensitive header value (`Authorization`, `Cookie`, `X-Api-Key`, … and the token after a `Bearer ` scheme) and every response field under a credential-like key (`token`, `password`, …) is redacted from every artifact written after the request. `artifact.request` events add `attempts`, `combinations` and `mismatches` when they apply.
+
+### Environment login: `use: login`
+
+`use: login` signs a run in through the API instead of the sign-in form. With no imported action named `login`, it runs the environment's `auth:` block in [the config](/configuration#environment-login-auth):
+
+1. `alreadyAuthenticated` (optional): a probe. When its `status` (default any 2xx) and `json` matchers hold, the session is already signed in and nothing else runs.
+2. `login`: the sign-in request. Its answer is `${requests.login.…}`.
+3. `after` (optional): follow-up requests, such as an OTP verify that sends `Bearer ${requests.login.body.token}`. Each can have a `when: { var: requests.login.body.…, equals | in | exists }` gate.
+4. `hydrate` (optional): page JavaScript, run once after a fresh login, for an app that reads its session from a client store. It sees `args.login` (the login response body), never the credentials.
+
+```yaml
+steps:
+  - use: login                                     # the environment's auth: block
+  - use: { action: login, vars: { role: admin } }  # use-site vars feed ${vars.X} in auth:
+  - open: /dashboard
+```
+
+`use: login` satisfies the [cold-start contract](/authoring).
+
+Secrets come from the run's provider (`secrets.provider`; tvault fetches the names the auth block uses when a flow has `use: login`). They are resolved when the step runs, registered for redaction before the first request, and never written to an artifact. An unset one fails the step before anything is sent. Each request is evidence: `requests/login_check.json`, `login.json` and `login_after_<n>.json`. The step's `detail` says what happened, for example `logged in (POST /api/login → 200); 1 follow-up(s); hydrated`. An imported action named `login` always wins over the built-in. `retry:` is not taken here (set `retry` on the login request instead), and heal never patches the step.
+
 ## Capture & artifacts
 
 ### `snapshot`
@@ -338,7 +437,63 @@ Page-context JavaScript escape hatch. Runs arbitrary JS in the browser via `back
 - fill: { by: label, name: Token, value: "${evals.answersBefore.value.token}" }
 ```
 
-`eval` is deliberately the last-resort, locator-free step: opaque to `heal` and bypassing the semantic-locator contract. Use it for state setup and internal-state assertions no UI affordance can reach. Prefer a typed step when one exists.
+`eval` is deliberately the last-resort, locator-free step: opaque to `heal` and bypassing the semantic-locator contract. Use it for state setup and internal-state assertions no UI affordance can reach. Prefer a typed step when one exists; `cairn spec lint` flags the evals it recognizes (`eval-typed-equivalent`):
+
+| Eval pattern | Typed replacement |
+| --- | --- |
+| Open a picker, type, click an option, hope it committed | [`set` / `choose` / `form`](/widgets) (driver + read-back) |
+| Click a radio or checkbox only when it is not already set | `choose` / `check` / `uncheck` (idempotent) |
+| Click a control when it is present | [`click.optional: true`](#click), or `wait.optional` + `assign` + `when` |
+| `el.click()` because a mask or overlay swallows the pointer | `click.fallback: dispatch` / `click.dispatch: true` |
+| Native value setter + `input` / `change` events | `fill.mode: set` |
+| Retry ladders, an unrolled N-step loop | [`repeat`](#control-flow) / `use: { action, retry }` |
+| Branch on what the page shows | `if` / `when` (+ `wait.any`) |
+| `fetch` sign-in, a bearer copied between calls, an OTP call | [`use: login`](#environment-login-use-login) with config `environments.<env>.auth` |
+| `fetch` in a sleep loop until a job finishes | `request.until`, or a verifier with `poll` |
+| Anonymous or authorization-boundary probes | `credentials: omit` + `matrix` + `expectStatus` |
+| Read or poll a framework store | `browser.appHandle` + `wait: { app: … }` |
+| An eval that throws to assert | [`expect`](#expect), or `capture` + the `value` verifier |
+| Unzip a downloaded workbook | the [`xlsx`](/verifiers#xlsx) verifier (`ctx.xlsx` in a node verifier) |
+| Helpers redeclared in every eval file | the `__cairn` prelude (below) |
+
+#### Page prelude and app handles
+
+An eval source (inline or file), a browser `script` verifier or an environment-login `hydrate` script that mentions `__cairn` gets a small helper set installed first, so evals stop redeclaring the same helpers:
+
+| Helper | Does |
+| --- | --- |
+| `__cairn.sleep(ms)` | resolves after `ms` (at most 600000) |
+| `__cairn.visible(el \| selector)` | rendered: connected, not `display:none` / `visibility:hidden`, non-empty box |
+| `__cairn.text(el \| selector)` | whitespace-normalized rendered text (`""` when absent) |
+| `__cairn.labelOf(el \| selector)` | `aria-label`, `aria-labelledby`, `<label for>` / wrapping label, then `placeholder` / `title` |
+| `__cairn.nativeSet(el \| selector, value)` | writes an input / textarea / select through the prototype's native setter (a boolean on a checkbox or radio sets `checked`), fires `input` + `change`, returns the read-back |
+| `__cairn.fire(el \| selector, type, init?)` | dispatches a `MouseEvent` / `PointerEvent` / `KeyboardEvent` / `FocusEvent` / `InputEvent` / `Event` that bubbles (except focus/blur/enter/leave) |
+| `__cairn.rows(table \| selector)` | visible rows of a `<table>` or role table/grid as `{ <header>: <cell> }` records (`columnN` for an empty header) |
+| `__cairn.waitFor(fn \| selector, { timeoutMs?, intervalMs? })` | polls until `fn()` is truthy (or the selector is visible) and resolves with it; rejects after `timeoutMs` (default 5000) naming the last error |
+| `__cairn.app.<name>` | the config `browser.appHandle` accessors |
+
+The prelude only defines `window.__cairn` (non-enumerable and read-only), is installed once per document (later sources reuse it and refresh the app handles), and never overwrites a page that already defines `window.__cairn` — the step fails with that message instead. Sources that do not mention `__cairn` are sent unchanged.
+
+Config `browser.appHandle` names read-only accessors: each value is a page expression evaluated on every read, so a store getter stays live.
+
+```yaml
+# cairntrace.config.yml
+browser:
+  appHandle:
+    store: document.querySelector("#app").__vue_app__.config.globalProperties.$store
+    user: document.querySelector("#app").__vue_app__.config.globalProperties.$store.state.auth.user
+```
+
+```yaml
+# a spec
+- wait: { app: { path: user.id, exists: true }, timeoutMs: 15000 }
+- wait: { app: { path: store.getters.cart/count, in: [1, 2] } }
+- eval:
+    js: "return { rows: __cairn.rows('#people').length, admin: __cairn.app.user.roles.includes('admin') };"
+    assign: page
+```
+
+`wait: { app: { path, equals | in | exists } }` waits for a value instead of an eval loop: `path` starts with a handle name and walks properties (`store.items[0].status`; a segment may hold `/`, as in the namespaced getter `store.getters.cart/count`). `equals` and `in` compare JSON deeply. App waits are polled by the runner with short bounded probes, like `optional` waits, and take `optional`, `assign` and a place in `wait.any` / `wait.all`. The value never leaves the page. A failure message carries a preview of at most 200 characters, which masks values under credential-like keys (`[redacted]`), shows long or token-shaped strings by length only (`<string, N chars>`), and is never cut inside a string. A path with a credential-like segment (`store.auth.token`) is shown only by type and length. A path whose handle is not configured fails the step at once. Handle expressions are project code, like eval files: they are syntax-checked by `cairn config validate` and run only in the page.
 
 ## Compound
 
@@ -363,6 +518,106 @@ flips back to its original value (a double-toggle from a late authored commit
 plus the recovery both applying) or state never changes at all, the batch fails
 at the authored sub-step and names the failed probe/action/verification phase —
 it never passes a flipped-back state.
+
+## Control flow
+
+Loops, branches and retries are typed steps, so a flow that clicks "Load more"
+until the list is complete, dismisses a banner only when it shows up, or retries
+a flaky dialog stays reviewable — no unrolled step ladders, no `eval` loops.
+
+### `repeat`
+
+Run nested steps up to `max` times (at most 100).
+
+```yaml
+- id: load_all
+  repeat:
+    max: 20
+    until: { text: All rows loaded }
+    steps:
+      - click: { by: role, role: button, name: Load more }
+      - wait: { notText: Loading }
+- id: tag_rows
+  repeat:
+    max: 3
+    indexVar: row
+    steps:
+      - click: { by: selector, selector: "tbody tr:nth-child(${repeat.iteration}) .tag" }
+```
+
+- `until` uses the `when:` grammar. It is checked before every iteration and once more after the last; the loop stops as soon as it holds (an `until` that already holds runs zero iterations).
+- Reaching `max` with an `until` that never held fails the step (`onMax: fail`, the default) or passes it (`onMax: continue`). Without `until` the loop runs exactly `max` times.
+- Nested steps see `${repeat.index}` (0-based) and `${repeat.iteration}` (1-based) of the innermost loop, and `${repeat.<indexVar>}` (0-based) of every enclosing loop that names one.
+- A failing nested step fails the repeat and the run.
+
+### `if`
+
+Check a condition once and run one branch.
+
+```yaml
+- id: cookie_banner
+  if:
+    condition: { selector: "#cookie-banner" }
+    then:
+      - click: { by: role, role: button, name: Accept }
+    else:
+      - wait: { ms: 100 }
+```
+
+The condition uses the `when:` grammar. Without `else`, a false condition runs nothing and the step passes.
+
+### Conditions: `when`, `until`, `condition`
+
+`when:`, `repeat.until`, `if.condition` and `use.retry.until` share one grammar: the string form (`text:Saved`, `notText:Loading`, `urlContains:/done`, `urlNotContains:…`, `urlMatches:…`, `selector:…`, `notSelector:…`) or the object form with exactly one of `urlContains`, `urlNotContains`, `urlMatches`, `url` (`includes | equals | pattern`), `text`, `notText`, `selector` (+ `hasText`), `notSelector`, or `var`. A condition is read once and never waits.
+
+`var` predicates compare a value as a string with exactly one of `equals`, `in` or `exists` (`exists: true` holds for a set, non-empty value):
+
+```yaml
+- when: { var: mode, equals: fast }            # config / spec / use-site var
+  click: { by: role, role: button, name: Skip tour }
+- when: { var: region, in: [eu, uk] }
+  click: { by: role, role: button, name: Accept GDPR terms }
+- when: { var: waits.banner.matched, equals: true }   # a runtime value
+  click: { by: role, role: button, name: Dismiss }
+```
+
+A plain name reads the vars of the file that declares the step — inside an action that includes the `use:` call's `vars`. A dotted name reads a runtime value: `waits.<name>.matched` / `.index`, `repeat.index` / `repeat.iteration` / `repeat.<indexVar>`, `captures.<name>.…`, `runs.<name>.…`, `requests.<name>.…`, `evals.<name>.…`, `fixtures.<name>.…`.
+
+### `wait.any`, `wait.all`, `optional`
+
+```yaml
+- id: save_result
+  wait:
+    any:
+      - { text: Saved }
+      - { text: Already exists }
+    timeoutMs: 15000
+    assign: saved              # ${waits.saved.matched}, ${waits.saved.index}
+- id: maybe_banner
+  wait: { text: Maintenance window, timeoutMs: 2000, optional: true, assign: banner }
+```
+
+- `any` passes on the first condition that holds; `all` needs every condition at the same poll. Both take one `timeoutMs` for the group (default 30000 × `waitScale`); members take no `timeoutMs` of their own.
+- `optional: true` never fails the step: a condition that does not hold within `timeoutMs` passes it with `matched: false`.
+- `assign: <name>` exposes `${waits.<name>.matched}` (`true` / `false`) and, for `any`, `${waits.<name>.index}` (0-based) to later steps, `when:` and `if:`.
+- Groups and optional waits are polled by the runner with short bounded probes (page text, URL, a DOM predicate, a control value; `load` reads `document.readyState`), so a miss never stops the browser.
+
+### `use` with `retry`
+
+```yaml
+- id: save
+  use:
+    action: submit_form
+    retry: { times: 2, until: { text: Saved }, delayMs: 500 }
+```
+
+The action's steps run as one group; when one of them fails, or `until` does not hold after they all passed, the group runs again — at most `times` (1–10) more attempts. An exhausted retry fails the step with the last attempt's error. A retried attempt's failed steps leave `run.json` `steps` (their errors are kept under the step's `retries`, and the events keep the `step.failed` with its `iteration`).
+
+### Ids, events and artifacts of nested steps
+
+A nested step keeps its own `id`, otherwise it is `<parent id>.<n>` (repeat body, retried action) or `<parent id>.then.<n>` / `<parent id>.else.<n>`. `step.started` / `step.finished` / `step.failed` events and `run.json` results carry `parentId`, `iteration` (1-based iteration or attempt) and `branch`; a block's own result adds `iterations` (repeat, retry), `taken` (`then | else | none` for `if`) and `matched` (optional or grouped waits). Results are recorded post-order — a block's steps before the block — so the first failed entry is the innermost failure. Screenshots, snapshots, diagnostics and `expects/` files get an `_i<n>` (iteration) or `_a<n>` (attempt) suffix so repeated executions never overwrite each other. A `request` without `assign` inside a block is named after its place — `request_<top>_<n>` for the n-th step of a repeat body or retried action, `request_<top>_then<n>` / `_else<n>` in an if branch, plus the suffix (`request_3_2_i2`) — so each execution keeps its own `requests/<name>.json` and `${requests.<name>}`. A request with `assign` keeps that name: the latest execution wins. Give every step its own id: `cairn spec lint` reports an id used twice (`duplicate-step-id`; an error inside blocks).
+
+`cairn spec heal` does not patch nested steps (it reports `no-heal-possible`); fix them by hand or heal the step at the top level. Control flow is not allowed in `teardown:`. `cairn export playwright` renders `repeat` as a bounded `for` loop, `if` as `if/else`, `wait.any` / `wait.all` as `Promise.any` / `Promise.all` and a retried `use` as a `try/catch` loop; a condition that reads a capture, a run output or a fixture is a hard skip unless an exported step (`capture`, or `run:` with `--preconditions inline|global`) or the global setup binds it. `capture` steps, the `table` verifier and verifier `poll` export; `run:` steps and `teardown:` export with `--preconditions inline|global` (see [Export](/export)).
 
 ## Process
 
@@ -488,11 +743,43 @@ steps:
 - Waits up to `timeoutMs` (default 5000 × `waitScale`) for the target; a missing or ambiguous target fails the step.
 - In later steps a capture splices as text (objects as JSON; unknown names as `""`). `expect` and `capture` steps resolve references themselves: locator and text fields as text, `count` and `expect.request` `json` values typed (`count: "${captures.rows.rowCount}"` compares a number), and an unknown name fails the step instead of becoming `""`. In outcome verifiers (`value`, `mongo`, `http`, …) a string that is exactly one `${captures.…}` keeps its type, and an unknown name fails or blocks the outcome instead of becoming `""`.
 
+## Widgets and forms
+
+Custom form controls are typed steps that write through a widget driver and
+read the value back — the step fails with evidence (`widgets/<n>_<id>.json`)
+when the field does not show what was written. Targets are `field: <key>`
+(resolved through config `browser.fieldRoot`) or any locator.
+
+```yaml
+- set: { field: country, value: Spain }                       # vue-multiselect, select, input…
+- set: { field: start_date, value: "2026-11-30" }             # PrimeVue calendar picker
+- set: { field: contact, value: { query: Ada, option: Ada Lovelace } }
+- check: { field: terms }
+- uncheck: { field: services, option: Consulting }
+- choose: { field: business_owner, option: "No" }
+- form:
+    fields:
+      setup: Shared entity
+      entity_code: { value: C100, dependsOn: setup }
+      legacy_supplier: { value: "No", optional: true }
+    onFailure: dumpUnanswered
+```
+
+Built-in drivers: `vue-multiselect`, `primevue-autocomplete`,
+`primevue-calendar`, `pills`, `radio-group`, `checkbox-group`, `native-select`,
+`native-input`; project drivers come from `browser.widgets`. Every widget step
+is idempotent (a field already holding the value is left alone), and `form`
+re-reads every field at the end so a later field that wiped an earlier one
+fails. See [Widgets](/widgets) for the drivers, evidence, custom driver
+contract and its trust model.
+
 ## Step output
 
 Every step produces timing and status entries in `events.ndjson`, and its final
 result is included in `run.json`, even when no screenshot is requested. Steps
-gated by `when:` produce a skipped event. A failed browser step writes
+gated by `when:` produce a skipped event. Steps nested in a `repeat`, `if` or
+retried `use` carry `parentId` / `iteration` / `branch` (see
+[Control flow](#control-flow)). A failed browser step writes
 `diagnostics/<step-ordinal>_<step-id>.json` with the captured page diagnostics
 when the backend is still responsive.
 
@@ -504,6 +791,7 @@ when the backend is still responsive.
 
 ## See also
 
+- [Widgets](/widgets) — set / check / choose / form, drivers and interaction flags
 - [Verifiers](/verifiers) — the outcome vocabulary evaluated against the post-step snapshot
 - [Snippets](/snippets) — `imports:` / `use:` for reusable action files
 - [Process monitoring](/monitor) — the `--monitor` run flag and `process` verifier

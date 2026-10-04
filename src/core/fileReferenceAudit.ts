@@ -7,6 +7,7 @@ import {
   type StepFileScope,
   stepFileScopeAt,
 } from "./runner/stepFiles";
+import { nestedStepLists, type Step } from "./schema/spec.v1";
 import { isScriptVerifier } from "./schema/verifier.v1";
 
 /**
@@ -55,7 +56,10 @@ interface Reference {
 const RUNTIME_PLACEHOLDER = /\$\{(?:artifacts|requests|evals)\./;
 
 export function auditFileReferences(
-  parsed: Pick<ParseResult, "path" | "origins" | "actionsByName" | "resolved">,
+  parsed: Pick<
+    ParseResult,
+    "path" | "origins" | "nestedOrigins" | "actionsByName" | "resolved"
+  >,
   opts: { projectRoot: string },
 ): FileReferenceFinding[] {
   const findings: FileReferenceFinding[] = [];
@@ -63,8 +67,26 @@ export function auditFileReferences(
   // The reference being resolved: the deprecation sink attributes to it.
   let current: (Reference & { deprecation?: FileReferenceFinding }) | undefined;
   const deprecated = new Map<string, FileReferenceFinding>();
-  const steps = parsed.resolved.steps ?? [];
-  for (const [index, step] of steps.entries()) {
+  // F14: steps nested in repeat / if / retried use blocks are audited too,
+  // each against the file that declares it (looked up by resolved path).
+  const located: Array<{ step: Step; index: number | string; label: string }> =
+    [];
+  const visit = (
+    list: readonly Step[],
+    prefix: string | undefined,
+    labelPrefix: string,
+  ): void => {
+    list.forEach((step, i) => {
+      const index = prefix === undefined ? i : `${prefix}/${i}`;
+      const label = `${labelPrefix}[${i}]`;
+      located.push({ step, index, label });
+      for (const nested of nestedStepLists(step)) {
+        visit(nested.steps, `${index}/${nested.key}`, `${label}.${nested.key}`);
+      }
+    });
+  };
+  visit(parsed.resolved.steps ?? [], undefined, "steps");
+  for (const { step, index, label } of located) {
     const scope = stepFileScopeAt(parsed, index, (key, message) => {
       if (!current || deprecated.has(key)) return;
       current.deprecation = {
@@ -81,7 +103,7 @@ export function auditFileReferences(
     });
     const where = scope.action
       ? `action ${scope.action.name} step ${scope.action.stepIndex + 1}`
-      : `steps[${index}]${step.id ? ` ${step.id}` : ""}`;
+      : `${label}${step.id ? ` ${step.id}` : ""}`;
     const add = (field: string, value: unknown, hostFile = false): void => {
       if (typeof value !== "string" || value.length === 0) return;
       references.push({

@@ -12,7 +12,31 @@ import {
   type EnvironmentDatasources,
 } from "../datasources/schema";
 import { resolveEnvironmentDatasources } from "../datasources/resolve";
+import { BUILTIN_WIDGET_DRIVERS } from "./shared";
 import { FixturesRegistrySchema } from "../fixtures/schema";
+import { EnvAuthSchema, type EnvAuth } from "./request.v1";
+import { appHandleSyntaxError } from "../prelude/prelude";
+import { MetricsListSchema } from "../metrics/schema";
+import { PRECONDITIONS_MODES, VERIFIERS_MODES } from "../exporters/exportModes";
+import { SuitesRegistrySchema, suiteEnvironmentRefs } from "../suites/schema";
+import { environmentAliasProblems } from "../config/envAlias";
+import {
+  ExpectOutputSchema,
+  ProvisionerPatchSchema,
+  ProvisionerSchema,
+  RequiresSchema,
+  RuntimesSchema,
+  SeedPhaseSchema,
+  SeedPostCommandSchema,
+  ServiceFileSchema,
+  TunnelSchema,
+  WindowRestartSchema,
+} from "../servicesOps/schema";
+import {
+  RunPolicyConfigSchema,
+  TeardownEntrySchema,
+  type RunPolicyConfig,
+} from "../runPolicy/schema";
 
 /**
  * Project-level Cairntrace config (plan §12).
@@ -22,12 +46,38 @@ import { FixturesRegistrySchema } from "../fixtures/schema";
  * Config is OPTIONAL — specs with absolute URLs work without one.
  */
 
-export const ConfigVarValueSchema = z.union([
-  z.string(),
-  z.number(),
-  z.boolean(),
-]);
-export type ConfigVarValue = z.infer<typeof ConfigVarValueSchema>;
+/** A scalar config var: what every var was before typed vars (F7). */
+export type ConfigScalarVarValue = string | number | boolean;
+
+/**
+ * F7 typed vars: a scalar, a list or an object (nested freely). A list or
+ * object reaches structured consumers (a script verifier's `fixtures`, a
+ * config fixture's `with`, `ctx.vars`) as itself when it is spliced as a
+ * whole value (`key: ${vars.x}`); in a string context it serializes as
+ * compact JSON (see `renderVarValue`).
+ */
+export type ConfigVarValue =
+  | ConfigScalarVarValue
+  | ConfigVarValue[]
+  | { [key: string]: ConfigVarValue };
+
+export const ConfigVarValueSchema: z.ZodType<ConfigVarValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.array(ConfigVarValueSchema),
+    z.record(ConfigVarValueSchema),
+  ]),
+);
+
+/** A `vars:` block (top-level or `environments.<name>.vars`). */
+export const ConfigVarsSchema = z.record(ConfigVarValueSchema);
+
+/** F7 `include:` — paths or globs (`*`, `?`, `**`) of YAML files. */
+export const ConfigIncludeSchema = z
+  .array(z.string().min(1, "an include entry cannot be empty"))
+  .min(1, "include: list at least one path or glob");
 
 export const ViewportConfigSchema = z
   .object({
@@ -41,6 +91,13 @@ export type ViewportConfig = z.infer<typeof ViewportConfigSchema>;
 // can reference EnvironmentConfig before EnvironmentConfigSchema is assigned
 // (it depends on ServicesConfigSchema + SecretsConfigSchema, defined later).
 export interface EnvironmentConfig {
+  /** F7: another environment this one deep-merges over (chains allowed). */
+  extends?: string;
+  /**
+   * Files (paths or globs) holding this environment's own `vars`. Composition
+   * merges them into `vars` and drops the key: a composed config never has it.
+   */
+  include?: string[];
   baseUrl?: string;
   vars?: Record<string, ConfigVarValue>;
   viewport?: ViewportConfig;
@@ -56,6 +113,10 @@ export interface EnvironmentConfig {
   policy?: EnvironmentPolicy;
   /** Per-env datasource overrides (partial entries merge; `false` disables). */
   datasources?: EnvironmentDatasources;
+  /** F18: API sign-in the built-in `use: login` runs (see EnvAuthSchema). */
+  auth?: EnvAuth;
+  /** F8: run policy for this environment, merged over the top-level `run:`. */
+  run?: RunPolicyConfig;
 }
 
 /**
@@ -158,6 +219,17 @@ export const StashTtlSchema = z
   .regex(
     /^(?:[1-9][0-9]*[mhdw]|\d{4}-\d{2}-\d{2})$/,
     "ttl must look like 24h, 7d, 2w or 2026-12-31",
+  );
+
+/**
+ * `stash.failTtl`: a file.cheap TTL, or `never` (keep failed-run evidence
+ * until it is deleted by hand — the opt-out from the 90d default).
+ */
+const StashFailTtlSchema = z
+  .string()
+  .regex(
+    /^(?:never|[1-9][0-9]*[mhdw]|\d{4}-\d{2}-\d{2})$/,
+    "failTtl must look like 24h, 7d, 2w, 2026-12-31 or never",
   );
 
 export const RetentionConfigSchema = z
@@ -370,6 +442,13 @@ export const HealthcheckSchema = z
     retries: z.number().int().positive().optional(),
     /** Seconds before a single check is considered failed (default 10). */
     timeoutSeconds: z.number().int().positive().optional(),
+    /**
+     * What cairn does while a run is active when the check turns unhealthy:
+     * `warn` logs each transition, `restart` restarts the tmux window (only
+     * for tmux windows; the check then runs every `intervalSeconds` for the
+     * whole run). Unset: one check after readiness, as before.
+     */
+    onUnhealthy: z.enum(["restart", "warn"]).optional(),
   })
   .strict();
 export type Healthcheck = z.infer<typeof HealthcheckSchema>;
@@ -447,6 +526,11 @@ export const TmuxWindowSchema = z
      * auto-stop services — see HealthcheckSchema.
      */
     healthcheck: HealthcheckSchema.optional(),
+    /**
+     * Restart policy while a run is active (F10): `{ policy: on-exit | never,
+     * backoff?, max? }`. See WindowRestartSchema.
+     */
+    restart: WindowRestartSchema.optional(),
   })
   .strict();
 export type TmuxWindow = z.infer<typeof TmuxWindowSchema>;
@@ -518,8 +602,11 @@ export type DockerConfig = z.infer<typeof DockerConfigSchema>;
  */
 export const SeedConfigSchema = z
   .object({
-    /** The seed command (shell, completes, potentially long-running). */
-    command: z.string().min(1),
+    /**
+     * The seed command (shell, completes, potentially long-running). Optional
+     * only when `phases` describes the seed instead.
+     */
+    command: z.string().min(1).optional(),
     /** Working directory (default: configDir). */
     cwd: z.string().optional(),
     /** Extra env merged over process.env + tvault secrets. */
@@ -537,11 +624,70 @@ export const SeedConfigSchema = z
      * Ideal for mongosh/ensure scripts that materialize test fixtures the
      * bulk import does not include.
      */
-    postCommands: z.array(z.string().min(1)).optional(),
+    postCommands: z.array(SeedPostCommandSchema).optional(),
     /** Max ms to wait for the seed command. Default 300000 (5 min). 0 = wait indefinitely. */
     timeoutMs: z.number().int().nonnegative().optional(),
+    /**
+     * F12: the seed as ordered, individually persisted phases instead of one
+     * `command` (a phase that succeeded is not repeated until its TTL ends or
+     * its command changes; `always` forces one). State is kept per project +
+     * environment + `target`.
+     */
+    phases: z.array(SeedPhaseSchema).min(1).optional(),
+    /**
+     * `afterCommand` (default): freshness is recorded as soon as the seed
+     * command succeeds. `afterPostCommands`: only after every post-command
+     * succeeded, so a failed post-command never leaves a stamped-fresh seed.
+     */
+    commit: z.enum(["afterCommand", "afterPostCommands"]).optional(),
+    /**
+     * Free text that identifies what is seeded (a database name, a tenant);
+     * part of the persisted state's key, so two targets never share one
+     * freshness record. Put `${env.NAME}` here instead of a wrapper script.
+     */
+    target: z.string().min(1).optional(),
+    /** The output of the seed command and phases must match none of these. */
+    expectOutput: ExpectOutputSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    if (cfg.command !== undefined && cfg.phases !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "services.seed takes either `command` or `phases`, not both (put the command in a phase)",
+      });
+    }
+    if (cfg.command === undefined && cfg.phases === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "services.seed needs a `command` or `phases`",
+      });
+    }
+    const seenPhases = new Set<string>();
+    for (const [index, phase] of (cfg.phases ?? []).entries()) {
+      if (seenPhases.has(phase.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["phases", index, "name"],
+          message: `duplicate seed phase name "${phase.name}"`,
+        });
+      }
+      seenPhases.add(phase.name);
+    }
+    const seenPost = new Set<string>();
+    for (const [index, entry] of (cfg.postCommands ?? []).entries()) {
+      if (typeof entry === "string") continue;
+      if (seenPost.has(entry.name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["postCommands", index, "name"],
+          message: `duplicate postCommand name "${entry.name}"`,
+        });
+      }
+      seenPost.add(entry.name);
+    }
+  });
 export type SeedConfig = z.infer<typeof SeedConfigSchema>;
 
 /**
@@ -582,6 +728,13 @@ export const TmuxConfigSchema = z
      * user's default shell.
      */
     defaultShell: z.string().min(1).optional(),
+    /**
+     * Size of the detached session (default 250x50). A wide session keeps
+     * log lines and URLs from wrapping, so `readyOn.text` and `services
+     * logs` see them whole.
+     */
+    columns: z.number().int().min(20).max(1000).optional(),
+    rows: z.number().int().min(5).max(500).optional(),
   })
   .strict()
   .refine(
@@ -716,12 +869,61 @@ export const ServicesStashConfigSchema = z
 export type ServicesStashConfig = z.infer<typeof ServicesStashConfigSchema>;
 
 /**
+ * Cross-field checks of a services block: names that must exist (windows a
+ * file restarts), uniqueness (tunnels), and options that only make sense for
+ * tmux windows.
+ */
+function servicesCrossChecks(
+  cfg: {
+    docker?: DockerConfig | undefined;
+    tmux?: TmuxConfig | undefined;
+    tunnels?: Array<{ name: string }> | undefined;
+    files?: Array<{ restart?: string[] | undefined }> | undefined;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  const issue = (path: Array<string | number>, message: string): void => {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
+  };
+  if (cfg.docker?.healthcheck?.onUnhealthy === "restart") {
+    issue(
+      ["docker", "healthcheck", "onUnhealthy"],
+      "onUnhealthy: restart applies to tmux windows only (docker supports warn)",
+    );
+  }
+  const seen = new Set<string>();
+  for (const [index, tunnel] of (cfg.tunnels ?? []).entries()) {
+    if (seen.has(tunnel.name)) {
+      issue(
+        ["tunnels", index, "name"],
+        `duplicate tunnel name "${tunnel.name}"`,
+      );
+    }
+    seen.add(tunnel.name);
+  }
+  const windows = new Set((cfg.tmux?.windows ?? []).map((w) => w.name));
+  for (const [index, file] of (cfg.files ?? []).entries()) {
+    for (const name of file.restart ?? []) {
+      if (!windows.has(name)) {
+        issue(
+          ["files", index, "restart"],
+          `unknown tmux window "${name}" (defined: ${
+            [...windows].join(", ") || "none"
+          })`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Multi-service environment lifecycle for `cairn run`: docker infra →
  * conditional seed → tmux session with service windows → teardown. Starts once
  * before the spec pool, stops once after. See `src/core/runner/services.ts`.
  *
  * Each phase is optional — configure only what you need. Phases run in order:
- * docker → seed → tmux. Teardown runs in reverse: tmux kill → docker down.
+ * provisioner → tunnels → docker → files → seed → tmux. Teardown runs in
+ * reverse: tunnels stop, teardown commands, tmux kill, provisioner down.
  */
 export const ServicesConfigSchema = z
   .object({
@@ -732,13 +934,26 @@ export const ServicesConfigSchema = z
     /** tmux session with service windows (optional). */
     tmux: TmuxConfigSchema.optional(),
     /** Shell commands run AFTER specs (teardown), best-effort, non-fatal. */
-    teardown: z.array(z.string().min(1)).optional(),
+    teardown: z.array(TeardownEntrySchema).optional(),
     /** Bounded local service evidence returned for attachment to each run. */
     artifacts: ServicesArtifactsConfigSchema.optional(),
     /** Stash services session artifacts to fcheap after the run. */
     stash: ServicesStashConfigSchema.optional(),
+    /**
+     * F10: a resource cairn creates and must always destroy (`up`, `down`,
+     * `exports`). Runs before every other phase; `down` runs on every exit
+     * path and a failed `down` is exit 8.
+     */
+    provisioner: ProvisionerSchema.optional(),
+    /** F10: supervised helper processes (tunnels), started before docker. */
+    tunnels: z.array(TunnelSchema).min(1).optional(),
+    /** F10: files written atomically before the tmux phase. */
+    files: z.array(ServiceFileSchema).min(1).optional(),
   })
   .strict()
+  .superRefine((cfg, ctx) => {
+    servicesCrossChecks(cfg, ctx);
+  })
   .refine(
     (cfg) => {
       // Validate: if tmux is configured with readiness probes, each window
@@ -770,12 +985,23 @@ export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
  */
 export const EnvironmentServicesConfigSchema = z
   .object({
-    docker: DockerConfigSchema.optional(),
+    /** `false` drops the inherited docker phase (the app runs elsewhere). */
+    docker: z.union([DockerConfigSchema, z.literal(false)]).optional(),
     seed: SeedConfigSchema.optional(),
     tmux: z.union([TmuxConfigSchema, z.literal(false)]).optional(),
-    teardown: z.array(z.string().min(1)).optional(),
+    teardown: z.array(TeardownEntrySchema).optional(),
     artifacts: ServicesArtifactsConfigSchema.optional(),
     stash: ServicesStashConfigSchema.optional(),
+    /** Keys merge over the top-level provisioner; `false` removes it. */
+    provisioner: z.union([ProvisionerPatchSchema, z.literal(false)]).optional(),
+    /** Replaces the top-level tunnels (`false` removes them). */
+    tunnels: z
+      .union([z.array(TunnelSchema).min(1), z.literal(false)])
+      .optional(),
+    /** Replaces the top-level files (`false` removes them). */
+    files: z
+      .union([z.array(ServiceFileSchema).min(1), z.literal(false)])
+      .optional(),
   })
   .strict()
   .refine(
@@ -798,12 +1024,108 @@ export type EnvironmentServicesConfig = z.infer<
   typeof EnvironmentServicesConfigSchema
 >;
 
+/** Environment variable names a runner's `env:` may not set: cairn owns them. */
+const RUNNER_RESERVED_ENV = /^(CAIRN_DELEGATE_|CAIRN_INVOCATION_)/;
+
+/**
+ * A delegated runner (`environments.<n>.runner`, contract
+ * `urn:cairntrace.dev:delegate:v1`): `cairn run --env <n>` validates and
+ * journals the invocation locally, then hands its execution to `command`,
+ * which runs it elsewhere, streams the remote invocation's events back and
+ * places the run directories under the local artifact root. See
+ * `docs/delegate.md` and `cairn docs delegate`.
+ */
+export const EnvironmentRunnerSchema = z
+  .object({
+    /**
+     * The runner's argv, never a shell string. `${env.X}`, `${vars.X}` and
+     * `${config.dir}` resolve when it is spawned.
+     */
+    command: z.array(z.string().min(1)).min(1),
+    /** Working directory, relative to the config directory (default: the config directory). */
+    cwd: z.string().min(1).optional(),
+    /**
+     * Extra environment for the runner (over the invocation's scoped env).
+     * Values resolve like `command`; `${secrets.X}` reads the scoped
+     * secrets. `CAIRN_DELEGATE_*` / `CAIRN_INVOCATION_*` are cairn's.
+     */
+    env: z
+      .record(
+        z
+          .string()
+          .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "an environment variable name")
+          .refine((name) => !RUNNER_RESERVED_ENV.test(name), {
+            message:
+              "CAIRN_DELEGATE_* and CAIRN_INVOCATION_* are set by cairn for the runner",
+          }),
+        z.string(),
+      )
+      .optional(),
+    /**
+     * Hard deadline for the whole runner (ms). At the deadline cairn cancels
+     * it like a Ctrl-C (SIGINT, `cancelGraceMs`, SIGTERM, SIGKILL) and the
+     * invocation exits 2. Default: none.
+     */
+    timeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(7 * 24 * 3_600_000)
+      .optional(),
+    /**
+     * How long the events stream may stay silent (ms) before cairn cancels
+     * the runner like a timeout (exit 2, diagnostic `idle`). Every line
+     * counts, remote heartbeats included (a followed remote journal beats
+     * every 15s). Default: none (a warning after 5 minutes of silence).
+     */
+    idleTimeoutMs: z
+      .number()
+      .int()
+      .min(1_000)
+      .max(7 * 24 * 3_600_000)
+      .optional(),
+    /**
+     * How long a cancel waits after SIGINT for the runner to stop its remote
+     * invocation and copy the results back before SIGTERM (default 180000).
+     */
+    cancelGraceMs: z.number().int().nonnegative().max(3_600_000).optional(),
+  })
+  .strict();
+export type EnvironmentRunnerConfig = z.infer<typeof EnvironmentRunnerSchema>;
+
 export const EnvironmentConfigSchema = z
   .object({
+    /**
+     * The same environment under another name: `environments.remote: {
+     * alias: chalupa }`. `--env remote` is canonicalized to `chalupa`
+     * where it is parsed, so suites, policy, state keys, locks and
+     * `CAIRN_ENV` see the target. An alias takes no other key and names a
+     * real environment (no chains, no cycles). Not `extends`, which
+     * inherits and then overrides a NEW environment.
+     */
+    alias: z.string().min(1).optional(),
+    /**
+     * F7: the environment this one inherits from. Objects merge key by key
+     * (this environment wins), lists and scalars replace, `vars` merge by
+     * name, `services: false` / `datasources.<name>: false` replace. Chains
+     * are allowed; a cycle or an unknown name is a config error.
+     */
+    extends: z.string().min(1).optional(),
+    /**
+     * Files (paths or globs, relative to the file that lists them) whose
+     * `vars` become this environment's own vars, under the ones it writes
+     * itself and over its `extends` chain and the top-level `vars`. Read by
+     * composition, which merges them and drops this key.
+     */
+    include: ConfigIncludeSchema.optional(),
     /** Base URL prepended to `open:` steps that begin with `/`. */
     baseUrl: z.string().optional(),
-    /** Variables substituted as `${vars.X}` inside specs. */
-    vars: z.record(ConfigVarValueSchema).optional(),
+    /**
+     * Variables substituted as `${vars.X}` inside specs, over the top-level
+     * `vars:` and the `extends` chain. Values may be lists or objects and
+     * may reference other vars (`${vars.host}/api`).
+     */
+    vars: ConfigVarsSchema.optional(),
     /** Browser viewport applied at run start. Spec-level `viewport:` wins. */
     viewport: ViewportConfigSchema.optional(),
     /** Multiply waits/settles for high-latency environments. Default 1. */
@@ -822,6 +1144,32 @@ export const EnvironmentConfigSchema = z
      * top-level `datasources.<name>`; `<name>: false` disables it here.
      */
     datasources: EnvironmentDatasourcesSchema.optional(),
+    /**
+     * F18: how `use: login` signs a run in through the API —
+     * `alreadyAuthenticated?` probe, `login` request, `after?` follow-ups
+     * (e.g. an OTP verify with the captured bearer), `hydrate?` page script.
+     * `${secrets.X}` resolves from the run's provider when it runs and
+     * never reaches artifacts.
+     */
+    auth: EnvAuthSchema.optional(),
+    /**
+     * F8: run policy for this environment, merged over the top-level `run:`
+     * key by key (lists replace; `lock: false` turns the lock off here).
+     */
+    run: RunPolicyConfigSchema.optional(),
+    /**
+     * F11: metric probes of this environment, merged over the top-level
+     * `metrics:` by name (the environment's entry wins).
+     */
+    metrics: MetricsListSchema.optional(),
+    /**
+     * Delegated runner: this environment runs elsewhere. Local cairn keeps
+     * the invocation (journal, run directories, exit code, cancel) and
+     * never boots services, a webServer or a browser for it, so the
+     * environment may not own a `services:` block. See
+     * {@link EnvironmentRunnerSchema}.
+     */
+    runner: EnvironmentRunnerSchema.optional(),
   })
   .strict();
 
@@ -851,8 +1199,12 @@ export const StashConfigSchema = z
     ttl: StashTtlSchema.optional(),
     /** TTL for passed runs (autoStash: always / --stash). Default 7d. */
     passTtl: StashTtlSchema.optional(),
-    /** TTL for failed/errored runs. Default: ttl, else never expires. */
-    failTtl: StashTtlSchema.optional(),
+    /**
+     * TTL for failed/errored runs. Default: ttl, else 90d. `never` keeps
+     * the evidence until deleted by hand; pinned runs (`cairn pin --stash`,
+     * tag `keep`) never carry a TTL.
+     */
+    failTtl: StashFailTtlSchema.optional(),
     /**
      * Tag auto-stashes with every `cairn run --label key=value` (default
      * false: labels are free-form cohort values; `meta` already records the
@@ -890,6 +1242,21 @@ export const ClipConfigSchema = z
   .strict();
 export type ClipConfig = z.infer<typeof ClipConfigSchema>;
 
+/** A `browser.fieldRoot` template: a CSS selector containing `{key}`. */
+const WidgetFieldRootTemplateSchema = z
+  .string()
+  .min(1)
+  .refine((template) => template.includes("{key}"), {
+    message: "browser.fieldRoot templates must contain {key}",
+  });
+
+/** One `browser.widgets` entry: a built-in driver or a project driver module. */
+export const WidgetDriverEntrySchema = z.union([
+  z.object({ use: z.enum(BUILTIN_WIDGET_DRIVERS) }).strict(),
+  z.object({ file: z.string().min(1) }).strict(),
+]);
+export type WidgetDriverEntry = z.infer<typeof WidgetDriverEntrySchema>;
+
 /**
  * Browser-backend tuning knobs for the agent-browser adapter.
  */
@@ -920,6 +1287,58 @@ export const BrowserConfigSchema = z
       .regex(
         /^[A-Za-z_][\w:-]*$/,
         "browser.testIdAttribute must be a valid HTML attribute name",
+      )
+      .optional(),
+    /**
+     * F15: CSS template(s) that locate a field's container from its key for
+     * `set` / `check` / `choose` / `form` (`{key}` is replaced; inside quotes
+     * it is quote-escaped, elsewhere CSS-escaped). The first template with a
+     * visible match wins. Default `[<testIdAttribute>="{key}"]`, then
+     * `[name="{key}"]`.
+     */
+    fieldRoot: z
+      .union([
+        WidgetFieldRootTemplateSchema,
+        z.array(WidgetFieldRootTemplateSchema).min(1),
+      ])
+      .optional(),
+    /**
+     * F15: widget drivers tried in order by `match(root)`: built-ins
+     * (`{ use: vue-multiselect }`) and project driver modules (`{ file:
+     * ./drivers/picker.js }`, exporting `{ name, match, read, write }`; they
+     * run in the page like eval files). The native drivers (radio-group,
+     * checkbox-group, native-select, native-input) are appended when not
+     * listed. Default: every built-in.
+     */
+    widgets: z.array(WidgetDriverEntrySchema).min(1).optional(),
+    /**
+     * F20: read-only page accessors registered as `window.__cairn.app.<name>`
+     * for eval steps, browser script verifiers and `wait: { app }`. Each
+     * value is a page JavaScript EXPRESSION evaluated on every read (a store
+     * getter, e.g. `document.querySelector("#app").__vue_app__
+     * .config.globalProperties.$store.getters["auth/user"]`). Project code,
+     * like an eval file: it runs in the page only (never on the host).
+     */
+    appHandle: z
+      .record(
+        z
+          .string()
+          .regex(
+            /^[A-Za-z][A-Za-z0-9_]*$/,
+            "browser.appHandle names are identifiers (letters, digits, _)",
+          ),
+        z
+          .string()
+          .min(1)
+          .superRefine((expression, ctx) => {
+            const error = appHandleSyntaxError(expression);
+            if (error !== undefined) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `browser.appHandle expression does not parse: ${error}`,
+              });
+            }
+          }),
       )
       .optional(),
   })
@@ -1032,6 +1451,64 @@ export const DiscoveryConfigSchema = z
   .strict();
 export type DiscoveryConfig = z.infer<typeof DiscoveryConfigSchema>;
 
+/**
+ * Named export profiles (`export.targets.<name>`), read by `cairn export
+ * playwright --target <name>` / MCP `cairn_export_playwright` `target`.
+ * Every field mirrors a flag of the same meaning; a flag given on the command
+ * line wins over the profile. Paths are relative to the config directory.
+ *
+ * - `input`: spec file or directory, used when no path is given;
+ * - `into` + `hostConfig`: write into the host Playwright tree and adapt to
+ *   its config (module system, timeouts, testIdAttribute, bypassCSP, testDir /
+ *   testMatch, tsconfig aliases, prettier);
+ * - `preconditions` / `verifiers` / `gateEnv`: the E10 host-command modes;
+ * - `lang`, `env` (config environment for var resolution);
+ * - `maxEvalRatio` (0..1): refuse a spec whose share of page `eval` steps
+ *   is higher; `allowEvalWithoutBypass`: export page evals into a host that
+ *   does not set `bypassCSP: true`;
+ * - `strictLocators`: no `.first()` on a locator without `nth`, so an
+ *   ambiguous locator fails the exported test under Playwright strict mode
+ *   (like `cairn run --backend playwright`); default false (first match);
+ * - `mapFile`: the export map (`export.map.yml`) that binds cairn actions to
+ *   the host's fixtures and page objects (`--map`); needs `into`;
+ * - `verifyProject`: the host Playwright project `--verify` lists, runs and
+ *   mutates under on a multi-project host (`--verify-project`; default: one
+ *   project that discovers the tests, Chromium first). Recorded in the
+ *   export's manifest.
+ */
+export const ExportTargetSchema = z
+  .object({
+    input: z.string().min(1).optional(),
+    into: z.string().min(1).optional(),
+    hostConfig: z.string().min(1).optional(),
+    preconditions: z.enum(PRECONDITIONS_MODES).optional(),
+    verifiers: z.enum(VERIFIERS_MODES).optional(),
+    gateEnv: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).optional(),
+    lang: z.enum(["js", "ts"]).optional(),
+    env: z.string().min(1).optional(),
+    mapFile: z.string().min(1).optional(),
+    maxEvalRatio: z.number().min(0).max(1).optional(),
+    allowEvalWithoutBypass: z.boolean().optional(),
+    strictLocators: z.boolean().optional(),
+    verifyProject: z.string().min(1).optional(),
+  })
+  .strict();
+export type ExportTarget = z.infer<typeof ExportTargetSchema>;
+
+export const ExportTargetNameSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z0-9][A-Za-z0-9_.-]*$/,
+    "a target name starts with a letter or digit and uses letters, digits, _ . -",
+  );
+
+export const ExportConfigSchema = z
+  .object({
+    targets: z.record(ExportTargetNameSchema, ExportTargetSchema).optional(),
+  })
+  .strict();
+export type ExportConfig = z.infer<typeof ExportConfigSchema>;
+
 /** Default drafts directory, relative to the config directory. */
 export const DEFAULT_DRAFTS_DIR = "flows/_drafts";
 
@@ -1089,6 +1566,32 @@ export const ConfigSchema = z
     /** Override `~/.cairntrace/runs` for this project. */
     artifactRoot: z.string().optional(),
     workflowRoots: z.array(z.string()).optional(),
+    /**
+     * F7: YAML files (paths or globs, relative to the file that lists them)
+     * whose `vars` / `fixtures` / `gates` / `datasources` / `suites` merge
+     * into this config, validated with the same schema. Entries merge by
+     * name, later files win and the including file wins over what it
+     * includes; every override is a `cairn config validate` finding.
+     * `environments.<name>.include` lists files that hold one environment's
+     * own `vars`.
+     */
+    include: ConfigIncludeSchema.optional(),
+    /**
+     * F19: the cairn this config needs (`requires: { cairntrace: ">=3.1" }`).
+     * A run, verify or MCP call on an older cairn is refused with exit 4;
+     * `cairn doctor` and `cairn config validate` report it.
+     */
+    requires: RequiresSchema.optional(),
+    /**
+     * F19: the runtimes cairn spawns for the project. `runtimes.node` picks
+     * the node binary of node scripts and verifiers (`CAIRN_NODE` wins).
+     */
+    runtimes: RuntimesSchema.optional(),
+    /**
+     * F7: vars shared by every environment (`${vars.X}`); an environment's
+     * own `vars` (and its `extends` chain) override them by name.
+     */
+    vars: ConfigVarsSchema.optional(),
     environments: z.record(EnvironmentConfigSchema),
     secrets: SecretsConfigSchema.optional(),
     /** Artifact-root pruning policy (see `cairn clean`). */
@@ -1108,6 +1611,12 @@ export const ConfigSchema = z
      * `preconditions.wait` and `cairn wait`.
      */
     gates: GatesRegistrySchema.optional(),
+    /**
+     * F8: run policy enforced by the run engine (CLI and MCP): `lock`
+     * (one run per config), `preflight` checks, `verifyClean` before and
+     * after, `finally` commands. See `cairn docs services` ("Run Policy").
+     */
+    run: RunPolicyConfigSchema.optional(),
     /** Multi-service environment lifecycle (docker/seed/tmux). */
     services: ServicesConfigSchema.optional(),
     /** fcheap stash integration (save/list/search run artifacts). */
@@ -1124,6 +1633,8 @@ export const ConfigSchema = z
     authoring: AuthoringConfigSchema.optional(),
     /** Discovery session settings: idle TTL + backend. */
     discovery: DiscoveryConfigSchema.optional(),
+    /** Named `cairn export playwright --target` profiles (E8). */
+    export: ExportConfigSchema.optional(),
     /**
      * Named connections for the mongo / temporal / http verifiers (and
      * fixtures): `kind: mongo` (uri or docker compose service), `kind:
@@ -1139,9 +1650,67 @@ export const ConfigSchema = z
      * `cairn docs fixtures`.
      */
     fixtures: FixturesRegistrySchema.optional(),
+    /**
+     * F9: named suites for `cairn run --suite <name>`: `specs` (paths,
+     * directories, globs, spec names), `tags`, `order`, `parallel`,
+     * `bail`, `requires`, per-environment `vars` / `before` / `after` /
+     * `hookTimeoutMs` / `specs`, and `seed.postCommands.skip`. See
+     * `cairn docs suites`.
+     */
+    suites: SuitesRegistrySchema.optional(),
+    /**
+     * F11: metric probes (`command` + `parse`, or `http` + `json`) the run
+     * engine samples around each spec or the whole invocation into
+     * `diagnostics/metrics.json` and `diagnostics/report.json`. See
+     * `cairn docs metrics`.
+     */
+    metrics: MetricsListSchema.optional(),
   })
   .strict()
   .superRefine((config, ctx) => {
+    for (const problem of environmentAliasProblems(config.environments)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: problem.path,
+        message: problem.message,
+      });
+    }
+    // A delegated environment runs elsewhere: it boots nothing locally, so
+    // a services block of its own (also one inherited through `extends`)
+    // would never run and is refused instead of ignored.
+    for (const [name, env] of Object.entries(config.environments)) {
+      if (!env.runner || env.services === undefined || env.services === false)
+        continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["environments", name, "services"],
+        message: `environment "${name}" has a runner (it runs elsewhere) and cannot own services: set \`services: false\` (also when it inherits them through extends); the top-level services and webServer apply to the local environments only`,
+      });
+    }
+    // F9: a suite names environments the config defines (a typo here would
+    // otherwise silently skip its hooks and vars).
+    for (const [suiteName, suite] of Object.entries(config.suites ?? {})) {
+      for (const ref of suiteEnvironmentRefs(suite)) {
+        const aliasTarget = config.environments[ref.env]?.alias;
+        if (aliasTarget !== undefined) {
+          // A suite sees the TARGET name (an alias is canonicalized at --env).
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["suites", suiteName, ...ref.path.split(".")],
+            message: `"${ref.env}" is an alias of "${aliasTarget}"; a suite names the target environment ("${aliasTarget}"), which \`--env ${ref.env}\` resolves to`,
+          });
+          continue;
+        }
+        if (Object.hasOwn(config.environments, ref.env)) continue;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["suites", suiteName, ...ref.path.split(".")],
+          message: `unknown environment "${ref.env}" (defined: ${
+            Object.keys(config.environments).toSorted().join(", ") || "none"
+          })`,
+        });
+      }
+    }
     // F2: a gate name in services / webServer must exist in `gates:` —
     // reported here, not after `docker compose up` or a server boot.
     const known = config.gates ?? {};
@@ -1166,6 +1735,7 @@ export type Config = z.infer<typeof ConfigSchema>;
 function configGateRefs(config: {
   webServer?: WebServerConfig | undefined;
   services?: ServicesConfig | undefined;
+  run?: RunPolicyConfig | undefined;
   environments: Record<string, EnvironmentConfig>;
 }): Array<{ path: Array<string | number>; refs: GateRefList | undefined }> {
   const out: Array<{
@@ -1175,16 +1745,37 @@ function configGateRefs(config: {
   const services = (
     prefix: Array<string | number>,
     block: {
-      docker?: DockerConfig | undefined;
+      docker?: DockerConfig | false | undefined;
       tmux?: TmuxConfig | false | undefined;
+      tunnels?: Array<{ ready?: GateRefList | undefined }> | false | undefined;
+      seed?: { phases?: Array<{ skipIf?: unknown }> | undefined } | undefined;
     },
   ): void => {
-    if (block.docker?.ready !== undefined) {
+    if (block.docker && block.docker.ready !== undefined) {
       out.push({
         path: [...prefix, "docker", "ready"],
         refs: block.docker.ready,
       });
     }
+    if (block.tunnels) {
+      block.tunnels.forEach((tunnel, index) => {
+        if (tunnel.ready !== undefined) {
+          out.push({
+            path: [...prefix, "tunnels", index, "ready"],
+            refs: tunnel.ready,
+          });
+        }
+      });
+    }
+    block.seed?.phases?.forEach((phase, index) => {
+      const skip = phase.skipIf;
+      if (skip && typeof skip === "object" && "gate" in skip) {
+        out.push({
+          path: [...prefix, "seed", "phases", index, "skipIf", "gate"],
+          refs: (skip as { gate: GateRefList }).gate,
+        });
+      }
+    });
     if (!block.tmux) return;
     block.tmux.windows.forEach((win, index) => {
       const at = [...prefix, "tmux", "windows", index];
@@ -1199,8 +1790,23 @@ function configGateRefs(config: {
   if (config.webServer?.ready !== undefined) {
     out.push({ path: ["webServer", "ready"], refs: config.webServer.ready });
   }
+  const preflight = (
+    prefix: Array<string | number>,
+    block: RunPolicyConfig | undefined,
+  ): void => {
+    block?.preflight?.forEach((check, index) => {
+      if (check.gate !== undefined) {
+        out.push({
+          path: [...prefix, "preflight", index, "gate"],
+          refs: check.gate,
+        });
+      }
+    });
+  };
+  preflight(["run"], config.run);
   if (config.services) services(["services"], config.services);
   for (const [name, environment] of Object.entries(config.environments)) {
+    preflight(["environments", name, "run"], environment.run);
     if (environment.services) {
       services(["environments", name, "services"], environment.services);
     }

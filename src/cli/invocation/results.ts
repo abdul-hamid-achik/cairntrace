@@ -2,7 +2,11 @@ import { isAbsolute as isAbsolutePath } from "node:path";
 import { addEnospcHint } from "../../core/artifacts/retention";
 import { UnknownEnvironmentError } from "../../core/config/runtimeContext";
 import { ContractHashMismatchError } from "../../core/parser/parseSpec";
-import { RunCancelledError, SpecRefusedError } from "../../core/runner/Runner";
+import {
+  DelegatedEnvironmentError,
+  RunCancelledError,
+  SpecRefusedError,
+} from "../../core/runner/Runner";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { Backend, ExitCode } from "../../core/schema/shared";
 import { synthesizeRefusedResult } from "./policy";
@@ -45,9 +49,10 @@ export function synthesizeErroredResult(
   const message = addEnospcHint(err.message);
   const contractChanged = err instanceof ContractHashMismatchError;
   const unknownEnvironment = err instanceof UnknownEnvironmentError;
+  const delegatedEnvironment = err instanceof DelegatedEnvironmentError;
   const exitCode: ExitCode = contractChanged
     ? 6
-    : unknownEnvironment
+    : unknownEnvironment || delegatedEnvironment
       ? err.exitCode
       : 2;
   const labels =
@@ -72,7 +77,8 @@ export function synthesizeErroredResult(
           ?.replace(/\.ya?ml$/, "") ?? "errored",
       path: absoluteSpecPath,
     },
-    environment: unknownEnvironment ? err.envName : "local",
+    environment:
+      unknownEnvironment || delegatedEnvironment ? err.envName : "local",
     backend: "agent-browser",
     coldStart: false,
     ...(labels ? { labels } : {}),

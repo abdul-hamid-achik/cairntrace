@@ -244,6 +244,64 @@ steps:
   });
 });
 
+describe("resolveScopedSecrets: the run policy's secrets come from the vault", () => {
+  it("selects run.preflight secret: names and ${env.X} of preflight / finally commands", async () => {
+    execaMock.mockReset();
+    execaMock.mockImplementation(async (_command: string, args: string[]) => {
+      if (args[0] === "--version") {
+        return { exitCode: 0, stdout: "tvault 0.18.0", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          DEPLOY_TOKEN: "vault-deploy",
+          QUOTA_KEY: "vault-quota",
+          DIAG_KEY: "vault-diag",
+        }),
+        stderr: "",
+      };
+    });
+    const dir = await mkdtemp(join(tmpdir(), "cairntrace-policy-tvault-"));
+    const specPath = join(dir, "flow.yml");
+    await writeFile(
+      join(dir, "cairntrace.config.yml"),
+      `version: 1
+environments:
+  local: {}
+secrets:
+  provider: tvault
+  tvault: { project: sealed-project }
+run:
+  preflight:
+    - { secret: DEPLOY_TOKEN }
+    - { command: "check-quota --key \${env.QUOTA_KEY}" }
+  finally:
+    - "collect --key \${env.DIAG_KEY}"
+`,
+    );
+    await writeFile(
+      specPath,
+      "version: 1\nname: policy_secrets\nintent: x\noutcomes: []\nsteps: []\n",
+    );
+
+    const scoped = await resolveScopedSecrets(specPath, {
+      baseEnv: { PATH: process.env.PATH },
+    });
+
+    expect(scoped.selectedKeys).toEqual([
+      "DEPLOY_TOKEN",
+      "DIAG_KEY",
+      "QUOTA_KEY",
+    ]);
+    expect(scoped.env.DEPLOY_TOKEN).toBe("vault-deploy");
+    expect(execaMock).toHaveBeenLastCalledWith(
+      "tvault",
+      expect.arrayContaining(["--only", "DEPLOY_TOKEN,DIAG_KEY,QUOTA_KEY"]),
+      expect.anything(),
+    );
+  });
+});
+
 describe("tvaultProcessEnv", () => {
   it("keeps an explicit passphrase file", () => {
     const env = tvaultProcessEnv({

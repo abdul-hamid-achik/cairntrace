@@ -1,0 +1,3 @@
+export function accountCredentials(id: string, kind: string): { email: string; password: string } {
+  return { email: `${kind}+${id}@example.test`, password: process.env.ACCOUNT_PASSWORD ?? "" };
+}

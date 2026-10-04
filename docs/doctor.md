@@ -35,8 +35,23 @@ the check failed.
 | `tvault` | `secrets.provider: tvault` in config |
 | `artifact-root` | `~/.cairntrace/runs` is writable |
 | `disk-space` | at least 1 GB free at the artifact root |
+| `config-requires` | the config's `requires.cairntrace` range is satisfied by this cairn (only when the config declares it) |
+| `config-node-runtime` | the config's `runtimes.node` (`path` / `version`, or `CAIRN_NODE`) resolves to a node that satisfies it (only when declared) |
 
-Exit code is `0` when every check passes, `2` otherwise. A missing optional tool is never fatal to a run that does not need it — `doctor` just surfaces what is and is not wired up so you do not chase a "stash unavailable" error mid-run.
+`cairn doctor [--config <path>]` reads the config from `--config`, else the `cairntrace.config.yml` found from the working directory; the two `config-*` rows exist only for what it declares. Exit code is `0` when every check passes, `2` otherwise, and `4` when a config pin (`requires.cairntrace`, `runtimes.node`) is not met. A missing optional tool is never fatal to a run that does not need it — `doctor` just surfaces what is and is not wired up so you do not chase a "stash unavailable" error mid-run.
+
+## `cairn doctor --orphans`
+
+`cairn doctor --orphans [--kill] [--yes] [--only <session|pid,...>] [--json]` skips the checks above and looks for browser sessions cairn started whose `cairn run` is gone but whose browser survives (a crashed machine, a `kill -9`). Cairn records every browser session it starts in `~/.cairntrace/sessions-ledger/` — each browser pid with its start time and command — and removes the entry when the browser closed cleanly. Only a ledger-named process that is still that same process and still looks like a browser cairn launches (the agent-browser daemon, Playwright's browsers, a browser with `--enable-automation`) is ever listed, and each is checked again right before it is signalled, so a recycled pid, your desktop browser or another tool's browser is never touched. Ledger entries with nothing left running, or whose owner has been gone for 7 days, are removed. `--only` limits the listing and the kill to those sessions and pids (comma-separated, repeatable): pass exactly what you confirmed, so an orphan that appeared or changed in between is left alone (Studio does).
+
+```bash
+cairn doctor --orphans              # list; exit 1 when any, 0 when none
+cairn doctor --orphans --kill       # asks first on a terminal
+cairn doctor --orphans --kill --yes # no prompt (required with --json / --yaml or without a terminal)
+cairn doctor --orphans --kill --yes --only cairntrace-4242,51234   # only what you confirmed
+```
+
+The result is `urn:cairntrace.dev:doctor-orphans:v1`: `orphans[]` (`session`, `backend`, `invocationId`, `ownerPid`, `projectDir`, `processes[]` with redacted commands, `killed` under `--kill`), `staleEntriesRemoved`, `liveSessions`, `killed`, `remaining`. Exit codes: `0` none (or all ended), `1` orphans listed or some survived `--kill`, `2` error, or `--kill` without a terminal or `--yes`. The config `run.verifyClean: [browsers]` uses the same ledger to refuse a run on a dirty machine.
 
 If `playwright-package` fails, run `bun install`. If
 `playwright-chromium` fails, run:

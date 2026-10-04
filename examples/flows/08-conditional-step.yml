@@ -1,13 +1,25 @@
-# Cairntrace example spec — when: conditional step.
+# Cairntrace example spec — control flow (if / repeat / optional wait / when: var).
 #
-# Demonstrates skipping a step based on the current page state. Useful in
-# checkpoint-resume specs where you want to log in only if the resume didn't
-# carry you past the login wall.
+# Flows branch, loop and probe with typed steps instead of unrolled step
+# ladders or eval loops:
+#   - `if` runs the navigation only when we are not on the dashboard yet
+#     (else: confirm where we are);
+#   - `repeat` + `until` is checked BEFORE every iteration, so a redundant
+#     navigation never runs when its goal already holds (zero iterations);
+#   - `wait.optional` + `assign` probes for a notice the demo app never shows:
+#     the step passes with matched=false, and `${waits.notice.matched}` feeds a
+#     later `when: { var: … }` gate that skips the dismiss click;
+#   - a bounded `repeat` walks the inventory rows one by one with
+#     `${repeat.iteration}`, gated by `when: { var: expectedRows, … }` on the
+#     environment's config var.
+#
+# Run against the demo app served at http://localhost:8787 (see examples/README.md).
 #
 version: 1
 name: conditional_demo
 intent: nav step runs because we start at /; the redundant nav is skipped
 environment: local
+coldStart: guest
 outcomes:
   - id: ended_on_dashboard
     description: ended on the dashboard
@@ -18,8 +30,37 @@ steps:
   - id: open_home
     open: /
   - id: nav_only_if_not_on_dashboard
-    open: /dashboard.html
-    when: urlNotContains:/dashboard.html
+    if:
+      condition: urlNotContains:/dashboard.html
+      then:
+        - id: open_dashboard
+          open: /dashboard.html
+      else:
+        - id: already_on_dashboard
+          wait: { url: { includes: /dashboard.html } }
   - id: redundant_nav_skipped
-    open: /dashboard.html
-    when: urlNotContains:/dashboard.html
+    repeat:
+      max: 2
+      until: { url: { includes: /dashboard.html } }
+      steps:
+        - id: open_dashboard_again
+          open: /dashboard.html
+  - id: maybe_maintenance_notice
+    wait:
+      text: Scheduled maintenance
+      timeoutMs: 1500
+      optional: true
+      assign: notice
+  - id: dismiss_notice_if_shown
+    when: { var: waits.notice.matched, equals: true }
+    click: { by: role, role: button, name: Dismiss }
+  - id: visit_each_row
+    when: { var: expectedRows, in: [3] }
+    repeat:
+      max: 3
+      steps:
+        - id: row_visible
+          wait:
+            selector: "tbody tr:nth-child(${repeat.iteration}) td"
+            state: visible
+            timeoutMs: 5000

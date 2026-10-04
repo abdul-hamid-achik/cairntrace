@@ -39,7 +39,7 @@ export interface FixtureVerbContext {
   /** The environment's datasources (the mongo script transport reads them). */
   datasourceSet?: EnvironmentDatasourceSet;
   envName: string;
-  vars: Readonly<Record<string, string | number | boolean>>;
+  vars: Readonly<Record<string, unknown>>;
   baseUrl?: string;
   /** Epoch ms when the verb is abandoned. */
   deadline: number;

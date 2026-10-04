@@ -42,12 +42,16 @@ jobs:
           set -euo pipefail
           ./bin/cairn run \
             examples/flows/01-dashboard-nav.yml \
+            examples/flows/08-conditional-step.yml \
+            examples/flows/13-widgets-form.yml \
             examples/flows/platform/20-login-journey.yml \
             examples/flows/platform/24-documents-pdf.yml \
             examples/flows/platform/26-exports.yml \
             examples/flows/platform/27-api-session.yml \
             examples/flows/platform/30-restock-job.yml \
             examples/flows/platform/31-run-step-teardown.yml \
+            examples/flows/platform/32-api-login-v2.yml \
+            examples/flows/platform/33-export-workbook.yml \
             --backend playwright
 
   desktop:
@@ -125,6 +129,61 @@ jobs:
       - name: Typecheck the export (strict + noUnusedLocals)
         run: cd "$EXPORT_DIR" && ./node_modules/.bin/tsc --noEmit -p . --noUnusedLocals
 
+      - name: Export the host-command modes (inline, global, manifest) and typecheck them
+        # E10: run: steps / teardown / capture through the bounded helper
+        # (inline), the global-setup with cairn wait + fixtures (global, with
+        # node / datasource verifiers gated), and the manifest listing. Each
+        # is checked fresh and compiled strictly; inline is also RUN below.
+        run: |
+          set -euo pipefail
+          for mode in inline global manifest; do
+            dir="$RUNNER_TEMP/cairn-playwright-export-$mode"
+            extra=""
+            if [ "$mode" = "global" ]; then extra="--verifiers gate --gate-env MONGO_URI"; fi
+            ./bin/cairn export playwright examples/flows --project --out-dir "$dir" --preconditions "$mode" $extra --format json > "$RUNNER_TEMP/export-report-$mode.json"
+            if grep -rIliE '__CAIRN_[A-Z_]+__' "$dir"; then
+              echo "late-bound sentinel leaked into the $mode export" >&2
+              exit 1
+            fi
+            ln -s "$GITHUB_WORKSPACE/node_modules" "$dir/node_modules"
+            ./bin/cairn export playwright --check "$dir" --format json
+            (cd "$dir" && ./node_modules/.bin/tsc --noEmit -p . --noUnusedLocals)
+          done
+          test -f "$RUNNER_TEMP/cairn-playwright-export-global/global-setup.ts"
+          grep -q '"preconditions"' "$RUNNER_TEMP/cairn-playwright-export-manifest/.cairn-export.json"
+          echo "EXPORT_INLINE_DIR=$RUNNER_TEMP/cairn-playwright-export-inline" >> "$GITHUB_ENV"
+
+      - name: Export the config's `demo` target profile and typecheck it
+        # export.targets.demo (examples/cairntrace.config.yml) carries the
+        # flags of one handoff (input, env, inline, gated verifiers); the
+        # manifest records the target and --check regenerates it.
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/cairn-playwright-export-target"
+          ./bin/cairn export playwright --config examples/cairntrace.config.yml --target demo --project --out-dir "$dir" --format json > "$RUNNER_TEMP/export-report-target.json"
+          grep -q '"target": "demo"' "$dir/.cairn-export.json"
+          if grep -rIliE '__CAIRN_[A-Z_]+__' "$dir"; then
+            echo "late-bound sentinel leaked into the target export" >&2
+            exit 1
+          fi
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$dir/node_modules"
+          ./bin/cairn export playwright --check "$dir" --format json
+          (cd "$dir" && ./node_modules/.bin/tsc --noEmit -p . --noUnusedLocals)
+
+      - name: Verify the exports (static gates)
+        # E5: sentinels, tsc with the export's tsconfig, `playwright test --list`
+        # == exported specs and freshness, for the default export and each
+        # host-command mode. Exit 0 means no gate failed; the eslint gate is
+        # skipped (the generated project has no eslint config), which is not a
+        # pass and not a failure here. The differential / mutation runs need
+        # the demo app and stay a local step (`--verify --differential`).
+        run: |
+          set -euo pipefail
+          ./bin/cairn export playwright --verify "$EXPORT_DIR" --format json > "$RUNNER_TEMP/verify-report.json"
+          for mode in inline global manifest target; do
+            ./bin/cairn export playwright --verify "$RUNNER_TEMP/cairn-playwright-export-$mode" --format json > /dev/null
+          done
+
       - name: Start the demo platform (Postgres + seeded demo app)
         # server.ts seeds (and migrates) on start, so it must come up after
         # Postgres is healthy.
@@ -141,9 +200,22 @@ jobs:
           cat "$RUNNER_TEMP/demo-app.log"
           exit 1
 
+      - name: Run the inline host-command export against the demo app
+        # Runs FIRST: its teardown leaves the catalog as it found it, while
+        # the default export (no teardown) leaves a product behind for the next
+        # run. --preconditions inline: the run: step provisions a product and the
+        # teardown deletes it again, through the bounded helper; captures read
+        # the page through the in-page probe. (The global variant would keep
+        # its fixture alive for the whole suite and skew the catalog counts, so
+        # it is compiled above, not run.)
+        run: |
+          set -euo pipefail
+          cd "$EXPORT_INLINE_DIR"
+          ./node_modules/.bin/playwright test
+
       - name: Run the exported suite against the demo app
-        # test.fixme tests (transform / file / xlsx coverage gaps) report as
-        # skipped.
+        # test.fixme tests (specs that need a run: step or config fixtures, which
+        # only --preconditions inline|global export) report as skipped.
         run: |
           set -euo pipefail
           cd "$EXPORT_DIR"

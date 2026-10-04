@@ -245,3 +245,122 @@ describe("isDocumentaryPrecondition", () => {
     expect(isDocumentaryPrecondition(run)).toBe(false);
   });
 });
+
+describe("the 30-minute floor depends on what the export emits (E10)", () => {
+  const withNode = spec({
+    outcomes: [
+      nodeOutcome("durable", 5 * 60 * 1000),
+      {
+        id: "db",
+        description: "db row",
+        verify: {
+          mongo: {
+            source: "main",
+            collection: "c",
+            filter: {},
+            expect: { count: 1 },
+          },
+        },
+      },
+    ],
+  } as Partial<Spec>);
+
+  it("keeps the floor for an exported node verifier, and for gate (it can run)", () => {
+    for (const verifiers of [undefined, "keep", "gate"] as const) {
+      const budget = playwrightTestTimeoutBudget(
+        withNode,
+        verifiers ? { verifiers } : {},
+      );
+      expect(budget.floorReason).toBe("nodeVerifier");
+      expect(budget.timeoutMs).toBe(PLAYWRIGHT_EXPORTED_TEST_MIN_TIMEOUT_MS);
+    }
+  });
+
+  it("--verifiers drop emits no node verifier: no floor, and the verifier adds no budget", () => {
+    const budget = playwrightTestTimeoutBudget(withNode, { verifiers: "drop" });
+    expect(budget.floorReason).toBeUndefined();
+    expect(budget.declaredMs).toBe(0);
+    expect(budget.timeoutMs).toBe(60_000);
+  });
+
+  it("a datasource verifier is never emitted, so it never reserves 30 seconds", () => {
+    const onlyDb = spec({
+      outcomes: [
+        {
+          id: "db",
+          description: "db row",
+          verify: {
+            mongo: {
+              source: "main",
+              collection: "c",
+              filter: {},
+              expect: { count: 1 },
+            },
+          },
+        },
+      ],
+    } as Partial<Spec>);
+    expect(playwrightTestTimeoutBudget(onlyDb).declaredMs).toBe(0);
+  });
+
+  it("run steps and teardown count only when they are emitted", () => {
+    const authored = spec({
+      steps: [
+        { id: "seed", run: { shell: "seed", timeoutMs: 40_000 } },
+        {
+          id: "cap",
+          capture: { assign: "t", text: { by: "role", role: "heading" } },
+        },
+      ],
+      teardown: {
+        steps: [{ id: "clean", run: { shell: "clean", timeoutMs: 20_000 } }],
+        timeoutMs: 90_000,
+      },
+    } as unknown as Partial<Spec>);
+    // Not emitted: only the capture (5s default wait) + the outcome (30s).
+    expect(playwrightTestTimeoutBudget(authored).declaredMs).toBe(35_000);
+    // Emitted: + the run step's own timeout + the teardown's items (<= its budget).
+    expect(
+      playwrightTestTimeoutBudget(authored, { hostCommands: true }).declaredMs,
+    ).toBe(35_000 + 40_000 + 20_000);
+    // A teardown's budget caps what it can add.
+    const capped = spec({
+      steps: [],
+      teardown: {
+        steps: [{ id: "clean", run: { shell: "clean", timeoutMs: 200_000 } }],
+        timeoutMs: 30_000,
+      },
+    } as unknown as Partial<Spec>);
+    expect(
+      playwrightTestTimeoutBudget(capped, { hostCommands: true }).declaredMs,
+    ).toBe(30_000 + 30_000);
+  });
+
+  it("a polled outcome reserves its poll window", () => {
+    const polled = spec({
+      outcomes: [
+        {
+          id: "soon",
+          description: "shows soon",
+          verify: { text: { contains: "x" }, poll: { timeoutMs: 120_000 } },
+        },
+      ],
+    } as unknown as Partial<Spec>);
+    expect(playwrightTestTimeoutBudget(polled).declaredMs).toBe(150_000);
+  });
+
+  it("a project does not budget preconditions it does not run in a beforeAll", () => {
+    const longPre = spec({
+      preconditions: {
+        commands: [{ run: "bun run seed", timeoutMs: 10 * 60 * 1000 }],
+      },
+    } as unknown as Partial<Spec>);
+    const inline = playwrightProjectTimeoutBudget([longPre]);
+    expect(inline.floorReason).toBe("longPrecondition");
+    const elsewhere = playwrightProjectTimeoutBudget([longPre], {
+      inlinePreconditions: false,
+    });
+    expect(elsewhere.floorReason).toBeUndefined();
+    expect(elsewhere.timeoutMs).toBe(60_000 + 30_000);
+  });
+});

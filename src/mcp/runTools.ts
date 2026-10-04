@@ -180,13 +180,19 @@ function summarizeRun(r: RunResult): string {
 
 function summarizeBatch(b: BatchRunResult): string {
   const refused = b.summary.refused ?? 0;
+  const skipped = b.summary.skipped ?? 0;
   return [
     `${b.summary.passed}/${b.summary.total} passed, ${b.summary.failed} failed, ${b.summary.errored} errored${
       refused > 0 ? `, ${refused} refused` : ""
+    }${
+      skipped > 0 ? `, ${skipped} skipped (bailed)` : ""
     } (exit ${b.exitCode})`,
     ...b.results.map(
       (r) =>
         `  ${r.status.toUpperCase()} ${r.spec.name} → ${resultLocation(r)}`,
+    ),
+    ...(b.skipped ?? []).map(
+      (entry) => `  SKIPPED ${entry.spec} (bailed after ${entry.bailedBy})`,
     ),
   ].join("\n");
 }
@@ -299,6 +305,10 @@ export function runToolResult(
   // a crash): the same schema-valid errored RunResult/batch the CLI prints
   // for an unknown --env, carrying the invocation error.
   const message = result.error ?? "run errored";
+  // A document carries a stable code; a delegated runner's 130 / 143 is
+  // in the status / journal.
+  const documentExitCode =
+    result.exitCode === 130 || result.exitCode === 143 ? 2 : result.exitCode;
   const labels = Object.fromEntries(
     requested.labels
       .map((pair) => [
@@ -312,7 +322,7 @@ export function runToolResult(
     summary: `errored before the spec ran: ${message}`,
     failure: { phase: "invocation", message },
     steps: [],
-    exitCode: result.exitCode,
+    exitCode: documentExitCode,
   }));
   const text = `${message}\n${invocationLine(result)}`;
   if (errored.length === 1) {
@@ -338,7 +348,7 @@ export function runToolResult(
         errored: errored.length,
       },
       results: errored.map(withNextActions),
-      exitCode: result.exitCode,
+      exitCode: documentExitCode,
     }) as unknown as Record<string, unknown>,
     isError: true,
   };
@@ -459,6 +469,7 @@ async function statusOf(
         ? { error: entry.failure }
         : {}),
     ...(document ? { document } : {}),
+    ...(journal?.delegate ? { delegate: journal.delegate } : {}),
   });
 }
 
@@ -478,6 +489,15 @@ function statusText(status: RunInvocationStatusResult): string {
     }`,
     ...(status.journalDirAbsolute
       ? [`journal: ${status.journalDirAbsolute}`]
+      : []),
+    ...(status.delegate
+      ? [
+          `delegated runner: ${status.delegate.command.join(" ")}${
+            status.delegate.remoteInvocationId
+              ? ` (remote invocation ${status.delegate.remoteInvocationId})`
+              : ""
+          }`,
+        ]
       : []),
     ...(status.planned !== undefined
       ? [`runs: ${status.runs.length}/${status.planned} started`]
@@ -527,15 +547,15 @@ export function registerRunTools(
         "Run specs through the same engine as `cairn run`: config + browser.* (testIdAttribute, click tuning), vars, scoped secrets, services/webServer lifecycle, before/after hooks, repeat/matrix, post-run stash/investigate/annotate, retention adapters, stamp-if-green, JUnit and the invocation journal. " +
         "Every `cairn run` flag is an input (camelCase: noServices, stampIfGreen, sinceCodemap, …). Like `cairn run`, it boots the config webServer and runs its teardown unless noWebServer is set. Config services (docker/seed/tmux) start, and their teardown runs, only on a server started as `cairn mcp --allow-services` (or CAIRN_MCP_ALLOW_SERVICES=1); otherwise a run whose config would start them fails with exit 4 before anything starts: pass noServices: true when the stack is already up, or reuseServices: true after `cairn services up`. " +
         "wait:true (default) returns the `cairn run --format json` document (RunResult, BatchRunResult for several specs, SelectionResult for selectOnly) plus nextActions; repeat/matrix return ONE BatchRunResult over every iteration (the CLI prints one document per iteration). isError when the exit code is not 0; a failed stamp-if-green or JUnit write is named in the text. Cancelling or timing out the request cancels the run: use wait:false for long suites. " +
-        `wait:false starts it in the background and returns {invocationId, journalDir, status}; poll cairn_run_status / cairn_logs, stop it with cairn_run_cancel. A server runs at most ${MAX_RUNNING_INVOCATIONS} invocations at once. before/after hooks need \`cairn mcp --allow-hooks\`. ` +
+        `wait:false starts it in the background and returns {invocationId, journalDir, status}; poll cairn_run_status / cairn_logs, stop it with cairn_run_cancel. A server runs at most ${MAX_RUNNING_INVOCATIONS} invocations at once. before/after hooks in the request need \`cairn mcp --allow-hooks\` (hooks the config declares — suite hooks, run.preflight/finally, metric commands — are trusted config). ` +
         "Invocations that boot services or a webServer from the same config file run one at a time (whatever their env); one with neither (noServices + noWebServer, or a config without them) never waits.",
       inputSchema: CAIRN_RUN_INPUT_SHAPE,
     },
     async (input, extra) => {
       const { specs, options } = runOptionsFromMcpInput(input);
-      if (specs.length === 0) {
+      if (specs.length === 0 && options.suite === undefined) {
         return textError(
-          "cairn_run needs `specs` (spec paths or directories) or `path`",
+          "cairn_run needs `specs` (spec paths or directories), `path` or `suite` (a config suites: entry)",
         );
       }
       if (hasHooks(options) && !ctx.allowHooks) {

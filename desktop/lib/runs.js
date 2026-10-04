@@ -17,6 +17,7 @@ const CairnEvents = require("./events");
 const CairnPolicy = require("./policy");
 const evidence = require("./evidence");
 const dataEvidence = require("./dataEvidence");
+const metrics = require("./metrics");
 
 const DEFAULT_MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -266,8 +267,50 @@ function readEventsWindow(runDir, end, maxBytes = LIVENESS_WINDOW_BYTES) {
 }
 
 /**
+ * The local journal of a delegated invocation (`delegate` in its
+ * invocation.json) that lists `runId`: a run directory its runner copies
+ * here from another machine. Newest first among the last `limit` journals.
+ * @param {string} runsRoot
+ * @param {string} runId
+ * @param {number} [limit]
+ * @returns {{ id: string, pid: number | null, status: string | null } | null}
+ */
+function delegatedRunOwner(runsRoot, runId, limit = 50) {
+  let names;
+  try {
+    names = fs
+      .readdirSync(path.join(runsRoot, INVOCATIONS_DIR))
+      .filter(isInvocationId)
+      .toSorted((a, b) => b.localeCompare(a))
+      .slice(0, limit);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    const journal = readJsonFile(
+      path.join(runsRoot, INVOCATIONS_DIR, name, "invocation.json"),
+    );
+    if (
+      journal?.delegate &&
+      Array.isArray(journal.runs) &&
+      journal.runs.some((/** @type {any} */ run) => run?.runId === runId)
+    ) {
+      return {
+        id: name,
+        pid: Number.isInteger(journal.pid) ? journal.pid : null,
+        status: typeof journal.status === "string" ? journal.status : null,
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * Liveness of a run directory without `run.json`: heartbeat → owning pid
- * (heartbeat or invocation journal) → mtime windows.
+ * (heartbeat or invocation journal) → mtime windows. A run a delegated
+ * runner copies here (its invocation journal is on another machine, and
+ * its heartbeats name a pid there) lives and dies with the LOCAL delegated
+ * invocation that lists it: that process's pid and journal status decide.
  * @param {string} runsRoot
  * @param {string} runDir
  * @param {{ now?: number, runningWindowMs?: number, staleMs?: number, pidAlive?: (pid: number) => boolean | null, lastActivityMs?: number | null }} [options]
@@ -283,6 +326,44 @@ function runLiveness(runsRoot, runDir, options = {}) {
     started?.invocation && typeof started.invocation === "object"
       ? started.invocation
       : null;
+  const localJournalDir =
+    typeof invocation?.dir === "string"
+      ? safeJoin(runsRoot, invocation.dir)
+      : null;
+  const owner =
+    invocation && !(localJournalDir && fs.existsSync(localJournalDir))
+      ? delegatedRunOwner(runsRoot, path.basename(runDir))
+      : null;
+  if (owner) {
+    const ownerAlive =
+      owner.status === "running" && owner.pid
+        ? (options.pidAlive ?? isPidAlive)(owner.pid)
+        : false;
+    const verdict = CairnEvents.classifyLiveness({
+      hasRunJson: false,
+      heartbeatTs: null,
+      pid: owner.pid,
+      pidAlive: ownerAlive,
+      lastActivityMs:
+        options.lastActivityMs === undefined
+          ? lastActivityMs(runDir)
+          : options.lastActivityMs,
+      now: options.now,
+      runningWindowMs: options.runningWindowMs,
+      staleMs: options.staleMs,
+    });
+    return {
+      ...verdict,
+      reason:
+        owner.status !== "running"
+          ? `its delegated invocation ${owner.id} settled (${owner.status ?? "unknown"}) without the runner copying run.json`
+          : `delegated: ${verdict.reason} (local invocation ${owner.id})`,
+      pid: owner.pid,
+      invocation,
+      heartbeatPhase:
+        typeof heartbeat?.phase === "string" ? heartbeat.phase : null,
+    };
+  }
   let pid = Number.isInteger(heartbeat?.pid) ? heartbeat.pid : null;
   if (!pid && typeof invocation?.dir === "string") {
     const journalDir = safeJoin(runsRoot, invocation.dir);
@@ -888,14 +969,29 @@ function buildFailurePanel(
     run.failure && typeof run.failure === "object" ? run.failure : {};
   const steps = Array.isArray(run.steps) ? run.steps : [];
   const record =
+    // a looped step has a result per execution: the failed one first
+    steps.find(
+      (step) =>
+        step?.id && step.id === failure.step && step.status === "failed",
+    ) ??
     steps.find((step) => step?.id && step.id === failure.step) ??
     steps.find((step) => step?.status === "failed") ??
     null;
+  // F14: a looped step has one row per execution; the failed one is it.
+  const failedId = record?.id ?? failure.step;
   const row =
-    model.steps.find(
-      (entry) => entry.stepId === (record?.id ?? failure.step),
+    model.steps.findLast(
+      (entry) =>
+        entry.stepId === failedId &&
+        entry.status === "failed" &&
+        !entry.superseded,
     ) ??
-    (record ? null : model.steps.find((entry) => entry.status === "failed")) ??
+    model.steps.findLast((entry) => entry.stepId === failedId) ??
+    (record
+      ? null
+      : model.steps.find(
+          (entry) => entry.status === "failed" && !entry.superseded,
+        )) ??
     null;
   const stepId = record?.id ?? row?.stepId ?? null;
   const artifacts = [
@@ -1015,6 +1111,19 @@ function buildFailurePanel(
           url: row?.url ?? diagnostics?.url ?? null,
           screenshot: exists(screenshot),
           diagnosticsPath: exists(diagnosticsPath),
+          // F14: where a nested step ran (`in visit_rows #3`)
+          place: CairnEvents.placeText(record ?? row),
+          // its evidence files (F15 widgets/, F18 requests/ …)
+          artifacts: [...new Set(artifacts)].slice(0, 50),
+          // F15: the interaction path it took and why
+          via:
+            (typeof record?.via === "string" ? record.via : null) ??
+            row?.via ??
+            null,
+          detail:
+            (typeof record?.detail === "string" ? record.detail : null) ??
+            row?.detail ??
+            null,
         }
       : null,
     lastScreenshot: exists(model.latestScreenshot?.path ?? null),
@@ -1233,6 +1342,72 @@ function readRunHooks(runDir, run, events) {
   return { invocationId: journal.id, before, after, logs };
 }
 
+/** Journal event types the run-policy panel reads (besides services.*). */
+const POLICY_EVENT_PATTERN =
+  /^(run\.lock\.|preflight\.|cleanliness\.|finally\.|suite\.|metric\.sampled$|invocation\.bailed$|services\.teardown\.)/;
+
+/**
+ * What the run policy did to the invocation a run belongs to, from its
+ * journal: the config `run:` lock, preflight checks, cleanliness (verifyClean)
+ * findings, `finally` hooks, `--bail`, the suite and its hooks, and the
+ * settled summary's `runPolicy` / `skipped` / exit code. These describe the
+ * whole invocation (the run is one spec of it). Null when the journal holds
+ * none of it, so a run from before the run policy shows no panel.
+ * @param {string | null | undefined} journalDir
+ * @returns {{ invocationId: string, suite: string | null, summary: { runPolicy: Record<string, any> | null, skipped: number | null, exitCode: number | null, error: string | null }, policy: Record<string, any>, services: Array<Record<string, any>> } | null}
+ */
+function readRunPolicy(journalDir) {
+  if (!journalDir) return null;
+  const journal = readJsonFile(path.join(journalDir, "invocation.json"));
+  const events = readEventsFrom(journalDir, 0, 8 * 1024 * 1024).events.filter(
+    (event) => POLICY_EVENT_PATTERN.test(String(event?.type ?? "")),
+  );
+  const model = CairnEvents.reduceEvents(events);
+  const policy = model.policy;
+  const summary =
+    journal?.summary && typeof journal.summary === "object"
+      ? journal.summary
+      : null;
+  const runPolicy =
+    summary?.runPolicy && typeof summary.runPolicy === "object"
+      ? summary.runPolicy
+      : null;
+  const suite =
+    typeof journal?.suite === "string"
+      ? journal.suite
+      : (policy.suite?.name ?? null);
+  const notable =
+    Boolean(policy.lock) ||
+    policy.preflight.checks.length > 0 ||
+    policy.cleanliness.length > 0 ||
+    policy.finally.length > 0 ||
+    Boolean(policy.bailed) ||
+    Boolean(policy.suite) ||
+    policy.suiteHooks.length > 0 ||
+    Boolean(runPolicy) ||
+    (typeof summary?.skipped === "number" && summary.skipped > 0);
+  if (!notable) return null;
+  return {
+    invocationId:
+      typeof journal?.invocationId === "string"
+        ? journal.invocationId
+        : path.basename(journalDir),
+    suite,
+    summary: {
+      runPolicy,
+      skipped: typeof summary?.skipped === "number" ? summary.skipped : null,
+      exitCode: Number.isInteger(summary?.exitCode) ? summary.exitCode : null,
+      error: typeof summary?.error === "string" ? summary.error : null,
+    },
+    policy,
+    // only the critical teardown failures are of interest here
+    services: model.services.filter(
+      (/** @type {Record<string, any>} */ row) =>
+        row.phase === "teardown" && row.event === "fail",
+    ),
+  };
+}
+
 /**
  * A `stash-receipt.json` as Studio shows it: the original four fields plus
  * whatever the 2b contract adds (contentHash, fileCount, sizeBytes,
@@ -1335,6 +1510,7 @@ function readRunDetail(runDir, options = {}) {
 
   const events = readEventsFrom(runDir, 0, 8 * 1024 * 1024).events;
   const hooks = readRunHooks(runDir, run, events);
+  const policyJournal = runJournal(runDir, run, events);
   const model = CairnEvents.reduceEvents(
     hooks ? [...hooks.before, ...events, ...hooks.after] : events,
   );
@@ -1371,6 +1547,10 @@ function readRunDetail(runDir, options = {}) {
     // F16 expect verdicts and captured values (expects/, captures/)
     expects,
     captures,
+    // F15 widget fields (widgets/) and F18 request envelopes (requests/),
+    // summarized and masked
+    widgets: dataEvidence.readWidgets(runDir),
+    requests: dataEvidence.readRequests(runDir),
     // F3b: the run's fixture ledger (fixtures.json), outputs masked
     fixtures: dataEvidence.readRunFixtures(runDir),
     // F3a: run.json `teardown` when the runner records it, else null
@@ -1388,6 +1568,9 @@ function readRunDetail(runDir, options = {}) {
     journal: hooks
       ? { invocationId: hooks.invocationId, logs: hooks.logs }
       : null,
+    // F8 run policy of the run's invocation, and F11 metric probes
+    runPolicy: readRunPolicy(policyJournal?.dir ?? null),
+    metrics: metrics.readRunMetrics(runDir),
     stashReceipt: normalizeStashReceipt(receipt),
     publishReceipt: evidence.readPublishReceipt(runDir),
     pinned: evidence.normalizePinned(run?.pinned),
@@ -1867,6 +2050,7 @@ module.exports = {
   lastActivityMs,
   readEventsWindow,
   runLiveness,
+  delegatedRunOwner,
   summarizeRun,
   parseLabelFilters,
   listRuns,
@@ -1885,6 +2069,7 @@ module.exports = {
   buildFailurePanel,
   runJournalDir,
   readRunHooks,
+  readRunPolicy,
   readRunDetail,
   readBoundedText,
   readTextFrom,

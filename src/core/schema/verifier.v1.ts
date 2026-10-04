@@ -441,12 +441,180 @@ export const CountVerifierSchema = z
   .strict();
 export type CountVerifier = z.infer<typeof CountVerifierSchema>;
 
-/** #8 — workbook content checks for downloaded `.xlsx` artifacts. */
+/** A regex source that must compile (schema-time error otherwise). */
+const RegexSourceSchema = z.string().refine((s) => !invalidRegex(s), {
+  message: "invalid regex",
+});
+
+/**
+ * Which worksheet an xlsx check reads: a name, `{ match: <regex> }` (the
+ * first sheet whose name matches) or a 0-based index (`0` = first sheet).
+ */
+export const XlsxSheetSelectorSchema = z.union([
+  z.string().min(1),
+  z.object({ match: RegexSourceSchema }).strict(),
+  z.number().int().min(0),
+]);
+export type XlsxSheetSelector = z.infer<typeof XlsxSheetSelectorSchema>;
+
+/** A header name, or `{ matches: <regex> }` for a pattern. */
+const XlsxHeaderNameSchema = z.union([
+  z.string().min(1),
+  z.object({ matches: RegexSourceSchema }).strict(),
+]);
+
+/**
+ * A list of header names: written inline, or one whole runtime reference
+ * that resolves to a list (`${captures.screen.headers}`).
+ */
+const XlsxHeaderListSchema = z.union([
+  z.array(z.union([z.string(), z.number()])),
+  z.string().regex(/^\$\{[^}]+\}$/, "a list, or one ${…} reference to a list"),
+]);
+
+const XlsxCountSchema = z
+  .object({
+    count: z.number().int().min(0).optional(),
+    atLeast: z.number().int().min(0).optional(),
+    atMost: z.number().int().min(0).optional(),
+  })
+  .strict()
+  .refine(
+    (c) =>
+      c.count !== undefined
+        ? c.atLeast === undefined && c.atMost === undefined
+        : c.atLeast !== undefined || c.atMost !== undefined,
+    { message: "count, or atLeast and/or atMost" },
+  );
+
+/**
+ * F17 — the header rows of the selected sheet. `labelRow` (default 1) and
+ * `keyRow` are 1-based Excel row numbers. A name matches a column whose
+ * label OR key equals it after whitespace is collapsed, `strip` (a regex,
+ * e.g. a trailing required marker `\s*\*$`) is removed, and case is ignored
+ * (unless `caseSensitive`).
+ *   - `present` / `absent`: names (or `{ matches }`) that must / must not
+ *     name a column;
+ *   - `labels: { <key>: <label> }`: the column keyed `key` is labelled
+ *     `label` (needs `keyRow`);
+ *   - `withinListInOrder`: every header column appears in this list, in the
+ *     list's relative order (the sheet adds no column and reorders none);
+ *   - `includesInOrder`: every name in this list is a column, in this
+ *     relative order (the sheet may hold more columns). A runtime reference
+ *     such as `${captures.screen.headers}` (a `capture: table`) compares the
+ *     workbook with what the page rendered.
+ */
+const XlsxHeadersSchema = z
+  .object({
+    labelRow: z.number().int().min(1).optional(),
+    keyRow: z.number().int().min(1).optional(),
+    strip: RegexSourceSchema.optional(),
+    caseSensitive: z.boolean().optional(),
+    present: z.array(XlsxHeaderNameSchema).nonempty().optional(),
+    absent: z.array(XlsxHeaderNameSchema).nonempty().optional(),
+    labels: z
+      .record(z.string().min(1), z.string())
+      .refine((m) => Object.keys(m).length > 0, {
+        message: "labels maps at least one key",
+      })
+      .optional(),
+    withinListInOrder: XlsxHeaderListSchema.optional(),
+    includesInOrder: XlsxHeaderListSchema.optional(),
+  })
+  .strict()
+  .refine((h) => h.labels === undefined || h.keyRow !== undefined, {
+    path: ["labels"],
+    message: "headers.labels maps keys to labels: set headers.keyRow",
+  })
+  .refine((h) => h.keyRow === undefined || h.keyRow !== (h.labelRow ?? 1), {
+    path: ["keyRow"],
+    message: "keyRow and labelRow must differ",
+  });
+
+/** One column → matcher entry of `rows.match` (column: a label or key). */
+const XlsxRowMatchSchema = z
+  .object({
+    column: z.string().min(1),
+    matcher: ValueMatcherSchema,
+  })
+  .strict();
+
+/**
+ * F17 — data rows of the selected sheet (rows below the key row, or below
+ * the label row without one). `afterKeyRow` counts non-blank rows;
+ * `match` needs ONE row where every entry's matcher holds against that
+ * row's cell (shared data matchers; cells are the strings Excel stores).
+ */
+const XlsxRowsSchema = z
+  .object({
+    afterKeyRow: XlsxCountSchema.optional(),
+    match: z.array(XlsxRowMatchSchema).nonempty().optional(),
+  })
+  .strict()
+  .refine((r) => r.afterKeyRow !== undefined || r.match !== undefined, {
+    message: "rows needs afterKeyRow or match",
+  });
+
+/**
+ * F17 — one cell by A1 reference. `equals` compares the stored string
+ * (numbers and dates unformatted), `matches` is a regex, `numFmt` is the
+ * applied number format: a format code (`@` = text, `yyyy-mm-dd`;
+ * case-insensitive) or a built-in id (`49`).
+ */
+const XlsxCellSchema = z
+  .object({
+    ref: z.string().regex(/^\$?[A-Za-z]{1,3}\$?[1-9]\d*$/, "an A1 reference"),
+    sheet: XlsxSheetSelectorSchema.optional(),
+    equals: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    matches: RegexSourceSchema.optional(),
+    numFmt: z.union([z.string().min(1), z.number().int().min(0)]).optional(),
+  })
+  .strict()
+  .refine(
+    (c) =>
+      c.equals !== undefined ||
+      c.matches !== undefined ||
+      c.numFmt !== undefined,
+    { message: "a cell check needs equals, matches or numFmt" },
+  );
+
+/**
+ * A data validation covering a column (found by header label or key).
+ * `formulaMatches`: regex(es) every one of which must match the
+ * validation's formula1 or formula2.
+ */
+const XlsxValidationSchema = z
+  .object({
+    sheet: XlsxSheetSelectorSchema.optional(),
+    column: z.string().min(1),
+    type: z.string().min(1).optional(),
+    formulaMatches: z
+      .union([RegexSourceSchema, z.array(RegexSourceSchema).nonempty()])
+      .optional(),
+  })
+  .strict();
+
+const XLSX_HEADER_ASSERTIONS = [
+  "present",
+  "absent",
+  "labels",
+  "withinListInOrder",
+  "includesInOrder",
+] as const;
+
+/**
+ * #8 — workbook checks for downloaded `.xlsx` artifacts (read-only; F17).
+ * `sheet` selects the worksheet for `headers` / `rows` / `cells` /
+ * `validations` (default: the first sheet) and scopes `contains`, which
+ * otherwise searches every sheet. `sheets[]` keeps its per-sheet `contains`.
+ */
 export const XlsxVerifierSchema = z
   .object({
     xlsx: z
       .object({
         path: z.string().min(1),
+        sheet: XlsxSheetSelectorSchema.optional(),
+        contains: z.array(z.string().min(1)).nonempty().optional(),
         sheets: z
           .array(
             z
@@ -457,22 +625,30 @@ export const XlsxVerifierSchema = z
               .strict(),
           )
           .optional(),
-        validations: z
-          .array(
-            z
-              .object({
-                sheet: z.string().min(1),
-                column: z.string().min(1),
-                type: z.string().min(1).optional(),
-              })
-              .strict(),
-          )
-          .optional(),
+        headers: XlsxHeadersSchema.optional(),
+        rows: XlsxRowsSchema.optional(),
+        cells: z.array(XlsxCellSchema).nonempty().optional(),
+        validations: z.array(XlsxValidationSchema).optional(),
       })
       .strict()
-      .refine((x) => Boolean(x.sheets?.length || x.validations?.length), {
-        message: "xlsx verifier requires sheets or validations",
-      }),
+      .refine(
+        (x) =>
+          Boolean(
+            x.sheets?.length ||
+              x.validations?.length ||
+              x.contains?.length ||
+              x.rows ||
+              x.cells?.length ||
+              (x.headers &&
+                XLSX_HEADER_ASSERTIONS.some(
+                  (key) => x.headers![key] !== undefined,
+                )),
+          ),
+        {
+          message:
+            "xlsx verifier requires at least one of: contains, sheets, headers (present/absent/labels/withinListInOrder/includesInOrder), rows, cells, validations",
+        },
+      ),
   })
   .strict();
 export type XlsxVerifier = z.infer<typeof XlsxVerifierSchema>;

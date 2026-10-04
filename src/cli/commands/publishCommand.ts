@@ -39,6 +39,8 @@ export interface PublishRunOutcome {
   sha256?: string;
   sizeBytes?: number;
   publishedAt?: string;
+  /** Server commit time from the fcheap receipt, when it carries one. */
+  committedAt?: string;
   expiresAt?: string;
   retentionDays: number;
   /** Run-relative paths/dirs left out of the package. */
@@ -81,6 +83,7 @@ export async function publishRunRef(
       sha256: published.sha256,
       sizeBytes: published.sizeBytes,
       publishedAt: published.publishedAt,
+      ...(published.committedAt ? { committedAt: published.committedAt } : {}),
       expiresAt: published.expiresAt,
       ...(published.webUrl ? { webUrl: published.webUrl } : {}),
       ...(published.excluded.length > 0
@@ -112,6 +115,7 @@ export async function publishRunRef(
       sha256: published.sha256,
       sizeBytes: published.sizeBytes,
       publishedAt: published.publishedAt,
+      ...(published.committedAt ? { committedAt: published.committedAt } : {}),
       expiresAt: published.expiresAt,
       retentionDays,
       excluded: published.excluded,

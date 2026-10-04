@@ -24,7 +24,12 @@ import type {
   Step,
   WaitCondition,
 } from "../../core/schema/spec.v1";
-import { clickLocator, withoutPostcondition } from "../../core/schema/spec.v1";
+import {
+  backendWaitCondition,
+  clickLocator,
+  fillLocator,
+  withoutPostcondition,
+} from "../../core/schema/spec.v1";
 import {
   DEFAULT_NETWORK_POSTCONDITION_TIMEOUT_MS,
   describeNetworkPostcondition,
@@ -211,8 +216,7 @@ export class PlaywrightAdapter implements BrowserBackend {
         // agent-browser adapter no special date path is needed here. Keep
         // every fill on this call; rerouting date inputs would lose fill()'s
         // format validation ("Malformed value" on a bad date string).
-        const { value, ...loc } = step.fill;
-        await this.resolveLocator(loc as Locator).fill(value, {
+        await this.resolveLocator(fillLocator(step)).fill(step.fill.value, {
           timeout: this.opts.defaultTimeoutMs,
         });
       } else if ("select" in step) {
@@ -247,7 +251,7 @@ export class PlaywrightAdapter implements BrowserBackend {
         const download = await downloadPromise;
         await download.saveAs(saveAs);
       } else if ("wait" in step) {
-        await this.applyWait(page, step.wait);
+        await this.applyWait(page, backendWaitCondition(step.wait));
       } else if ("press" in step) {
         if (step.target) {
           await this.resolveLocator(step.target).press(step.press, {
@@ -303,7 +307,10 @@ export class PlaywrightAdapter implements BrowserBackend {
           `unhandled step type: ${JSON.stringify(Object.keys(step as object))}`,
         );
       }
-      return success(Date.now() - start);
+      const done = success(Date.now() - start);
+      // F15: Playwright hands the renderer the bytes; record the path for
+      // parity with agent-browser's DataTransfer fallback.
+      return "upload" in step ? { ...done, via: "setInputFiles" } : done;
     } catch (e) {
       return failure((e as Error).message, Date.now() - start);
     }
@@ -814,7 +821,11 @@ export class PlaywrightAdapter implements BrowserBackend {
     timeoutMs: number,
   ): Promise<BackendResponse> {
     const mode = this.resolveRequestMode();
-    if (mode === "cookie-bridge") {
+    // F18 `credentials: omit`: APIRequestContext always attaches the
+    // context's cookies, so an anonymous call goes through the bridge path
+    // (no cookie header, no Set-Cookie kept) — in process unless Bun needs
+    // the isolated subprocess.
+    if (mode === "cookie-bridge" || (mode === "api" && omitsCredentials(req))) {
       return this.fetchRequestWithCookieBridge(context, req, timeoutMs);
     }
     if (mode === "subprocess-cookie-bridge") {
@@ -874,10 +885,12 @@ export class PlaywrightAdapter implements BrowserBackend {
         signal: controller.signal,
       });
       const text = await response.text();
-      const cookies = parseSetCookieHeaders(
-        getSetCookieHeaders(response.headers),
-        response.url || req.url,
-      );
+      const cookies = omitsCredentials(req)
+        ? []
+        : parseSetCookieHeaders(
+            getSetCookieHeaders(response.headers),
+            response.url || req.url,
+          );
       if (cookies.length > 0) {
         await context.addCookies(cookies);
       }
@@ -917,10 +930,9 @@ export class PlaywrightAdapter implements BrowserBackend {
       timeoutMs,
       this.opts.isolatedFetchScript ?? ISOLATED_FETCH_SCRIPT,
     );
-    const cookies = parseSetCookieHeaders(
-      result.setCookieHeaders,
-      result.url || req.url,
-    );
+    const cookies = omitsCredentials(req)
+      ? []
+      : parseSetCookieHeaders(result.setCookieHeaders, result.url || req.url);
     if (cookies.length > 0) {
       await context.addCookies(cookies);
     }
@@ -937,7 +949,7 @@ export class PlaywrightAdapter implements BrowserBackend {
     req: BackendRequest,
   ): Promise<{ headers: Headers; body: EncodedRequestBody }> {
     const headers = new Headers(req.headers ?? {});
-    if (!headers.has("cookie")) {
+    if (!headers.has("cookie") && !omitsCredentials(req)) {
       const cookieHeader = serializeCookies(await context.cookies(req.url));
       if (cookieHeader) headers.set("cookie", cookieHeader);
     }
@@ -1111,14 +1123,17 @@ export class PlaywrightAdapter implements BrowserBackend {
     });
     page.on("response", (res: Response) => {
       const pending = pendingRequests.get(res.request());
-      if (pending) pending.status = res.status();
+      if (!pending) return;
+      // The status is final once the headers arrive: publish it now, so an
+      // outcome judged right after the page saw the fetch resolve never
+      // reads it as <pending> while the body is still downloading. Timing
+      // is stamped when the request finishes (or fails).
+      pending.status = res.status();
+      pending.entry.status = pending.status;
     });
     page.on("requestfinished", (req: Request) => {
       const pending = stampTerminalTiming(req);
       if (!pending) return;
-
-      // Response headers arrive before the body is complete. Keep their status
-      // private until requestfinished makes the whole terminal record visible.
       if (pending.status !== undefined) pending.entry.status = pending.status;
       else
         pending.entry.error =
@@ -1821,6 +1836,11 @@ function splitSetCookieHeader(value) {
   return out.filter(Boolean);
 }
 `;
+
+/** F18: an anonymous request — no context cookies out, none kept. */
+function omitsCredentials(req: BackendRequest): boolean {
+  return req.credentials === "omit";
+}
 
 function parseResponseBody(text: string): unknown {
   try {

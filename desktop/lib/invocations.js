@@ -69,12 +69,59 @@ function invocationDir(runsRoot, invocationId) {
  *   origin: string | null,
  *   client: string | null,
  *   env: string | null,
+ *   suite: string | null,
+ *   delegate: InvocationDelegate | null,
  *   cwd: string | null,
  *   signal: string | null,
  *   liveness: InvocationLiveness,
  *   logs: Array<{ path: string, bytes: number, mtimeMs: number }>,
  * }} InvocationSummary
  */
+
+/**
+ * @typedef {{
+ *   remoteInvocationId: string | null,
+ *   command: string[],
+ *   exitCode: number | null,
+ *   cancelled: boolean,
+ *   timedOut: boolean,
+ *   idle?: boolean,
+ *   diagnostics: number,
+ * }} InvocationDelegate
+ */
+
+/**
+ * `delegate` from the journal: the environment has a runner
+ * (`environments.<n>.runner`, urn:cairntrace.dev:delegate:v1) — this
+ * process owns the invocation (pid, Stop, journal) and the runs execute
+ * elsewhere. Display data only; null for an ordinary invocation.
+ * @param {unknown} value
+ * @returns {InvocationDelegate | null}
+ */
+function journalDelegate(value) {
+  if (!value || typeof value !== "object") return null;
+  const block = /** @type {Record<string, unknown>} */ (value);
+  if (typeof block.contract !== "string") return null;
+  return {
+    remoteInvocationId:
+      typeof block.remoteInvocationId === "string"
+        ? journalClient(block.remoteInvocationId)
+        : null,
+    command: Array.isArray(block.command)
+      ? block.command.filter((part) => typeof part === "string").slice(0, 32)
+      : [],
+    exitCode: Number.isInteger(block.exitCode)
+      ? /** @type {number} */ (block.exitCode)
+      : null,
+    cancelled: block.cancelled === true,
+    timedOut: block.timedOut === true,
+    // cancelled after runner.idleTimeoutMs without a stream line
+    idle: block.idle === true,
+    diagnostics: Number.isInteger(block.diagnostics)
+      ? /** @type {number} */ (block.diagnostics)
+      : 0,
+  };
+}
 
 /**
  * `origin` from the journal: who launched the invocation. The runner writes
@@ -266,6 +313,9 @@ function readInvocation(runsRoot, invocationId, options = {}) {
     origin: journalOrigin(journal.origin),
     client: journalClient(journal.client),
     env: typeof journal.env === "string" ? journal.env : null,
+    // `cairn run --suite <name>`: the config suite the specs came from
+    suite: typeof journal.suite === "string" ? journal.suite : null,
+    delegate: journalDelegate(journal.delegate),
     cwd: typeof journal.cwd === "string" ? journal.cwd : null,
     signal: typeof journal.signal === "string" ? journal.signal : null,
     liveness: invocationLiveness({
@@ -307,6 +357,26 @@ function listInvocations(runsRoot, options = {}) {
     if (summary) out.push(summary);
   }
   return out;
+}
+
+/**
+ * The running invocation journal `pid` owns (newest first among the last
+ * `limit`), or null. Studio's Live Cancel asks it whether the run it
+ * launched is delegated (`delegate` in the journal).
+ * @param {string} runsRoot
+ * @param {number | null | undefined} pid
+ * @param {{ limit?: number, pidAlive?: (pid: number) => boolean | null }} [options]
+ * @returns {InvocationSummary | null}
+ */
+function findRunningInvocationByPid(runsRoot, pid, options = {}) {
+  if (!Number.isInteger(pid) || !pid) return null;
+  for (const summary of listInvocations(runsRoot, {
+    limit: options.limit ?? 20,
+    ...(options.pidAlive ? { pidAlive: options.pidAlive } : {}),
+  })) {
+    if (summary.pid === pid && summary.status === "running") return summary;
+  }
+  return null;
 }
 
 /**
@@ -687,6 +757,7 @@ function checkStoppable(invocation, processInfo, options = {}) {
 }
 
 module.exports = {
+  findRunningInvocationByPid,
   INVOCATION_ID_PATTERN,
   isInvocationId,
   invocationDir,

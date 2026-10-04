@@ -149,6 +149,13 @@ export function renderAgentContext(spec: Spec, result: RunResult): string {
     if (o.evidence) evidenceRefs.push(`- ${o.evidence}`);
     if (o.evidenceRaw) evidenceRefs.push(`- ${o.evidenceRaw}`);
   }
+  // F15: a failed widget step's read-back evidence (expected vs committed).
+  for (const step of result.steps) {
+    if (step.status !== "failed") continue;
+    for (const path of step.artifacts ?? []) {
+      if (path.startsWith("widgets/")) evidenceRefs.push(`- ${path}`);
+    }
+  }
   if (result.artifacts.network)
     evidenceRefs.push(`- ${result.artifacts.network}`);
   if (result.artifacts.console)

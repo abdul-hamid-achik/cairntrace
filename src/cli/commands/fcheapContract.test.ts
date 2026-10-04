@@ -543,6 +543,39 @@ function receiptWithWebUrl(webUrl?: string): string {
   });
 }
 
+describe("file.cheap 0.37 receipt timestamps", () => {
+  const withExtra = (extra: Record<string, unknown>): string =>
+    JSON.stringify({ ...JSON.parse(receiptWithWebUrl()), ...extra });
+
+  it("accepts optional committed_at and expires_at", () => {
+    const result = parseFcheapPublishOutput(
+      withExtra({
+        committed_at: "2026-07-24T00:00:01.123456789Z",
+        expires_at: "2026-07-31T00:00:00+00:00",
+      }),
+    );
+    expect(result).toMatchObject({
+      committedAt: "2026-07-24T00:00:01.123456789Z",
+      expiresAt: "2026-07-31T00:00:00+00:00",
+    });
+    const older = parseFcheapPublishOutput(receiptWithWebUrl());
+    expect(older).not.toHaveProperty("committedAt");
+    expect(older).not.toHaveProperty("expiresAt");
+  });
+
+  it.each([
+    { committed_at: "yesterday" },
+    { expires_at: "2026-07-31" },
+    { expires_at: 1790000000 },
+    { expires_on: "2026-07-31T00:00:00Z" },
+    { committedAt: "2026-07-24T00:00:01Z" },
+  ])("still rejects %j", (extra) => {
+    expect(() => parseFcheapPublishOutput(withExtra(extra))).toThrow(
+      /Invalid fcheap publish JSON/,
+    );
+  });
+});
+
 describe("file.cheap web_url and secret-scan fields", () => {
   it("accepts a stable https web_url on a cloud ref", () => {
     const result = parseFcheapPublishOutput(

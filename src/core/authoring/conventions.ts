@@ -471,7 +471,7 @@ function credentialLiterals(
 }
 
 function describeLocator(locator: Record<string, unknown>): string {
-  for (const key of ["label", "name", "text", "testid", "selector"]) {
+  for (const key of ["label", "name", "text", "testid", "selector", "field"]) {
     if (typeof locator[key] === "string") {
       return `${key} "${locator[key] as string}"`;
     }

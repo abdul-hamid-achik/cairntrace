@@ -29,22 +29,46 @@ export const SECRET_REF_SENTINEL = /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__/;
 export const RUN_TOKEN_SENTINEL = "__CAIRN_RUN_TOKEN__";
 
 const SPLIT_RE =
-  /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__|__CAIRN_RUN_TOKEN__|__CAIRN_VAR_REF__([A-Za-z0-9_]+)__|\$\{(requests|evals)\.([a-z][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}|\$\{artifacts\.([a-z][A-Za-z0-9_]*)\.(path|relativePath)\}/g;
+  /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__|__CAIRN_RUN_TOKEN__|__CAIRN_VAR_REF__([A-Za-z0-9_]+)__|\$\{(requests|evals)\.([a-z][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_]+)*)\}|\$\{artifacts\.([a-z][A-Za-z0-9_]*)\.(path|relativePath)\}|\$\{((?:repeat|waits)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)?)\}|__CAIRN_ENV_DEFAULT__([0-9a-f]+)_([0-9a-f]*)__|\$\{(runs|captures|fixtures)\.([a-z][A-Za-z0-9_]*)((?:\.[^.}]+)*)\}/g;
 
 /** Same reference grammar the runner splices at run time. */
 const RUNTIME_REF_RE =
-  /\$\{(requests|evals)\.([a-z][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_]+)*\}|\$\{artifacts\.([a-z][A-Za-z0-9_]*)\.(?:path|relativePath)\}/g;
+  /\$\{(requests|evals)\.([a-z][A-Za-z0-9_]*)(?:\.[A-Za-z0-9_]+)*\}|\$\{artifacts\.([a-z][A-Za-z0-9_]*)\.(?:path|relativePath)\}|\$\{(runs|captures|fixtures)\.([a-z][A-Za-z0-9_]*)(?:\.[^.}]+)*\}/g;
 
 /** Any late-bound sentinel, in any letter case (normalization lowercases). */
 const LEAK_RE = /__CAIRN_[A-Z_]+__/i;
 
-export type RuntimeRefSource = "requests" | "evals" | "artifacts";
+/**
+ * Runtime splice namespaces: `requests` / `evals` / `artifacts` (request,
+ * eval and download steps), `runs` (`run:` step `assign`), `captures`
+ * (`capture` steps) and `fixtures` (config fixture outputs).
+ */
+export type RuntimeRefSource =
+  | "requests"
+  | "evals"
+  | "artifacts"
+  | "runs"
+  | "captures"
+  | "fixtures"
+  // Typed data verifiers only (`network.assign` records): never spliced into text.
+  | "network";
 
 export type TemplatePart =
   | { kind: "lit"; text: string }
   | { kind: "env"; name: string }
   | { kind: "var"; name: string }
   | { kind: "runToken" }
+  /**
+   * `${env.X:-fallback}`: read `process.env.X` at test run time (an unset
+   * OR empty variable falls back, like `cairn run`). `fallback` is the
+   * already-substituted default text and may carry other late-bound parts.
+   */
+  | { kind: "envDefault"; name: string; fallback: string }
+  /**
+   * F14: `${repeat.index}` / `${waits.<name>.matched}` — a loop variable
+   * or a wait result in scope where the exporter emits it.
+   */
+  | { kind: "control"; ref: string; text: string }
   | {
       kind: "runtime";
       source: RuntimeRefSource;
@@ -53,6 +77,24 @@ export type TemplatePart =
       /** Reference without the `${…}` wrapper, e.g. `evals.state.value.id`. */
       ref: string;
     };
+
+/**
+ * Late-bound `${env.NAME:-fallback}`. Both halves are hex-encoded so the
+ * sentinel survives every pass over the spec text (a default may itself hold
+ * quotes, `}` or other sentinels); emission decodes and re-parses the
+ * fallback.
+ */
+export function envDefaultSentinel(name: string, fallback: string): string {
+  return `__CAIRN_ENV_DEFAULT__${hex(name)}_${hex(fallback)}__`;
+}
+
+function hex(text: string): string {
+  return Buffer.from(text, "utf8").toString("hex");
+}
+
+function unhex(text: string): string {
+  return Buffer.from(text, "hex").toString("utf8");
+}
 
 export function varRefSentinel(name: string): string {
   return `__CAIRN_VAR_REF__${name}__`;
@@ -91,15 +133,35 @@ export function parseTemplateValue(
         ? (m[3] as RuntimeRefSource)
         : m[6] !== undefined
           ? "artifacts"
-          : undefined;
+          : m[11] !== undefined
+            ? (m[11] as RuntimeRefSource)
+            : undefined;
     if (runtimeSource && opts.runtimeRefs === false) continue;
+    if (m[8] !== undefined && opts.runtimeRefs === false) continue;
     if (runtimeSource && opts.sources && !opts.sources.has(runtimeSource)) {
       opts.onLiteralRef?.(m[0].slice(2, -1));
       continue;
     }
     if (m.index > last)
       parts.push({ kind: "lit", text: s.slice(last, m.index) });
-    if (m[1] !== undefined) parts.push({ kind: "env", name: m[1] });
+    if (m[8] !== undefined)
+      parts.push({ kind: "control", ref: m[8], text: m[0] });
+    else if (m[9] !== undefined) {
+      parts.push({
+        kind: "envDefault",
+        name: unhex(m[9]),
+        fallback: unhex(m[10] ?? ""),
+      });
+    } else if (m[11] !== undefined) {
+      const path = m[13] ? m[13].slice(1).split(".") : [];
+      parts.push({
+        kind: "runtime",
+        source: m[11] as RuntimeRefSource,
+        name: m[12]!,
+        path,
+        ref: `${m[11]}.${m[12]}${m[13] ?? ""}`,
+      });
+    } else if (m[1] !== undefined) parts.push({ kind: "env", name: m[1] });
     else if (m[2] !== undefined) parts.push({ kind: "var", name: m[2] });
     else if (m[3] !== undefined) {
       const path = m[5] ? m[5].slice(1).split(".") : [];
@@ -130,6 +192,8 @@ export function parseTemplateValue(
 /** Collects which late-bound references the generated file actually uses. */
 export interface RefUsage {
   envNames: Set<string>;
+  /** Env vars read with a `:-default` (optional: the test works without them). */
+  optionalEnvNames: Set<string>;
   varNames: Set<string>;
   runToken: boolean;
   /**
@@ -152,11 +216,18 @@ export interface RefUsage {
   spliceSources?: ReadonlySet<RuntimeRefSource>;
   /** References kept literal because of `spliceSources`, in order. */
   literalLog: string[];
+  /**
+   * F14: expressions of the control references in scope (`repeat.index` →
+   * the loop variable, `waits.banner.matched` → the wait's binding). A
+   * reference without one stays literal text, as `cairn run` leaves it.
+   */
+  controlBindings: Map<string, string>;
 }
 
 export function newRefUsage(): RefUsage {
   return {
     envNames: new Set(),
+    optionalEnvNames: new Set(),
     varNames: new Set(),
     runToken: false,
     bindings: new Map(),
@@ -165,6 +236,7 @@ export function newRefUsage(): RefUsage {
     splice: false,
     unresolvedHelper: false,
     literalLog: [],
+    controlBindings: new Map(),
   };
 }
 
@@ -181,10 +253,90 @@ function usageParseOptions(
   };
 }
 
+/**
+ * E8: how generated identifiers are spelled. `camel` (host profiles) turns
+ * `some_name` / `some-name` into `someName` for every identifier derived
+ * from a spec name (action functions, action vars, bindings), with an alias
+ * map so two names that collapse to the same identifier stay distinct.
+ */
+interface IdentPolicy {
+  style: "camel";
+  /** original key → identifier */
+  aliases: Map<string, string>;
+  /** identifier → original key */
+  owners: Map<string, string>;
+}
+
+let identPolicy: IdentPolicy | undefined;
+
+/** Run an export under an identifier spelling policy (synchronous). */
+export function withIdentPolicy<T>(
+  style: "camel" | undefined,
+  render: () => T,
+): T {
+  const previous = identPolicy;
+  identPolicy = style
+    ? { style, aliases: new Map(), owners: new Map() }
+    : undefined;
+  try {
+    return render();
+  } finally {
+    identPolicy = previous;
+  }
+}
+
+function camelWords(name: string): string {
+  const words = name.split(/[^A-Za-z0-9]+/).filter((word) => word.length > 0);
+  if (words.length === 0) return "_";
+  return words
+    .map((word, index) => {
+      if (/^[A-Z0-9]+$/.test(word) && word.length > 1) {
+        word = word.toLowerCase();
+      }
+      return index === 0
+        ? word.charAt(0).toLowerCase() + word.slice(1)
+        : word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join("");
+}
+
+/** A policy identifier for `key`, unique within the export. */
+function policyIdent(key: string, spell: () => string): string {
+  const policy = identPolicy!;
+  const known = policy.aliases.get(key);
+  if (known) return known;
+  const base = spell();
+  let ident = base;
+  for (let n = 2; policy.owners.get(ident) !== undefined; n += 1) {
+    ident = `${base}${n}`;
+  }
+  policy.aliases.set(key, ident);
+  policy.owners.set(ident, key);
+  return ident;
+}
+
 /** A safe JS identifier for a user-provided name. */
 export function toIdent(name: string): string {
+  if (identPolicy) {
+    return policyIdent(`n:${name}`, () => {
+      const camel = camelWords(name);
+      return /^[A-Za-z_$]/.test(camel) ? camel : `_${camel}`;
+    });
+  }
   const cleaned = name.replaceAll(/[^A-Za-z0-9_$]/g, "_");
   return /^[A-Za-z_$]/.test(cleaned) ? cleaned : `_${cleaned}`;
+}
+
+/**
+ * A binding identifier: `<prefix>_<name>` by default (`cairnEvals_state`),
+ * `<prefix><Name>` under the camel policy (`cairnEvalsState`).
+ */
+export function bindingIdent(prefix: string, name: string): string {
+  if (!identPolicy) return `${prefix}_${toIdent(name)}`;
+  return policyIdent(`b:${prefix}:${name}`, () => {
+    const camel = camelWords(name);
+    return `${prefix}${camel.charAt(0).toUpperCase()}${camel.slice(1)}`;
+  });
 }
 
 function escapeTemplateLiteral(text: string): string {
@@ -203,6 +355,11 @@ function partExpr(
     usage.envNames.add(p.name);
     return `process.env.${p.name} ?? ""`;
   }
+  if (p.kind === "envDefault") {
+    usage.optionalEnvNames.add(p.name);
+    // `:-` semantics: an unset OR empty variable falls back (`||`, not `??`).
+    return `(process.env.${p.name} || ${emitStr(p.fallback, usage)})`;
+  }
   if (p.kind === "var") {
     usage.varNames.add(p.name);
     return toIdent(p.name);
@@ -210,6 +367,9 @@ function partExpr(
   if (p.kind === "runToken") {
     usage.runToken = true;
     return `RUN_TOKEN`;
+  }
+  if (p.kind === "control") {
+    return usage.controlBindings.get(p.ref) ?? JSON.stringify(p.text);
   }
   const binding = usage.bindings.get(runtimeRefKey(p.source, p.name));
   if (binding) {
@@ -240,12 +400,42 @@ export function emitStr(
     usage.varNames.add(only.name);
     return toIdent(only.name);
   }
+  // A lone `${env.X:-default}` is the expression itself, not a template.
+  if (only?.kind === "envDefault") return partExpr(only, usage);
   let out = "`";
   for (const p of parts) {
     if (p.kind === "lit") out += escapeTemplateLiteral(p.text);
     else out += `\${${partExpr(p, usage)}}`;
   }
   return `${out}\``;
+}
+
+/** A CSS string body: `\` and `"` escaped, newlines as `\a `. */
+function cssStringEscape(text: string): string {
+  return text.replace(/[\\"]/g, "\\$&").replace(/\n/g, "\\a ");
+}
+
+/**
+ * `[attribute="value"]` as a source expression whose value is CSS-escaped,
+ * the runtime parts (`${vars.X}`, env, captured refs) included: a value
+ * with a quote or a backslash can neither break nor extend the selector.
+ */
+export function emitCssAttributeSelector(
+  attribute: string,
+  value: string,
+  usage: RefUsage,
+): string {
+  const parts = parseTemplateValue(value, usageParseOptions(usage, {}));
+  if (parts.every((p) => p.kind === "lit")) {
+    return JSON.stringify(`[${attribute}="${cssStringEscape(value)}"]`);
+  }
+  let out = `\`${escapeTemplateLiteral(`[${attribute}="`)}`;
+  for (const p of parts) {
+    if (p.kind === "lit") out += escapeTemplateLiteral(cssStringEscape(p.text));
+    else
+      out += `\${String(${partExpr(p, usage)}).replace(/[\\\\"]/g, "\\\\$&").replace(/\\n/g, "\\\\a ")}`;
+  }
+  return `${out}${escapeTemplateLiteral('"]')}\``;
 }
 
 /**
@@ -341,8 +531,55 @@ export function humanizeSentinels(s: string): string {
   return s
     .replaceAll(/__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__/gi, "process.env.$1")
     .replaceAll(/__CAIRN_RUN_TOKEN__/gi, "RUN_TOKEN")
+    .replaceAll(
+      /__CAIRN_ENV_DEFAULT__([0-9a-f]+)_([0-9a-f]*)__/gi,
+      (_match, name: string, fallback: string) =>
+        `process.env.${unhex(name)} || ${JSON.stringify(
+          humanizeSentinels(unhex(fallback ?? "")),
+        )}`,
+    )
     .replaceAll(/__CAIRN_VAR_REF__([A-Za-z0-9_]+)__/gi, "vars.$1")
     .replaceAll(/__CAIRN_[A-Z_]+__/gi, "<late-bound>");
+}
+
+/**
+ * The authored `${…}` form of a sentinel-bearing string, for documents that
+ * LIST commands (the export manifest, the README): `${env.X}`,
+ * `${env.X:-default}`, `${run.token}`. Never an environment value — the
+ * sentinels never carried one.
+ */
+export function authoredPlaceholders(s: string): string {
+  return s
+    .replaceAll(/__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__/g, "${env.$1}")
+    .replaceAll(/__CAIRN_RUN_TOKEN__/g, "${run.token}")
+    .replaceAll(
+      /__CAIRN_ENV_DEFAULT__([0-9a-f]+)_([0-9a-f]*)__/g,
+      (_match, name: string, fallback: string) =>
+        `\${env.${unhex(name)}:-${authoredPlaceholders(unhex(fallback ?? ""))}}`,
+    )
+    .replaceAll(/__CAIRN_VAR_REF__([A-Za-z0-9_]+)__/g, "${vars.$1}");
+}
+
+/** A late-bound environment reference (`${env.X}`, `${env.X:-d}`, `${secrets.X}`). */
+const LATE_ENV_RE =
+  /__CAIRN_SECRET_REF__([A-Za-z0-9_]+)__|__CAIRN_ENV_DEFAULT__([0-9a-f]+)_([0-9a-f]*)__/g;
+
+/** True when `s` holds a late-bound environment reference. */
+export function hasLateEnvRef(s: string): boolean {
+  return /__CAIRN_(?:SECRET_REF|ENV_DEFAULT)__/.test(s);
+}
+
+/**
+ * `s` with every late-bound environment reference replaced by its AUTHORED
+ * default (`${env.X:-d}` → `d`, a reference without one → ""). Never an
+ * environment value: used for config validation stand-ins only.
+ */
+export function withAuthoredDefaults(s: string): string {
+  return s.replace(
+    LATE_ENV_RE,
+    (_match, ref: string | undefined, _name: string, fallback: string) =>
+      ref !== undefined ? "" : withAuthoredDefaults(unhex(fallback ?? "")),
+  );
 }
 
 /** Runtime-ref binding keys (`requests:x`, `evals:y`, `artifacts:z`) used anywhere in `value`. */
@@ -356,6 +593,8 @@ export function collectRuntimeRefKeys(
         into.add(runtimeRefKey(m[1] as RuntimeRefSource, m[2]!));
       } else if (m[3] !== undefined) {
         into.add(runtimeRefKey("artifacts", m[3]));
+      } else if (m[4] !== undefined) {
+        into.add(runtimeRefKey(m[4] as RuntimeRefSource, m[5]!));
       }
     }
   } else if (Array.isArray(value)) {

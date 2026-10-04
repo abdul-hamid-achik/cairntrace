@@ -1,7 +1,7 @@
 import { createReadStream, existsSync } from "node:fs";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import {
   INVOCATIONS_DIR,
   INVOCATION_ID_PATTERN,
@@ -10,6 +10,8 @@ import {
   listInvocationIds,
   readInvocationJournal,
 } from "../../core/artifacts/invocationJournal";
+import { DelegateStreamProducer } from "../../core/delegate/remoteStream";
+import { DurationSchema, durationMs } from "../../core/gates/schema";
 import type { InvocationJournalFile } from "../../core/schema/events.v1";
 import { emit, resolveFormat } from "../format";
 // resolveRunRef's latest/previous only see run directories, never the
@@ -37,8 +39,25 @@ export interface LogsCommandOptions {
    * `narration`, `services`, `hook`, or a file name under logs/.
    */
   log?: string;
-  /** An invocation journal id, `latest` or `previous` instead of a run. */
+  /**
+   * An invocation journal id, `latest`, `previous` or `label:<key>=<value>`
+   * (the newest journal with that label; with `--follow`, waited for)
+   * instead of a run.
+   */
   invocation?: string;
+  /**
+   * With `--invocation`: print the delegated-runner events stream
+   * (`urn:cairntrace.dev:delegate:v1`) — the journal's events plus
+   * `invocation.run.*` and `invocation.summary` lines — for a runner to
+   * pipe into CAIRN_DELEGATE_EVENTS.
+   */
+  relay?: boolean;
+  /**
+   * With `--follow` and `--invocation label:<key>=<value>`: how long to wait
+   * for a journal with that label to appear (ms, or a number with
+   * ms|s|m|h). Default 10m; `0` waits without end. Expired: exit 2.
+   */
+  waitTimeout?: string;
   /** Invocation summary format (no --follow): json | yaml | md. */
   format?: string;
   json?: boolean;
@@ -89,8 +108,22 @@ export async function logsCommand(
     ...(opts.config ? { config: opts.config } : {}),
   });
 
+  if (opts.relay && opts.invocation === undefined) {
+    process.stderr.write(
+      "cairn logs: --relay streams an invocation journal: pass --invocation <id|latest|label:key=value>\n",
+    );
+    process.exitCode = 2;
+    return;
+  }
   if (opts.invocation !== undefined) {
     process.exitCode = await invocationLogs(runsRoot, opts.invocation, opts);
+    return;
+  }
+  if (opts.waitTimeout !== undefined) {
+    process.stderr.write(
+      "cairn logs: --wait-timeout applies to --invocation label:<key>=<value> --follow\n",
+    );
+    process.exitCode = 2;
     return;
   }
 
@@ -392,14 +425,67 @@ async function liveInvocationRun(
   }
 }
 
+/**
+ * The local journal of a delegated invocation that lists this run: its
+ * run directory is a copy the runner keeps refreshing, and the heartbeats
+ * in it come from a process on another machine, so the local invocation's
+ * process is the one whose liveness counts.
+ */
+async function delegatedOwner(runDir: string): Promise<string | undefined> {
+  const runsRoot = dirname(runDir);
+  const runId = basename(runDir);
+  const ids = (await listInvocationIds(runsRoot)).toReversed().slice(0, 50);
+  for (const id of ids) {
+    const dir = join(runsRoot, INVOCATIONS_DIR, id);
+    const journal = await readInvocationJournal(dir);
+    if (journal?.delegate && journal.runs.some((run) => run.runId === runId)) {
+      return dir;
+    }
+  }
+  return undefined;
+}
+
+/** A delegated run settles with its manifest, or dies with its local owner. */
+async function delegatedRunSettleState(
+  runDir: string,
+  ownerDir: string,
+): Promise<SettleState> {
+  if (existsSync(join(runDir, "artifact-manifest.json"))) return "settled";
+  const journal = await readInvocationJournal(ownerDir);
+  if (!journal) return "dead";
+  if (journal.status !== "running") {
+    return existsSync(join(runDir, "run.json")) ? "settled" : "dead";
+  }
+  return isPidAlive(journal.pid) ? "running" : "dead";
+}
+
 /** One run: events.ndjson or the chosen live log, optionally followed. */
 async function runLogs(
   runDir: string,
   opts: LogsCommandOptions,
 ): Promise<number> {
+  const owner = opts.follow ? await delegatedOwner(runDir) : undefined;
   if (!(await stat(runDir).catch(() => undefined))?.isDirectory()) {
-    process.stderr.write(`cairn logs: no run at ${runDir}\n`);
-    return 2;
+    if (!owner) {
+      process.stderr.write(`cairn logs: no run at ${runDir}\n`);
+      return 2;
+    }
+    // A delegated run the runner has not copied here yet.
+    process.stderr.write(
+      `cairn logs: waiting for the delegated runner to copy ${basename(runDir)}\n`,
+    );
+    for (;;) {
+      await new Promise((resolveSleep) =>
+        setTimeout(resolveSleep, opts.pollMs ?? 500),
+      );
+      if ((await stat(runDir).catch(() => undefined))?.isDirectory()) break;
+      if ((await delegatedRunSettleState(runDir, owner)) !== "running") {
+        process.stderr.write(
+          `cairn logs: the delegated invocation ended without copying ${basename(runDir)}\n`,
+        );
+        return 2;
+      }
+    }
   }
   const selection = opts.log ?? "events";
   const files = runLogFiles(runDir, selection);
@@ -419,7 +505,8 @@ async function runLogs(
   }
   return followFiles({
     files,
-    state: () => runSettleState(runDir),
+    state: () =>
+      owner ? delegatedRunSettleState(runDir, owner) : runSettleState(runDir),
     pollMs: opts.pollMs ?? 500,
     headers: selection === "precondition" || selection === "outcome",
     root: runDir,
@@ -450,13 +537,25 @@ async function invocationLogs(
   ref: string,
   opts: LogsCommandOptions,
 ): Promise<number> {
-  const dir = await resolveInvocationRef(runsRoot, ref);
+  let waitMs: number;
+  try {
+    waitMs = labelWaitMs(opts.waitTimeout);
+  } catch (error) {
+    process.stderr.write(`cairn logs: ${(error as Error).message}\n`);
+    return 2;
+  }
+  const dir =
+    (await resolveInvocationRef(runsRoot, ref)) ??
+    (opts.follow && ref.startsWith("label:")
+      ? await waitForInvocationRef(runsRoot, ref, opts.pollMs ?? 500, waitMs)
+      : undefined);
   if (!dir) {
     process.stderr.write(
       `cairn logs: no invocation "${ref}" under ${runsRoot}\n`,
     );
     return 2;
   }
+  if (opts.relay) return relayInvocation(dir, opts);
   if (!opts.follow && opts.log === undefined && !opts.events) {
     const journal = await readInvocationJournal(dir);
     if (!journal) {
@@ -515,12 +614,116 @@ function invocationLogFiles(
   }
 }
 
-/** `latest` / `previous` (by id, i.e. start time), an id, or a path. */
+/**
+ * The delegate events stream of one invocation journal on stdout, until it
+ * settles with `--follow` (exit 0; 2 when its process died), or what it
+ * holds now without. Lines are written whole, in order.
+ */
+function writeLines(lines: readonly string[]): void {
+  if (lines.length > 0) process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+async function relayInvocation(
+  dir: string,
+  opts: LogsCommandOptions,
+): Promise<number> {
+  const producer = new DelegateStreamProducer(dir);
+  const write = writeLines;
+  if (!opts.follow) {
+    write(await producer.poll(true));
+    return 0;
+  }
+  for (;;) {
+    const state = await invocationSettleState(dir);
+    write(await producer.poll(state !== "running"));
+    if (state === "settled") return 0;
+    if (state === "dead") {
+      process.stderr.write(
+        `cairn logs: invocation ${basename(dir)} stopped without finishing (interrupted)\n`,
+      );
+      return 2;
+    }
+    await new Promise((resolveSleep) =>
+      setTimeout(resolveSleep, opts.pollMs ?? 500),
+    );
+  }
+}
+
+/** How long a `label:` ref waits for its journal by default (10 minutes). */
+export const LABEL_WAIT_DEFAULT_MS = 600_000;
+
+/** `--wait-timeout` in ms (0: no end); a bad value throws. */
+function labelWaitMs(value: string | undefined): number {
+  if (value === undefined) return LABEL_WAIT_DEFAULT_MS;
+  const candidate = /^\d+$/.test(value.trim()) ? Number(value) : value.trim();
+  const parsed = DurationSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new Error(
+      `--wait-timeout ${value}: use milliseconds or a number with ms|s|m|h (e.g. 10m; 0 waits without end)`,
+    );
+  }
+  return durationMs(parsed.data) ?? LABEL_WAIT_DEFAULT_MS;
+}
+
+/**
+ * `label:<key>=<value>` that names no journal yet: wait for one, at most
+ * `waitMs` (0: without end). Undefined once that passed.
+ */
+async function waitForInvocationRef(
+  runsRoot: string,
+  ref: string,
+  pollMs: number,
+  waitMs: number,
+): Promise<string | undefined> {
+  if (!/^label:[^=]+=/.test(ref)) return undefined;
+  process.stderr.write(
+    `cairn logs: no invocation with ${ref.slice("label:".length)} yet; waiting for it${
+      waitMs > 0
+        ? ` (at most ${Math.round(waitMs / 1000)}s; --wait-timeout)`
+        : ""
+    }\n`,
+  );
+  const deadline = waitMs > 0 ? Date.now() + waitMs : Number.POSITIVE_INFINITY;
+  for (;;) {
+    await new Promise((resolveSleep) =>
+      setTimeout(
+        resolveSleep,
+        Math.max(0, Math.min(pollMs, deadline - Date.now())),
+      ),
+    );
+    const dir = await resolveInvocationRef(runsRoot, ref);
+    if (dir) return dir;
+    if (Date.now() >= deadline) {
+      process.stderr.write(
+        `cairn logs: no invocation with ${ref.slice("label:".length)} appeared within ${Math.round(waitMs / 1000)}s (--wait-timeout)\n`,
+      );
+      return undefined;
+    }
+  }
+}
+
+/**
+ * `latest` / `previous` (by id, i.e. start time), an id, a path, or
+ * `label:<key>=<value>` (the newest journal whose labels carry it).
+ */
 async function resolveInvocationRef(
   runsRoot: string,
   ref: string,
 ): Promise<string | undefined> {
   let dir: string;
+  if (ref.startsWith("label:")) {
+    const pair = ref.slice("label:".length);
+    const eq = pair.indexOf("=");
+    if (eq <= 0) return undefined;
+    const key = pair.slice(0, eq);
+    const value = pair.slice(eq + 1);
+    for (const id of (await listInvocationIds(runsRoot)).toReversed()) {
+      const candidate = join(runsRoot, INVOCATIONS_DIR, id);
+      const journal = await readInvocationJournal(candidate);
+      if (journal?.labels?.[key] === value) return candidate;
+    }
+    return undefined;
+  }
   if (ref === "latest" || ref === "previous") {
     const ids = await listInvocationIds(runsRoot);
     const id = ids.at(ref === "latest" ? -1 : -2);
