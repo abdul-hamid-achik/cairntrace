@@ -313,7 +313,8 @@ suites:
       remote:
         seed: { postCommands: { skip: [remote-only] } }
 `,
-      { suite: "s", env: "remote", servicesDryRun: true },
+      // coldStart is explicit: it defaults to a truthy CI, which would change the plan's cold-start line on CI runners.
+      { suite: "s", env: "remote", servicesDryRun: true, coldStart: false },
     );
     expect(result.exitCode, result.error).toBe(0);
     const plan = (result.document as { plan: string[] }).plan;
