@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { installSyncStdio } from "./syncStdio";
 import { cleanCommand } from "./commands/clean";
 import { clipCommand } from "./commands/clip";
 import { captureFromSessionCommand } from "./commands/checkpoint/capture";
@@ -61,6 +62,9 @@ import { verifierSchemaCommand } from "./commands/verifier";
 import { CAIRN_VERSION } from "./version";
 import { configureLoggerFromFlags } from "./logger";
 import { applyUsageExitCodes } from "./usageExit";
+
+// Before anything prints: a command that exits right after writing must not lose output a pipe has not drained.
+installSyncStdio();
 
 const program = new Command();
 
