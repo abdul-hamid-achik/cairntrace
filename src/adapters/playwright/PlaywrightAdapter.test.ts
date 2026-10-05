@@ -559,6 +559,81 @@ describe("PlaywrightAdapter evaluate", () => {
   });
 });
 
+describe("PlaywrightAdapter after a wedge", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the request and console logs a hard deadline left behind", async () => {
+    const adapter = new PlaywrightAdapter();
+    expect(adapter.evidenceInProcess).toBe(true);
+    const internals = adapter as unknown as {
+      networkLog: Array<{ url: string; method: string; status?: number }>;
+      consoleLog: Array<{ type: string; text: string }>;
+    };
+    internals.networkLog.push({
+      url: "http://app.test/api/data",
+      method: "GET",
+      status: 200,
+    });
+    internals.consoleLog.push({ type: "error", text: "boom" });
+    installPage(adapter, { evaluate: vi.fn(() => new Promise(() => {})) });
+
+    const result = await adapter.evaluate("while (true) {}", { timeoutMs: 20 });
+    expect(result).toMatchObject({ ok: false, exitCode: 124 });
+    expect(adapter.isWedged()).toBe(true);
+    expect(await adapter.getNetworkRequests({ filter: "/api/data" })).toEqual([
+      { url: "http://app.test/api/data", method: "GET", status: 200 },
+    ]);
+    expect(await adapter.getErrors()).toEqual([
+      { type: "error", text: "boom" },
+    ]);
+  });
+
+  it("bounds a browser close that never returns and kills the browser process", async () => {
+    const adapter = new PlaywrightAdapter();
+    const browserProcess = startHungProcess();
+    const exited = new Promise<void>((resolve) =>
+      browserProcess.once("exit", () => resolve()),
+    );
+    const close = vi.fn(() => new Promise<void>(() => {}));
+    (
+      adapter as unknown as {
+        browser: { process: () => ChildProcess; close: typeof close };
+      }
+    ).browser = { process: () => browserProcess, close };
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const pending = adapter.close();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(pending).resolves.toMatchObject({ ok: true });
+      vi.useRealTimers();
+      expect(close).toHaveBeenCalledOnce();
+      await exited;
+      expect(adapterInternals(adapter).browser).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      stopProcess(browserProcess);
+    }
+  });
+
+  it("terminateSync kills the browser process without talking to it", async () => {
+    const adapter = new PlaywrightAdapter();
+    const browserProcess = startHungProcess();
+    const exited = new Promise<void>((resolve) =>
+      browserProcess.once("exit", () => resolve()),
+    );
+    installBrowserProcess(adapter, browserProcess);
+    try {
+      adapter.terminateSync();
+      await exited;
+      expect(adapterInternals(adapter).browser).toBeUndefined();
+    } finally {
+      stopProcess(browserProcess);
+    }
+  });
+});
+
 describe("PlaywrightAdapter screenshot", () => {
   afterEach(() => {
     vi.useRealTimers();

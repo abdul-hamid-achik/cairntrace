@@ -359,6 +359,8 @@ export interface RunInvocationIO {
    */
   /** Where the run policy looks at the machine (tests only). */
   runPolicyDeps?: RunPolicyDeps;
+  /** Bound on one spec's `backend.close()` (tests only; default 90s). */
+  backendCloseTimeoutMs?: number;
   environmentLock?: (
     key: string,
     options: {
@@ -684,6 +686,13 @@ const CANCELLABLE_BACKEND_METHODS = new Set([
 ]);
 
 const CANCELLED_MESSAGE = "cairn: invocation cancelled";
+
+/**
+ * The longest one spec's `backend.close()` may take. Above the adapters' own
+ * bounds (a Playwright close is killed after 10s, an agent-browser `close`
+ * command after 60s), so it only catches a close that would never return.
+ */
+const BACKEND_CLOSE_TIMEOUT_MS = 90_000;
 
 /** A graceful cancel that landed before the first spec ran. */
 const CANCELLED_BEFORE_SPECS = "invocation cancelled before its specs ran";
@@ -1044,6 +1053,42 @@ class RunInvocation {
     if (this.narration.note) this.narration.note(kind, message);
     else if (kind === "warn") this.runLog.warn(message);
     else this.runLog.info(message);
+  }
+
+  /**
+   * `backend.close()` with a bound. A close that waits on a hung browser or
+   * daemon must not hold what follows a spec — the next spec, the suite
+   * `after` hooks, the services teardown, the exit. Past the bound the
+   * backend's synchronous kill (`terminateSync`) ends its processes.
+   */
+  private async closeBackend(
+    backend: BrowserBackend,
+    real: BrowserBackend,
+  ): Promise<void> {
+    const timeoutMs = this.io.backendCloseTimeoutMs ?? BACKEND_CLOSE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const closed = await Promise.race([
+      backend.close().then(
+        () => true,
+        () => true,
+      ),
+      new Promise<false>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (closed) return;
+    try {
+      real.terminateSync?.();
+    } catch {
+      // best-effort: the close already failed its bound
+    }
+    this.note(
+      "warn",
+      `the ${real.name} browser did not close within ${timeoutMs}ms; ${
+        real.terminateSync ? "its processes were killed" : "it was abandoned"
+      }`,
+    );
   }
 
   /* ----- cancellation ----- */
@@ -3522,7 +3567,7 @@ class RunInvocation {
       });
       return { exitCode: 7, document: result };
     }
-    const { backend, untrack, finishLedger } = this.createTrackedBackend({
+    const { backend, untrack, real, finishLedger } = this.createTrackedBackend({
       ...backendOpts(opts, inputs.browser),
       session: this.sessionRoot,
     });
@@ -3682,7 +3727,7 @@ class RunInvocation {
       untrackSignalArtifactReporter?.();
       await specMetrics?.dispose();
       untrack();
-      await backend.close().catch(() => undefined);
+      await this.closeBackend(backend, real);
       finishLedger();
     }
   }
@@ -3818,10 +3863,11 @@ class RunInvocation {
             planIndex: planIndex || (inputs.index - 1) * specs.length + idx + 1,
             plannedTotal,
           };
-          const { backend, untrack, finishLedger } = this.createTrackedBackend({
-            ...backendOpts(opts, inputs.browser),
-            session: `${this.sessionRoot}-w${workerIndex}-s${idx}`,
-          });
+          const { backend, untrack, real, finishLedger } =
+            this.createTrackedBackend({
+              ...backendOpts(opts, inputs.browser),
+              session: `${this.sessionRoot}-w${workerIndex}-s${idx}`,
+            });
           const specListener = this.specListener(ctx);
           const runToken = opts.runToken ?? generateRunToken();
           const specMetrics = this.metrics?.forSpec(scopedSecrets, runToken);
@@ -3934,7 +3980,7 @@ class RunInvocation {
             if (activeRunDir) activeRunDirs.delete(activeRunDir);
             await specMetrics?.dispose();
             untrack();
-            await backend.close().catch(() => undefined);
+            await this.closeBackend(backend, real);
             finishLedger();
           }
         },

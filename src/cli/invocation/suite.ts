@@ -4,6 +4,7 @@ import type { InvocationJournal } from "../../core/artifacts/invocationJournal";
 import { HOOK_OUTPUT_TAIL_CHARS } from "../../core/schema/events.v1";
 import type { RunInvocationOptions } from "../../core/schema/runInvocation.v1";
 import { runBoundedCommand } from "../../core/runner/boundedCommand";
+import { describeLostExit } from "../../core/runner/childExit";
 import {
   runShellCommandSync,
   signalTimeout,
@@ -456,6 +457,7 @@ export async function runSuiteHooks(
     let cancelled = false;
     let output = "";
     let ok = false;
+    let lostExit: string | undefined;
     try {
       const result = await runBoundedCommand("/bin/sh", ["-c", command], {
         cwd: run.cwd,
@@ -474,6 +476,10 @@ export async function runSuiteHooks(
         : result.all;
       ok =
         result.exitCode === 0 && !timedOut && !cancelled && !result.spawnError;
+      lostExit = describeLostExit(
+        result.abandoned ? "abandoned" : result.exitLost ? "poll" : "event",
+        result.exitCode,
+      );
     } catch (error) {
       output = (error as Error).message;
     }
@@ -487,7 +493,14 @@ export async function runSuiteHooks(
             : `exit ${exitCode ?? "unknown"}`
       } after ${durationMs}ms]`,
     );
+    if (lostExit) live?.writeLine(`[${lostExit}]`);
     live?.flush();
+    if (lostExit) {
+      run.note(
+        "warn",
+        `suite ${run.suite} ${run.phase} hook #${index}: ${lostExit}: ${shown}`,
+      );
+    }
     const redacted = run.redact(output).trimEnd();
     const outputTail =
       redacted.length > HOOK_OUTPUT_TAIL_CHARS

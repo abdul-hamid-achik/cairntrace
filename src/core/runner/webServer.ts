@@ -15,6 +15,7 @@ import {
 import { probeHttp } from "../gates/probes";
 import { gatesRegistryFor } from "../gates/registry";
 import { gateRefList, type GateNode, type GateRef } from "../gates/schema";
+import { watchChildExit } from "./childExit";
 
 /**
  * `webServer` lifecycle for the whole `cairn run` invocation: build → boot →
@@ -412,29 +413,28 @@ export async function runShellDetached(
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+  // The exit event alone is not trusted (a runtime can lose it, leaving a
+  // <defunct> child): the process table settles a lost exit, and a command
+  // killed at its deadline is given up on once SIGKILL had its grace.
+  const exitWatch = watchChildExit(child);
   if (timeoutMs !== undefined && timeoutMs > 0 && child.pid !== undefined) {
     const pgid = child.pid;
     timer = setTimeout(() => {
       timedOut = true;
       signalGroup(pgid, "SIGTERM");
-      killTimer = setTimeout(() => signalGroup(pgid, "SIGKILL"), 2_000);
+      killTimer = setTimeout(() => {
+        signalGroup(pgid, "SIGKILL");
+        abandonTimer = setTimeout(() => exitWatch.abandon(), 2_000);
+      }, 2_000);
       killTimer.unref?.();
     }, timeoutMs);
     timer.unref?.();
   }
-  const settled = await new Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    error?: Error;
-  }>((resolveExit) => {
-    // `on`, not `once`: a late 'error' must never become an uncaught one.
-    child.on("error", (error) =>
-      resolveExit({ code: null, signal: null, error }),
-    );
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
-  });
+  const settled = await exitWatch.exited;
   if (timer) clearTimeout(timer);
   if (killTimer && !timedOut) clearTimeout(killTimer);
+  if (abandonTimer) clearTimeout(abandonTimer);
   const output = await readFileTail(outputFile, maxOutputBytes);
   await unlink(outputFile).catch(() => undefined);
   if (settled.error) throw settled.error;

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { killProcessTreeSync } from "../../adapters/agent-browser/processTree";
+import { watchChildExit, type ExitProbe } from "./childExit";
 
 /**
  * A host command with a hard deadline that a background process cannot
@@ -18,10 +19,18 @@ import { killProcessTreeSync } from "../../adapters/agent-browser/processTree";
  * background processes included, even after they were re-parented. Without
  * it the child shares the caller's terminal (and group); the deadline kills
  * the process tree that is still attached to the child.
+ *
+ * The child's exit is never awaited unbounded: a runtime that loses the
+ * exit notification (a `<defunct>` child, see ./childExit.ts) is caught by
+ * a process-table poll, and once the deadline or a cancel killed the child
+ * the command settles within `killSettleMs` even when no exit is ever
+ * reported — `timeoutMs` bounds the await, not only the child.
  */
 
 /** How long the pipes may stay open after the child exited. */
 const DEFAULT_DRAIN_MS = 500;
+/** How long a killed child may take to report its exit before we stop waiting. */
+const DEFAULT_KILL_SETTLE_MS = 2_000;
 const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
 export interface BoundedCommandOptions {
@@ -50,6 +59,15 @@ export interface BoundedCommandOptions {
   drainMs?: number;
   /** Written to the child's stdin, then closed (stdin is closed empty otherwise). */
   input?: string;
+  /**
+   * After the deadline or a cancel killed the child, how long to wait for
+   * its exit before settling without one. Default 2s.
+   */
+  killSettleMs?: number;
+  /** Process-table poll cadence for a lost exit event (default 1s; tests). */
+  exitPollMs?: number;
+  /** Process-table reader (tests). */
+  exitProbe?: ExitProbe;
 }
 
 export interface BoundedCommandResult {
@@ -69,6 +87,16 @@ export interface BoundedCommandResult {
   spawnError?: string;
   /** A background process still held the output open when the child exited. */
   outputHeld?: boolean;
+  /**
+   * The runtime never reported the child's exit: the process table showed
+   * it ended (`exitCode` only when a Linux zombie still held it).
+   */
+  exitLost?: boolean;
+  /**
+   * The deadline or a cancel killed the child and no exit was observed
+   * within `killSettleMs`: the command was given up on.
+   */
+  abandoned?: boolean;
   durationMs: number;
 }
 
@@ -206,12 +234,23 @@ export async function runBoundedCommand(
   let cancelled = false;
   if (ownGroup && pid !== undefined) trackGroup(pid);
   else if (pid !== undefined) trackChild(pid);
+  const exitWatch = watchChildExit(child, {
+    ...(opts.exitPollMs !== undefined ? { pollMs: opts.exitPollMs } : {}),
+    ...(opts.exitProbe ? { probe: opts.exitProbe } : {}),
+  });
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
   const kill = (): void => {
     if (pid === undefined) return;
     // The tree first (it needs the parent links), then the group: a
     // process re-parented away from the tree is still in the group.
     if (running) killProcessTreeSync(pid);
     if (ownGroup) killGroup(pid);
+    // A killed child whose exit is never reported (a zombie the runtime
+    // does not reap) must not hold the command past its bound.
+    settleTimer ??= setTimeout(
+      () => exitWatch.abandon(),
+      Math.max(1, opts.killSettleMs ?? DEFAULT_KILL_SETTLE_MS),
+    );
   };
   const timer = setTimeout(
     () => {
@@ -228,18 +267,10 @@ export async function runBoundedCommand(
   };
   opts.signal?.addEventListener("abort", onAbort, { once: true });
 
-  const exit = await new Promise<{
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    error?: Error;
-  }>((resolveExit) => {
-    child.once("exit", (code, signal) => resolveExit({ code, signal }));
-    child.once("error", (error) =>
-      resolveExit({ code: null, signal: null, error }),
-    );
-  });
+  const exit = await exitWatch.exited;
   running = false;
   clearTimeout(timer);
+  clearTimeout(settleTimer);
   opts.signal?.removeEventListener("abort", onAbort);
   if (pid !== undefined) liveChildren.delete(pid);
   if (ownGroup && pid !== undefined) {
@@ -276,6 +307,8 @@ export async function runBoundedCommand(
       ? { spawnError: exit.error.message }
       : {}),
     ...(drained ? {} : { outputHeld: true }),
+    ...(exit.via === "poll" ? { exitLost: true } : {}),
+    ...(exit.via === "abandoned" ? { abandoned: true } : {}),
     durationMs: Date.now() - startedAt,
   };
 }

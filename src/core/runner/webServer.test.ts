@@ -4,8 +4,10 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { dropExitEvents } from "../../testing/lostExit";
 import {
   runShell,
+  runShellDetached,
   startWebServer,
   WebServerError,
   type WebServerHandle,
@@ -321,6 +323,29 @@ describe("runShell child environment", () => {
       expect(r.stdout).toBe("|given");
     } finally {
       delete process.env[key];
+    }
+  });
+});
+
+describe("runShellDetached with a lost exit event", () => {
+  it("settles a teardown command the runtime never reported as exited", async () => {
+    // A services teardown at exit: its shell ended but the runtime lost the
+    // exit (a <defunct> child). The process table settles it.
+    const restore = dropExitEvents("cairn-detached-lost-exit");
+    try {
+      const started = Date.now();
+      const result = await runShellDetached(
+        "echo torn-down # cairn-detached-lost-exit",
+        { cwd: dir, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } },
+        undefined,
+        1024,
+        60_000,
+      );
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(result.stdout).toBe("torn-down");
+      expect(result.timedOut).toBeUndefined();
+    } finally {
+      restore();
     }
   });
 });

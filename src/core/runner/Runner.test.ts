@@ -1004,6 +1004,92 @@ steps:
     expect(diagnostics).toContain('"wedged": true');
   });
 
+  it("keeps an in-process request/console log after a wedge instead of writing empty evidence", async () => {
+    const specPath = await writeSpec(
+      "wedged_in_process_evidence",
+      `version: 1
+name: wedged_in_process_evidence
+intent: requests made before a hard-deadline wedge stay evidence
+outcomes:
+  - id: data_loaded
+    description: the data request returned 200
+    verify:
+      network:
+        urlContains: /api/data
+        status: { equals: 200 }
+steps:
+  - id: open
+    open: /home
+  - id: idle
+    wait: { load: networkidle, timeoutMs: 1000 }
+`,
+    );
+    const backend = new MockBrowserBackend();
+    // Playwright's contract: the logs live in this process, so a wedge
+    // (the browser killed at a hard deadline) leaves them readable.
+    (backend as unknown as { evidenceInProcess: boolean }).evidenceInProcess =
+      true;
+    let wedged = false;
+    (backend as BrowserBackend & { isWedged?: () => boolean }).isWedged = () =>
+      wedged;
+    const original = backend.runStep.bind(backend);
+    backend.runStep = async (step) => {
+      if ("wait" in step) {
+        wedged = true;
+        return {
+          ok: false,
+          stdout: "",
+          stderr: "wait timed out after 1000ms",
+          exitCode: 1,
+          durationMs: 1000,
+          argv: ["wait"],
+        };
+      }
+      const result = await original(step);
+      backend.pushNetworkEntry({
+        url: "http://localhost/api/data",
+        method: "GET",
+        status: 200,
+        timestamp: Date.now(),
+      });
+      backend.pushNetworkEntry({
+        url: "http://localhost/api/poll",
+        method: "GET",
+        timestamp: Date.now(),
+      });
+      backend.pushConsoleEntry({ type: "log", text: "polling" });
+      return result;
+    };
+
+    const result = await runSpec({ specPath, backend, artifactRoot });
+
+    expect(result.status).toBe("failed");
+    expect(result.steps[1]).toMatchObject({ id: "idle", status: "failed" });
+    // The outcome is judged from the requests made before the wedge.
+    expect(result.outcomes[0]).toMatchObject({
+      id: "data_loaded",
+      status: "passed",
+    });
+    const requests = (
+      await readFile(join(result.runDir, "network", "requests.ndjson"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { url: string });
+    expect(requests.map((r) => r.url)).toEqual([
+      "http://localhost/api/data",
+      "http://localhost/api/poll",
+    ]);
+    expect(
+      await readFile(join(result.runDir, "console", "console.ndjson"), "utf8"),
+    ).toContain("polling");
+    const diagnostic = await readFile(
+      join(result.runDir, "diagnostics", "002_idle.json"),
+      "utf8",
+    );
+    expect(diagnostic).toContain("captured before the kill are still written");
+  });
+
   it("assigns a network postcondition match to requests/<name>.json", async () => {
     const specPath = await writeSpec(
       "postcondition_assign",

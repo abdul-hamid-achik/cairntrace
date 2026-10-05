@@ -147,8 +147,11 @@ runner, confirm Chromium can create a compositing surface. The run records the
 failure under `diagnostics/` instead of waiting indefinitely or publishing a
 partial PNG. A capture timeout is best-effort: it does not fail the step, spec,
 or outcomes — it only marks the backend wedged so the remaining optional
-captures (console/network/trace/video) are skipped while the outcome verifiers
-still run. If the page is genuinely wedged it fails on its next interaction.
+captures (trace/video, and agent-browser's console/network, which live in its
+daemon) are skipped while the outcome verifiers still run. Playwright keeps its
+request and console logs in the cairn process, so `network/` and `console/`
+still hold everything captured before a wedge. If the page is genuinely wedged
+it fails on its next interaction.
 
 ## Common misconfigurations
 
