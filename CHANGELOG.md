@@ -7,6 +7,9 @@ All notable changes to cairntrace are documented here. This project adheres to
 
 ### Fixed
 
+- On agent-browser, the end-of-steps network snapshot re-reads the request
+  log exactly once for a request still in flight (it waited on a deadline,
+  so a timer firing a few ms early bought a second read).
 - **A run could hang forever in its teardown after a wedged browser.** Bun can
   lose a child process's exit notification on Linux: the child exits, stays
   `<defunct>`, and the event loop never hears about it. Every bounded command

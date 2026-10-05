@@ -66,19 +66,27 @@ export async function settledNetworkSnapshot(
   let entries = await backend.getNetworkRequests();
   if (filters.length === 0) return entries;
   const pollMs = opts.pollMs ?? NETWORK_SETTLE_POLL_MS;
-  // A backend that never marks a failed or cancelled request (agent-browser)
-  // would keep such an entry "in flight" for the whole bound: one re-read
-  // catches a response that was just being recorded, nothing more.
-  const boundMs =
-    backend.reportsRequestFailures === false
-      ? Math.min(pollMs, opts.timeoutMs ?? NETWORK_SETTLE_TIMEOUT_MS)
-      : (opts.timeoutMs ?? NETWORK_SETTLE_TIMEOUT_MS);
   const unsettled = (log: NetworkEntry[]): boolean =>
     filters.some((filter) =>
       filterNetworkEntries(log, filter.method, filter.urlContains).some(
         isInFlight,
       ),
     );
+  // A backend that never marks a failed or cancelled request (agent-browser)
+  // would keep such an entry "in flight" for the whole bound: exactly one
+  // re-read catches a response that was just being recorded, nothing more. A
+  // count, not a deadline: a timer that fires a few ms early must not buy a
+  // second re-read.
+  if (backend.reportsRequestFailures === false) {
+    if (!unsettled(entries)) return entries;
+    const waitMs = Math.min(
+      pollMs,
+      opts.timeoutMs ?? NETWORK_SETTLE_TIMEOUT_MS,
+    );
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return backend.getNetworkRequests();
+  }
+  const boundMs = opts.timeoutMs ?? NETWORK_SETTLE_TIMEOUT_MS;
   const deadline = Date.now() + boundMs;
   while (unsettled(entries)) {
     const remaining = deadline - Date.now();
