@@ -9,6 +9,11 @@ import {
 import type { InvocationJournal } from "../../core/artifacts/invocationJournal";
 import { createArtifactRedactor } from "../../core/artifacts/redaction";
 import {
+  describeLostExit,
+  watchChildExit,
+  type ChildExit,
+} from "../../core/runner/childExit";
+import {
   cairnContextEnv,
   targetChildEnvWithSelectedTvaultKeys,
   type CairnContextEnvInput,
@@ -49,6 +54,34 @@ export interface HookObserver {
   runId?: string;
   /** `--repeat`/`--matrix`: the 1-based iteration. */
   iteration?: number;
+}
+
+/**
+ * After the deadline killed a hook's tree, how long its exit may take to be
+ * reported before the hook is given up on.
+ */
+const HOOK_KILL_SETTLE_MS = 5_000;
+/** Output kept for a hook whose exit the runtime lost. */
+const LOST_HOOK_OUTPUT_CHARS = 64 * 1024;
+
+/** The fields of an execa result a hook verdict reads. */
+interface HookRunResult {
+  exitCode?: number;
+  timedOut: boolean;
+  all?: unknown;
+  stderr?: unknown;
+  /** Why the verdict did not come from execa (the exit was lost). */
+  lost?: string;
+}
+
+function lostHookResult(exit: ChildExit, output: string): HookRunResult {
+  return {
+    ...(exit.code !== null ? { exitCode: exit.code } : {}),
+    timedOut: exit.via === "abandoned",
+    all: output,
+    stderr: "",
+    lost: describeLostExit(exit.via, exit.code),
+  };
 }
 
 /** A `signal` cancelled the hooks (thrown for fatal `--before` hooks). */
@@ -131,25 +164,56 @@ export async function runHookCommands(
         reject: false,
         all: true,
       });
-      subprocess.all?.on("data", (chunk: Buffer | string) =>
-        hook?.write(String(chunk)),
-      );
+      let collected = "";
+      subprocess.all?.on("data", (chunk: Buffer | string) => {
+        const text = String(chunk);
+        collected = (collected + text).slice(-LOST_HOOK_OUTPUT_CHARS);
+        hook?.write(text);
+      });
       const watchdog = createProcessTreeWatchdog(subprocess.pid, timeoutMs);
+      // execa settles on the child's exit event, which the runtime can lose
+      // (a <defunct> hook, see core/runner/childExit.ts): the process table
+      // settles it then, and a hook killed at its deadline is given up on
+      // after a short grace instead of being awaited forever.
+      const exitWatch = watchChildExit(subprocess);
+      const settleTimer = setTimeout(
+        () => exitWatch.abandon(),
+        timeoutMs + HOOK_KILL_SETTLE_MS,
+      );
       // Cancel: hard-kill the hook's whole tree (a shell's children too).
       let killedByCancel = false;
+      let cancelSettleTimer: ReturnType<typeof setTimeout> | undefined;
       const onAbort = (): void => {
         killedByCancel = true;
         killProcessTreeSync(subprocess.pid);
+        cancelSettleTimer = setTimeout(
+          () => exitWatch.abandon(),
+          HOOK_KILL_SETTLE_MS,
+        );
       };
       signal?.addEventListener("abort", onAbort, { once: true });
-      const r = await (async () => {
+      const r: HookRunResult = await (async () => {
         try {
-          return await subprocess;
+          return await Promise.race([
+            subprocess.then((result): HookRunResult => result),
+            exitWatch.exited.then(
+              (exit): Promise<HookRunResult> | HookRunResult =>
+                exit.via === "event"
+                  ? subprocess.then((result): HookRunResult => result)
+                  : lostHookResult(exit, collected),
+            ),
+          ]);
         } finally {
           watchdog.cancel();
+          clearTimeout(settleTimer);
+          clearTimeout(cancelSettleTimer);
+          exitWatch.abandon();
           signal?.removeEventListener("abort", onAbort);
         }
       })();
+      if (r.lost) {
+        note("warn", `${phase} hook: ${r.lost}: ${redact(command)}`);
+      }
       hook?.finish({
         ...(typeof r.exitCode === "number" ? { exitCode: r.exitCode } : {}),
         timedOut: !killedByCancel && (watchdog.timedOut || r.timedOut),
@@ -177,7 +241,7 @@ export async function runHookCommands(
         const tail = redact(String(r.all ?? r.stderr ?? ""))
           .trim()
           .slice(-2000);
-        const msg = `${phase} hook failed (exit ${r.exitCode}): ${redact(command)}${
+        const msg = `${phase} hook failed (exit ${r.exitCode ?? "unknown"}): ${redact(command)}${
           tail ? `\n${tail}` : ""
         }`;
         if (fatal) throw new Error(msg);

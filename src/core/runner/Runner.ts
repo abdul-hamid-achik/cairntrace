@@ -2555,7 +2555,9 @@ async function executeSpec(
           status: stepStatus,
           stepError,
           wedged: true,
-          note: "backend reported isWedged() === true after a child-timeout kill; post-failure capture was skipped to avoid hitting the unresponsive daemon. The close path will escalate to a daemon kill.",
+          note: opts.backend.evidenceInProcess
+            ? "backend reported isWedged() === true after a hard-deadline kill; post-failure capture was skipped to avoid hitting the unresponsive browser. The request and console logs captured before the kill are still written (network/, console/). The close path is bounded and kills the browser process."
+            : "backend reported isWedged() === true after a child-timeout kill; post-failure capture was skipped to avoid hitting the unresponsive daemon. The close path will escalate to a daemon kill.",
         },
         "diagnostic",
       );
@@ -2765,6 +2767,14 @@ async function executeSpec(
   // the evaluateOutcomes call below).
   const backendWedgedAfterSteps =
     opts.backend.isWedged?.() === true || cancelled();
+  // A request/console log this process keeps (Playwright's page listeners)
+  // never reaches the browser: after a wedge it still holds every request
+  // and message up to the kill, and writing empty logs instead would erase
+  // the evidence an outcome (and the agent) needs most. A daemon-held log
+  // (agent-browser) is skipped, as is everything after a cancel.
+  const evidenceUnreadable =
+    cancelled() ||
+    (backendWedgedAfterSteps && opts.backend.evidenceInProcess !== true);
 
   // Stop the process sampler (if it ever started) and reduce its samples into
   // diagnostics/process.{json,md}. Zero-cost when monitoring was disabled or
@@ -2801,22 +2811,24 @@ async function executeSpec(
   // Persist console + network even on full pass, so agents have evidence to skim.
   // Read errors once here. The console verifier reuses this snapshot so a
   // long script outcome cannot hang a second `getErrors()` on a stale daemon.
-  const consoleEntries = backendWedgedAfterSteps
+  const consoleEntries = evidenceUnreadable
     ? []
     : await safe(() => opts.backend.getConsole()).then((x) => x ?? []);
   // A judged request whose response event has not reached the backend yet
-  // would read as <pending>: the snapshot waits (bounded) for those only.
-  const networkEntries = backendWedgedAfterSteps
+  // would read as <pending>: the snapshot waits (bounded) for those only —
+  // not after a wedge, when the killed browser will never answer them.
+  const networkEntries = evidenceUnreadable
     ? []
     : await safe(() =>
         settledNetworkSnapshot(
           opts.backend,
           judgedNetworkFilters(resolved.outcomes),
+          backendWedgedAfterSteps ? { timeoutMs: 0 } : {},
         ),
       ).then((x) => x ?? []);
   let capturedConsoleErrors: ConsoleEntry[] | undefined;
   let consoleUnavailable: string | undefined;
-  if (backendWedgedAfterSteps) {
+  if (evidenceUnreadable) {
     consoleUnavailable =
       "console was not captured because the backend was wedged";
   } else {

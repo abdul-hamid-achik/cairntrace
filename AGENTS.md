@@ -108,6 +108,12 @@ per-agent code paths.
   live run holds that lock, or by the engine pin (config
   `requires.cairntrace` not met, `runtimes.node` missing or out of range).
 - Prefer small adapters over coupling core logic to agent-browser or Playwright.
+- Never await a child process's `exit` event alone: Bun can lose it on Linux
+  (the child stays `<defunct>`, the wait never ends, a deadline SIGKILL only
+  hits the zombie). Spawn host commands through `runBoundedCommand`, or wrap
+  the child in `watchChildExit` (`src/core/runner/childExit.ts`), which
+  settles a lost exit from the process table and can be abandoned once a
+  deadline killed the child.
 - Do **not** introduce per-agent code paths. The CLI + MCP server + artifact
   format are the agent interface.
 - Do **not** add a `scripts/` folder for ad-hoc dev tooling. Use a CLI
@@ -1223,6 +1229,10 @@ Cairntrace has two backends; the spec doesn't have to know which one runs.
   Playwright Chromium launches with `--no-sandbox` and
   `--disable-dev-shm-usage` by default; override with
   `CAIRN_PLAYWRIGHT_LAUNCH_ARGS` when a runner needs different flags.
+  Its request/console logs live in the cairn process (`evidenceInProcess`),
+  so a run wedged by a hard deadline still writes `network/` and `console/`
+  up to the kill; `close()` is bounded (10s) and then kills the browser, and
+  the engine bounds every backend close (90s) before `terminateSync()`.
 
 ### agent-browser quirks (when reading `AgentBrowserAdapter.ts`):
 

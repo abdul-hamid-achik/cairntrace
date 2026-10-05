@@ -186,6 +186,14 @@ export interface BrowserBackend {
    * Absent: the backend reports failures (Playwright's requestfailed).
    */
   readonly reportsRequestFailures?: boolean;
+  /**
+   * `true` when `getNetworkRequests`, `getConsole` and `getErrors` read a log
+   * this process keeps (Playwright's page listeners) and never reach the
+   * browser. After a wedge the Runner still reads them — the evidence up to
+   * the kill — instead of writing empty logs. Absent: the log lives on the
+   * browser side (agent-browser's daemon) and is skipped once it is wedged.
+   */
+  readonly evidenceInProcess?: boolean;
 
   /* ----- console ----- */
   getConsole(): Promise<ConsoleEntry[]>;

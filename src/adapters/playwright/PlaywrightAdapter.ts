@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, selectors } from "playwright";
 import { resolveTestIdAttribute } from "../../core/locators";
+import { killProcessTreeSync } from "../agent-browser/processTree";
 import { targetChildEnv } from "../../core/processEnv";
 import type {
   APIRequestContext,
@@ -97,6 +98,12 @@ const SENSITIVE_POST_DATA_KEY_RE =
  */
 export class PlaywrightAdapter implements BrowserBackend {
   readonly name = "playwright" as const;
+  /**
+   * The request and console logs are filled by page listeners in this
+   * process: reading them never reaches the browser, so they stay readable
+   * (and complete up to the kill) after a hard deadline wedged the page.
+   */
+  readonly evidenceInProcess = true;
 
   private browser: Browser | undefined;
   private context: BrowserContext | undefined;
@@ -115,6 +122,12 @@ export class PlaywrightAdapter implements BrowserBackend {
   private videoSpeed = 1;
   /** Sticky when an in-process hard deadline had to abandon a page operation. */
   private pageOperationWedged = false;
+  /**
+   * Browser processes whose handle a hard deadline dropped: the external
+   * watchdog normally killed them already, but when it could not (a denied
+   * kill, no watchdog) close() and terminateSync() still must.
+   */
+  private readonly abandonedBrowserPids = new Set<number>();
   /** Environment-level multiplier for waits and network-idle quiet windows. */
   private waitScale = 1;
 
@@ -761,11 +774,22 @@ export class PlaywrightAdapter implements BrowserBackend {
     const start = Date.now();
     try {
       if (this.browser) {
-        await this.browser.close();
-        this.browser = undefined;
-        this.context = undefined;
-        this.page = undefined;
+        const browser = this.browser;
+        const pid = this.browserProcessPid();
+        this.resetBrowserRefs();
+        // A graceful close talks to the browser; a hung one would never
+        // answer, so the close is bounded and then the process is killed.
+        try {
+          await withTimeout(
+            browser.close(),
+            BROWSER_CLOSE_TIMEOUT_MS,
+            `browser close timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms`,
+          );
+        } catch {
+          if (pid !== undefined) this.abandonedBrowserPids.add(pid);
+        }
       }
+      this.killAbandonedBrowsers();
       // Clean up the video temp directory.
       if (this.videoTempDir) {
         await rm(this.videoTempDir, { recursive: true, force: true });
@@ -780,7 +804,26 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
   }
 
+  /**
+   * Signal-time teardown: SIGKILL the browser process (and any a hard
+   * deadline abandoned) without talking to it. Synchronous.
+   */
+  terminateSync(): void {
+    const pid = this.browserProcessPid();
+    if (pid !== undefined) this.abandonedBrowserPids.add(pid);
+    this.resetBrowserRefs();
+    this.killAbandonedBrowsers();
+  }
+
   /* ----- internals ----- */
+
+  /** SIGKILL every abandoned browser process tree that is still alive. */
+  private killAbandonedBrowsers(): void {
+    for (const pid of this.abandonedBrowserPids) {
+      if (processIsAlive(pid)) killProcessTreeSync(pid);
+    }
+    this.abandonedBrowserPids.clear();
+  }
 
   private async ensureBrowser(): Promise<Browser> {
     if (this.browser) return this.browser;
@@ -1293,12 +1336,19 @@ export class PlaywrightAdapter implements BrowserBackend {
     try {
       return await withTimeout(operation(), floorMs, message);
     } catch (e) {
-      if (watchdog.didFire() || e instanceof TimeoutError) {
+      const watchdogFired = watchdog.didFire();
+      if (watchdogFired || e instanceof TimeoutError) {
         // Browser is (or may be) wedged — abandon the refs so the next operation
         // spins up a fresh page instead of reusing a dead/hung one.
         this.pageOperationWedged = true;
         // A deadline can race a responsive browser; close it before dropping
         // the handle, even when no process-based watchdog was available.
+        // When no watchdog killed it, its pid is kept so close() can still
+        // kill a browser that ignores that close.
+        const pid = this.browserProcessPid();
+        if (!watchdogFired && pid !== undefined) {
+          this.abandonedBrowserPids.add(pid);
+        }
         void this.browser?.close().catch(() => {});
         this.resetBrowserRefs();
         throw new TimeoutError(message);
@@ -1393,6 +1443,8 @@ const NETWORK_IDLE_BASE_WINDOW_MS = 500;
 const SCREENSHOT_TIMEOUT_MS = 15_000;
 const DEFAULT_CI_CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"];
 const HARD_TIMEOUT_SIGKILL_GRACE_MS = 250;
+/** A graceful browser.close() longer than this is a hung browser: kill it. */
+const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
 // Extra slack added to the in-process timeout floor (over the watchdog's kill
 // deadline) so the clean browser-process kill wins in the normal case and the
 // floor only fires as a last resort when the external kill never lands.

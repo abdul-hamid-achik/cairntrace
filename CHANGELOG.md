@@ -3,6 +3,38 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.1.2] - 2026-10-05
+
+### Fixed
+
+- On agent-browser, the end-of-steps network snapshot re-reads the request
+  log exactly once for a request still in flight (it waited on a deadline,
+  so a timer firing a few ms early bought a second read).
+- **A run could hang forever in its teardown after a wedged browser.** Bun can
+  lose a child process's exit notification on Linux: the child exits, stays
+  `<defunct>`, and the event loop never hears about it. Every bounded command
+  (suite `before`/`after` hooks, `--before`/`--after` hooks, fixtures,
+  preflight, `run.finally`, services teardown commands) awaited that event
+  alone, and its deadline only sent SIGKILL to the zombie, which settles
+  nothing: a suite `after` hook ran for an hour past `--hook-timeout-ms` until
+  Ctrl-C. A lost exit is now settled from the process table (on Linux with
+  the zombie's real exit code), a command killed at its deadline or on cancel
+  is given up on 2 s later even if no exit is ever reported, and the hook
+  narrates which of the two happened.
+- **A wedged Playwright run wrote empty `network/` and `console/` evidence.**
+  After a hard deadline killed the browser, the run skipped the request and
+  console logs as if they lived in the dead browser; they are kept in the cairn
+  process, so `requests.ndjson` came out empty and a `network` outcome on a
+  request made before the wedge failed with "no requests were captured". They
+  are now written and judged as captured up to the kill (agent-browser, whose
+  logs live in its daemon, still skips them).
+- **Closing a browser could hold the rest of the invocation.** Playwright's
+  close is bounded at 10 s and then kills the browser process (also a browser a
+  hard deadline abandoned without a watchdog kill), Playwright gains the
+  synchronous signal-path kill agent-browser already had, and the engine bounds
+  every spec's close at 90 s before killing the backend's processes, so the
+  next spec, the suite `after` hooks and the exit always run.
+
 ## [3.1.1] - 2026-10-04
 
 ### Fixed
