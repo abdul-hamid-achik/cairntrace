@@ -3,7 +3,7 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.1.2] - 2026-10-05
 
 ### Fixed
 
