@@ -117,7 +117,7 @@ test("golden_widgets", async ({ page }) => {
     { key: "legacy", value: "No", optional: true },
   ], { verify: true, dumpUnanswered: true, timeoutMs: 10000 });
   // step: start
-  if (await page.getByRole("button", { name: "Start" }).first().isVisible().catch(() => true)) {
+  if (await page.getByRole("button", { name: "Start" }).first().waitFor({ state: "visible", timeout: 750 }).then(() => true, (error: unknown) => !(error instanceof Error && error.name === "TimeoutError"))) {
     await page.getByRole("button", { name: "Start" }).first().click();
   }
   // step: save
@@ -132,7 +132,7 @@ test("golden_widgets", async ({ page }) => {
   // step: address
   await cairnWidget(page, { op: "fill", target: { "locator": { "by": "label", "name": "Address" } }, value: "10 Main Street", mountMs: 5000, verify: true, settleMs: 500, attempts: 4 });
   // step: referral
-  if (await page.getByLabel("Referral").first().isVisible().catch(() => true)) {
+  if (await page.getByLabel("Referral").first().waitFor({ state: "visible", timeout: 750 }).then(() => true, (error: unknown) => !(error instanceof Error && error.name === "TimeoutError"))) {
     {
       for (let fillAttempt = 0; ; fillAttempt++) {
         await page.getByLabel("Referral").first().fill("SPRING");

@@ -206,6 +206,17 @@ describe("compareSides", () => {
     expect(result.reason).toContain("proves nothing");
   });
 
+  it("is inconclusive when both sides pass but no step, outcome or network id aligns (nothing compared)", () => {
+    const result = compare(
+      cairn({ outcomes: [], network: {} }),
+      exp({ steps: [{ id: "export_only", status: "passed" }], network: {} }),
+    );
+    expect(result.status).toBe("inconclusive");
+    expect(result.reason).toContain("nothing compared");
+    expect(result.compared).toEqual({ steps: 0, outcomes: 0 });
+    expect(result.mismatches).toEqual([]);
+  });
+
   it("skips a fixme or gated export, and reports a side that could not run as an error", () => {
     expect(
       compare(cairn(), exp({ status: "skipped", fixme: true })),

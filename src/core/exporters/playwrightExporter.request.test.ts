@@ -301,6 +301,74 @@ describe("request v2 export", () => {
     expect(diagnostics).toEqual([]);
   });
 
+  it("reports credentialBaked on the login spec only, never on specs without a login", () => {
+    const value = ["pw", "proj", String(4096 + 9)].join("-");
+    const loginSpec = requestSpec();
+    const plainSpec = SpecSchema.parse({
+      version: 1,
+      name: "plain_nav",
+      intent: "navigate without signing in",
+      coldStart: "guest",
+      outcomes: [
+        {
+          id: "landed",
+          description: "landed on the dashboard",
+          verify: { url: { startsWith: "https://example.com/dash" } },
+        },
+      ],
+      steps: [{ open: "/dash" }],
+    });
+    const bakedAuth: ExportEnvAuth = {
+      ...ENV_AUTH,
+      vars: { ...ENV_AUTH.vars, appPassword: value },
+      auth: EnvAuthSchema.parse({
+        login: {
+          url: "${vars.loginPath}",
+          body: {
+            email: "${secrets.E2E_EMAIL}",
+            password: "${vars.appPassword}",
+          },
+          expectStatus: 200,
+        },
+      }),
+    };
+    const projectDir = join(TMP_DIR, "project-baked");
+    rmSync(projectDir, { recursive: true, force: true });
+    const result = exportPlaywrightProject(
+      [
+        {
+          spec: loginSpec,
+          resolved: loginSpec,
+          path: join(projectDir, "flows", "with_login.yml"),
+          contractHashValid: true,
+          origins: [],
+          actionsByName: new Map(),
+        },
+        {
+          spec: plainSpec,
+          resolved: plainSpec,
+          path: join(projectDir, "flows", "plain_nav.yml"),
+          contractHashValid: true,
+          origins: [],
+          actionsByName: new Map(),
+        },
+      ],
+      { envAuth: bakedAuth },
+    );
+    const loginRisks = result.specs
+      .find((spec) => spec.name === "golden_request_v2")!
+      .coverage.semanticRisks.filter((item) => item.kind === "credentialBaked");
+    const plainRisks = result.specs
+      .find((spec) => spec.name === "plain_nav")!
+      .coverage.semanticRisks.filter((item) => item.kind === "credentialBaked");
+    expect(loginRisks).toHaveLength(1);
+    expect(loginRisks[0]!.detail).toContain("appPassword");
+    expect(plainRisks).toHaveLength(0);
+    expect(JSON.stringify(result.specs.map((s) => s.coverage))).not.toContain(
+      value,
+    );
+  });
+
   it("cairnLoginState writes the session owner-only (0600) and atomically, no temp file left (M10)", async () => {
     const projectDir = join(TMP_DIR, "login-state");
     rmSync(projectDir, { recursive: true, force: true });
@@ -465,5 +533,40 @@ describe("request runtime uses the runner's matchers", () => {
     expect(
       runtime.cairnMatchPaths({ a: 1, b: 2 }, { a: 1, b: { atLeast: 3 } }),
     ).toBe("b = 2 (expected b >= 3)");
+  });
+});
+
+describe("environment login credential risks", () => {
+  it("reports credentialBaked when a credential-named var resolves into the login literal", () => {
+    const value = ["pw", "baked", String(4096 + 7)].join("-");
+    const result = exportPlaywright(requestSpec(), {
+      envAuth: {
+        envName: "local",
+        vars: { loginPath: "/api/login", appPassword: value },
+        configDir: HERE,
+        auth: EnvAuthSchema.parse({
+          login: {
+            url: "${vars.loginPath}",
+            body: {
+              email: "${secrets.E2E_EMAIL}",
+              password: "${vars.appPassword}",
+            },
+            expectStatus: 200,
+          },
+        }),
+      },
+    });
+    const risk = result.coverage.semanticRisks.find(
+      (item) => item.kind === "credentialBaked",
+    );
+    expect(risk?.detail).toContain("appPassword");
+    expect(JSON.stringify(result.coverage)).not.toContain(value);
+  });
+
+  it("reports no credentialBaked when the login reads secrets", () => {
+    const result = exportPlaywright(requestSpec(), { envAuth: ENV_AUTH });
+    expect(
+      result.coverage.semanticRisks.map((item) => item.kind),
+    ).not.toContain("credentialBaked");
   });
 });

@@ -249,7 +249,7 @@ an exported test writes and reads back exactly like `cairn run`.
 `click.dispatch` and `fill.mode: set` run through the same helper (one visible
 target; a disabled target fails a dispatch; the fill re-sets a wiped value),
 `fallback: dispatch` becomes a try/catch around a 5-second pointer click with
-that dispatch as the fallback, and `optional` an `isVisible()` guard. Error
+that dispatch as the fallback, and `optional` a 750ms visibility wait (the runner's presence window) before it counts as absent. Error
 messages of a password control or a credential-named field never include its
 values.
 

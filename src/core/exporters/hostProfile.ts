@@ -1706,7 +1706,7 @@ export interface HostEmit {
   notes: string[];
 }
 
-/** Glob → regular expression (fallback when Playwright's own minimatch cannot be loaded). */
+/** Glob → regular expression (fallback when Playwright's own minimatch cannot be loaded). Throws HostProfileError on an extglob negation !(…), which it cannot evaluate. */
 export function globToRegExp(glob: string): RegExp {
   let out = "";
   const closers: string[] = [];
@@ -1726,12 +1726,13 @@ export function globToRegExp(glob: string): RegExp {
       out += "(?:";
       closers.push(")*");
       i += 1;
-    } else if (
-      (c === "@" || c === "?" || c === "+" || c === "!") &&
-      next === "("
-    ) {
+    } else if (c === "!" && next === "(") {
+      throw new HostProfileError(
+        `the glob ${JSON.stringify(glob)} uses an extglob negation !(…), which cairn can only evaluate with Playwright's own minimatch, and playwright-core could not be loaded from the host or cairntrace; install @playwright/test in the host, or export without --host-config`,
+      );
+    } else if ((c === "@" || c === "?" || c === "+") && next === "(") {
       out += "(?:";
-      closers.push(c === "@" ? ")" : c === "?" ? ")?" : c === "+" ? ")+" : ")");
+      closers.push(c === "@" ? ")" : c === "?" ? ")?" : ")+");
       i += 1;
     } else if (c === "*") {
       out += "[^/]*";
@@ -1749,9 +1750,19 @@ export function globToRegExp(glob: string): RegExp {
     } else if (c === "|" && closers.length > 0) {
       out += "|";
     } else if (c === "[") {
-      const end = glob.indexOf("]", i + 1);
-      if (end > i) {
-        out += glob.slice(i, end + 1);
+      const negated = glob[i + 1] === "!";
+      const start = negated ? i + 2 : i + 1;
+      // minimatch classes: [!a] is a negated class, like [^a] in a RegExp,
+      // and a "]" right after "[" or "!" is a literal member, so the class
+      // ends at a later "]" (an unterminated "[!]" is literal text).
+      const lead = glob[start] === "]" ? 1 : 0;
+      const end = glob.indexOf("]", start + lead);
+      if (end >= start) {
+        const body =
+          lead === 1
+            ? "\\]" + glob.slice(start + 1, end)
+            : glob.slice(start, end);
+        out += negated ? `[^${body}]` : `[${body}]`;
         i = end;
       } else out += "\\[";
     } else if (/[.+^$|()\\\]]/.test(c)) {

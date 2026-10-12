@@ -29,6 +29,8 @@ export const RUNTIME_MODULES = [
   "url",
   "httpWire",
   "xlsxJudge",
+  "textMatching",
+  "tableJudge",
 ] as const;
 export type RuntimeModuleName = (typeof RUNTIME_MODULES)[number];
 
@@ -45,6 +47,8 @@ export const RUNTIME_SOURCE_FILES: Record<RuntimeModuleName, string> = {
   url: "runner/url.ts",
   httpWire: "datasources/httpWire.ts",
   xlsxJudge: "runner/verifiers/xlsxJudge.ts",
+  textMatching: "textMatching.ts",
+  tableJudge: "runner/verifiers/tableJudge.ts",
 };
 
 /** The `lib/` import specifier of the workbook reader (`xlsxJudge` needs it). */
@@ -218,6 +222,15 @@ export function buildRuntimeSourceTs(
           '} from "../../../sdk/workbook.js";',
           `} from "./${WORKBOOK_MODULE}.js";`,
         );
+      break;
+    case "tableJudge":
+      // The judge is the shared table checker: the runner and the Playwright
+      // export feed it the same structural shapes, and its only non-sibling
+      // import is the text normalizer, flattened to a runtime sibling here.
+      source = source.replace(
+        'from "../../textMatching";',
+        'from "./textMatching";',
+      );
       break;
     default:
       source = rerouteSchemaTypes(source, name);

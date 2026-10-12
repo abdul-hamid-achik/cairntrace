@@ -877,13 +877,20 @@ export async function verifyPlaywrightExport(
           differential.summary.skipped > 0)) ||
       (mutation !== undefined && mutation.status !== "passed"));
   // Nothing proven is never a pass: no toolchain gate (tsc, playwright
-  // --list) ran over the generated code, or the requested differential /
-  // mutation proved nothing either way.
+  // --list) ran over the generated code, freshness could not regenerate the
+  // export from its sources, or the requested differential / mutation proved
+  // nothing either way.
   const staticProvedNothing = !gates.some(
     (gate) => TOOLCHAIN_GATES.has(gate.id) && gate.status !== "skipped",
   );
+  // Freshness is the only gate that ties the files to their current
+  // sources; when it cannot regenerate the export, nothing does.
+  const freshnessUnproven = gates.some(
+    (gate) => gate.id === "freshness" && gate.status === "skipped",
+  );
   const inconclusive =
     staticProvedNothing ||
+    freshnessUnproven ||
     differential?.status === "inconclusive" ||
     mutation?.status === "inconclusive";
   const status: ExportVerifyReport["status"] =
@@ -900,8 +907,11 @@ export async function verifyPlaywrightExport(
         staticProvedNothing
           ? "neither the typecheck nor the playwright --list gate ran (no local tsc / Playwright, or a JavaScript export without Playwright)"
           : undefined,
+        freshnessUnproven
+          ? "the freshness gate could not regenerate the export from its sources, so nothing ties these files to the current specs"
+          : undefined,
         differential?.status === "inconclusive"
-          ? "the differential matched no spec (failed baselines, skipped tests)"
+          ? "the differential matched no spec (failed baselines, skipped tests, nothing compared)"
           : undefined,
         mutation?.status === "inconclusive"
           ? "no mutant was killed or survived"

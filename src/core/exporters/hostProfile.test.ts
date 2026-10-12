@@ -599,4 +599,25 @@ describe("globToRegExp", () => {
     expect(globToRegExp("*.e2e.ts").test("dir/x.e2e.ts")).toBe(false);
     expect(globToRegExp("**/*.{a,b}.ts").test("p/q/z.b.ts")).toBe(true);
   });
+
+  it("refuses an extglob negation instead of inverting it", () => {
+    expect(() => globToRegExp("**/!(skip).spec.ts")).toThrow(HostProfileError);
+    expect(() => globToRegExp("**/!(skip).spec.ts")).toThrow(
+      /extglob negation/,
+    );
+  });
+
+  it("translates a negated character class like minimatch does", () => {
+    expect(globToRegExp("**/[!a].ts").test("x/b.ts")).toBe(true);
+    expect(globToRegExp("**/[!a].ts").test("x/a.ts")).toBe(false);
+    expect(globToRegExp("**/[abc].ts").test("x/b.ts")).toBe(true);
+    expect(globToRegExp("**/[abc].ts").test("x/d.ts")).toBe(false);
+  });
+
+  it("keeps a leading ] in a class a literal member, like minimatch", () => {
+    expect(globToRegExp("**/[!]a].ts").test("x/b.ts")).toBe(true);
+    expect(globToRegExp("**/[!]a].ts").test("x/].ts")).toBe(false);
+    expect(globToRegExp("**/[!]a].ts").test("x/a.ts")).toBe(false);
+    expect(globToRegExp("**/[]a].ts").test("x/].ts")).toBe(true);
+  });
 });

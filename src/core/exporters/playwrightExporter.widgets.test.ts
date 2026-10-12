@@ -186,11 +186,47 @@ describe("exportPlaywright — F15 widget kit", () => {
       'await cairnWidget(page, { op: "click", mode: "dispatch", target: { "locator": { "by": "selector", "selector": ".close" } }, mountMs: 5000 });',
     );
     expect(result.source).toMatch(/catch \(pointerError\)/);
-    expect(result.source).toContain(".isVisible().catch(() => true)");
+    expect(result.source).toContain(
+      '.waitFor({ state: "visible", timeout: 750 })',
+    );
+    expect(result.source).not.toContain(".isVisible()");
     expect(result.source).toMatch(
       /await cairnWidget\(page, \{ op: "fill", target: .*settleMs: 500, attempts: 4/,
     );
     expect(result.source).not.toContain('dispatchEvent("click")');
+  });
+
+  it("waits the runner's 750ms presence window before skipping an optional click or fill; JavaScript has no annotation", () => {
+    const spec = SpecSchema.parse({
+      version: 1,
+      name: "optional_presence",
+      intent: "optional click and plain fill",
+      steps: [
+        {
+          id: "start",
+          click: { by: "role", role: "button", name: "Start", optional: true },
+        },
+        {
+          id: "referral",
+          fill: {
+            by: "label",
+            name: "Referral",
+            value: "SPRING",
+            optional: true,
+          },
+        },
+      ],
+      outcomes: [
+        { id: "ok", description: "ok", verify: { text: { contains: "x" } } },
+      ],
+    });
+    const source = exportPlaywright(spec, { lang: "js" }).source;
+    expect(source).not.toContain(".isVisible()");
+    expect(
+      source.split('.waitFor({ state: "visible", timeout: 750 })').length - 1,
+    ).toBe(2);
+    expect(source).toContain("(error) => !(error instanceof Error");
+    expect(source).not.toContain(": unknown");
   });
 
   it("embeds exactly the script parts cairn run evaluates, custom drivers included", () => {

@@ -464,7 +464,8 @@ per-agent code paths.
   read from the TypeScript syntax tree, so host formatting is irrelevant). Report
   `urn:cairntrace.dev:export-verify:v1`, also in `.cairn-export-verify.json` and
   the manifest's `verify`; exit 0 pass / 1 failed / 2 environment error / 3
-  inconclusive (nothing proven: neither tsc nor `playwright --list` ran, or the
+  inconclusive (nothing proven: neither tsc nor `playwright --list` ran, the
+  freshness gate could not regenerate the export from its sources, or the
   differential / mutation proved nothing) — never report 3 as a pass.
   On a multi-project host config every Playwright run of the verify uses one
   project (`--project`; its setup dependencies still run): `--verify-project`

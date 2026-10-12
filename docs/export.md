@@ -100,7 +100,9 @@ Every export reports, per spec, what was translated and what was not:
   runs before the test body, but the `use:` it replaces came after other
   steps), `mappedStorageState` (the test starts from an API login's
   storageState but takes its page from a `providesPage` host fixture, which
-  may build its own context),
+  may build its own context), `credentialBaked` (a credential-named `${vars.X}`
+  written into generated code as a literal, e.g. in `lib/authState`: vars
+  resolve at export time; use `${secrets.X}` / `${env.X}`),
   `globalPreconditions` (`--preconditions global` runs commands once for the
   whole suite), `pollApproximated` (a `poll.stableMs` window the export
   emulates) and `teardownBestEffort` (an exported teardown runs in a
@@ -648,7 +650,9 @@ and one browser at a time, and compares:
 
 A spec whose `cairn run` baseline did not pass is `inconclusive` when the
 export agrees with it (both failed: the app or the spec is unhealthy, which
-proves nothing), never a match; a disagreement is a `mismatch`. `test.fixme`
+proves nothing), never a match; a disagreement is a `mismatch`. A spec whose
+two sides agree but share no step, outcome or network id compared nothing and
+is `inconclusive`. `test.fixme`
 and gated exports are `skipped`. A gated export runs everything else before it
 ends skipped, so the steps and outcomes it did judge are compared first: one
 that disagrees with `cairn run` (the runner failed an outcome the export
@@ -685,8 +689,9 @@ gate, a differential spec or a mutant failed, `2` usage or environment error
 (no manifest, the app is unreachable, no local Playwright for a differential, an
 unknown `--verify-project`, a side could not run), `3` **inconclusive**: what was requested proved nothing —
 neither the typecheck nor the `playwright test --list` gate ran (no local
-`tsc` / Playwright next to the export), the differential matched no spec, or
-no mutant was killed or survived. The report's `status` is then
+`tsc` / Playwright next to the export), freshness could not regenerate the
+export from its sources, the differential matched no spec (a spec that compared nothing is not a match),
+or no mutant was killed or survived. The report's `status` is then
 `inconclusive`, never `passed`. `--verify-strict` makes anything skipped or
 inconclusive a `1`. A file the host's eslint config ignores (or that no config
 entry matches) was not linted: the lint gate is then `skipped`, listing the
@@ -885,8 +890,11 @@ request context, so a captured token reaches the next request
   `mappedStorageState` risk: a fixture that builds its own context
   (`browser.newContext()`) never sees that storageState.
 - Credentials are read from `process.env` **when the sign-in runs** (a missing
-  required one fails with its name before anything is sent). They are never in
-  generated code, the manifest, the report or the saved state, and never go
+  required one fails with its name before anything is sent). `${secrets.X}` /
+  `${env.X}` credentials are read from process.env when the sign-in runs and
+  never appear in generated code; a `${vars.X}` is resolved at export time and
+  written as a literal (a credential-named one is reported as a `credentialBaked`
+  risk). They are never in the manifest, the report or the saved state, and never go
   through `page.evaluate`. A login that needs the page (`hydrate`, filling a
   form) is not an API login.
 - Default and `--preconditions inline|skip|manifest`: the test file signs in
@@ -1033,8 +1041,8 @@ strict mode judges, in tests, action modules and generated page objects alike.
 | wait.any / wait.all / optional / assign | `Promise.any` / one `expect.poll` reading every condition each tick (all must hold at the same moment, like `cairn run`) / a caught miss / a typed `{ matched, index }` binding |
 | use + retry | a `try/catch` retry loop (around the action module call in `--project`) |
 | set / check / uncheck / choose / form | `cairnWidget(page, …)` / `cairnWidgetForm(page, …)`: the same in-page widget runtime and `browser.fieldRoot` / `browser.widgets` config as `cairn run` (`lib/widgets` in `--project`) |
-| click `optional` / `dispatch` / `fallback: dispatch` | an `isVisible()` guard / `cairnWidget(page, { op: "click", mode: "dispatch", … })` / a 5s pointer click with that dispatch as the catch |
-| fill `mode: set` / `optional` | `cairnWidget(page, { op: "fill", … })` (the runner's own in-page fill) / an `isVisible()` guard |
+| click `optional` / `dispatch` / `fallback: dispatch` | a 750ms visibility wait (the runner's presence window) before it counts as absent / `cairnWidget(page, { op: "click", mode: "dispatch", … })` / a 5s pointer click with that dispatch as the catch |
+| fill `mode: set` / `optional` | `cairnWidget(page, { op: "fill", … })` (the runner's own in-page fill) / a 750ms visibility wait (the runner's presence window) before it counts as absent |
 | eval / browser script / login hydrate that use `__cairn` | the source runs after `CAIRN_PRELUDE`, the same `window.__cairn` installer with the config `browser.appHandle` accessors (`lib/prelude` in `--project`) |
 | `wait: { app }` | `expect.poll(() => cairnAppCheck(page, path, check))`: the same in-page check `cairn run` polls (a navigation mid-check counts as "not yet"; a strict CSP that blocks it fails at once, naming the CSP) |
 | text / url / count / network / console | expect(...) (`noFailedRequests`, and `network` in a spec that has one: `cairnAssertNoFailedRequests` / `cairnAssertNetwork`, the runner's judges) |

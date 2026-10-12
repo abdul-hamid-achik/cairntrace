@@ -177,6 +177,7 @@ import {
 import { usesCairnPrelude, type AppHandles } from "../prelude/prelude";
 import { defaultWidgets, type PreparedWidgets } from "../widgets/runtime";
 import {
+  bakedCredentialVars,
   prepareExportAuth,
   renderRequestHelperLines,
   requestRuntimeImports,
@@ -309,6 +310,7 @@ export interface ExportCoverageSkip {
  *  - mappedStorageState: the test starts from a storageState (an API login)
  *    but its page comes from a host fixture (`providesPage`), which may build
  *    its own browser context that never sees `test.use({ storageState })`.
+ *  - credentialBaked: a credential-named ${vars.X} (vars resolve at export time) is written into generated code as a literal.
  */
 export type ExportSemanticRiskKind =
   | "envBaked"
@@ -327,7 +329,8 @@ export type ExportSemanticRiskKind =
   | "teardownBestEffort"
   | "transformInProcess"
   | "mappedOrdering"
-  | "mappedStorageState";
+  | "mappedStorageState"
+  | "credentialBaked";
 
 export interface ExportSemanticRisk {
   kind: ExportSemanticRiskKind;
@@ -2713,10 +2716,10 @@ function renderStepBody(
             ]
           : [raw(`await ${target}.click();`), ...settle];
     }
-    // F15 optional: skip when no visible target exists right now.
+    // F15 optional: skip when no visible target shows up within the runner's presence window.
     return step.click.optional
       ? {
-          stmts: [iff(`await ${target}.isVisible().catch(() => true)`, stmts)],
+          stmts: [iff(optionalPresence(target, ctx), stmts)],
           exported: true,
         }
       : { stmts, exported: true };
@@ -2756,12 +2759,7 @@ function renderStepBody(
     }
     return step.fill.optional
       ? {
-          stmts: [
-            iff(
-              `await ${target}.isVisible().catch(() => true)`,
-              rendered.stmts,
-            ),
-          ],
+          stmts: [iff(optionalPresence(target, ctx), rendered.stmts)],
           exported: rendered.exported,
         }
       : rendered;
@@ -2929,6 +2927,17 @@ const WIDGET_DEFAULT_TIMEOUT_MS = 10_000;
 const WIDGET_OPTIONAL_PRESENCE_MS = 750;
 /** Runner mount wait of a dispatch click / fill mode: set (CLICK_MOUNT_MS). */
 const WIDGET_CLICK_MOUNT_MS = 5_000;
+
+/**
+ * F15 optional click / fill: wait the runner's presence window
+ * (OPTIONAL_PRESENCE_MS) before the control counts as absent. Only a
+ * timeout means absent; any other error counts as present, so the action
+ * reports it.
+ */
+function optionalPresence(target: string, ctx: EmitCtx): string {
+  const error = ctx.lang === "ts" ? "error: unknown" : "error";
+  return `await ${target}.waitFor({ state: "visible", timeout: ${WIDGET_OPTIONAL_PRESENCE_MS} }).then(() => true, (${error}) => !(error instanceof Error && error.name === "TimeoutError"))`;
+}
 
 /**
  * F15 set / check / uncheck / choose / form → `cairnWidget` /
@@ -3591,6 +3600,18 @@ function renderLoginStep(step: UseStep, ctx: EmitCtx): Rendered {
       "step",
       `use: login not exportable: ${(e as Error).message}`,
       `use: login skipped — ${(e as Error).message}`,
+      step.id,
+    );
+  }
+  const bakedLoginVars = bakedCredentialVars(literal, {
+    ...auth.vars,
+    ...useVars,
+  });
+  if (bakedLoginVars.length > 0) {
+    addRisk(
+      ctx,
+      "credentialBaked",
+      `use: login: credential-named var(s) ${bakedLoginVars.join(", ")} are written into the generated login literal (vars resolve at export time; cairn spec lint flags them as literal-secret); use \${secrets.NAME} or \${env.NAME} so the sign-in reads them from process.env`,
       step.id,
     );
   }

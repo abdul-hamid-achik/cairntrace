@@ -595,7 +595,7 @@ addFormatFlags(
     )
     .option(
       "--verify [dirOrMode]",
-      "prove an export faithful: static gates (no leaked sentinels, tsc with the target tsconfig, the host's eslint, playwright test --list == exported specs, manifest freshness), each passed | failed | skipped(reason). A value is an export directory (--verify ./export) or a mode (static | differential) for the export this command writes. On a host config with several projects every Playwright run uses one project (--verify-project). Writes .cairn-export-verify.json/.md and the manifest's verify field; exit 0 all pass, 1 a gate / differential / mutant failed, 2 usage or environment error, 3 inconclusive (nothing proven: neither tsc nor playwright --list ran, the differential matched no spec, no mutant was killed or survived; never a pass)",
+      "prove an export faithful: static gates (no leaked sentinels, tsc with the target tsconfig, the host's eslint, playwright test --list == exported specs, manifest freshness), each passed | failed | skipped(reason). A value is an export directory (--verify ./export) or a mode (static | differential) for the export this command writes. On a host config with several projects every Playwright run uses one project (--verify-project). Writes .cairn-export-verify.json/.md and the manifest's verify field; exit 0 all pass, 1 a gate / differential / mutant failed, 2 usage or environment error, 3 inconclusive (nothing proven: neither tsc nor playwright --list ran, freshness could not regenerate the export from its sources, the differential matched no spec (a spec that compared nothing is not a match), no mutant was killed or survived; never a pass)",
     )
     .option(
       "--differential",

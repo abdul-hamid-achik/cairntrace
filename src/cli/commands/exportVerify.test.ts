@@ -308,6 +308,29 @@ describe("verifyPlaywrightExport (static gates)", () => {
     expect(diff.report.error).toContain("--project or --into");
   }, 120_000);
 
+  it("is inconclusive (exit 3) when freshness cannot regenerate the export, even with every toolchain gate passed", async () => {
+    const { dir, specFile } = await exportFixture();
+    // Regeneration reads the spec; without it the freshness gate is skipped.
+    rmSync(specFile);
+    const { report, exitCode } = await verifyPlaywrightExport({
+      exportDir: dir,
+      write: false,
+    });
+    const gates = Object.fromEntries(report.gates.map((g) => [g.id, g]));
+    expect(gates["freshness"]).toMatchObject({
+      status: "skipped",
+      reason: expect.stringContaining("cannot regenerate"),
+    });
+    expect(gates["typecheck"]).toMatchObject({ status: "passed" });
+    expect(gates["list"]).toMatchObject({ status: "passed" });
+    expect(exitCode).toBe(3);
+    expect(report.status).toBe("inconclusive");
+    expect(report.warnings.join(" ")).toContain(
+      "freshness gate could not regenerate",
+    );
+    expect(report.warnings.join(" ")).toContain("(exit 3)");
+  }, 120_000);
+
   it("markdown names failed gates, findings and the skipped-is-not-pass rule", async () => {
     const { dir, testFile } = await exportFixture();
     writeFileSync(

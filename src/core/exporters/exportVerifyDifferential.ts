@@ -278,10 +278,13 @@ export function compareSides(
   }
 
   const baselineFailed = cairn.status !== "passed";
+  // Agreeing verdicts with no aligned id prove nothing: the sides never met.
+  const nothingCompared =
+    comparedSteps + comparedOutcomes === 0 && network.length === 0;
   const status: ExportVerifyDifferentialSpec["status"] =
     mismatches.length > 0
       ? "mismatch"
-      : baselineFailed
+      : baselineFailed || nothingCompared
         ? "inconclusive"
         : "match";
   return {
@@ -289,7 +292,9 @@ export function compareSides(
     status,
     ...(status === "inconclusive"
       ? {
-          reason: `cairn run itself ${cairn.status}: the two sides agree, but the app or the spec is unhealthy, so this proves nothing`,
+          reason: baselineFailed
+            ? `cairn run itself ${cairn.status}: the two sides agree, but the app or the spec is unhealthy, so this proves nothing`
+            : "the two sides agree on the verdict, but no step or outcome id aligned between them (nothing compared), so this proves nothing",
         }
       : {}),
     cairn: cairnSummary,

@@ -24,6 +24,7 @@ import {
   renderAuthStateModule,
   type MapCall,
 } from "./exportMapEmit";
+import { bakedCredentialVars } from "./requestRuntime";
 import { SpecSchema } from "../schema/spec.v1";
 
 const roots: string[] = [];
@@ -339,5 +340,33 @@ describe("authState module", () => {
     expect(js).toContain('from "./request.js"');
     expect(js).not.toContain(": string");
     expect(js).not.toContain("interface");
+  });
+
+  it("says which values are literals: secrets and env are read at run time, vars were resolved at export", () => {
+    const source = renderAuthStateModule("ts", "cjs", states);
+    expect(source).toContain("${vars.X} values were resolved at export time");
+    expect(source).toContain("${secrets.X} and ${env.X}");
+    expect(source).not.toContain("nothing secret");
+  });
+});
+
+describe("bakedCredentialVars", () => {
+  it("names a credential-named var whose literal the login carries; placeholders, late-bound refs, unused and ordinary vars are not named", () => {
+    const pw = ["pw", "baked", String(4096 + 3)].join("-");
+    const literal = JSON.stringify({
+      body: { email: "a@b.c", password: pw },
+    });
+    const vars = {
+      apiPassword: pw,
+      email: "a@b.c",
+      apiToken: "${env.T}",
+      sessionToken: "__CAIRN_SECRET_REF__S__",
+      unusedSecret: "zzz-unused",
+      creds: { password: pw },
+    };
+    expect(bakedCredentialVars(literal, vars)).toEqual([
+      "apiPassword",
+      "creds.password",
+    ]);
   });
 });

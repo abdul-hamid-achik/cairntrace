@@ -1236,8 +1236,8 @@ separate so the core stays deterministic and testable.
   freshness), `--differential` (`cairn run` and the exported test with the
   same `CAIRN_RUN_TOKEN`, verdicts and network evidence compared) and
   `--mutate` (an inverted assertion must fail); exit 0 pass / 1 failed / 2
-  error / 3 inconclusive (nothing proven, e.g. no local tsc or Playwright —
-  never a pass). `--into <dir> --host-config <playwright.config>` fits the
+  error / 3 inconclusive (nothing proven, e.g. no local tsc or Playwright, or
+  freshness cannot regenerate the export from its sources — never a pass). `--into <dir> --host-config <playwright.config>` fits the
   output to an existing Playwright tree (config read statically, never run);
   `--map` binds actions to the host's fixtures and page objects; `--preconditions`
   decides whether `run:` steps, `teardown:`, fixtures and gates run inline, once

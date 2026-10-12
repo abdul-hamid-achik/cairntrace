@@ -1427,7 +1427,7 @@ export function buildExplain(): ExplainResult {
           "0": "success (written or partial with skips); --check: export is fresh; --verify: every requested gate, differential and mutation passed",
           "1": "--check: export is stale (files or specs drifted from the sources); --verify: a gate, a differential spec or a mutant failed (--verify-strict: or something was skipped / inconclusive)",
           "2": "usage/IO error, or a late-bound placeholder leaked into generated code; --check: no/unreadable manifest or regeneration failed; --verify: no manifest, bad flags, an unknown --verify-project, app unreachable or no local Playwright for a differential / mutation, or a side could not run (a failed dependency project included)",
-          "3": "--verify: inconclusive, what was requested proved nothing (neither tsc nor playwright --list ran, the differential matched no spec, no mutant was killed or survived); never a pass. Merged with the export's own code by severity: 2 > 1 > 3 > 0",
+          "3": "--verify: inconclusive, what was requested proved nothing (neither tsc nor playwright --list ran, freshness could not regenerate the export from its sources, the differential matched no spec (a spec that compared nothing is not a match), no mutant was killed or survived); never a pass. Merged with the export's own code by severity: 2 > 1 > 3 > 0",
           "4": "spec parse failure, or (single file) a config field the export emits that only an environment value could fill (a typed field holding ${env.X}, or a browser.testIdAttribute / fieldRoot / widgets / appHandle holding one: written into code as a literal)",
         },
       },

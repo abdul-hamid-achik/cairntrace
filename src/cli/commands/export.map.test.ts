@@ -846,6 +846,9 @@ describe("API login as a storageState", () => {
         treatment: "storageState",
         target: ".auth/sign_in_api.json",
       });
+      expect(
+        report.specs[0]?.coverage.semanticRisks.map((r) => r.kind),
+      ).not.toContain("credentialBaked");
 
       const compiled = await tsc(s.tree, join(s.tree.e2e, "tsconfig.json"));
       expect(compiled.exitCode, compiled.output).toBe(0);
@@ -853,6 +856,30 @@ describe("API login as a storageState", () => {
       if (previous === undefined) delete process.env[PASSWORD_ENV];
       else process.env[PASSWORD_ENV] = previous;
     }
+  }, 180_000);
+
+  it("reports a credential-named var baked into lib/authState as a credentialBaked risk, never its value", async () => {
+    const value = ["pw", "baked", String(4096 + 5)].join("-");
+    const s = scenario("cjs", {
+      actions: {
+        ...ACTIONS,
+        sign_in_api: SIGN_IN_API.replace(
+          'password: "${secrets.CAIRN_TEST_API_PASSWORD}"',
+          'password: "${vars.apiPassword}"',
+        ).replace(
+          "  email: casey@example.test",
+          `  email: casey@example.test\n  apiPassword: ${value}`,
+        ),
+      },
+      specs: { api_orders_flow: API_SPEC },
+    });
+    const report = await exportInto(s);
+    const risk = report.specs[0]?.coverage.semanticRisks.find(
+      (r) => r.kind === "credentialBaked",
+    );
+    expect(risk?.detail).toContain("apiPassword");
+    expect(JSON.stringify(report)).not.toContain(value);
+    expect(text(join(s.tree.into, "lib", "authState.ts"))).toContain(value);
   }, 180_000);
 
   for (const kind of ["cjs", "esm"] as const) {

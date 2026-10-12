@@ -164,6 +164,7 @@ import {
 import { defaultWidgets, type PreparedWidgets } from "../widgets/runtime";
 import type { AppHandles } from "../prelude/prelude";
 import {
+  bakedCredentialVars,
   prepareExportAuth,
   renderAuthRuntime,
   renderRequestRuntime,
@@ -837,6 +838,7 @@ function exportPlaywrightProjectUnder(
         );
       } else {
         let auth: { literal: string; requiredEnv: string[] } | undefined;
+        let loginVars: Record<string, unknown> = {};
         if (decision.login.setupProject === undefined) {
           if (call.loaded) {
             const blocker = apiLoginBlocker(call.loaded.action.steps);
@@ -845,16 +847,17 @@ function exportPlaywrightProjectUnder(
                 `export map: action ${call.action} cannot be an API login: ${blocker}`,
               );
             }
+            loginVars = {
+              ...call.loaded.actionDefaults,
+              ...call.specVars,
+              ...call.callVars,
+            };
             auth = apiLoginAuth({
               steps: parseReusableAction(
                 call.loaded.rawSource,
                 call.loaded.path,
                 {
-                  vars: {
-                    ...call.loaded.actionDefaults,
-                    ...call.specVars,
-                    ...call.callVars,
-                  } as Record<string, ConfigVarValue>,
+                  vars: loginVars as Record<string, ConfigVarValue>,
                   env: {},
                   ...(opts.configDir ? { configDir: opts.configDir } : {}),
                   secretRef: (name) => `__CAIRN_SECRET_REF__${name}__`,
@@ -866,6 +869,7 @@ function exportPlaywrightProjectUnder(
               configDir: opts.configDir ?? process.cwd(),
             });
           } else if (opts.envAuth) {
+            loginVars = { ...opts.envAuth.vars, ...call.callVars };
             auth = authLiteral(opts.envAuth, call.callVars ?? {});
           } else {
             throw new ExportMapError(
@@ -873,6 +877,15 @@ function exportPlaywrightProjectUnder(
             );
           }
           for (const name of auth.requiredEnv) ctx.usage.envNames.add(name);
+          const baked = bakedCredentialVars(auth.literal, loginVars);
+          if (baked.length > 0) {
+            addRisk(
+              ctx,
+              "credentialBaked",
+              `action ${call.action}: credential-named var(s) ${baked.join(", ")} are written into lib/authState as literals (vars resolve at export time; cairn spec lint flags them as literal-secret); use \${secrets.NAME} or \${env.NAME} so the sign-in reads them from process.env`,
+              call.stepId ?? call.action,
+            );
+          }
         }
         stmts = map.useApiLogin(
           call,

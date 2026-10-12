@@ -26,6 +26,7 @@
 
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { isSensitiveName } from "../catalog/mask";
 import type { EnvAuth } from "../schema/request.v1";
 import { withCairnPrelude } from "../prelude/prelude";
 import { lookupVar, renderVarValue } from "../config/varValue";
@@ -607,6 +608,43 @@ export interface ExportEnvAuth {
   configDir: string;
   /** F20: config `browser.appHandle` (a hydrate script that uses `__cairn`). */
   appHandles?: Record<string, string>;
+}
+
+/** A late-bound ref the export resolves at run time (__CAIRN_SECRET_REF__…, __CAIRN_ENV_DEFAULT__…). */
+const LATE_BOUND_REF = /__CAIRN_[A-Z_]+__/;
+
+/**
+ * Credential-named vars (`isSensitiveName`, the names `cairn spec lint`'s
+ * literal-secret flags in spec vars) whose literal value an exported login
+ * literal carries: vars resolve at export time, so the value is in the
+ * generated file. Placeholders and late-bound refs are read at run time.
+ * Dotted paths for typed vars; never the values.
+ */
+export function bakedCredentialVars(
+  literal: string,
+  vars: Record<string, unknown>,
+): string[] {
+  const out: string[] = [];
+  const walk = (value: unknown, path: string[]): void => {
+    if (typeof value === "string") {
+      if (
+        value.length > 0 &&
+        path.some(isSensitiveName) &&
+        !value.includes("${") &&
+        !LATE_BOUND_REF.test(value) &&
+        literal.includes(JSON.stringify(value).slice(1, -1))
+      ) {
+        out.push(path.join("."));
+      }
+      return;
+    }
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      for (const [key, item] of Object.entries(value))
+        walk(item, [...path, key]);
+    }
+  };
+  for (const [name, value] of Object.entries(vars)) walk(value, [name]);
+  return out.toSorted();
 }
 
 /**
