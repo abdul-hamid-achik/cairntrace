@@ -49,6 +49,8 @@ export interface ResolvedSuite {
   vars: Record<string, string>;
   before: string[];
   after: string[];
+  /** `afterCritical`: cleanup whose failure is exit 8; runs after `after`. */
+  afterCritical: string[];
   hookTimeoutMs?: number;
   /** `seed.postCommands.skip`: the suite's, then the environment's. */
   seedSkip: string[];
@@ -518,6 +520,10 @@ export class SuiteResolver {
       vars,
       before: [...(suite.before ?? []), ...(envBlock?.before ?? [])],
       after: [...(suite.after ?? []), ...(envBlock?.after ?? [])],
+      afterCritical: [
+        ...(suite.afterCritical ?? []),
+        ...(envBlock?.afterCritical ?? []),
+      ],
       ...(hookTimeoutMs !== undefined ? { hookTimeoutMs } : {}),
       seedSkip: unique([
         ...(suite.seed?.postCommands?.skip ?? []),

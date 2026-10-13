@@ -14,7 +14,7 @@ import type {
 } from "../../../core/schema/services.v1";
 import { trackServices } from "../../cleanup";
 import { emit, resolveFormat } from "../../format";
-import { log } from "../../logger";
+import { log, reconfigureWithConfig, setNarrationDefault } from "../../logger";
 import {
   configErrorExitCode,
   startServicesPlan,
@@ -57,10 +57,16 @@ export interface ServicesUpOptions {
   /** Lifecycle narration (redacted). */
   log?: (message: string) => void;
   logDetail?: (message: string) => void;
-  /** Live docker/seed output chunks (interactive). */
+  /** Live, redacted docker/provisioner progress lines. */
   onOutput?: (chunk: string) => void;
   /** Signal-time teardown registration for the boot window. */
   onSpawn?: (terminateSync: () => void) => void;
+  /**
+   * The resolved config's `logging:` block, once the target loaded (the CLI
+   * applies it as a logger default; the programmatic API never touches the
+   * global logger).
+   */
+  onLogging?: (logging: ServicesTarget["logging"]) => void;
 }
 
 export interface ServicesUpCommandOptions {
@@ -107,6 +113,7 @@ export async function servicesUp(
       error: (e as Error).message,
     });
   }
+  opts.onLogging?.(target.logging);
   const identity = {
     project: target.project,
     env: target.envName,
@@ -346,6 +353,9 @@ export async function servicesUpCommand(
 ): Promise<void> {
   const format = resolveFormat(opts, "md");
   const services = log.scope("services");
+  // Boot progress goes to stderr even with --json (stdout stays one document);
+  // --quiet, --log-level, env and config levels still win.
+  setNarrationDefault(true);
   let untrack: (() => void) | undefined;
   const result = await servicesUp({
     ...(opts.config !== undefined ? { config: opts.config } : {}),
@@ -354,6 +364,8 @@ export async function servicesUpCommand(
     log: (m) => services.info(m),
     logDetail: (m) => services.debug(m),
     onOutput: (chunk) => log.raw(chunk),
+    // The config's `logging:` block is a project default (flags/env win).
+    onLogging: (logging) => reconfigureWithConfig(logging),
     // Ctrl-C during the boot tears down what started (run semantics); once
     // the services are up they are left running on exit.
     onSpawn: (terminateSync) => {

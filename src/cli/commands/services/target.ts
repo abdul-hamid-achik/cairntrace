@@ -34,6 +34,8 @@ export interface ServicesTarget {
   runPolicy?: RunPolicyConfig;
   /** The config's `run:` and environments (every declared run lock). */
   lockConfig?: Pick<Config, "run" | "environments">;
+  /** The config's `logging:` block (a project default for the CLI logger). */
+  logging?: NonNullable<Config["logging"]>;
   scopedSecrets: ScopedSecrets;
   /** Redacts the scoped secret values out of commands and events. */
   redactor: ArtifactRedactor;
@@ -137,6 +139,7 @@ export async function resolveServicesTarget(
     ...(ctx.services ? { services: ctx.services } : {}),
     ...(ctx.config?.gates ? { gates: ctx.config.gates } : {}),
     ...(ctx.config?.project ? { configProject: ctx.config.project } : {}),
+    ...(ctx.config?.logging ? { logging: ctx.config.logging } : {}),
     ...(ctx.runPolicy ? { runPolicy: ctx.runPolicy } : {}),
     ...(ctx.config
       ? {

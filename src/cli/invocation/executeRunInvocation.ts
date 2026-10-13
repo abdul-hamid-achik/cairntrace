@@ -174,6 +174,7 @@ import type { InvocationPlannedRun } from "../../core/schema/events.v1";
 import {
   type AppliedSuite,
   applySuite,
+  type CriticalSuiteHookFailure,
   refreshSuiteVars,
   runSuiteAfterHooksSync,
   runSuiteHooks,
@@ -471,6 +472,16 @@ class ResourceScope {
   /** `run.finally`: after services and the webServer are down. */
   private readonly afterTeardownHooks = new Set<SignalHook>();
 
+  /** Mandatory cleanup (hooks) still owed: `true` makes the notice say critical. */
+  private readonly criticalProbes = new Set<() => boolean>();
+
+  trackCriticalPending(probe: () => boolean): () => void {
+    this.criticalProbes.add(probe);
+    return () => {
+      this.criticalProbes.delete(probe);
+    };
+  }
+
   trackSignalHook(
     stage: "before-teardown" | "after-teardown",
     hook: SignalHook,
@@ -563,6 +574,13 @@ class ResourceScope {
    * still owes a critical entry (a provisioner's `down`).
    */
   private pendingCleanup(): "critical" | "teardown" | undefined {
+    for (const probe of this.criticalProbes) {
+      try {
+        if (probe()) return "critical";
+      } catch {
+        // A probe never blocks the exit path.
+      }
+    }
     for (const handle of this.services) {
       try {
         if (handle.criticalPending?.()) return "critical";
@@ -968,6 +986,11 @@ class RunInvocation {
   private projectDir: string | undefined;
   /** Critical teardown entries that failed (exit 8). */
   private criticalFailures: CriticalTeardownFailure[] = [];
+  /**
+   * Critical cleanup hooks that did not complete (suite `afterCritical`,
+   * `--after-critical`), folded into {@link criticalFailures} at the verdict.
+   */
+  private readonly criticalAfterFailures: CriticalTeardownFailure[] = [];
   /** Exit 8 / 9 messages of the run policy. */
   private readonly policyErrors: string[] = [];
   /**
@@ -1395,8 +1418,54 @@ class RunInvocation {
 
   /** `runPolicy` of the journal summary, when the policy did anything notable. */
   private policySummary(): Pick<InvocationSummary, "runPolicy"> {
-    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const runPolicy = summarizeRunPolicy(this.policy, this.allCritical());
     return runPolicy ? { runPolicy } : {};
+  }
+
+  /** Every critical cleanup failure known so far (teardown and hooks). */
+  private allCritical(): CriticalTeardownFailure[] {
+    return this.criticalFailures.length > 0
+      ? this.criticalFailures
+      : this.criticalAfterFailures;
+  }
+
+  /** {@link runAfterHooksForResult}'s `trackSignalHook`, on the resource scope. */
+  private readonly trackCriticalAfterSignal = (
+    hook: () => void,
+  ): (() => void) => {
+    const untrackPending = this.resources.trackCriticalPending(() => true);
+    const untrack = this.resources.trackSignalHook("before-teardown", () =>
+      hook(),
+    );
+    return () => {
+      untrackPending();
+      untrack();
+    };
+  };
+
+  /** Remember a critical cleanup hook that did not complete (exit 8). */
+  private recordCriticalAfter(
+    source: NonNullable<CriticalTeardownFailure["source"]>,
+    failure: {
+      index: number;
+      command: string;
+      exitCode?: number;
+      timedOut?: boolean;
+      error?: string;
+      runId?: string;
+    },
+    path: CriticalTeardownFailure["path"] = "teardown",
+  ): void {
+    this.criticalAfterFailures.push({
+      index: failure.index,
+      command: this.redactNote(failure.command),
+      ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+      ...(failure.timedOut ? { timedOut: true } : {}),
+      ...(failure.error ? { error: this.redactNote(failure.error) } : {}),
+      path,
+      source,
+      ...(failure.runId ? { runId: failure.runId } : {}),
+    });
   }
 
   /**
@@ -2282,7 +2351,10 @@ class RunInvocation {
       ? await resolveRunMetrics(firstSpec, opts, scopedSecrets, cwd)
       : undefined;
     const hookContext: HookContext =
-      (opts.before?.length ?? 0) + (opts.after?.length ?? 0) > 0 ||
+      (opts.before?.length ?? 0) +
+        (opts.after?.length ?? 0) +
+        (opts.afterCritical?.length ?? 0) >
+        0 ||
       this.suite !== undefined ||
       runMetrics !== undefined
         ? await resolveHookContext(firstSpec, opts, scopedSecrets, cwd)
@@ -2313,11 +2385,24 @@ class RunInvocation {
           ]),
         ),
       };
+      const after = suite.resolved.after.filter((command) => command.trim());
+      const critical =
+        phase === "after"
+          ? suite.resolved.afterCritical.filter((command) => command.trim())
+          : [];
       return {
         suite: suite.resolved.name,
         phase,
+        // `afterCritical` runs after `after`, as the tail of one command list.
         commands:
-          phase === "before" ? suite.resolved.before : suite.resolved.after,
+          phase === "before" ? suite.resolved.before : [...after, ...critical],
+        ...(critical.length > 0
+          ? {
+              criticalFrom: after.length + 1,
+              onCritical: (failure: CriticalSuiteHookFailure) =>
+                this.recordCriticalAfter("suite.afterCritical", failure),
+            }
+          : {}),
         timeoutMs: suite.resolved.hookTimeoutMs ?? hookTimeoutMs,
         cwd: suite.configDir,
         env: targetChildEnvWithSelectedTvaultKeys(
@@ -2336,8 +2421,18 @@ class RunInvocation {
     // finished (a signal stops cairn before an async continuation runs).
     let suiteAfterDone = 0;
     let suiteAfterFinished = false;
+    const suiteAfterCount = this.suite
+      ? this.suite.resolved.after.length +
+        this.suite.resolved.afterCritical.length
+      : 0;
+    const untrackSuitePending =
+      (this.suite?.resolved.afterCritical.length ?? 0) > 0
+        ? this.resources.trackCriticalPending(
+            () => suiteBeforeStarted && !suiteAfterFinished,
+          )
+        : undefined;
     const untrackSuiteSignal =
-      this.suite && this.suite.resolved.after.length > 0
+      this.suite && suiteAfterCount > 0
         ? this.resources.trackSignalHook(
             "before-teardown",
             (signal, budget) => {
@@ -2353,6 +2448,17 @@ class RunInvocation {
                 journal: hook.journal,
                 redact: hook.redact,
                 note: (_kind, message) => this.signalNote(message),
+                ...(hook.criticalFrom !== undefined
+                  ? {
+                      criticalFrom: hook.criticalFrom,
+                      onCritical: (failure: CriticalSuiteHookFailure) =>
+                        this.recordCriticalAfter(
+                          "suite.afterCritical",
+                          failure,
+                          "signal",
+                        ),
+                    }
+                  : {}),
                 from: suiteAfterDone + 1,
                 budget,
               });
@@ -2362,7 +2468,10 @@ class RunInvocation {
 
     // The verdict can still change after the specs: hold the documents.
     this.holdDocuments =
-      this.policy !== undefined || svcHandle?.hasCriticalTeardown?.() === true;
+      this.policy !== undefined ||
+      svcHandle?.hasCriticalTeardown?.() === true ||
+      (this.suite?.resolved.afterCritical.length ?? 0) > 0 ||
+      (opts.afterCritical ?? []).some((command) => command.trim() !== "");
     // A signal ends cairn before that verdict: what finished is handed over
     // then (exit 130 / 143), never dropped.
     const untrackHeldDocuments = this.holdDocuments
@@ -2538,11 +2647,12 @@ class RunInvocation {
         this.suite &&
         suiteBeforeStarted &&
         !suiteAfterFinished &&
-        this.suite.resolved.after.length > 0
+        suiteAfterCount > 0
       ) {
+        const afterOpts = suiteHookOpts("after", exitCode);
         try {
           const outcome: SuiteHooksOutcome = await runSuiteHooks({
-            ...suiteHookOpts("after", exitCode),
+            ...afterOpts,
             onDone: (index) => {
               suiteAfterDone = index;
             },
@@ -2551,10 +2661,25 @@ class RunInvocation {
         } catch (e) {
           this.suiteHooksFailed += 1;
           this.note("warn", `suite after hooks: ${(e as Error).message}`);
+          // The hooks stopped half way: the critical ones not done count.
+          if (afterOpts.criticalFrom !== undefined) {
+            for (
+              let at = Math.max(suiteAfterDone + 1, afterOpts.criticalFrom);
+              at <= afterOpts.commands.length;
+              at += 1
+            ) {
+              this.recordCriticalAfter("suite.afterCritical", {
+                index: at - afterOpts.criticalFrom,
+                command: afterOpts.commands[at - 1]!,
+                error: (e as Error).message.slice(0, 500),
+              });
+            }
+          }
         }
         suiteAfterFinished = true;
       }
       untrackSuiteSignal?.();
+      untrackSuitePending?.();
       if (multiRun && summaryRows.length > 0) {
         if (this.narration.iterationsSummary) {
           this.narration.iterationsSummary(summaryRows, iterations.length);
@@ -2600,10 +2725,10 @@ class RunInvocation {
     // run, and the clean-machine check may turn the exit into 9. The lock is
     // released last, before the journal settles.
     const specsExitCode = exitCode;
-    const settledPolicy = await this.settlePolicy(
-      exitCode,
-      svcHandle?.criticalTeardownFailures?.() ?? [],
-    );
+    const settledPolicy = await this.settlePolicy(exitCode, [
+      ...(svcHandle?.criticalTeardownFailures?.() ?? []),
+      ...this.criticalAfterFailures,
+    ]);
     exitCode = settledPolicy.exitCode;
     this.policy?.releaseLock();
 
@@ -2741,7 +2866,7 @@ class RunInvocation {
         mergeExitCodes(code, entry.document.exitCode, index === 0),
       0,
     );
-    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const runPolicy = summarizeRunPolicy(this.policy, this.allCritical());
     const outcome: InvocationOutcome = {
       exitCode: signalExitCode(signal),
       specsExitCode,
@@ -2771,7 +2896,7 @@ class RunInvocation {
     errors: readonly string[],
     redactor: { text: (input: string) => string },
   ): InvocationOutcome {
-    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const runPolicy = summarizeRunPolicy(this.policy, this.allCritical());
     return {
       exitCode,
       specsExitCode,
@@ -2926,16 +3051,24 @@ class RunInvocation {
   /** Local-only features a delegated invocation does not run, said once. */
   private noteDelegatedScope(target: DelegationTarget): void {
     const suite = this.suite?.resolved;
-    if (suite && (suite.before.length > 0 || suite.after.length > 0)) {
+    if (
+      suite &&
+      suite.before.length + suite.after.length + suite.afterCritical.length > 0
+    ) {
       this.note(
         "info",
         `suite ${suite.name}: its before/after hooks run with the remote invocation, not locally (environment "${target.envName}" has a runner)`,
       );
     }
-    if ((this.opts.before?.length ?? 0) + (this.opts.after?.length ?? 0) > 0) {
+    if (
+      (this.opts.before?.length ?? 0) +
+        (this.opts.after?.length ?? 0) +
+        (this.opts.afterCritical?.length ?? 0) >
+      0
+    ) {
       this.note(
         "info",
-        "--before/--after hooks do not run locally for a delegated environment: the runner gets them in its request (options.before / options.after)",
+        "--before/--after/--after-critical hooks do not run locally for a delegated environment: the runner gets them in its request (options.before / options.after / options.afterCritical)",
       );
     }
     if (this.opts.stampIfGreen || this.opts.autoAnnotate) {
@@ -3325,7 +3458,7 @@ class RunInvocation {
       durationMs: number;
     },
   ): { document: RunDocument; meta: RunDocumentMeta } {
-    const runPolicy = summarizeRunPolicy(this.policy, this.criticalFailures);
+    const runPolicy = summarizeRunPolicy(this.policy, this.allCritical());
     const outcome: InvocationOutcome = {
       exitCode: input.exitCode,
       specsExitCode: input.specsExitCode,
@@ -3630,11 +3763,20 @@ class RunInvocation {
       if (invocation)
         journalRunFinished(invocation, planIndex, specPath, result);
       await specMetrics?.finish(result);
-      if (!this.aborted) {
+      if (!this.aborted || (opts.afterCritical?.length ?? 0) > 0) {
         await runAfterHooksForResult(
           result,
           {
-            after: opts.after,
+            // A cancel skips plain hooks; critical cleanup still runs.
+            after: this.aborted ? [] : opts.after,
+            afterCritical: opts.afterCritical,
+            onCriticalFailure: (failure) =>
+              this.recordCriticalAfter(
+                "afterCritical",
+                failure,
+                failure.path ?? "teardown",
+              ),
+            trackSignalHook: this.trackCriticalAfterSignal,
             hookTimeoutMs: inputs.hookTimeoutMs,
             signal: this.cancelController.signal,
           },
@@ -3913,11 +4055,19 @@ class RunInvocation {
             if (invocation)
               journalRunFinished(invocation, planIndex, specPath, r);
             await specMetrics?.finish(r);
-            if (!this.aborted) {
+            if (!this.aborted || (opts.afterCritical?.length ?? 0) > 0) {
               await runAfterHooksForResult(
                 r,
                 {
-                  after: opts.after,
+                  after: this.aborted ? [] : opts.after,
+                  afterCritical: opts.afterCritical,
+                  onCriticalFailure: (failure) =>
+                    this.recordCriticalAfter(
+                      "afterCritical",
+                      failure,
+                      failure.path ?? "teardown",
+                    ),
+                  trackSignalHook: this.trackCriticalAfterSignal,
                   hookTimeoutMs: inputs.hookTimeoutMs,
                   signal: this.cancelController.signal,
                 },

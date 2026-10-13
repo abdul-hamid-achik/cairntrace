@@ -163,6 +163,7 @@ export function runOptionsToArgv(
   each("--label", opts.label);
   each("--before", opts.before);
   each("--after", opts.after);
+  each("--after-critical", opts.afterCritical);
   flag("--hook-timeout-ms", opts.hookTimeoutMs);
   flag("--repeat", opts.repeat);
   flag("--matrix", opts.matrix);

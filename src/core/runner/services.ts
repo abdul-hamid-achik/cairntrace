@@ -129,7 +129,7 @@ import {
   tmuxWindowTarget,
 } from "./tmuxTarget";
 import type { ArtifactRedactor } from "../artifacts/ArtifactWriter";
-import { LineSplitter } from "../artifacts/liveLog";
+import { LineSplitter, normalizeLogLine } from "../artifacts/liveLog";
 import { targetChildEnvWithSelectedTvaultKeys } from "../processEnv";
 import {
   descendantPidsSync,
@@ -175,7 +175,12 @@ export interface StartServicesContext {
   logDetail?: (message: string) => void;
   /** Root for per-window pane logs (default `~/.cairntrace/services`). */
   serviceLogRoot?: string;
-  /** Optional live streamer for service command output (interactive runs). */
+  /**
+   * Optional live progress of the docker and provisioner `up` commands:
+   * complete, REDACTED, bounded lines (each ends in `\n`). A secret split
+   * across chunks is redacted whole. Seed and tmux pane output stay in the
+   * service logs.
+   */
   onOutput?: (chunk: string) => void;
   /**
    * Live, line-buffered, REDACTED output of the docker and seed commands
@@ -322,6 +327,13 @@ export interface CriticalTeardownFailure {
   path: "teardown" | "signal";
   /** The entry is the provisioner's `down`. */
   provisioner?: boolean;
+  /**
+   * Where the cleanup came from when it is not a `services.teardown` entry:
+   * a suite `afterCritical` command or a `--after-critical` hook (then
+   * `index` is its 0-based position in that list and `runId` the spec run).
+   */
+  source?: "suite.afterCritical" | "afterCritical";
+  runId?: string;
 }
 
 /** Thrown for every services lifecycle failure; run.ts maps it to exit 2. */
@@ -1835,20 +1847,13 @@ async function startDocker(
 
   ctx.log?.(`docker (${cfg.command})`);
   emit("docker", "start", cfg.command);
-  const liveOutput = serviceOutput(ctx, "docker", artifactRedactor);
+  const liveOutput = serviceOutput(ctx, "docker", artifactRedactor, true);
   liveOutput?.announce(cfg.command);
-  const onChunk =
-    ctx.onOutput || liveOutput
-      ? (_s: "stdout" | "stderr", chunk: string) => {
-          ctx.onOutput?.(chunk);
-          liveOutput?.push(chunk);
-        }
-      : undefined;
   const r = await runShellWithTimeout(
     cfg.command,
     { cwd, env, signal: ctx.signal, track: ctx.bootPids },
     timeout,
-    onChunk,
+    liveOutput ? (stream, chunk) => liveOutput.push(chunk, stream) : undefined,
   );
   liveOutput?.finish(r.exitCode);
   storeServiceCommandArtifactRecord(phases, "docker", {
@@ -2324,7 +2329,9 @@ async function startSeed(
       command,
       { cwd, env, signal: ctx.signal, track: ctx.bootPids },
       timeout,
-      liveOutput ? (_s, chunk) => liveOutput.push(chunk) : undefined,
+      liveOutput
+        ? (stream, chunk) => liveOutput.push(chunk, stream)
+        : undefined,
     );
   } finally {
     clearInterval(heartbeat);
@@ -2648,7 +2655,7 @@ async function runSeedShell(
       track: ctx.bootPids,
     },
     input.timeoutMs,
-    liveOutput ? (_s, chunk) => liveOutput.push(chunk) : undefined,
+    liveOutput ? (stream, chunk) => liveOutput.push(chunk, stream) : undefined,
   );
   liveOutput?.finish(r.exitCode);
   storeServiceCommandArtifactRecord(phases, "seed", {
@@ -5575,36 +5582,111 @@ async function runHealthcheck(
  * complete lines are redacted, so a secret split across chunks still matches.
  * `undefined` when the caller did not ask for live service output.
  */
-function serviceOutput(
-  ctx: StartServicesContext,
+export function serviceOutput(
+  ctx: Pick<StartServicesContext, "onServiceOutput" | "onOutput">,
   source: "docker" | "seed" | "teardown" | "provisioner",
   redactor: ArtifactRedactor,
+  /** Also stream the redacted lines to `ctx.onOutput` (boot progress). */
+  progress = false,
 ):
   | {
       announce(command: string): void;
-      push(chunk: string): void;
+      push(chunk: string, stream?: "stdout" | "stderr"): void;
       finish(exitCode: number): void;
     }
   | undefined {
   const sink = ctx.onServiceOutput;
-  if (!sink) return undefined;
+  const live = progress ? ctx.onOutput : undefined;
+  if (!sink && !live) return undefined;
+  const redactLine = (line: string): string =>
+    redactor.text(normalizeLogLine(line));
   const emitLine = (line: string): void => {
     try {
-      sink(source, redactor.text(line));
+      sink?.(source, redactLine(line));
     } catch {
       // A log sink failure must never fail the services lifecycle.
     }
   };
-  const splitter = new LineSplitter(emitLine, { redact: redactor.text });
+  // The terminal gets complete, redacted, collapsed lines at a bounded rate:
+  // at most SERVICE_PROGRESS_WINDOW_LINES per SERVICE_PROGRESS_WINDOW_MS, the
+  // rest counted and reported once as a "not shown" notice when the window
+  // ends, so a burst never silences the rest of a long startup.
+  let windowStart = Number.NEGATIVE_INFINITY;
+  let shown = 0;
+  let suppressed = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const send = (text: string): void => {
+    try {
+      live?.(`${text}\n`);
+    } catch {
+      // A progress sink failure must never fail the services lifecycle.
+    }
+  };
+  const closeWindow = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+    if (suppressed > 0) {
+      send(`${source} — ${suppressed} more output line(s) not shown`);
+    }
+    suppressed = 0;
+    shown = 0;
+    windowStart = Number.NEGATIVE_INFINITY;
+  };
+  const progressLine = (line: string): void => {
+    if (!live) return;
+    // Redact first, cut after: a secret never straddles the cut.
+    const text = redactLine(line).trimEnd();
+    if (text === "") return;
+    const now = Date.now();
+    if (now - windowStart >= SERVICE_PROGRESS_WINDOW_MS) {
+      closeWindow();
+      windowStart = now;
+    }
+    if (shown < SERVICE_PROGRESS_WINDOW_LINES) {
+      shown += 1;
+      send(
+        text.length > SERVICE_PROGRESS_LINE_CHARS
+          ? `${text.slice(0, SERVICE_PROGRESS_LINE_CHARS)}…`
+          : text,
+      );
+      return;
+    }
+    suppressed += 1;
+    if (!timer) {
+      timer = setTimeout(
+        closeWindow,
+        Math.max(0, windowStart + SERVICE_PROGRESS_WINDOW_MS - now),
+      );
+      timer.unref?.();
+    }
+  };
+  const onLine = (line: string): void => {
+    emitLine(line);
+    progressLine(line);
+  };
+  // One splitter per stream: stderr written between two stdout chunks must
+  // not break the line a secret is split across.
+  const splitters = {
+    stdout: new LineSplitter(onLine, { redact: redactLine }),
+    stderr: new LineSplitter(onLine, { redact: redactLine }),
+  };
   return {
     announce: (command) => emitLine(`$ ${command}`),
-    push: (chunk) => splitter.push(chunk),
+    push: (chunk, stream = "stdout") => splitters[stream].push(chunk),
     finish: (exitCode) => {
-      splitter.flush();
+      splitters.stdout.flush();
+      splitters.stderr.flush();
+      closeWindow();
       emitLine(`[exit ${exitCode}]`);
     },
   };
 }
+
+/** Lines of live boot progress shown per window (the rest is counted). */
+const SERVICE_PROGRESS_WINDOW_LINES = 100;
+const SERVICE_PROGRESS_WINDOW_MS = 5_000;
+/** A live progress line is cut here, after redaction. */
+const SERVICE_PROGRESS_LINE_CHARS = 400;
 
 /**
  * Run a shell command with a timeout. Unlike `runShell` (which is fire-and-forget
@@ -5780,13 +5862,13 @@ async function runProvisionerUp(
     DEFAULT_PROVISIONER_UP_MS;
   ctx.log?.(redactor.text(`provisioner — up (${up.run})`));
   emit("provisioner", "start", redactor.text(up.run));
-  const live = serviceOutput(ctx, "provisioner", redactor);
+  const live = serviceOutput(ctx, "provisioner", redactor, true);
   live?.announce(up.run);
   const r = await runShellWithTimeout(
     up.run,
     { cwd, env, signal: ctx.signal, track: ctx.bootPids },
     timeout,
-    live ? (_stream, chunk) => live.push(chunk) : undefined,
+    live ? (stream, chunk) => live.push(chunk, stream) : undefined,
   );
   live?.finish(r.exitCode);
   if (r.exitCode !== 0) {

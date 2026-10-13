@@ -771,3 +771,28 @@ describe("cairn_logs cursor", () => {
     }
   }, 30_000);
 });
+
+describe("cairn_run critical cleanup hooks gate", () => {
+  it("refuses afterCritical without --allow-hooks and runs nothing", async () => {
+    const marker = join(dir, "critical-hook-ran");
+    const strict = await connect();
+    try {
+      const refused = await strict.callTool({
+        name: "cairn_run",
+        arguments: {
+          specs: [join(dir, "pass.yml")],
+          mock: true,
+          artifactRoot: join(dir, "runs-critical-hooks"),
+          noServices: true,
+          noWebServer: true,
+          afterCritical: [`touch "${marker}"`],
+        },
+      });
+      expect(refused.isError).toBe(true);
+      expect(JSON.stringify(refused.content)).toContain("--allow-hooks");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await strict.close();
+    }
+  }, 30_000);
+});

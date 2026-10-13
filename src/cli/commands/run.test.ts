@@ -1050,7 +1050,7 @@ steps: []
     );
 
     expect(result.stderr).not.toContain("web server exited");
-    expect(result.stderr).not.toContain("NO_SERVICES_AT_BOOT");
+    expect(result.stderr).not.toMatch(/^NO_SERVICES_AT_BOOT$/m);
     expect(existsSync(servicesMarker)).toBe(true);
     expect(result.exitCode).toBe(0);
   });

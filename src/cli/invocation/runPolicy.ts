@@ -792,7 +792,12 @@ export function describeCriticalTeardown(
         failure.command.length > 100
           ? `${failure.command.slice(0, 97)}...`
           : failure.command;
-      return `services.teardown[${failure.index}] (${command}) ${how}`;
+      const where = failure.source
+        ? `${failure.source}[${failure.index}]${
+            failure.runId ? ` (run ${failure.runId})` : ""
+          }`
+        : `services.teardown[${failure.index}]`;
+      return `${where} (${command}) ${how}`;
     })
     .join("; ");
 }
@@ -819,6 +824,8 @@ export function summarizeRunPolicy(
             ...(failure.signal ? { signal: failure.signal } : {}),
             ...(failure.error ? { error: failure.error } : {}),
             path: failure.path,
+            ...(failure.source ? { source: failure.source } : {}),
+            ...(failure.runId ? { runId: failure.runId } : {}),
           })),
         }
       : {}),
