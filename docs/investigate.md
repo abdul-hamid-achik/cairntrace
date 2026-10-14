@@ -1,3 +1,7 @@
+---
+title: "Investigate Failed Browser Tests with Code Context"
+---
+
 # Investigate & audit
 
 When a spec fails, the artifact pack tells you *what* broke in the browser.

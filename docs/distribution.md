@@ -1,3 +1,7 @@
+---
+title: Install Cairntrace with npm, Homebrew or GitHub Releases
+---
+
 # Distribution
 
 Cairntrace is published to npm as **`@thelacanians/cairntrace`** and to
@@ -35,13 +39,13 @@ the Homebrew formula via `.github/workflows/homebrew-tap.yml`.
 
 ## What gets distributed
 
-- **The CLI binary**, `./bin/cairn` — a Bun shebang launcher. No `node_modules` install required for end users when shipped with `--standalone`.
+- **The CLI binary**, `./bin/cairn` — a Bun shebang launcher. It runs on Bun and needs the dependencies installed (`bun install`) when run from a clone.
 - **The MCP server**, `./bin/cairn mcp` — same binary, different mode.
-- **Spec examples**, `examples/` — meant to be copied, not edited.
+- **Spec examples**, `examples/` — meant to be copied, not edited. (The npm package's `files` list does not include `examples/`; use a clone to get them.)
 
 What does NOT get distributed:
 
-- The `node_modules/` tree (when shipped without `--standalone`).
+- The `node_modules/` tree. Installs from npm and Homebrew bring their own dependencies; a clone needs `bun install`.
 - Any `dev` dependency (Oxlint, Vitest, Knip). TypeScript is a runtime
   dependency: `cairn import playwright` and the export's host profile read
   code with its compiler API.
@@ -52,7 +56,7 @@ What does NOT get distributed:
 ```bash
 git clone https://github.com/abdul-hamid-achik/cairntrace
 cd cairntrace
-git checkout v3.0.0
+git checkout <release-tag>
 bun install
 ./bin/cairn --version
 ```
@@ -67,7 +71,7 @@ For active collaboration, track `main` and rebase often:
 git fetch origin
 git rebase origin/main
 bun install
-./bin/cairn run examples/specs/hello.yml --format md
+./bin/cairn run examples/flows/01-dashboard-nav.yml --format md
 ```
 
 The canonical local gate is `bun run verify` (typecheck + lint + format check + knip + tests). There is no separate `dev` script that runs the spec suite with mock data — `bun run verify` is it.
@@ -83,20 +87,16 @@ cairn --help
 
 This lets spec authors invoke `cairn run my-spec.yml` from any project without baking the path. Teams that put specs under `~/work/specs/` all point at the same binary this way.
 
-## What "standalone" means
-
-`./bin/cairn --standalone` (when added in a future release) ships the binary with the runtime compiled in, so end users do not have to `bun install` at all. Until then, `bun install` is required once per machine. The dependency is small (Bun + Playwright + a handful of Node-style modules).
-
 ## Versioning policy
 
-SemVer tags are the release record. The pre-1.0 series used `0.x.y`; post-1.0 uses `1.x.y`. All `v1.x.y` tags are Cairntrace v1; do not rewrite old tags just to make the visible numbering look cleaner.
+Releases are SemVer tags (`vMAJOR.MINOR.PATCH`) and are the release record. Old tags are not rewritten, even when the numbering looks inconsistent with the current series. Check the tags on the [GitHub releases page](https://github.com/abdul-hamid-achik/cairntrace/releases) for the current version.
 
 ## What this means for agent harnesses
 
 An agent harness (Claude Code, Codex, OpenCode, …) should:
 
-- Pin to a specific tag (`v3.0.0`), npm version, or Homebrew formula in any setup script.
-- Verify the version with `./bin/cairn version` after install.
+- Pin to a specific release tag, npm version, or Homebrew formula in any setup script.
+- Verify the version with `cairn --version` after install.
 - Run `cairn_explain` (or `cairn explain --format json`) once on first contact to get the current CLI surface.
 - Re-pin only on a deliberate upgrade.
 

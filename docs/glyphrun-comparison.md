@@ -1,3 +1,8 @@
+---
+title: "Browser Specs vs Terminal Specs: Glyphrun Comparison"
+description: "Compare Cairntrace browser specs with Glyphrun terminal specs: shared contracts, artifact packs, MCP shape and execution surfaces."
+---
+
 # Glyphrun × Cairntrace
 
 A side-by-side for the two spec runners under [the-lacanians](https://www.thelacanians.com). They look like siblings on purpose. Both are local-first, both speak `intent + outcomes`, both emit a self-contained artifact pack for humans and coding agents. They differ on the surface they drive — Glyphrun on terminals, Cairntrace on browsers.

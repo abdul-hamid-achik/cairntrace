@@ -1,5 +1,5 @@
 :root {
-  --vp-font-family-base: "Geist", "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --vp-font-family-base: "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --vp-font-family-mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
   --vp-c-brand-1: #047857;
   --vp-c-brand-2: #059669;
@@ -10,7 +10,7 @@
   --vp-c-bg-soft: #f5f7f3;
   --vp-c-text-1: #142019;
   --vp-c-text-2: #536158;
-  --vp-c-text-3: #778279;
+  --vp-c-text-3: #66726a;
   --vp-c-divider: rgba(20, 32, 25, 0.13);
   --vp-button-brand-bg: #047857;
   --vp-button-brand-hover-bg: #066b50;
@@ -19,7 +19,7 @@
   --vp-layout-max-width: 1440px;
   --ct-ink: #142019;
   --ct-muted: #5d6a61;
-  --ct-faint: #7b877f;
+  --ct-faint: #5f6c64;
   --ct-line: rgba(20, 32, 25, 0.14);
   --ct-bg: #fbfcf9;
   --ct-soft: #eff4ee;
@@ -346,7 +346,7 @@ body {
   min-width: 0;
   overflow: hidden;
   color: var(--ct-muted);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -359,7 +359,7 @@ body {
   color: var(--ct-ink);
   background: var(--ct-soft);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   cursor: pointer;
 }
@@ -368,7 +368,7 @@ body {
   margin-top: 10px !important;
   color: var(--ct-faint);
   font-family: var(--vp-font-family-mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ct-terminal-wrap {
@@ -397,7 +397,7 @@ body {
   border-bottom: 1px solid rgba(210, 234, 219, 0.1);
   color: #819187;
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ct-terminal-dots {
@@ -430,7 +430,7 @@ body {
   padding: 22px 24px !important;
   color: #b5c4b9;
   background: transparent !important;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.72;
   text-align: left;
 }
@@ -458,7 +458,7 @@ body {
   border-top: 1px solid rgba(210, 234, 219, 0.1);
   background: #0d1510;
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ct-run-command {
@@ -497,7 +497,7 @@ body {
   border-radius: 50%;
   color: #07100a;
   background: #5ee2aa;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -513,7 +513,7 @@ body {
   padding: 14px 14px 0;
   color: var(--ct-faint);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
+  font-size: 12px;
   text-transform: uppercase;
 }
 
@@ -550,7 +550,7 @@ body {
 .ct-proof-grid span {
   color: var(--ct-green);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -632,7 +632,7 @@ body {
 .ct-contract-index {
   color: var(--ct-green);
   font-family: var(--vp-font-family-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -648,7 +648,7 @@ body {
 
 .ct-contract-row code {
   color: var(--ct-green);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .ct-contract-tag {
@@ -657,7 +657,7 @@ body {
   border-radius: 999px;
   color: var(--ct-faint);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
+  font-size: 12px;
   text-transform: uppercase;
 }
 
@@ -677,7 +677,7 @@ body {
   margin-top: 18px;
   color: var(--ct-faint);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -742,7 +742,7 @@ body {
   color: #5ee2aa;
   background: var(--ct-dark);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -768,7 +768,7 @@ body {
   border-radius: 8px;
   color: #bdd0c2;
   background: #0b120e;
-  font-size: 9px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -848,7 +848,7 @@ body {
   color: var(--ct-faint);
   background: var(--ct-soft);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ct-hash code {
@@ -873,7 +873,7 @@ body {
   padding: 16px 0;
   border-bottom: 1px solid rgba(229, 243, 233, 0.12);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ct-mosaic-backends li strong {
@@ -892,7 +892,7 @@ body {
   color: var(--ct-faint);
   background: var(--ct-soft);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .ct-evidence-tree strong {
@@ -913,7 +913,7 @@ body {
   color: var(--ct-green);
   background: var(--ct-soft);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -936,7 +936,7 @@ body {
 .ct-use-cases > li > span {
   color: var(--ct-green);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -1096,7 +1096,7 @@ body {
   }
 
   .ct-timeline code {
-    font-size: 8px;
+    font-size: 12px;
   }
 }
 
@@ -1193,7 +1193,7 @@ body {
   }
 
   .ct-timeline code {
-    font-size: 9px;
+    font-size: 12px;
   }
 
   .ct-mosaic-contract,
@@ -1259,7 +1259,7 @@ body {
   }
 
   .ct-install code {
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .ct-terminal-wrap {
@@ -1281,7 +1281,7 @@ body {
 
   .ct-code {
     padding: 18px !important;
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .ct-result-row {
@@ -1403,5 +1403,246 @@ body {
   .ct-button {
     animation: none !important;
     transition: none !important;
+  }
+}
+
+/* Install tabs (hero + final CTA) */
+.ct-install-stack {
+  max-width: 650px;
+  margin-top: 24px;
+}
+
+.ct-install-stack .ct-install {
+  margin-top: 0;
+}
+
+.ct-install-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px !important;
+  color: var(--ct-ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ct-install-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 3px;
+  border: 1px solid var(--ct-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ct-paper) 86%, transparent);
+}
+
+.ct-install-tab {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--ct-muted);
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ct-install-tab:hover {
+  color: var(--ct-ink);
+}
+
+.ct-install-tab[aria-selected="true"] {
+  color: var(--ct-ink);
+  border-color: var(--ct-line);
+  background: var(--ct-soft);
+}
+
+.ct-install-tab:focus-visible,
+.ct-agent-tab:focus-visible,
+.ct-agent-panel:focus-visible {
+  outline: 2px solid var(--ct-green);
+  outline-offset: 2px;
+}
+
+.ct-install-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--ct-muted);
+  font-size: 14px;
+}
+
+.ct-install-step code {
+  padding: 4px 8px;
+  border: 1px solid var(--ct-line);
+  border-radius: 6px;
+  color: var(--ct-ink);
+  background: var(--ct-soft);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+}
+
+.ct-install-step-number {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  color: var(--ct-green);
+  background: var(--ct-green-pale);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ct-install-note-muted {
+  margin-top: 4px !important;
+}
+
+.ct-inline-link {
+  color: var(--ct-green);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Final CTA sits on a dark card: invert the install panel */
+.ct-final-install {
+  margin-top: 28px;
+}
+
+.ct-final-install .ct-install {
+  background: rgba(237, 245, 239, 0.06);
+  border-color: rgba(237, 245, 239, 0.16);
+}
+
+.ct-final-install .ct-install-prompt {
+  color: #5ee2aa;
+}
+
+.ct-final-install .ct-install code {
+  color: #c8d6cc;
+}
+
+.ct-final-install .ct-install button {
+  border-color: rgba(237, 245, 239, 0.18);
+  color: #edf5ef;
+  background: rgba(237, 245, 239, 0.08);
+}
+
+.ct-final-install .ct-install-tab {
+  color: #9fb0a4;
+}
+
+.ct-final-install .ct-install-tab[aria-selected="true"] {
+  color: #edf5ef;
+  border-color: rgba(237, 245, 239, 0.18);
+  background: rgba(237, 245, 239, 0.1);
+}
+
+.ct-final-install .ct-install-tabs {
+  border-color: rgba(237, 245, 239, 0.14);
+  background: rgba(237, 245, 239, 0.04);
+}
+
+/* Connect your agent */
+.ct-connect-grid {
+  align-items: start;
+}
+
+.ct-agent-tabs {
+  min-width: 0;
+}
+
+.ct-agent-tablist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid var(--ct-line);
+  border-radius: 10px;
+  background: var(--ct-soft);
+}
+
+.ct-agent-tab {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--ct-muted);
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ct-agent-tab:hover {
+  color: var(--ct-ink);
+}
+
+.ct-agent-tab[aria-selected="true"] {
+  color: var(--ct-ink);
+  border-color: var(--ct-line);
+  background: var(--ct-paper);
+}
+
+.ct-agent-panel {
+  min-width: 0;
+  margin-top: 14px;
+  border-radius: 14px;
+}
+
+.ct-agent-file {
+  margin: 0 0 8px !important;
+  color: var(--ct-faint);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+}
+
+.ct-agent-code {
+  margin: 0 !important;
+  padding: 18px 20px !important;
+  border: 1px solid rgba(237, 245, 239, 0.1);
+  border-radius: 12px;
+  background: #0f2117 !important;
+}
+
+@media (max-width: 600px) {
+  .ct-install-stack {
+    max-width: 100%;
+  }
+
+  .ct-install-tabs,
+  .ct-agent-tablist {
+    width: 100%;
+  }
+
+  .ct-install-tab,
+  .ct-agent-tab {
+    flex: 1 1 auto;
+    padding: 0 10px;
+  }
+
+  .ct-install-step {
+    align-items: flex-start;
+  }
+
+  .ct-install-step code {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .ct-agent-code {
+    padding: 16px !important;
   }
 }

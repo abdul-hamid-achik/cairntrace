@@ -144,7 +144,7 @@ export:                               # `cairn export playwright --target <name>
       maxEvalRatio: 0.25              # refuse specs with more than 25% page eval steps
 ```
 
-The schema is `.strict()` at every level, so a misspelled key (e.g. `runner:` or `run:` — neither exists) is a validation error, not a silent no-op.
+The schema is `.strict()` at every level, so a misspelled key (or a key in the wrong place, such as `runner:` at the top level, where it does not exist; it is valid only inside an environment) is a validation error, not a silent no-op. `run:` is valid both at the top level and inside an environment.
 
 Agent-browser confirms same-tab link delivery from URL, document, or DOM
 evidence by default without waiting for network-idle. A positive click-step or
@@ -191,6 +191,11 @@ reports one that does not parse. See
 | `secrets` | replaces the top-level `secrets:` block for this env entirely |
 | `policy` | what may run here: `trait`, `mutations`, `description` (see [Environment policy](#environment-policy)) |
 | `auth` | the API sign-in the built-in `use: login` step runs (see [Environment login](#environment-login-auth)) |
+| `include` | files (paths or globs, relative to the file that lists them) whose `vars` become this environment's own vars; read by composition (see [Composing a config](#composing-a-config)) |
+| `waitScale` | multiplies waits and settles for high-latency environments (a positive number; default `1`) |
+| `datasources` | per-environment overrides of the top-level `datasources.<name>`: a partial entry merges over it, and `<name>: false` disables it here |
+| `run` | run policy for this environment, merged over the top-level `run:` key by key (lists replace; `lock: false` turns the lock off here) |
+| `metrics` | metric probes for this environment, merged over the top-level `metrics:` by name (the environment's entry wins) |
 | `runner` | a delegated runner: the environment runs elsewhere and the local `cairn` keeps the invocation (see [Delegated runner](#delegated-runner-runner)) |
 
 The active environment is `--env <name>` (MCP `env`), else the spec's `environment:`, else `defaultEnvironment`, else `local`.
@@ -594,6 +599,8 @@ Several settings that look like config actually live on the **spec**, not `cairn
 
 - `backend`, `mode`, `viewport`, `vars`, `environment`, `settleMs`, `coldStart`, `preconditions`, `session`, `redaction`, `metadata`, `artifacts` (capture policies, video, clip points) — all spec-root keys.
 - `redaction:` on a spec is `{ headers?, queryParams?, storageKeys?, values? }`, not a regex list. Header, query-parameter, and storage-key names match case-insensitively; `values` are literal secret strings. These rules augment the built-in credential heuristics rather than replacing them.
+
+Other spec-root keys are `version`, `name`, `intent`, `outcomes`, `steps`, `requires`, `imports`, `fixtures`, `teardown`, `stash`, `coversSymbol` and `contractHash`. For the spec body, see [Authoring](/authoring).
 
 Backend choice and capture policies are per-spec because they describe *what this flow observes*, not project plumbing. Project plumbing (environments, services, secrets, retention, integrations) is what goes in config.
 

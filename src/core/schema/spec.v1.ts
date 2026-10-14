@@ -724,7 +724,13 @@ export const OpenStepSchema = z
       z
         .object({
           path: z.string().min(1),
-          waitUntil: z.enum(["networkidle", "load", "domcontentloaded"]),
+          // Optional in the source; the parsed step always carries a value
+          // ("load", the Playwright default), so every consumer of
+          // `step.open.waitUntil` sees a concrete wait. contractHash covers
+          // only intent + outcomes, so stamped specs keep their hashes.
+          waitUntil: z
+            .enum(["networkidle", "load", "domcontentloaded"])
+            .default("load"),
           timeoutMs: z.number().int().positive().optional(),
         })
         .strict(),

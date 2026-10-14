@@ -7,7 +7,7 @@ description: Reference Cairntrace commands for browser-spec discovery, verificat
 
 The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page below documents one command family — flags, flow, and when to reach for it. Every command supports `--format json|yaml|md` and has a stable JSON schema; no interactive prompts on `--json`/`--yaml` paths.
 
-A command-line usage error (an unknown flag or command, a missing option value or required argument) exits `2`, on every command, and never `1`, which means a failed outcome: a typo cannot read as a red test. `--help` and `--version` exit `0`. See the exit-code table in the README.
+A command-line usage error (an unknown flag or command, a missing option value or required argument) exits `2`, on every command, and never `1`, which means a failed outcome: a typo cannot read as a red test. `--help` and `--version` exit `0`. See the [exit codes](/exit-codes) page for the full table.
 
 ## Maintenance
 

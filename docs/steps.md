@@ -25,7 +25,7 @@ Navigate to a URL. Relative paths resolve against the config `baseUrl` for the a
 - open: { path: "/login?next=/account" }
 ```
 
-`waitUntil` is one of `networkidle | load | domcontentloaded`. Use `networkidle` on the first interaction with an SPA so the click does not land before handlers attach.
+`waitUntil` is optional in the object form and defaults to `load`. Its allowed values are `networkidle | load | domcontentloaded`. Use `networkidle` on the first interaction with an SPA so the click does not land before handlers attach.
 
 ### `wait`
 

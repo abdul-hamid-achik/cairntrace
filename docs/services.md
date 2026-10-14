@@ -1,3 +1,8 @@
+---
+title: Manage Docker and Dev Servers for E2E Test Runs
+description: Let Cairntrace start Docker, seed data, tmux dev servers and readiness checks around a spec suite, then tear them down.
+---
+
 # Services
 
 `cairn services` owns the multi-service environment a spec pool needs: docker, conditional data seeding, and tmux session management — all config-driven, started once before the pool and stopped after the last spec. `cairn services status` is the read-only check; the lifecycle itself runs automatically on `cairn run` unless disabled. `cairn services up` / `down` keep the stack running between runs when you explore against it.
