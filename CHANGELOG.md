@@ -3,6 +3,14 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.2] - 2026-10-14
+
+### Fixed
+
+- Playwright videos are recorded at the configured viewport size (spec
+  `viewport` or the environment's), including after a checkpoint restore,
+  instead of Playwright's default canvas.
+
 ## [3.3.1] - 2026-10-14
 
 ### Fixed
