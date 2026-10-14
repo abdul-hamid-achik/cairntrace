@@ -1,0 +1,224 @@
+{
+  "$schema": "urn:cairntrace.dev:report:v1",
+  "version": "1",
+  "generatedAt": "2026-10-14T06:23:36.903Z",
+  "run": {
+    "runId": "2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de",
+    "runDir": "run-dir",
+    "specName": "drifted_dashboard_nav",
+    "specPath": "examples/flows/demos/_06-drifted-link.yml",
+    "environment": "local",
+    "backend": "agent-browser",
+    "coldStart": true,
+    "status": "failed",
+    "startedAt": "2026-10-14T06:23:15.696Z",
+    "endedAt": "2026-10-14T06:23:36.388Z",
+    "durationMs": 20692,
+    "durationLabel": "20.7s",
+    "exitCode": 1
+  },
+  "summary": {
+    "outcomes": {
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "total": 1
+    },
+    "steps": {
+      "passed": 1,
+      "failed": 1,
+      "skipped": 0,
+      "total": 2
+    }
+  },
+  "outcomes": [
+    {
+      "id": "url_is_dashboard",
+      "status": "failed",
+      "evidence": "outcomes/url_is_dashboard.md"
+    }
+  ],
+  "steps": [
+    {
+      "id": "open_home",
+      "status": "passed",
+      "durationMs": 943,
+      "artifacts": [
+        "snapshots/001_open_home.txt"
+      ]
+    },
+    {
+      "id": "click_link",
+      "status": "failed",
+      "durationMs": 10442,
+      "error": "element not found: could not resolve role=link name=\"Dashboard link\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
+      "artifacts": [
+        "snapshots/002_click_link.txt",
+        "screenshots/002_click_link.png",
+        "diagnostics/002_click_link.json"
+      ]
+    }
+  ],
+  "artifacts": {
+    "report": "report.html",
+    "reportJson": "report.json",
+    "agentContext": "agent_context.md",
+    "events": "events.ndjson",
+    "console": "console/errors.ndjson",
+    "network": "network/failed_requests.ndjson",
+    "screenshots": [
+      "screenshots/002_click_link.png"
+    ],
+    "snapshots": [
+      "snapshots/002_click_link.txt"
+    ],
+    "diagnostics": [
+      "diagnostics/002_click_link.json"
+    ],
+    "trace": "traces/agent-browser-trace.json",
+    "replay": "replay.json",
+    "manifest": "artifact-manifest.json"
+  },
+  "artifactLinks": [
+    {
+      "label": "Run report",
+      "path": "report.html",
+      "kind": "report"
+    },
+    {
+      "label": "Report data",
+      "path": "report.json",
+      "kind": "report-json"
+    },
+    {
+      "label": "Agent context",
+      "path": "agent_context.md",
+      "kind": "context"
+    },
+    {
+      "label": "Events",
+      "path": "events.ndjson",
+      "kind": "events"
+    },
+    {
+      "label": "url_is_dashboard evidence",
+      "path": "outcomes/url_is_dashboard.md",
+      "kind": "outcome"
+    },
+    {
+      "label": "Console errors",
+      "path": "console/errors.ndjson",
+      "kind": "console"
+    },
+    {
+      "label": "Network failures",
+      "path": "network/failed_requests.ndjson",
+      "kind": "network"
+    },
+    {
+      "label": "Trace",
+      "path": "traces/agent-browser-trace.json",
+      "kind": "trace"
+    },
+    {
+      "label": "002_click_link.png",
+      "path": "screenshots/002_click_link.png",
+      "kind": "screenshot"
+    },
+    {
+      "label": "002_click_link.txt",
+      "path": "snapshots/002_click_link.txt",
+      "kind": "snapshot"
+    },
+    {
+      "label": "002_click_link.json",
+      "path": "diagnostics/002_click_link.json",
+      "kind": "diagnostic"
+    }
+  ],
+  "theme": {
+    "selected": "cairn",
+    "label": "Cairn",
+    "tokens": "[redacted]",
+    "overrides": {},
+    "available": {
+      "cairn": {
+        "name": "cairn",
+        "label": "Cairn",
+        "colors": {
+          "background": "#e7f0ec",
+          "surface": "#fbfdf9",
+          "surfaceAlt": "#edf7f4",
+          "ink": "#10201f",
+          "muted": "#5d6c70",
+          "line": "#bfd4ce",
+          "accent": "#0f766e",
+          "accentText": "#ecfeff",
+          "success": "#16823a",
+          "warning": "#a45f12",
+          "danger": "#b42318",
+          "info": "#4f46e5",
+          "codeBg": "#dfeae6"
+        }
+      },
+      "slate": {
+        "name": "slate",
+        "label": "Slate",
+        "colors": {
+          "background": "#1d2224",
+          "surface": "#f3f5f2",
+          "surfaceAlt": "#e4ebe7",
+          "ink": "#161c1f",
+          "muted": "#59666b",
+          "line": "#bac7c2",
+          "accent": "#256f7d",
+          "accentText": "#f7fcfd",
+          "success": "#217a4a",
+          "warning": "#b7791f",
+          "danger": "#b83d36",
+          "info": "#5964d8",
+          "codeBg": "#dce4df"
+        }
+      },
+      "midnight": {
+        "name": "midnight",
+        "label": "Midnight",
+        "colors": {
+          "background": "#17151f",
+          "surface": "#252331",
+          "surfaceAlt": "#302d3f",
+          "ink": "#f2f4f8",
+          "muted": "#b9c2cf",
+          "line": "#4a435d",
+          "accent": "#43b8a7",
+          "accentText": "#071412",
+          "success": "#55c97b",
+          "warning": "#e0a33a",
+          "danger": "#ff6b5f",
+          "info": "#a49bff",
+          "codeBg": "#14131b"
+        }
+      },
+      "contrast": {
+        "name": "contrast",
+        "label": "Contrast",
+        "colors": {
+          "background": "#000000",
+          "surface": "#ffffff",
+          "surfaceAlt": "#f1f1f1",
+          "ink": "#000000",
+          "muted": "#343434",
+          "line": "#000000",
+          "accent": "#005fcc",
+          "accentText": "#ffffff",
+          "success": "#007a2f",
+          "warning": "#8a4b00",
+          "danger": "#c60000",
+          "info": "#3b2fc9",
+          "codeBg": "#eeeeee"
+        }
+      }
+    }
+  },
+  "reproduce": "cairn run examples/flows/demos/_06-drifted-link.yml --env local"
+}

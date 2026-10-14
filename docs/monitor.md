@@ -24,6 +24,8 @@ shown below.
 
 Capture a process profile or a one-shot sample at a *specific point* in the flow — not just the run-wide summary.
 
+In `cairntrace.config.yml`:
+
 ```yaml
 diagnostics:
   monitor:
@@ -33,7 +35,11 @@ diagnostics:
         runtime: node
         codebaseRoot: /workspace/worker
         mainScriptSuffix: dist/server.js
+```
 
+In the spec:
+
+```yaml
 steps:
   - open: /heavy-dashboard
   - monitor: { action: profile, type: heap, assign: heapAfterLoad }

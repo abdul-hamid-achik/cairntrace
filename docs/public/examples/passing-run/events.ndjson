@@ -1,0 +1,24 @@
+{"ts":"2026-10-14T06:23:38.052Z","type":"run.started","runId":"2026-10-14T06-23-38-052Z_dashboard_nav_68a219","spec":"dashboard_nav","invocation":{"id":"2026-10-14T06-23-37-940Z_93354_1d332e","index":1,"total":1,"dir":"_invocations/2026-10-14T06-23-37-940Z_93354_1d332e"}}
+{"ts":"2026-10-14T06:23:38.056Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"2026-10-14T06:23:38.057Z","type":"phase.changed","phase":"preconditions","item":"precondition[0]","budgetMs":120000,"deadline":"2026-10-14T06:25:38.057Z"}
+{"ts":"2026-10-14T06:23:38.058Z","type":"log.opened","kind":"precondition","name":"precondition[0]","path":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T06:23:38.058Z","type":"precondition.started","name":"precondition[0]","timeoutMs":120000,"index":1,"total":1,"logPath":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T06:23:38.062Z","type":"precondition.run","name":"precondition[0]","exitCode":0,"durationMs":4,"timedOut":false,"output":"demo-app must be running on :8787","logPath":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T06:23:39.741Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-14T06:23:39.742Z","type":"step.started","stepId":"open_home","index":1,"total":3,"kind":"open","label":"open http://localhost:8787/"}
+{"ts":"2026-10-14T06:23:39.989Z","type":"artifact.snapshot","stepId":"open_home","path":"snapshots/001_open_home.txt"}
+{"ts":"2026-10-14T06:23:39.989Z","type":"step.finished","stepId":"open_home","durationMs":247,"url":"http://localhost:8787/"}
+{"ts":"2026-10-14T06:23:39.989Z","type":"step.started","stepId":"click_open_dashboard","index":2,"total":3,"kind":"click","label":"click role=link \"Open dashboard\""}
+{"ts":"2026-10-14T06:23:40.864Z","type":"artifact.snapshot","stepId":"click_open_dashboard","path":"snapshots/002_click_open_dashboard.txt"}
+{"ts":"2026-10-14T06:23:40.864Z","type":"step.finished","stepId":"click_open_dashboard","durationMs":875,"resolved":{"role":"link","name":"Open dashboard","ref":"e3"}}
+{"ts":"2026-10-14T06:23:40.864Z","type":"step.started","stepId":"wait_for_dashboard","index":3,"total":3,"kind":"wait","label":"wait text \"Dashboard\""}
+{"ts":"2026-10-14T06:23:41.065Z","type":"artifact.snapshot","stepId":"wait_for_dashboard","path":"snapshots/003_wait_for_dashboard.txt"}
+{"ts":"2026-10-14T06:23:41.065Z","type":"step.finished","stepId":"wait_for_dashboard","durationMs":201}
+{"ts":"2026-10-14T06:23:41.977Z","type":"phase.changed","phase":"outcomes"}
+{"ts":"2026-10-14T06:23:41.978Z","type":"outcome.started","outcomeId":"url_is_dashboard","kind":"url"}
+{"ts":"2026-10-14T06:23:42.093Z","type":"outcome.passed","outcomeId":"url_is_dashboard","durationMs":115}
+{"ts":"2026-10-14T06:23:42.094Z","type":"outcome.started","outcomeId":"dashboard_heading_visible","kind":"text"}
+{"ts":"2026-10-14T06:23:42.209Z","type":"outcome.passed","outcomeId":"dashboard_heading_visible","durationMs":115}
+{"ts":"2026-10-14T06:23:42.209Z","type":"outcome.started","outcomeId":"no_console_errors","kind":"console"}
+{"ts":"2026-10-14T06:23:42.210Z","type":"outcome.passed","outcomeId":"no_console_errors","durationMs":1}
+{"ts":"2026-10-14T06:23:42.210Z","type":"run.passed","runId":"2026-10-14T06-23-38-052Z_dashboard_nav_68a219","durationMs":4158}

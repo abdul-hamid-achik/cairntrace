@@ -1,0 +1,12 @@
+runId: 2026-10-14T06-23-38-052Z_dashboard_nav_68a219
+status: passed
+outcomes:
+  - id: url_is_dashboard
+    status: passed
+    evidence: outcomes/url_is_dashboard.md
+  - id: dashboard_heading_visible
+    status: passed
+    evidence: outcomes/dashboard_heading_visible.md
+  - id: no_console_errors
+    status: passed
+    evidence: outcomes/no_console_errors.md

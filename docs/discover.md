@@ -38,7 +38,7 @@ Returns:
 }
 ```
 
-The `snapshot` tree is what the heal `snapshotParser` reads, so `discover` output is exactly what a spec author needs to draft `by: { role, name }` steps. The `inventory` deduplicates the tree into ready-to-paste locators.
+The `snapshot` tree is what the heal `snapshotParser` reads, so `discover` output is exactly what a spec author needs to draft `{ by: role, role: <role>, name: <name> }` steps. The `inventory` deduplicates the tree into ready-to-paste locators.
 
 ### Flags
 
@@ -202,7 +202,7 @@ Run `cairn docs discovery --json` (or MCP `cairn_docs` with topic `discovery`) f
 
 ## See also
 
-- [Steps](/steps) — the `by: { role, name }` locator shape these inventories produce
+- [Steps](/steps) — the `by: role, role:, name:` locator shape these inventories produce
 - [Configuration](/configuration) — `environments.<name>.baseUrl` for relative-URL resolution
 - [MCP](/mcp) — the interactive `cairn_discover_*` tool family
 - [Checkpoints](/checkpoint) — scoped checkpoints for `resume`

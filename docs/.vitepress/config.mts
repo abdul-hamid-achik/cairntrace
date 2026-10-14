@@ -36,6 +36,8 @@ function pageUrl(page: string): string {
 }
 
 export default defineConfig({
+  // docs/public holds raw example run artifacts (agent_context.md etc.); serve them as files, not pages.
+  srcExclude: ["public/**"],
   lang: "en-US",
   title: "Cairntrace",
   titleTemplate: ":title | Cairntrace",
@@ -167,6 +169,7 @@ export default defineConfig({
         ],
       },
       { text: "MCP", link: "/mcp" },
+      { text: "Compare", link: "/compare" },
     ],
 
     sidebar: {
@@ -196,6 +199,7 @@ export default defineConfig({
             { text: "Delegated runners", link: "/delegate" },
             { text: "Checkpoints & login", link: "/checkpoint" },
             { text: "Video capture", link: "/video" },
+            { text: "CI", link: "/ci" },
             { text: "Troubleshooting", link: "/troubleshooting" },
           ],
         },
@@ -228,6 +232,8 @@ export default defineConfig({
         {
           text: "Project",
           items: [
+            { text: "Compare", link: "/compare" },
+            { text: "Examples", link: "/examples" },
             { text: "Glyphrun Comparison", link: "/glyphrun-comparison" },
             { text: "GitHub", link: "/github" },
           ],

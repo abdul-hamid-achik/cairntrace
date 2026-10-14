@@ -1,0 +1,82 @@
+{
+  "expectedTextExcerpts": [
+    {
+      "excerpt": "",
+      "found": false,
+      "needle": "Dashboard link"
+    }
+  ],
+  "formLabels": [],
+  "landmarks": {
+    "footer": {
+      "childElementCount": 0,
+      "present": false,
+      "tag": "footer",
+      "visibleTextLength": 0
+    },
+    "header": {
+      "childElementCount": 2,
+      "present": true,
+      "tag": "header",
+      "visibleTextLength": 77
+    },
+    "main": {
+      "childElementCount": 5,
+      "present": true,
+      "tag": "main",
+      "visibleTextLength": 465
+    }
+  },
+  "readyState": "complete",
+  "selectorCount": null,
+  "step": {
+    "kind": "click",
+    "locator": {
+      "by": "role",
+      "name": "Dashboard link",
+      "role": "link"
+    }
+  },
+  "stepError": "element not found: could not resolve role=link name=\"Dashboard link\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
+  "suspenseBoundaries": {
+    "clientRendered": 0,
+    "pending": 0
+  },
+  "tableHeaders": [],
+  "title": "Cairntrace Demo — Home",
+  "url": "http://localhost:8787/",
+  "visibleButtons": [],
+  "visibleInputs": [],
+  "visibleLinks": [
+    {
+      "className": "button",
+      "href": "http://localhost:8787/dashboard.html",
+      "text": "Open dashboard"
+    },
+    {
+      "className": "",
+      "href": "http://localhost:8787/products.html",
+      "text": "Products"
+    },
+    {
+      "className": "",
+      "href": "http://localhost:8787/documents.html",
+      "text": "Documents"
+    },
+    {
+      "className": "",
+      "href": "http://localhost:8787/form-controls.html",
+      "text": "Form controls"
+    },
+    {
+      "className": "",
+      "href": "http://localhost:8787/widgets.html",
+      "text": "Vendor profile"
+    },
+    {
+      "className": "",
+      "href": "http://localhost:8787/login.html",
+      "text": "Sign in"
+    }
+  ]
+}

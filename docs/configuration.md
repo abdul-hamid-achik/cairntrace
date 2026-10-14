@@ -104,7 +104,7 @@ services:                             # multi-service lifecycle (docker/seed/tmu
 
 stash:                                # fcheap run-artifact stash — see Stash page
   enabled: true
-  autoStash: on-failure               # on-failure | never
+  autoStash: on-failure               # always | on-failure | never
   tags: [regression, audit]
   # failTtl: 90d                      # failed runs expire after 90d by default; `never` keeps them
 
@@ -592,6 +592,20 @@ cairn config vars --used-by flows/checkout.yml
 Each row has the var's `kind` (`string`, `number`, `boolean`, `list`, `object`, or `mixed` when environments disagree), its effective value per environment with the definition that wins there (`scope` and `file:line`, plus the authored `template` when it held `${env.X}` / `${vars.X}`), every definition (`definedAt`, lowest precedence first, `inheritedFrom` for merge keys and aliases), the definitions that win over an earlier one and where (`overriddenBy`), whether it is the same in every environment, and `usedBy`: specs, actions, script verifiers that read `ctx.vars.X`, config fixtures, datasources, gates, suites, environment logins, other config values and other vars. `unused: true` marks a var nothing uses, directly or through another var. Values that look like credentials (also under names with `password`, `pass`, `pw`, `token`, `secret`, … at any depth) are masked, and a var whose value carries environment data — an `${env.X}` / `${secrets.X}` anywhere in its definition, or a reference to such a var or to a credential-named one — shows its authored template instead of its value (`fromEnvironment: true`): an environment value is never printed. `--used-by <spec path or name>` keeps the vars that spec reaches through its own steps, its actions, the fixtures it lists (and their `needs`), its script verifiers, the environment login it uses, and the vars those are built from. JSON is the stable `urn:cairntrace.dev:config-vars:v1` document; MCP `cairn_config_vars` takes `config`, `env`, `unused`, `usedBy` and `limit`. An unknown `--env`, an unknown `--used-by` spec or an invalid config exits 4.
 
 `cairn catalog --kind vars` lists the same vars per environment; a row the environment gets without writing it says `definedIn: top-level` or `extends` (with `inheritedFrom` and `file`). A var from the environment's own include file is `definedIn: environment` with `file` naming the include file and line.
+
+## Logging
+
+`logging:` sets the CLI defaults for every command. Flags (`--log-level`, `--quiet`, `--verbose`, `--log-format`, `--no-color`) and env (`CAIRN_LOG_LEVEL`, `CAIRN_LOG_FORMAT`, `NO_COLOR`) override the block. Without it, level defaults to info on a TTY and warn in CI or when piped.
+
+```yaml
+version: 1
+environments:
+  local: { baseUrl: http://localhost:3000 }
+logging:
+  level: info        # debug | info | warn | error | silent
+  format: human      # human | json (one NDJSON object per line)
+  color: true        # ANSI colors in human format (default: TTY-aware)
+```
 
 ## Where run-time settings actually live
 

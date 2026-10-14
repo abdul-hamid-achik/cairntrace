@@ -1,8 +1,8 @@
 ---
-title: "Repository Architecture, CI and Contributing"
+title: "Contributing"
 ---
 
-# GitHub
+# Contributing
 
 Cairntrace development happens on `main`. GitHub Actions run the same verify gate locally and in CI. Releases are SemVer tags mirrored as GitHub release pages, published to npm as `@thelacanians/cairntrace`, and bumped on Homebrew as `abdul-hamid-achik/tap/cairntrace` (see [Distribution](/distribution)).
 

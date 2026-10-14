@@ -1,0 +1,6 @@
+runId: 2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de
+status: failed
+outcomes:
+  - id: url_is_dashboard
+    status: failed
+    evidence: outcomes/url_is_dashboard.md

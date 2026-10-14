@@ -1,0 +1,21 @@
+- banner
+  - heading "Dashboard" [level=1, ref=e9]
+  - paragraph
+    - StaticText "All systems normal"
+- main
+  - paragraph
+    - StaticText "Inventory:"
+  - table "Inventory"
+    - rowgroup
+      - row
+        - columnheader "Item" [ref=e16]
+        - columnheader "Total" [ref=e17]
+    - row
+      - cell "Apples" [ref=e10]
+      - cell "$1.00" [ref=e11]
+    - row
+      - cell "Bread" [ref=e12]
+      - cell "$2.00" [ref=e13]
+    - row
+      - cell "Cheese" [ref=e14]
+      - cell "$5.00" [ref=e15]
