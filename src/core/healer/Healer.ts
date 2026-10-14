@@ -360,6 +360,9 @@ function tryLocatorDrift(
   // The drifted "field" is the name for role/label, the text for text-locator.
   const current = locator.by === "text" ? locator.text : locator.name;
   if (current === undefined) return undefined;
+  // An empty or blank name is a substring of nearly every candidate: nothing
+  // to match on.
+  if (current.trim() === "") return undefined;
 
   const exactMatch = candidates.find((c) => (c.name ?? "") === current);
   if (exactMatch) return undefined;

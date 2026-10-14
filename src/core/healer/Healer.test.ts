@@ -263,6 +263,224 @@ describe("proposeOps", () => {
   });
 });
 
+const snapOf = (role: string, names: string[]) =>
+  parseSnapshot(names.map((n) => `- ${role} "${n}"`).join("\n"));
+
+describe("proposeOps — rename safety", () => {
+  const healTo = (
+    role: string,
+    name: string,
+    names: string[],
+  ): string | undefined => {
+    const step: Step = { click: { by: "role", role, name } };
+    const op = proposeOps(step, 0, snapOf(role, names))[0];
+    return op?.op === "replace" ? String(op.to) : undefined;
+  };
+
+  it("heals the demo rename: 'Dashboard' → 'Open dashboard' among other links", () => {
+    expect(
+      healTo("link", "Dashboard", [
+        "Open dashboard",
+        "Products",
+        "Documents",
+        "Form controls",
+        "Vendor profile",
+        "Sign in",
+      ]),
+    ).toBe("Open dashboard");
+  });
+
+  // Reordered or re-qualified words are NOT healed: "Open issues" may be a
+  // status filter, "Open account" a create action, "Celsius to Fahrenheit"
+  // the opposite direction. A wrong heal leaves a passing-but-wrong spec.
+  it.each([
+    [
+      "two candidates contain the words",
+      "link",
+      "Dashboard link",
+      ["Open the dashboard", "Go to dashboard"],
+    ],
+    [
+      "the name has no trailing role word",
+      "link",
+      "Reports overview",
+      ["Overview of reports", "Help"],
+    ],
+    [
+      "the trailing word is another role",
+      "button",
+      "Dashboard link",
+      ["Open dashboard"],
+    ],
+    ["only the role word is left", "link", "Link", ["Open dashboard"]],
+    [
+      "the content word is a number",
+      "link",
+      "2 link",
+      ["Page 12", "Step 2 of 5"],
+    ],
+    [
+      "the content word is one letter",
+      "button",
+      "A button",
+      ["Option A", "Help"],
+    ],
+    ["a sign differs", "button", "+1 button", ["-1", "+2"]],
+    [
+      "the candidate deletes",
+      "link",
+      "Account link",
+      ["Delete account", "Products"],
+    ],
+    [
+      "the candidate cancels",
+      "link",
+      "Subscription link",
+      ["Cancel subscription"],
+    ],
+    [
+      "the candidate disables",
+      "link",
+      "Notifications link",
+      ["Disable notifications"],
+    ],
+    ["the candidate negates", "button", "Save button", ["Don't save", "Help"]],
+    [
+      "the candidate negates without an apostrophe",
+      "button",
+      "Save button",
+      ["Dont save"],
+    ],
+    ["the candidate ends the session", "link", "Session link", ["End session"]],
+    [
+      "the candidate signs out",
+      "link",
+      "Account link",
+      ["Sign out of account"],
+    ],
+    ["the words are missing", "button", "Submit button", ["Cancel", "Reset"]],
+    ["a sign differs on a word", "button", "+ab button", ["-ab", "Help"]],
+    [
+      "the candidate negates with a curly apostrophe",
+      "button",
+      "Save button",
+      ["Don\u2019t save", "Help"],
+    ],
+    [
+      "the candidate signs out (hyphenated)",
+      "link",
+      "Account link",
+      ["Sign-out of account", "Products"],
+    ],
+    [
+      "the candidate refunds",
+      "button",
+      "Order button",
+      ["Refund order", "Help", "Print invoice"],
+    ],
+    [
+      "the candidate pauses",
+      "button",
+      "Subscription button",
+      ["Pause subscription", "Billing history"],
+    ],
+    [
+      "the candidate turns off",
+      "switch",
+      "Notifications switch",
+      ["Turn off notifications", "Dark mode"],
+    ],
+    [
+      "the candidate unlinks",
+      "link",
+      "Bank account link",
+      ["Unlink bank account", "Cards"],
+    ],
+    [
+      "the candidate widens the scope",
+      "button",
+      "Save button",
+      ["Save and publish", "Preview"],
+    ],
+    [
+      "the candidate is another settings page",
+      "link",
+      "Settings link",
+      ["Cookie settings", "Home", "Privacy"],
+    ],
+    [
+      "the candidate creates instead",
+      "link",
+      "Account link",
+      ["Create account", "Sign in", "Pricing"],
+    ],
+    [
+      "the candidate is another 'next'",
+      "link",
+      "Next link",
+      ["Previous", "1", "2", "Read next article"],
+    ],
+    [
+      "the candidate picks a provider",
+      "button",
+      "Login button",
+      ["Login with Google", "Help"],
+    ],
+    ["the candidate goes back", "button", "Go button", ["Go back", "Help"]],
+    [
+      "the role word is part of the real name",
+      "tab",
+      "New tab",
+      ["New document", "Settings"],
+    ],
+    [
+      "the words are reordered",
+      "link",
+      "Dashboard link",
+      ["Open dashboard", "Products"],
+    ],
+    [
+      "'open' is a status filter",
+      "tab",
+      "Issues tab",
+      ["Open issues", "Closed issues", "All issues"],
+    ],
+    [
+      "'open' creates",
+      "link",
+      "Account link",
+      ["Open account", "Sign in", "Help"],
+    ],
+    [
+      "the direction is reversed",
+      "button",
+      "Celsius to Fahrenheit button",
+      ["Fahrenheit to Celsius", "Reset"],
+    ],
+    [
+      "'my' narrows the scope",
+      "tab",
+      "Tasks tab",
+      ["My tasks", "Team tasks", "All tasks"],
+    ],
+  ])("refuses when %s", (_why, role, name, names) => {
+    expect(healTo(role, name, names)).toBeUndefined();
+  });
+
+  it("never overrides the character rule when a close candidate exists", () => {
+    // 'Overview tab' is close to 'Overview table' by characters: that rule
+    // decides, exactly as before this word rule existed.
+    expect(healTo("tab", "Overview tab", ["Overview", "Overview table"])).toBe(
+      "Overview table",
+    );
+  });
+
+  it("refuses an empty or blank name instead of matching everything", () => {
+    expect(healTo("button", "", ["Save"])).toBeUndefined();
+    expect(healTo("button", "   ", ["Save"])).toBeUndefined();
+  });
+});
+
 describe("applyPatchOps", () => {
   const source = `steps:
   - id: open_home

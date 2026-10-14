@@ -7,7 +7,7 @@ description: Real Cairntrace runs against the demo app, one failing with a locat
 
 These are real runs of two specs against the demo app in `examples/`, captured with the CLI in this repo. Apart from replacing absolute local paths with `run-dir` or repo-relative paths, nothing here is hand-edited: the reports are the files `cairn` wrote.
 
-- A failing run: [`examples/flows/demos/_06-drifted-link.yml`](#failing-run-the-spec-and-its-output), which clicks a link named "Dashboard link" that the page no longer has.
+- A failing run: [`examples/flows/demos/_06-drifted-link.yml`](#failing-run-the-spec-and-its-output), which clicks a link by its old name, "Dashboard", after the page renamed it to "Open dashboard".
 - A passing run: [`examples/flows/01-dashboard-nav.yml`](#passing-run-the-spec-and-its-output), which follows "Open dashboard" to the dashboard.
 
 ## Reports and agent context
@@ -46,14 +46,14 @@ The spec, copied from `examples/flows/demos/_06-drifted-link.yml`:
 ```yaml
 # Cairntrace example spec — selector drift, healed by `cairn spec heal`.
 #
-# This spec is INTENTIONALLY broken: the click locator uses name="Dashboard link",
-# but the real page has a link named "Open dashboard". Running it fails with a
-# locator-not-found error.
+# This spec is INTENTIONALLY broken: it was written when the link was named
+# "Dashboard", and the page has since renamed it to "Open dashboard". Running it
+# fails with a locator-not-found error.
 #
 # Then run:
 #   ./bin/cairn spec heal examples/flows/demos/_06-drifted-link.yml
 # to see Cairntrace inspect the snapshot and propose:
-#   replace /steps/1/click/name  from "Dashboard link"  to "Open dashboard"
+#   replace /steps/1/click/name  from "Dashboard"  to "Open dashboard"
 #
 # Add --apply to write the fix back to the file (comments preserved), then re-run
 # with `cairn run examples/flows/demos/_06-drifted-link.yml` to confirm it passes.
@@ -78,43 +78,43 @@ steps:
     click:
       by: role
       role: link
-      name: Dashboard link
+      name: Dashboard
 ```
 
 `cairn run` output (narration on stdout, then the Markdown summary):
 
 ````text
-[06:23:15] run start: drifted_dashboard_nav (env=local, backend=agent-browser)
-[06:23:15] run dir: run-dir
-[06:23:15] precondition precondition[0] started (budget 2m 0s)
-[06:23:15] precondition precondition[0] ok 5ms
-[06:23:24] step open_home passed 943ms
-[06:23:35] step click_link failed 10.4s
-  element not found: could not resolve role=link name="Dashboard link" for click within 10000ms
+[07:50:43] run start: drifted_dashboard_nav (env=local, backend=agent-browser)
+[07:50:43] run dir: run-dir
+[07:50:43] precondition precondition[0] started (budget 2m 0s)
+[07:50:43] precondition precondition[0] ok 9ms
+[07:50:49] step open_home passed 339ms
+[07:50:59] step click_link failed 10.7s
+  element not found: could not resolve role=link name="Dashboard" for click within 10000ms
 matching candidates (6):
   - link "Open dashboard" ref=e3
   - link "Products" ref=e4
-  - link "Documents"…
-[06:23:36] outcomes: evaluating 1
-[06:23:36] outcome url_is_dashboard verifying…
-[06:23:36] outcome url_is_dashboard failed
+  - link "Documents" ref=…
+[07:51:03] outcomes: evaluating 1
+[07:51:03] outcome url_is_dashboard verifying…
+[07:51:03] outcome url_is_dashboard failed
   expected: URL endsWith "/dashboard.html"
   actual:   URL was "http://localhost:8787/"
 # Run: drifted_dashboard_nav — FAILED
 
 - env: local | backend: agent-browser | cold-start: yes
-- duration: 20.7s | outcomes: 0/1 passed
-- run id: 2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de
-- reason: element not found: could not resolve role=link name="Dashboard link" for click within 10000ms matching candidates (6): - link "Open dashboard" ref=e3 - link "Products" ref=e4 - link "Documents" ref=e5 - link "Form controls" ref=e6 - link "Vendor profile" ref=e7 - link "Sign in" ref=e8
+- duration: 20.2s | outcomes: 0/1 passed
+- run id: 2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7
+- reason: element not found: could not resolve role=link name="Dashboard" for click within 10000ms matching candidates (6): - link "Open dashboard" ref=e3 - link "Products" ref=e4 - link "Documents" ref=e5 - link "Form controls" ref=e6 - link "Vendor profile" ref=e7 - link "Sign in" ref=e8
 
 ## Outcomes
 - ✗ url_is_dashboard → outcomes/url_is_dashboard.md
 
 ## Steps
-- ✓ open_home (943ms)
-- ✗ click_link (10.4s) — element not found: could not resolve role=link name="Dashboard link" for click within 10000ms
+- ✓ open_home (339ms)
+- ✗ click_link (10.7s) — element not found: could not resolve role=link name="Dashboard" for click within 10000ms
 matching candidates (6):
- …
+  - li…
 
 ## Reproduce
 ```bash
@@ -127,42 +127,20 @@ Agent context: run-dir/agent_context.md
 
 The reproduce line is shortened to a repo-relative path from the checkout root.
 
-`cairn spec heal` output for the same spec (a separate run, no `--apply`):
+`cairn spec heal` on the same spec proposes the rename (no `--apply`, trimmed to the proposal):
 
 ```text
-[06:23:42] run start: drifted_dashboard_nav (env=local, backend=agent-browser)
-[06:23:42] run dir: run-dir
-[06:23:42] precondition precondition[0] started (budget 2m 0s)
-[06:23:42] precondition precondition[0] ok 6ms
-[06:23:44] step open_home passed 223ms
-[06:23:54] step click_link failed 10.5s
-  element not found: could not resolve role=link name="Dashboard link" for click within 10000ms
-matching candidates (6):
-  - link "Open dashboard" ref=e3
-  - link "Products" ref=e4
-  - link "Documents"…
-[06:23:55] outcomes: evaluating 1
-[06:23:55] outcome url_is_dashboard verifying…
-[06:23:55] outcome url_is_dashboard failed
-  expected: URL endsWith "/dashboard.html"
-  actual:   URL was "http://localhost:8787/"
-# Heal: examples/flows/demos/_06-drifted-link.yml
-Status: patch-proposed
-Outcomes still reachable: yes
-Based on run: run-dir
-
-▸ patch proposed (re-run with --apply to write)
-
 proposed 1 op(s) on examples/flows/demos/_06-drifted-link.yml; pass --apply to write
 
 ## Proposed ops (1)
 
-- **insert** `/steps/1`
-  - value: {"id":"wait_for_dashboard_link","wait":{"text":"Dashboard link","timeoutMs":5000}}
-  - why:  no name candidate matched — insert a wait for "Dashboard link" in case the element appears after async
+- **replace** `/steps/1/click/name`
+  - from: "Dashboard"
+  - to:   "Open dashboard"
+  - why:  snapshot shows role=link with name="Open dashboard" (6 candidates)
 ```
 
-The heal proposal is an inserted wait for "Dashboard link", not the rename to "Open dashboard" that the spec's header comment describes. The candidates list shows the rename would be the fix. Heal output can differ from the comment, so check the proposal before applying it.
+`cairn spec heal --verify` applies the same op to a temporary copy, reruns it from a cold browser and writes the fix only when the rerun passes (`verified: yes`). The contract hash covers `intent` and `outcomes`, so a heal can change the click target but never the definition of done.
 
 ## Passing run: the spec and its output
 

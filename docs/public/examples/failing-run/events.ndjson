@@ -1,21 +1,21 @@
-{"ts":"2026-10-14T06:23:15.696Z","type":"run.started","runId":"2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de","spec":"drifted_dashboard_nav","invocation":{"id":"2026-10-14T06-23-15-465Z_92280_141542","index":1,"total":1,"dir":"_invocations/2026-10-14T06-23-15-465Z_92280_141542"}}
-{"ts":"2026-10-14T06:23:15.700Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
-{"ts":"2026-10-14T06:23:15.701Z","type":"phase.changed","phase":"preconditions","item":"precondition[0]","budgetMs":120000,"deadline":"2026-10-14T06:25:15.701Z"}
-{"ts":"2026-10-14T06:23:15.701Z","type":"log.opened","kind":"precondition","name":"precondition[0]","path":"logs/precondition-01-precondition-0.log"}
-{"ts":"2026-10-14T06:23:15.701Z","type":"precondition.started","name":"precondition[0]","timeoutMs":120000,"index":1,"total":1,"logPath":"logs/precondition-01-precondition-0.log"}
-{"ts":"2026-10-14T06:23:15.706Z","type":"precondition.run","name":"precondition[0]","exitCode":0,"durationMs":5,"timedOut":false,"output":"demo-app must be running on :8787","logPath":"logs/precondition-01-precondition-0.log"}
-{"ts":"2026-10-14T06:23:23.903Z","type":"phase.changed","phase":"steps"}
-{"ts":"2026-10-14T06:23:23.942Z","type":"step.started","stepId":"open_home","index":1,"total":2,"kind":"open","label":"open http://localhost:8787/"}
-{"ts":"2026-10-14T06:23:24.885Z","type":"artifact.snapshot","stepId":"open_home","path":"snapshots/001_open_home.txt"}
-{"ts":"2026-10-14T06:23:24.885Z","type":"step.finished","stepId":"open_home","durationMs":943,"url":"http://localhost:8787/"}
-{"ts":"2026-10-14T06:23:24.888Z","type":"step.started","stepId":"click_link","index":2,"total":2,"kind":"click","label":"click role=link \"Dashboard link\""}
-{"ts":"2026-10-14T06:23:30.703Z","type":"run.heartbeat","phase":"steps","item":"click_link","elapsedMs":5815,"runElapsedMs":15002,"pid":92280}
-{"ts":"2026-10-14T06:23:35.091Z","type":"artifact.snapshot","stepId":"click_link","path":"snapshots/002_click_link.txt"}
-{"ts":"2026-10-14T06:23:35.219Z","type":"artifact.screenshot","stepId":"click_link","path":"screenshots/002_click_link.png"}
-{"ts":"2026-10-14T06:23:35.329Z","type":"artifact.diagnostics","stepId":"click_link","path":"diagnostics/002_click_link.json"}
-{"ts":"2026-10-14T06:23:35.330Z","type":"step.failed","stepId":"click_link","durationMs":10442,"url":"http://localhost:8787/","screenshot":"screenshots/002_click_link.png","error":"element not found: could not resolve role=link name=\"Dashboard link\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8"}
-{"ts":"2026-10-14T06:23:36.272Z","type":"phase.changed","phase":"outcomes"}
-{"ts":"2026-10-14T06:23:36.272Z","type":"outcome.started","outcomeId":"url_is_dashboard","kind":"url"}
-{"ts":"2026-10-14T06:23:36.387Z","type":"outcome.failed","outcomeId":"url_is_dashboard","durationMs":115}
-{"ts":"2026-10-14T06:23:36.892Z","type":"artifact.trace","action":"saved","path":"traces/agent-browser-trace.json","format":"chrome-trace-json","bytes":13154860,"sensitivity":"sanitized"}
-{"ts":"2026-10-14T06:23:36.388Z","type":"run.failed","runId":"2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de","durationMs":20692}
+{"ts":"2026-10-14T07:50:43.854Z","type":"run.started","runId":"2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7","spec":"drifted_dashboard_nav","invocation":{"id":"2026-10-14T07-50-43-616Z_25303_0adb40","index":1,"total":1,"dir":"_invocations/2026-10-14T07-50-43-616Z_25303_0adb40"}}
+{"ts":"2026-10-14T07:50:43.902Z","type":"log.opened","kind":"narration","name":"run","path":"run.log"}
+{"ts":"2026-10-14T07:50:43.905Z","type":"phase.changed","phase":"preconditions","item":"precondition[0]","budgetMs":120000,"deadline":"2026-10-14T07:52:43.905Z"}
+{"ts":"2026-10-14T07:50:43.905Z","type":"log.opened","kind":"precondition","name":"precondition[0]","path":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T07:50:43.905Z","type":"precondition.started","name":"precondition[0]","timeoutMs":120000,"index":1,"total":1,"logPath":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T07:50:43.914Z","type":"precondition.run","name":"precondition[0]","exitCode":0,"durationMs":9,"timedOut":false,"output":"demo-app must be running on :8787","logPath":"logs/precondition-01-precondition-0.log"}
+{"ts":"2026-10-14T07:50:48.733Z","type":"phase.changed","phase":"steps"}
+{"ts":"2026-10-14T07:50:48.738Z","type":"step.started","stepId":"open_home","index":1,"total":2,"kind":"open","label":"open http://localhost:8787/"}
+{"ts":"2026-10-14T07:50:49.076Z","type":"artifact.snapshot","stepId":"open_home","path":"snapshots/001_open_home.txt"}
+{"ts":"2026-10-14T07:50:49.077Z","type":"step.finished","stepId":"open_home","durationMs":339,"url":"http://localhost:8787/"}
+{"ts":"2026-10-14T07:50:49.078Z","type":"step.started","stepId":"click_link","index":2,"total":2,"kind":"click","label":"click role=link \"Dashboard\""}
+{"ts":"2026-10-14T07:50:58.917Z","type":"run.heartbeat","phase":"steps","item":"click_link","elapsedMs":9839,"runElapsedMs":15013,"pid":25303}
+{"ts":"2026-10-14T07:50:59.298Z","type":"artifact.snapshot","stepId":"click_link","path":"snapshots/002_click_link.txt"}
+{"ts":"2026-10-14T07:50:59.539Z","type":"artifact.screenshot","stepId":"click_link","path":"screenshots/002_click_link.png"}
+{"ts":"2026-10-14T07:50:59.737Z","type":"artifact.diagnostics","stepId":"click_link","path":"diagnostics/002_click_link.json"}
+{"ts":"2026-10-14T07:50:59.747Z","type":"step.failed","stepId":"click_link","durationMs":10669,"url":"http://localhost:8787/","screenshot":"screenshots/002_click_link.png","error":"element not found: could not resolve role=link name=\"Dashboard\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8"}
+{"ts":"2026-10-14T07:51:03.609Z","type":"phase.changed","phase":"outcomes"}
+{"ts":"2026-10-14T07:51:03.624Z","type":"outcome.started","outcomeId":"url_is_dashboard","kind":"url"}
+{"ts":"2026-10-14T07:51:03.977Z","type":"outcome.failed","outcomeId":"url_is_dashboard","durationMs":353}
+{"ts":"2026-10-14T07:51:05.110Z","type":"artifact.trace","action":"saved","path":"traces/agent-browser-trace.json","format":"chrome-trace-json","bytes":14345983,"sensitivity":"sanitized"}
+{"ts":"2026-10-14T07:51:04.016Z","type":"run.failed","runId":"2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7","durationMs":20162}

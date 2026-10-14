@@ -136,7 +136,7 @@ cd examples
 ## Heal demo (`cairn spec heal`)
 
 `demos/_06-drifted-link.yml` ships with a locator that doesn't match the page
-(it asks for `link "Dashboard link"` when the real page has
+(it asks for `link "Dashboard"`, the link's old name, when the real page has
 `link "Open dashboard"`).
 
 ```bash

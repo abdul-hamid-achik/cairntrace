@@ -1,13 +1,13 @@
 # Cairntrace example spec — selector drift, healed by `cairn spec heal`.
 #
-# This spec is INTENTIONALLY broken: the click locator uses name="Dashboard link",
-# but the real page has a link named "Open dashboard". Running it fails with a
-# locator-not-found error.
+# This spec is INTENTIONALLY broken: it was written when the link was named
+# "Dashboard", and the page has since renamed it to "Open dashboard". Running it
+# fails with a locator-not-found error.
 #
 # Then run:
 #   ./bin/cairn spec heal examples/flows/demos/_06-drifted-link.yml
 # to see Cairntrace inspect the snapshot and propose:
-#   replace /steps/1/click/name  from "Dashboard link"  to "Open dashboard"
+#   replace /steps/1/click/name  from "Dashboard"  to "Open dashboard"
 #
 # Add --apply to write the fix back to the file (comments preserved), then re-run
 # with `cairn run examples/flows/demos/_06-drifted-link.yml` to confirm it passes.
@@ -32,4 +32,4 @@ steps:
     click:
       by: role
       role: link
-      name: Dashboard link
+      name: Dashboard

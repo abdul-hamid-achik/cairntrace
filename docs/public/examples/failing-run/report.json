@@ -1,9 +1,9 @@
 {
   "$schema": "urn:cairntrace.dev:report:v1",
   "version": "1",
-  "generatedAt": "2026-10-14T06:23:36.903Z",
+  "generatedAt": "2026-10-14T07:51:05.181Z",
   "run": {
-    "runId": "2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de",
+    "runId": "2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7",
     "runDir": "run-dir",
     "specName": "drifted_dashboard_nav",
     "specPath": "examples/flows/demos/_06-drifted-link.yml",
@@ -11,10 +11,10 @@
     "backend": "agent-browser",
     "coldStart": true,
     "status": "failed",
-    "startedAt": "2026-10-14T06:23:15.696Z",
-    "endedAt": "2026-10-14T06:23:36.388Z",
-    "durationMs": 20692,
-    "durationLabel": "20.7s",
+    "startedAt": "2026-10-14T07:50:43.854Z",
+    "endedAt": "2026-10-14T07:51:04.016Z",
+    "durationMs": 20162,
+    "durationLabel": "20.2s",
     "exitCode": 1
   },
   "summary": {
@@ -42,7 +42,7 @@
     {
       "id": "open_home",
       "status": "passed",
-      "durationMs": 943,
+      "durationMs": 339,
       "artifacts": [
         "snapshots/001_open_home.txt"
       ]
@@ -50,8 +50,8 @@
     {
       "id": "click_link",
       "status": "failed",
-      "durationMs": 10442,
-      "error": "element not found: could not resolve role=link name=\"Dashboard link\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
+      "durationMs": 10669,
+      "error": "element not found: could not resolve role=link name=\"Dashboard\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
       "artifacts": [
         "snapshots/002_click_link.txt",
         "screenshots/002_click_link.png",

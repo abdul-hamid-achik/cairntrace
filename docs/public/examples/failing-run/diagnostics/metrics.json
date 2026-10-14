@@ -1,7 +1,7 @@
 {
   "$schema": "urn:cairntrace.dev:metrics:v1",
   "version": "1",
-  "runId": "2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de",
+  "runId": "2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7",
   "environment": "local",
   "metrics": [
     {
@@ -11,14 +11,14 @@
       "mode": "sample",
       "target": "curl -sf http://localhost:8787/api/stats",
       "before": {
-        "at": "2026-10-14T06:23:15.602Z",
+        "at": "2026-10-14T07:50:43.763Z",
         "value": 4,
-        "durationMs": 84
+        "durationMs": 72
       },
       "after": {
-        "at": "2026-10-14T06:23:37.094Z",
+        "at": "2026-10-14T07:51:06.215Z",
         "value": 4,
-        "durationMs": 39
+        "durationMs": 77
       },
       "failures": 0,
       "delta": 0

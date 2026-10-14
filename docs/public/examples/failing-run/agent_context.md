@@ -6,7 +6,7 @@
 - backend: agent-browser
 - status: failed
 - cold start: yes
-- run id: 2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de
+- run id: 2026-10-14T07-50-43-854Z_drifted_dashboard_nav_675ce7
 
 ## Intent
 navigate to dashboard via a renamed link (simulates UI drift)
@@ -16,7 +16,7 @@ navigate to dashboard via a renamed link (simulates UI drift)
 
 ## Last successful step
 - step: open_home
-- duration: 943ms
+- duration: 339ms
 
 ## Failure evidence
 - outcomes/url_is_dashboard.md
@@ -31,16 +31,16 @@ cairn run examples/flows/demos/_06-drifted-link.yml --env local --headed
 ```
 
 ## View the trace
-- traces/agent-browser-trace.json is Chrome trace-event JSON: open https://ui.perfetto.dev and load the file, or chrome://tracing.
+- run-dir/traces/agent-browser-trace.json is Chrome trace-event JSON: open https://ui.perfetto.dev and load the file, or chrome://tracing.
 
 ## Brief (failed step)
 ## Step click_link
 Action: click
-Goal: Click the link named "Dashboard link"
-Authored: role=link name="Dashboard link"
+Goal: Click the link named "Dashboard"
+Authored: role=link name="Dashboard"
 Search approximations (try in order):
-1. role link named "Dashboard link"
-2. visible text "Dashboard link"
+1. role link named "Dashboard"
+2. visible text "Dashboard"
 Done when: the authored effect is visible
 
 ## Suggested next steps

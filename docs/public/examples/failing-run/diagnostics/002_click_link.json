@@ -1,9 +1,9 @@
 {
   "expectedTextExcerpts": [
     {
-      "excerpt": "",
-      "found": false,
-      "needle": "Dashboard link"
+      "excerpt": "Cairntrace demo home Tiny static app for testing behavioral specs end-to-end. From here you can navigate to the dashboard, which lists three inventory items. Open dashboard Demo platform The platform pages are backed by Postgres (docker c",
+      "found": true,
+      "needle": "Dashboard"
     }
   ],
   "formLabels": [],
@@ -33,11 +33,11 @@
     "kind": "click",
     "locator": {
       "by": "role",
-      "name": "Dashboard link",
+      "name": "Dashboard",
       "role": "link"
     }
   },
-  "stepError": "element not found: could not resolve role=link name=\"Dashboard link\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
+  "stepError": "element not found: could not resolve role=link name=\"Dashboard\" for click within 10000ms\nmatching candidates (6):\n  - link \"Open dashboard\" ref=e3\n  - link \"Products\" ref=e4\n  - link \"Documents\" ref=e5\n  - link \"Form controls\" ref=e6\n  - link \"Vendor profile\" ref=e7\n  - link \"Sign in\" ref=e8",
   "suspenseBoundaries": {
     "clientRendered": 0,
     "pending": 0
