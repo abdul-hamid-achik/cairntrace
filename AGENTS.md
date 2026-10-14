@@ -101,7 +101,8 @@ per-agent code paths.
   7 refused by the environment policy (`cairn run` when every spec was
   refused, or any spec under `--strict-requires`; `cairn spec heal` on a
   refused spec), 8 a critical teardown failed (a `services.teardown` entry
-  with `critical: true`, or the `services.provisioner` `down`), 9 dirty state after the run (config
+  with `critical: true`, the `services.provisioner` `down`, a suite
+  `afterCritical` command or a `--after-critical` hook), 9 dirty state after the run (config
   `run.verifyClean`). Precedence 8 > 9 > the run's own code; 4 also covers a
   run refused by the config `run:` policy (live run lock, failed preflight,
   dirty machine before the run), `cairn services up|down|restart` while a
@@ -681,7 +682,14 @@ Key rules:
   kept in the run's service-log artifact. Each not-yet-ready
   tmux window's pane tail is streamed every few seconds so a stuck window
   shows its startup logs/errors instead of a blind wait. Non-interactive/CI
-  runs stay quiet (the logger's default warn level suppresses info).
+  runs show boot progress on stderr only: `cairn services up` and the
+  service boot of `cairn run` (any `--format`) raise the logger's default to
+  info, so the docker and provisioner `up` commands stream complete,
+  redacted lines (a secret split across chunks, or by a stderr line between
+  them, is scrubbed whole; at most 100 lines of 400 chars per 5 seconds, the
+  rest summarized as a "not shown" notice) while stdout stays one document. `--quiet`, `--log-level`, `CAIRN_LOG_LEVEL` and
+  config `logging.level` still win; `--log-format json` wraps each line as
+  NDJSON. Seed output stays debug-only (a 60s heartbeat is the live signal).
 - **Per-environment overrides:** `environments.<name>` can carry `services:`
   and `secrets:` blocks. `services: false` disables all services for that env
   (e.g. `dev`/`test` where the app is already deployed remotely). A partial

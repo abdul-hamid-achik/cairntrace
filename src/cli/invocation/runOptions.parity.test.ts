@@ -201,6 +201,8 @@ describe("cairn run ↔ RunInvocationOptions ↔ cairn_run parity", () => {
         "echo before",
         "--after",
         "echo after",
+        "--after-critical",
+        "echo cleanup",
         "--hook-timeout-ms",
         "1000",
         "--repeat",

@@ -142,6 +142,12 @@ export const SuiteEnvSchema = z
     before: CommandListSchema.optional(),
     /** Commands run once after the last spec, on every exit path; non-fatal. */
     after: CommandListSchema.optional(),
+    /**
+     * Cleanup commands run after `after`, on every exit path: one that fails,
+     * times out or cannot start turns the invocation into exit 8 (a critical
+     * teardown failed), like a `services.teardown` entry with `critical: true`.
+     */
+    afterCritical: CommandListSchema.optional(),
     /** Budget of each suite hook of this environment (default: `--hook-timeout-ms`). */
     hookTimeoutMs: HookTimeoutSchema.optional(),
     /** Replaces the suite's `specs` in this environment. */
@@ -193,6 +199,7 @@ export const SuiteSchema = z
     vars: z.record(z.string(), SuiteVarValueSchema).optional(),
     before: CommandListSchema.optional(),
     after: CommandListSchema.optional(),
+    afterCritical: CommandListSchema.optional(),
     hookTimeoutMs: HookTimeoutSchema.optional(),
     env: z.record(z.string(), SuiteEnvSchema).optional(),
     seed: SuiteSeedSchema.optional(),

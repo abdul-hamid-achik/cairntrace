@@ -130,9 +130,11 @@ export function runOptionsFromMcpInput(input: CairnRunInput): {
 }
 
 function hasHooks(options: RunInvocationOptions): boolean {
-  return [...(options.before ?? []), ...(options.after ?? [])].some(
-    (command) => command.trim().length > 0,
-  );
+  return [
+    ...(options.before ?? []),
+    ...(options.after ?? []),
+    ...(options.afterCritical ?? []),
+  ].some((command) => command.trim().length > 0);
 }
 
 type ToolResult = {

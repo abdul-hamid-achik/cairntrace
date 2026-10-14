@@ -250,6 +250,12 @@ export function buildExplain(): ExplainResult {
               "Shell command run after EACH spec finishes (pass or fail), while services are still up (repeatable; sequential, in the order given). Env: CAIRN_RUN_DIR (absolute run dir; diagnostics/ is pre-created), CAIRN_RUN_ID, CAIRN_RUN_STATUS (passed|failed|errored), CAIRN_SPEC_PATH. Numeric top-level fields of $CAIRN_RUN_DIR/diagnostics/report.json become `cairn stats --metric` values. Skipped for specs that errored before a run dir existed. Failures and timeouts are logged, non-fatal.",
           },
           {
+            name: "--after-critical",
+            type: "string",
+            description:
+              "Cleanup command run like --after (same env and order, after the plain --after hooks of that spec, repeatable) whose failure is not forgiven: a non-zero exit, a timeout or a command that cannot start makes the invocation exit 8 (a critical cleanup failed, precedence 8 > 9 > the run's code) and the run documents are held until that verdict (top-level exitCode, status errored, invocationOutcome). It runs even after a cancel. Plain --after stays non-fatal.",
+          },
+          {
             name: "--hook-timeout-ms",
             type: "number",
             default: 600000,
@@ -343,7 +349,7 @@ export function buildExplain(): ExplainResult {
           "4": "unknown --env for the resolved config (errored result documents still printed under --format json|yaml), or the `cairn services up` lock of the config: held without --reuse-services, held for another env of the config, stale or unreadable, or --reuse-services without a lock, or the config run policy refusing the run: a live foreign run.lock, a failed run.preflight check, a dirty machine before the run (run.verifyClean), specs from several configs where any declares run: (or runtimes.node), or a run: policy whose config does not load (no hook, service, webServer or browser started)",
           "6": "contract hash mismatch",
           "7": "refused by the environment policy: every spec of the run was refused (one spec or many, whatever --parallel), or any spec under --strict-requires",
-          "8": "a critical teardown failed: a services.teardown entry with critical: true exited non-zero or timed out. Outranks every verdict and exit 9 (precedence 8 > 9 > the rest); the journal summary lists it under runPolicy.criticalTeardown",
+          "8": "a critical cleanup failed: a services.teardown entry with critical: true, a suite afterCritical command or a --after-critical hook exited non-zero, timed out or could not start. Outranks every verdict and exit 9 (precedence 8 > 9 > the rest); the journal summary lists it under runPolicy.criticalTeardown",
           "9": "dirty state after the run: the config run.verifyClean found a survivor (browsers, tmux, docker-project) once the teardown and run.finally were done; the survivors are named on stderr and in the journal (cleanliness.dirty, summary.runPolicy.dirty). Never kills anything; `cairn doctor --orphans --kill` does, for browsers",
         },
         outputSchema: "urn:cairntrace.dev:run:v1",

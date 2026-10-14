@@ -66,6 +66,7 @@ export const DelegateRequestOptionsSchema = RunInvocationOptionsSchema.pick({
   runToken: true,
   before: true,
   after: true,
+  afterCritical: true,
   hookTimeoutMs: true,
   stash: true,
   stashOnFailure: true,

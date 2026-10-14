@@ -177,6 +177,12 @@ export const RunInvocationOptionsShape = {
     .describe(
       "Shell commands run after EACH spec (pass or fail) with CAIRN_RUN_DIR set; failures are logged, non-fatal. MCP: needs `cairn mcp --allow-hooks`",
     ),
+  afterCritical: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Cleanup commands run after EACH spec like `after`, but one that fails, times out or cannot start makes the invocation exit 8 (a critical cleanup failed) and the documents wait for that verdict. MCP: needs `cairn mcp --allow-hooks`",
+    ),
   hookTimeoutMs: z
     .number()
     .int()

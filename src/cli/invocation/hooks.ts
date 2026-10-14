@@ -21,6 +21,7 @@ import {
 import { HOOK_OUTPUT_TAIL_CHARS } from "../../core/schema/events.v1";
 import type { RunResult } from "../../core/schema/run.v1";
 import type { RunInvocationOptions } from "../../core/schema/runInvocation.v1";
+import { runShellCommandSync } from "../../core/runPolicy/finally";
 import { log } from "../logger";
 import type { ScopedSecrets } from "../commands/secrets";
 import {
@@ -84,6 +85,18 @@ function lostHookResult(exit: ChildExit, output: string): HookRunResult {
   };
 }
 
+/** One hook that failed, timed out or could not start (see `onFailure`). */
+export interface HookFailure {
+  /** 0-based position in the list the hooks were given. */
+  index: number;
+  /** The command, redacted. */
+  command: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  /** Why it could not start (or finish), redacted. */
+  error?: string;
+}
+
 /** A `signal` cancelled the hooks (thrown for fatal `--before` hooks). */
 export class HookCancelledError extends Error {
   constructor(message: string) {
@@ -104,6 +117,12 @@ export async function runHookCommands(
   commands: string[] | undefined,
   /** Invocation journal (observer): hook.* events and live logs/hook-*.log. */
   /** Non-fatal failure narration (default: the run logger). */
+  /**
+   * Called for every hook that failed, timed out or could not start, so a
+   * caller can judge a non-fatal phase (critical cleanup) itself.
+   */
+  /** Added to the hook's 1-based number in journal events and log names. */
+  /** Called once a hook finished, whatever its verdict (0-based position). */
   opts: {
     fatal?: boolean;
     cwd?: string;
@@ -113,6 +132,9 @@ export async function runHookCommands(
     observer?: HookObserver;
     note?: NoteFn;
     signal?: AbortSignal;
+    onFailure?: (failure: HookFailure) => void;
+    indexOffset?: number;
+    onHookDone?: (position: number) => void;
   } = {},
 ): Promise<void> {
   const list = (commands ?? []).map((c) => c.trim()).filter(Boolean);
@@ -143,10 +165,11 @@ export async function runHookCommands(
     const hook = startHookObservation(
       opts.observer,
       phase,
-      position + 1,
+      position + 1 + (opts.indexOffset ?? 0),
       command,
       timeoutMs,
     );
+    let reported = false;
     try {
       const subprocess = execa(command, {
         shell: true,
@@ -233,6 +256,12 @@ export async function runHookCommands(
         const msg = `${phase} hook timed out after ${timeoutMs}ms and its process tree was killed: ${redact(command)}${
           tail ? `\n${tail}` : ""
         }`;
+        reported = true;
+        opts.onFailure?.({
+          index: position,
+          command: redact(command),
+          timedOut: true,
+        });
         if (fatal) throw new Error(msg);
         note("warn", msg);
         continue;
@@ -244,14 +273,34 @@ export async function runHookCommands(
         const msg = `${phase} hook failed (exit ${r.exitCode ?? "unknown"}): ${redact(command)}${
           tail ? `\n${tail}` : ""
         }`;
+        reported = true;
+        opts.onFailure?.({
+          index: position,
+          command: redact(command),
+          ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+          ...(r.exitCode === undefined
+            ? { error: r.lost ?? "could not run" }
+            : {}),
+        });
         if (fatal) throw new Error(msg);
         note("warn", msg);
       }
     } catch (e) {
       if (e instanceof HookCancelledError) throw e;
       hook?.finish({ output: (e as Error).message });
+      // A fatal failure above threw out of this try already reported: only an
+      // error thrown by execa itself is reported here.
+      if (!reported) {
+        opts.onFailure?.({
+          index: position,
+          command: redact(command),
+          error: redact((e as Error).message).slice(0, 500),
+        });
+      }
       if (fatal) throw e;
       note("warn", `${phase} hook error: ${redact((e as Error).message)}`);
+    } finally {
+      opts.onHookDone?.(position);
     }
   }
 }
@@ -375,16 +424,54 @@ export async function runAfterHooksForResult(
   result: RunResult,
   opts: {
     after?: string[];
+    /**
+     * `--after-critical`: run after `after`, never cancelled (cleanup must
+     * run); a failure, timeout, spawn error or a skipped hook is reported to
+     * `onCriticalFailure` instead of being forgiven.
+     */
+    afterCritical?: string[];
     hookTimeoutMs?: string | number;
     /** Cancel: kill the running hook and skip the rest. */
     signal?: AbortSignal;
+    onCriticalFailure?: (failure: CriticalHookFailure) => void;
+    /**
+     * Registers a synchronous signal-path hook (ResourceScope's
+     * `before-teardown` stage) for as long as this spec's hook phase is in
+     * flight: on SIGINT/SIGTERM the critical commands not completed run
+     * there, each on its own hook-timeout bound. Returns the untrack.
+     */
+    trackSignalHook?: (hook: () => void) => () => void;
   },
   scopedSecrets?: ScopedSecrets,
   context: HookContext & { runToken?: string } = {},
   observer?: HookObserver,
   note: NoteFn = defaultNote,
 ): Promise<void> {
-  if (!opts.after || opts.after.every((c) => !c.trim())) return;
+  const plain = (opts.after ?? []).filter((c) => c.trim());
+  const critical = (opts.afterCritical ?? []).filter((c) => c.trim());
+  if (plain.length === 0 && critical.length === 0) return;
+  const redactForNote = observer
+    ? (text: string) => observer.journal.redactText(text)
+    : createArtifactRedactor(undefined, scopedSecrets?.childEnv ?? process.env)
+        .text;
+  const reportCritical = (failure: CriticalHookFailure): void => {
+    note(
+      "warn",
+      `critical after hook: ${redactForNote(describeHookFailure(failure))}`,
+    );
+    opts.onCriticalFailure?.(failure);
+  };
+  // Every critical hook counts as failed when none of them could run.
+  const allCriticalFailed = (error: string): void => {
+    for (const [index, command] of critical.entries()) {
+      reportCritical({
+        index,
+        command: redactForNote(command.trim()),
+        error,
+        runId: result.runId,
+      });
+    }
+  };
   try {
     const diagnostics = join(result.runDir, "diagnostics");
     if (!existsSync(result.runDir)) {
@@ -392,11 +479,15 @@ export async function runAfterHooksForResult(
         "warn",
         `after hooks skipped: run directory does not exist (${result.runDir})`,
       );
+      // A refused spec never started anything; a missing run directory of a
+      // real run means the cleanup could not run.
+      if (!result.synthetic) {
+        allCriticalFailed("run directory does not exist");
+      }
       return;
     }
     await mkdir(diagnostics, { recursive: true });
-    await runHookCommands("after", opts.after, {
-      fatal: false,
+    const hookOpts = {
       env: {
         ...(scopedSecrets?.childEnv ?? process.env),
         ...cairnContextEnv({
@@ -415,11 +506,109 @@ export async function runAfterHooksForResult(
           : parseHookTimeoutMs(opts.hookTimeoutMs),
       ...(observer ? { observer } : {}),
       note,
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    });
+    };
+    let criticalDone = 0;
+    const untrackSignal =
+      critical.length > 0
+        ? opts.trackSignalHook?.(() => {
+            const childEnv = targetChildEnvWithSelectedTvaultKeys(
+              hookOpts.env,
+              hookOpts.selectedTvaultKeys,
+            );
+            // A hook the signal killed mid-run runs again from the start.
+            for (let i = criticalDone; i < critical.length; i += 1) {
+              const command = critical[i]!;
+              const observed = startHookObservation(
+                observer,
+                "after",
+                plain.length + i + 1,
+                command,
+                hookOpts.timeoutMs,
+              );
+              const done = runShellCommandSync(command, {
+                cwd: process.cwd(),
+                env: childEnv,
+                timeoutMs: hookOpts.timeoutMs,
+              });
+              const output = done.spawnError ?? done.outputTail ?? "";
+              observed?.write(output);
+              observed?.finish({
+                ...(done.exitCode !== undefined
+                  ? { exitCode: done.exitCode }
+                  : {}),
+                timedOut: done.timedOut,
+                output,
+              });
+              criticalDone = i + 1;
+              if (
+                done.exitCode !== 0 ||
+                done.timedOut ||
+                done.spawnError !== undefined
+              ) {
+                reportCritical({
+                  index: i,
+                  command: redactForNote(command.trim()),
+                  runId: result.runId,
+                  path: "signal",
+                  ...(done.exitCode !== undefined && !done.spawnError
+                    ? { exitCode: done.exitCode }
+                    : {}),
+                  ...(done.timedOut ? { timedOut: true } : {}),
+                  ...(done.spawnError
+                    ? { error: redactForNote(done.spawnError) }
+                    : {}),
+                });
+              }
+            }
+          })
+        : undefined;
+    try {
+      if (plain.length > 0) {
+        await runHookCommands("after", plain, {
+          ...hookOpts,
+          fatal: false,
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        });
+      }
+      if (critical.length > 0) {
+        try {
+          await runHookCommands("after", critical, {
+            ...hookOpts,
+            fatal: false,
+            indexOffset: plain.length,
+            onFailure: (failure) =>
+              reportCritical({ ...failure, runId: result.runId }),
+            onHookDone: (position) => {
+              criticalDone = position + 1;
+            },
+          });
+        } catch (e) {
+          allCriticalFailed((e as Error).message.slice(0, 500));
+        }
+      }
+    } finally {
+      untrackSignal?.();
+    }
   } catch (e) {
     note("warn", `after hook: ${(e as Error).message}`);
+    allCriticalFailed((e as Error).message.slice(0, 500));
   }
+}
+
+/** A `--after-critical` hook that did not complete successfully. */
+export interface CriticalHookFailure extends HookFailure {
+  runId?: string;
+  /** Ran on the SIGINT/SIGTERM path. */
+  path?: "signal";
+}
+
+function describeHookFailure(failure: CriticalHookFailure): string {
+  const how = failure.timedOut
+    ? "timed out"
+    : failure.exitCode !== undefined
+      ? `exit ${failure.exitCode}`
+      : (failure.error ?? "failed");
+  return `${failure.command} ${how}`;
 }
 
 /**

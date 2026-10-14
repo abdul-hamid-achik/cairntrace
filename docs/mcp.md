@@ -115,7 +115,7 @@ There is no HTTP transport, no `serve` subcommand, and no `--port` flag. If you 
 | `--parallel`, `--repeat`, `--matrix`, `--stop-on-fail` | `parallel`, `repeat`, `matrix`, `stopOnFail` |
 | `--tag`, `--label`, `--since-codemap`, `--select-only` | `tag`, `label` (or a `labels` object), `sinceCodemap` (alias `since`), `selectOnly` |
 | `--no-services`, `--no-web-server`, `--services-dry-run`, `--reuse-services` | `noServices`, `noWebServer`, `servicesDryRun`, `reuseServices` |
-| `--before`, `--after`, `--hook-timeout-ms` | `before`, `after`, `hookTimeoutMs` (hooks need `--allow-hooks`, below) |
+| `--before`, `--after`, `--after-critical`, `--hook-timeout-ms` | `before`, `after`, `afterCritical`, `hookTimeoutMs` (hooks need `--allow-hooks`, below) |
 | `--stash-on-failure`, `--auto-annotate`, `--monitor` | `stashOnFailure`, `autoAnnotate`, `monitor` |
 | `--artifact-root`, `--junit`, `--stamp-if-green` | `artifactRoot`, `junit`, `stampIfGreen` |
 

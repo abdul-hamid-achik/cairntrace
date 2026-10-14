@@ -165,6 +165,7 @@ export interface RunCommandOptions {
    * run exit code.
    */
   after?: string[];
+  afterCritical?: string[];
   /** Per-command timeout shared by `--before` and `--after` hooks. */
   hookTimeoutMs?: string;
   /** `--repeat N`: run the whole spec set N times, labeling `repeat=<i>`. */
@@ -310,6 +311,12 @@ export function configureRunCommand(command: Command): Command {
         [] as string[],
       )
       .option(
+        "--after-critical <shell>",
+        "like --after (same env, once per finished spec, repeatable) for cleanup that must happen: a command that fails, times out or cannot start makes the invocation exit 8 (a critical cleanup failed) and the documents are held until that verdict. Plain --after stays non-fatal.",
+        collectRepeatable,
+        [] as string[],
+      )
+      .option(
         "--repeat <n>",
         "run the spec set n times sequentially (distinct run dirs), stamping label repeat=<i>; --before hooks run per run",
       )
@@ -423,6 +430,7 @@ export function runInvocationOptionsFromCli(
     ...defined("label", opts.label),
     ...defined("before", opts.before),
     ...defined("after", opts.after),
+    ...defined("afterCritical", opts.afterCritical),
     ...defined("hookTimeoutMs", hookTimeoutMs),
     ...defined("repeat", repeat),
     ...defined("matrix", opts.matrix),
@@ -699,7 +707,9 @@ function makeCliNarration(
         progressMode === "tty"
           ? makeInkServicesNarrator(getTuiStore()!)
           : undefined;
-      if (progressMode) setNarrationDefault(true);
+      // A service boot can take minutes: its progress reaches stderr in every
+      // format (stdout stays the one document); flags/env/config still win.
+      setNarrationDefault(true);
       return narrator;
     },
     // The dry-run plan prints raw to stderr; release the viewport first.

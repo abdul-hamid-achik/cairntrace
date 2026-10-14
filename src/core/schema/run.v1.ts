@@ -221,6 +221,9 @@ export const InvocationRunPolicySchema = z
             signal: z.string().optional(),
             error: z.string().optional(),
             path: z.enum(["teardown", "signal"]),
+            /** Absent: a `services.teardown` entry. */
+            source: z.enum(["suite.afterCritical", "afterCritical"]).optional(),
+            runId: z.string().optional(),
           })
           .strict(),
       )

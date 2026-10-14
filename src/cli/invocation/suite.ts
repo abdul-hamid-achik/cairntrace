@@ -407,6 +407,25 @@ export interface SuiteHookRun {
   note: (kind: "info" | "warn", message: string) => void;
   /** Called after each command finished (1-based index). */
   onDone?: (index: number) => void;
+  /**
+   * `commands` from this 1-based position on are critical cleanup
+   * (`afterCritical`): their failure is reported in
+   * {@link SuiteHooksOutcome.critical} and a cancel does not skip them.
+   */
+  criticalFrom?: number;
+  /** Receives each critical command that did not complete, as it happens. */
+  onCritical?: (failure: CriticalSuiteHookFailure) => void;
+}
+
+/** A critical suite hook (`afterCritical`) that did not complete successfully. */
+export interface CriticalSuiteHookFailure {
+  /** 0-based position in the suite's `afterCritical`. */
+  index: number;
+  /** The command, redacted. */
+  command: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  error?: string;
 }
 
 export interface SuiteHooksOutcome {
@@ -414,6 +433,7 @@ export interface SuiteHooksOutcome {
   /** The first failure, redacted. */
   firstFailure?: string;
   cancelled?: boolean;
+  critical?: CriticalSuiteHookFailure[];
 }
 
 const logIndex = (index: number): string => String(index).padStart(2, "0");
@@ -427,12 +447,19 @@ export async function runSuiteHooks(
   const { journal } = run;
   for (const [i, command] of commands.entries()) {
     const index = i + 1;
-    if (run.signal?.aborted) {
-      run.note(
-        "info",
-        `suite ${run.phase} hooks skipped: invocation cancelled (${commands.length - i} not run)`,
-      );
-      return { ...outcome, cancelled: true };
+    const isCritical =
+      run.criticalFrom !== undefined && index >= run.criticalFrom;
+    if (run.signal?.aborted && !isCritical) {
+      if (!outcome.cancelled) {
+        run.note(
+          "info",
+          `suite ${run.phase} hooks skipped: invocation cancelled (${commands.length - i} not run)`,
+        );
+      }
+      outcome.cancelled = true;
+      // Critical cleanup after them still runs.
+      if (run.criticalFrom === undefined) return outcome;
+      continue;
     }
     const shown = run.redact(command);
     run.note("info", `suite ${run.suite} ${run.phase} #${index}: ${shown}`);
@@ -458,12 +485,13 @@ export async function runSuiteHooks(
     let output = "";
     let ok = false;
     let lostExit: string | undefined;
+    let spawnFailed = false;
     try {
       const result = await runBoundedCommand("/bin/sh", ["-c", command], {
         cwd: run.cwd,
         env: run.env,
         timeoutMs: run.timeoutMs,
-        ...(run.signal ? { signal: run.signal } : {}),
+        ...(run.signal && !isCritical ? { signal: run.signal } : {}),
         ownProcessGroup: true,
         killLeftovers: false,
         onOutput: (chunk) => live?.write(chunk),
@@ -471,6 +499,7 @@ export async function runSuiteHooks(
       exitCode = result.exitCode;
       timedOut = result.timedOut;
       cancelled = result.cancelled;
+      spawnFailed = Boolean(result.spawnError);
       output = result.spawnError
         ? `could not start: ${result.spawnError}`
         : result.all;
@@ -518,7 +547,11 @@ export async function runSuiteHooks(
       ...(timedOut ? { timedOut: true } : {}),
       ...(outputTail ? { outputTail } : {}),
     });
-    if (cancelled) return { ...outcome, cancelled: true };
+    if (cancelled) {
+      outcome.cancelled = true;
+      if (run.criticalFrom === undefined) return outcome;
+      continue;
+    }
     run.onDone?.(index);
     if (!ok) {
       outcome.failed += 1;
@@ -529,6 +562,19 @@ export async function runSuiteHooks(
         outputTail ? `\n${outputTail.slice(-500)}` : ""
       }`;
       outcome.firstFailure ??= message;
+      if (isCritical) {
+        const failure: CriticalSuiteHookFailure = {
+          index: index - run.criticalFrom!,
+          command: shown,
+          ...(exitCode !== undefined && !spawnFailed ? { exitCode } : {}),
+          ...(timedOut ? { timedOut: true } : {}),
+          ...(spawnFailed || (!timedOut && exitCode === undefined)
+            ? { error: run.redact(output).slice(0, 500) || "failed" }
+            : {}),
+        };
+        (outcome.critical ??= []).push(failure);
+        run.onCritical?.(failure);
+      }
       if (run.fatal) return outcome;
       run.note("warn", message);
     }
@@ -552,16 +598,27 @@ export function runSuiteAfterHooksSync(
   const commands = run.commands.map((c) => c.trim()).filter(Boolean);
   let failed = 0;
   const journalDir = run.journal?.dir;
+  const criticalIndex = (i: number): number | undefined =>
+    run.criticalFrom !== undefined && i >= run.criticalFrom
+      ? i - run.criticalFrom
+      : undefined;
   for (let i = Math.max(1, run.from); i <= commands.length; i += 1) {
     const command = commands[i - 1]!;
     const shown = run.redact(command);
-    const timeoutMs = signalTimeout(run.budget, run.timeoutMs);
+    // Critical cleanup runs on its own bound (the hook timeout), whatever
+    // the optional hooks left of the shared signal budget; an optional hook
+    // the budget cannot cover is skipped and the next one still gets its turn.
+    const critical = criticalIndex(i) !== undefined;
+    const timeoutMs = critical
+      ? run.timeoutMs
+      : signalTimeout(run.budget, run.timeoutMs);
     if (timeoutMs <= 0) {
+      failed += 1;
       run.note(
         "warn",
-        `suite ${run.suite} after hooks: ${commands.length - i + 1} not run, the signal-path budget is spent (CAIRN_SIGNAL_HOOK_TIMEOUT_MS)`,
+        `suite ${run.suite} after hook #${i} not run, the signal-path budget is spent (CAIRN_SIGNAL_HOOK_TIMEOUT_MS): ${shown}`,
       );
-      return failed + commands.length - i + 1;
+      continue;
     }
     run.note(
       "info",
@@ -602,6 +659,20 @@ export function runSuiteAfterHooksSync(
     });
     if (!ok) {
       failed += 1;
+      const at = criticalIndex(i);
+      if (at !== undefined) {
+        run.onCritical?.({
+          index: at,
+          command: shown,
+          ...(result.exitCode !== undefined && !result.spawnError
+            ? { exitCode: result.exitCode }
+            : {}),
+          ...(result.timedOut ? { timedOut: true } : {}),
+          ...(result.spawnError
+            ? { error: run.redact(result.spawnError) }
+            : {}),
+        });
+      }
       run.note(
         "warn",
         `suite ${run.suite} after hook #${i} ${
