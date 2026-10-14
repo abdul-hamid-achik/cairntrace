@@ -1,0 +1,27 @@
+{
+  "$schema": "urn:cairntrace.dev:metrics:v1",
+  "version": "1",
+  "runId": "2026-10-14T06-23-15-696Z_drifted_dashboard_nav_4144de",
+  "environment": "local",
+  "metrics": [
+    {
+      "name": "electronics_products",
+      "scope": "spec",
+      "source": "command",
+      "mode": "sample",
+      "target": "curl -sf http://localhost:8787/api/stats",
+      "before": {
+        "at": "2026-10-14T06:23:15.602Z",
+        "value": 4,
+        "durationMs": 84
+      },
+      "after": {
+        "at": "2026-10-14T06:23:37.094Z",
+        "value": 4,
+        "durationMs": 39
+      },
+      "failures": 0,
+      "delta": 0
+    }
+  ]
+}

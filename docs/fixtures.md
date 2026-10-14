@@ -142,7 +142,19 @@ demo_kit:
 Operations: `insertOne`, `insertMany`, `updateOne`, `updateMany`,
 `replaceOne`, `deleteOne`, `deleteMany`, `cloneDoc`, `findOne` and `count`,
 each with an optional `expect` (`matched`, `modified`, `upserted`, `deleted`,
-`inserted`, `count`, `found`, `fields`; a number means equals) and `as`.
+`inserted`, `count`, `found`, `fields`; a number means equals) and `as`. Each operation takes `collection` (and an optional `database`) plus:
+
+| Operation | Keys |
+|---|---|
+| `insertOne` | `document` |
+| `insertMany` | `documents` (a non-empty list) |
+| `updateOne`, `updateMany` | `filter`, `update` (a document or a pipeline list), `upsert` |
+| `replaceOne` | `filter`, `replacement`, `upsert` |
+| `deleteOne`, `deleteMany` | `filter` |
+| `cloneDoc` | `from` (a filter or a list of fallback filters), `to`, `fromCollection`, `set`, `unset` |
+| `findOne` | `filter`, `projection` |
+| `count` | `filter` |
+
 `cloneDoc` reads the first document matching `from` (fallback filters tried in
 order), applies `set` / `unset` (dotted paths), and writes it onto `to` with a
 `replaceOne` upsert that keeps `to._id`. Values are extended JSON (`{$oid}`,

@@ -7,7 +7,7 @@ description: Reference typed Cairntrace steps for navigation, semantic interacti
 
 The step vocabulary. Every `step:` entry below is a typed verb the runner knows. The vocabulary is closed — exactly the steps the `StepSchema` union accepts; if your intent does not map to one of them, use `eval` (page-context JS) or `request` (typed API call), never invent a new shape. Run `cairn explain --format json` for the machine-readable surface.
 
-Every step also accepts two optional common keys:
+Every step also accepts three optional common keys:
 
 - `id: <name>` — a stable step label for cross-referencing in artifacts.
 - `when: <condition>` — skip the whole step (do not run, do not capture) when the condition is false: the string form (`text:Saved`, `urlContains:/done`, `selector:#banner`) or an object (`{ selector, hasText }`, `{ url: { includes } }`, `{ var: mode, equals: fast }`). See [Conditions](#conditions-when-until-condition).
@@ -62,7 +62,7 @@ Condition shapes, exactly one per step:
 | `value: <locator + equals>`                 | a form control's live value exactly equals the string                                                                                                                                                                                                                                                                                                                                    |
 | `url: { includes \| equals \| pattern }`    | the current page URL matches; `pattern` is a JS regex                                                                                                                                                                                                                                                                                                                                    |
 | `ms: <n>`                                   | pause with no predicate (search-index catch-up); max 300000                                                                                                                                                                                                                                                                                                                              |
-| `app: { path, equals \| in \| exists }`      | a config [`browser.appHandle`](/configuration#browser) value holds; see [Page prelude and app handles](#page-prelude-and-app-handles)                                                                                                                                                                                                                                                     |
+| `app: { path, equals \| in \| exists }`      | a config [`browser.appHandle`](/configuration#schema) value holds; see [Page prelude and app handles](#page-prelude-and-app-handles)                                                                                                                                                                                                                                                     |
 
 `text` and `notText` collapse whitespace and match case-insensitively by
 default. Set `caseSensitive: true` when rendered casing is significant.
@@ -785,7 +785,7 @@ when the backend is still responsive.
 
 ## What is deliberately not a step
 
-- No `sleep N` — every wait is conditional on a typed observable.
+- No bare `sleep N`. The only unconditional pause is `ms: <n>` (a `wait` predicate, max 300000, for search-index catch-up); every other wait is conditional on a typed observable.
 - No per-step backend choice — backends live in `cairntrace.config.yml`, not in steps.
 - No per-agent code paths. The CLI + MCP server + artifact shape are the interface; steps do not know who is reading them.
 

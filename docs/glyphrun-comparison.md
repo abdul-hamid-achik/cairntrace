@@ -5,6 +5,8 @@ description: "Compare Cairntrace browser specs with Glyphrun terminal specs: sha
 
 # Glyphrun × Cairntrace
 
+For Cairntrace against other browser test tools, see [/compare](/compare).
+
 A side-by-side for the two spec runners under [the-lacanians](https://www.thelacanians.com). They look like siblings on purpose. Both are local-first, both speak `intent + outcomes`, both emit a self-contained artifact pack for humans and coding agents. They differ on the surface they drive — Glyphrun on terminals, Cairntrace on browsers.
 
 ## Where the two overlap

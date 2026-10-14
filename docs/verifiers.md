@@ -109,7 +109,7 @@ verify:
 
 ## `count`
 
-Asserts the count of elements matching a role or selector in an optional region. Exactly one of `role` or `selector` is required (counting by visible text is not supported — use `text` for presence or `script` for a text-based count); exactly one of `equals`, `atLeast`, `atMost`, `between`.
+Asserts the count of elements matching a role or selector in an optional region. At least one of `role` or `selector` is required (counting by visible text is not supported — use `text` for presence or `script` for a text-based count); exactly one of `equals`, `atLeast`, `atMost`, `between`.
 
 ```yaml
 verify:
@@ -412,7 +412,7 @@ Two patterns across verifiers:
 
 ## Sidecar artifact shape
 
-```yaml
+```text
 # Always written for every outcome
 outcomes/<id>.md          # rendered, redacted, human-readable
 

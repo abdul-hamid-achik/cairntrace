@@ -1,0 +1,36 @@
+- banner
+  - heading "Cairntrace demo home" [level=1, ref=e1]
+  - paragraph
+    - StaticText "Tiny static app for testing behavioral specs end-to-end."
+- main
+  - paragraph
+    - StaticText "From here you can navigate to the dashboard, which lists three inventory items."
+  - paragraph
+    - link "Open dashboard" [ref=e3]
+  - heading "Demo platform" [level=2, ref=e2]
+  - paragraph
+    - StaticText "The platform pages are backed by Postgres (docker compose in "
+    - code
+      - StaticText "examples/"
+    - StaticText "):"
+  - list
+    - listitem [level=1]
+      - ListMarker "• "
+      - link "Products" [ref=e4]
+      - StaticText " — seeded catalog, category filters, exports"
+    - listitem [level=1]
+      - ListMarker "• "
+      - link "Documents" [ref=e5]
+      - StaticText " — upload and download files (sign-in required)"
+    - listitem [level=1]
+      - ListMarker "• "
+      - link "Form controls" [ref=e6]
+      - StaticText " — focus combobox, Enter-driven search"
+    - listitem [level=1]
+      - ListMarker "• "
+      - link "Vendor profile" [ref=e7]
+      - StaticText " — custom form controls for the widget steps"
+    - listitem [level=1]
+      - ListMarker "• "
+      - link "Sign in" [ref=e8]
+      - StaticText " — demo operator casey@cairntrace.dev / cairn-demo-2026"

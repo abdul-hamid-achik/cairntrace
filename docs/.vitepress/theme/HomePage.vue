@@ -145,15 +145,15 @@ onBeforeUnmount(() => {
     <section class="ct-hero">
       <div class="ct-shell ct-hero-grid">
         <div class="ct-hero-copy">
-          <p class="ct-eyebrow ct-reveal">Behavioral browser specs for coding agents</p>
+          <p class="ct-eyebrow ct-reveal">Browser acceptance tests for AI coding agents</p>
           <h1 id="ct-home-title" class="ct-reveal ct-delay-1">
             Your coding agent said it’s done.
             <span>Make the browser prove it.</span>
           </h1>
           <p class="ct-hero-lede ct-reveal ct-delay-2">
-            Cairntrace is a local-first browser testing layer for AI coding agents. Define the
-            user outcome once, replay it through a real browser, and return failures with the
-            evidence needed to fix them.
+            Cairntrace turns what a feature should do into a YAML spec, replays it in a real
+            browser, and hands your agent a failure report it can fix. Heal the path, never the
+            promise.
           </p>
 
           <div class="ct-hero-actions ct-reveal ct-delay-3">
@@ -167,10 +167,20 @@ onBeforeUnmount(() => {
             </a>
             <a
               class="ct-button ct-button-secondary"
-              href="https://github.com/abdul-hamid-achik/cairntrace"
-              @click="track('cta_click', { cta: 'github', location: 'hero' })"
-            >View on GitHub</a>
+              href="/examples"
+              @click="track('cta_click', { cta: 'examples', location: 'hero' })"
+            >See a real failing run</a>
           </div>
+
+          <p class="ct-compat-row ct-reveal ct-delay-3">
+            <span>Works with</span> Claude Code · Cursor · Codex · OpenCode
+          </p>
+          <ul class="ct-trust-row ct-reveal ct-delay-3" aria-label="Trust signals">
+            <li>Free</li>
+            <li>MIT</li>
+            <li>No account</li>
+            <li>Runs locally</li>
+          </ul>
 
           <div class="ct-install-stack ct-reveal ct-delay-4" role="group" aria-label="Install Cairntrace">
             <p class="ct-install-label"><span class="ct-install-step-number" aria-hidden="true">1</span> Install</p>
@@ -219,7 +229,9 @@ onBeforeUnmount(() => {
             Needs Bun 1.3+ (Homebrew installs it) · browser: agent-browser or Playwright
           </p>
           <p class="ct-install-note ct-install-note-muted ct-reveal ct-delay-4">
-            Open source · MIT licensed · <a class="ct-inline-link" href="/distribution">Build from source</a>
+            Open source · MIT licensed ·
+            <a class="ct-inline-link" href="https://github.com/abdul-hamid-achik/cairntrace">View on GitHub</a> ·
+            <a class="ct-inline-link" href="/distribution">Build from source</a>
           </p>
         </div>
 
@@ -432,6 +444,44 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <section class="ct-section ct-author-section" aria-labelledby="ct-author-title">
+      <div class="ct-shell ct-problem-grid">
+        <div class="ct-section-heading">
+          <p class="ct-kicker">Let the agent write the spec</p>
+          <h2 id="ct-author-title">Record the journey once, then promote the draft.</h2>
+          <p>
+            An agent can open the page, record each step, and export a draft spec. The draft
+            is linted and run from a cold browser. It is promoted only after it passes.
+          </p>
+          <a class="ct-text-link" href="/author-flow">Read the author-flow guide <span aria-hidden="true">→</span></a>
+          <a class="ct-text-link ct-text-link-second" href="/discover">Discovery sessions <span aria-hidden="true">→</span></a>
+        </div>
+
+        <ul class="ct-use-cases">
+          <li>
+            <span>01</span>
+            <div><strong>Discover</strong><p><code>cairn_discover_open</code> opens the page and returns a snapshot and locator inventory.</p></div>
+          </li>
+          <li>
+            <span>02</span>
+            <div><strong>Interact</strong><p><code>cairn_discover_interact</code> records each click, fill, or assert as a step.</p></div>
+          </li>
+          <li>
+            <span>03</span>
+            <div><strong>Export</strong><p><code>cairn_discover_export</code> writes the draft from the session journal, even after the browser closed.</p></div>
+          </li>
+          <li>
+            <span>04</span>
+            <div><strong>Finish</strong><p><code>cairn spec finish</code> lints the draft, runs it cold, and stamps the contract when green.</p></div>
+          </li>
+          <li>
+            <span>05</span>
+            <div><strong>Promote</strong><p><code>cairn spec promote</code> moves it into the suite, rebases its paths, and stamps the contract.</p></div>
+          </li>
+        </ul>
+      </div>
+    </section>
+
     <section class="ct-section ct-capabilities-section">
       <div class="ct-shell">
         <div class="ct-capabilities-heading">
@@ -495,6 +545,151 @@ onBeforeUnmount(() => {
             </div>
           </article>
         </div>
+      </div>
+    </section>
+
+    <section class="ct-section ct-beyond-section" aria-labelledby="ct-beyond-title">
+      <div class="ct-shell">
+        <div class="ct-capabilities-heading">
+          <div>
+            <p class="ct-kicker">Beyond the click</p>
+            <h2 id="ct-beyond-title">Check the data, the setup, and the suite too.</h2>
+          </div>
+          <p>
+            Outcomes can read the backend, not only the page. Fixtures, services, suites, and
+            runners are declared in cairntrace.config.yml, next to your specs.
+          </p>
+        </div>
+
+        <ul class="ct-beyond-grid">
+          <li>
+            <a class="ct-beyond-card" href="/verifiers" @click="track('cta_click', { cta: 'verifiers', location: 'beyond' })">
+              <span class="ct-mosaic-label">Backend verifiers</span>
+              <h3>Assert the record, not just the screen.</h3>
+              <p><code>mongo</code>, <code>temporal</code>, <code>http</code>, and <code>xlsx</code> outcomes check the data behind the UI.</p>
+              <span class="ct-beyond-link">Verifiers <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+          <li>
+            <a class="ct-beyond-card" href="/fixtures" @click="track('cta_click', { cta: 'fixtures', location: 'beyond' })">
+              <span class="ct-mosaic-label">Fixtures</span>
+              <h3>Seed the data before the run starts.</h3>
+              <p>Fixtures create test data before a run and tear it down after.</p>
+              <span class="ct-beyond-link">Fixtures <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+          <li>
+            <a class="ct-beyond-card" href="/services" @click="track('cta_click', { cta: 'services', location: 'beyond' })">
+              <span class="ct-mosaic-label">Suites and run policy</span>
+              <h3>Run named suites with a defined policy.</h3>
+              <p>Pick a suite with <code>--suite</code>, set bail and preflight rules, and hold the run on readiness gates while services start and tear down with it.</p>
+              <span class="ct-beyond-link">Services and suites <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+          <li>
+            <a class="ct-beyond-card" href="/delegate" @click="track('cta_click', { cta: 'delegate', location: 'beyond' })">
+              <span class="ct-mosaic-label">Delegated runners</span>
+              <h3>Run where your app lives.</h3>
+              <p>Hand <code>cairn run</code> to a command you provide. The local process keeps the journal, run directories, and exit code.</p>
+              <span class="ct-beyond-link">Delegated runners <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+          <li>
+            <a class="ct-beyond-card" href="/export" @click="track('cta_click', { cta: 'export', location: 'beyond' })">
+              <span class="ct-mosaic-label">Export to Playwright</span>
+              <h3>Keep the spec. Export the test.</h3>
+              <p>Emit <code>@playwright/test</code> files from a spec. <code>--verify</code> checks the export before you rely on it.</p>
+              <span class="ct-beyond-link">Export and verify <span aria-hidden="true">→</span></span>
+            </a>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="ct-section ct-differs-section" aria-labelledby="ct-differs-title">
+      <div class="ct-shell">
+        <div class="ct-capabilities-heading">
+          <div>
+            <p class="ct-kicker">How it differs</p>
+            <h2 id="ct-differs-title">Three ways to check a browser feature.</h2>
+          </div>
+          <p>
+            Ad-hoc agent browsing is fast to start. Hand-written Playwright is mature. Cairntrace
+            keeps the check as a spec the agent can run and repair.
+          </p>
+        </div>
+
+        <div class="ct-table-wrap" tabindex="0" role="region" aria-label="Comparison table, scrollable on small screens">
+          <table class="ct-compare-table">
+            <thead>
+              <tr>
+                <th scope="col"><span class="visually-hidden">Criterion</span></th>
+                <th scope="col">Ad-hoc agent + browser MCP</th>
+                <th scope="col">Hand-written Playwright</th>
+                <th scope="col" class="ct-compare-us">Cairntrace</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Survives the session</th>
+                <td>No. Steps live in the chat.</td>
+                <td>Yes. Test files in the repo.</td>
+                <td class="ct-compare-us">Yes. YAML spec in the repo.</td>
+              </tr>
+              <tr>
+                <th scope="row">Fixed definition of done</th>
+                <td>Whatever the agent decides it is.</td>
+                <td>Yes. The assertions you wrote.</td>
+                <td class="ct-compare-us">Yes. Intent and outcomes, covered by a contract hash.</td>
+              </tr>
+              <tr>
+                <th scope="row">Agent-readable failure evidence</th>
+                <td>Screenshots and logs the agent has to interpret.</td>
+                <td>Traces and reports built for people.</td>
+                <td class="ct-compare-us">Start with <code>agent_context.md</code>, then outcomes, snapshots, and console.</td>
+              </tr>
+              <tr>
+                <th scope="row">Drift repair</th>
+                <td>Re-explore the page each time.</td>
+                <td>Edit the test by hand.</td>
+                <td class="ct-compare-us">Heal proposes step changes. The contract hash blocks changes to outcomes.</td>
+              </tr>
+              <tr>
+                <th scope="row">Exports to Playwright</th>
+                <td>No.</td>
+                <td>Native.</td>
+                <td class="ct-compare-us"><code>cairn export playwright</code>, with <code>--verify</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="ct-differs-note">
+          Playwright wins on ecosystem, maturity, and CI adoption. Cairntrace can
+          use Playwright as its browser backend, and it can export to Playwright when a
+          conventional test is the better home.
+          <a class="ct-text-link" href="/compare">Full comparison <span aria-hidden="true">→</span></a>
+        </p>
+      </div>
+    </section>
+
+    <section class="ct-section ct-ci-section" aria-labelledby="ct-ci-title">
+      <div class="ct-shell ct-problem-grid">
+        <div class="ct-section-heading">
+          <p class="ct-kicker">From agent loop to CI</p>
+          <h2 id="ct-ci-title">The same suite the agent ran, in CI.</h2>
+          <p>
+            <code>--cold-start</code> clears the browser profile first, so a pass does not depend
+            on leftover state. <code>--junit</code> writes a report your CI can read. Exit codes
+            tell the job what happened.
+          </p>
+          <a class="ct-text-link" href="/ci">CI recipe <span aria-hidden="true">→</span></a>
+          <a class="ct-text-link ct-text-link-second" href="/exit-codes">Exit codes <span aria-hidden="true">→</span></a>
+        </div>
+
+        <pre class="ct-code ct-ci-code" aria-label="GitHub Actions step that runs a Cairntrace suite"><code># cairn is installed earlier in the job (see /ci)
+- name: Browser acceptance
+  run: cairn run --suite &lt;name&gt; --cold-start --junit cairn-junit.xml</code></pre>
       </div>
     </section>
 
@@ -564,18 +759,56 @@ onBeforeUnmount(() => {
             </p>
           </details>
           <details>
-            <summary>Does run data leave my machine?</summary>
+            <summary>Does it need Bun?</summary>
             <p>
-              Normal runs are local-first. Browser state and artifact packs are written locally.
-              Optional integrations only run when you configure or invoke them.
+              Yes, Bun 1.3.0 or newer (<code>engines.bun</code> in package.json). Homebrew installs
+              it as a dependency. npm and bun installs need Bun on your PATH.
             </p>
           </details>
           <details>
-            <summary>How does it handle UI drift?</summary>
+            <summary>Does it run in CI?</summary>
             <p>
-              Semantic locators fail with diagnostics, and the healer can propose step changes
-              from fresh browser snapshots. The contract hash prevents those repairs from silently
-              changing the intended outcome.
+              Yes. <code>--cold-start</code> is on by default in CI, <code>--junit</code> writes
+              JUnit XML, and <code>cairn run</code> exits with documented codes. The CI recipe is
+              on <a class="ct-inline-link" href="/ci">/ci</a>.
+            </p>
+          </details>
+          <details>
+            <summary>Is the MCP server safe to register?</summary>
+            <p>
+              It runs over stdio. Shell hooks and service starts (docker, seed, tmux) are refused
+              until you opt in with <code>--allow-hooks</code> or <code>--allow-services</code>, or
+              the matching <code>CAIRN_MCP_ALLOW_*</code> environment variable.
+            </p>
+          </details>
+          <details>
+            <summary>How is it different from Playwright MCP?</summary>
+            <p>
+              Playwright MCP gives the agent a browser to drive. Cairntrace is a spec format and a
+              runner on top of a browser (agent-browser by default, or Playwright). Use a browser
+              MCP to explore. Use Cairntrace to keep the check and its evidence.
+            </p>
+          </details>
+          <details>
+            <summary>Which operating systems are supported?</summary>
+            <p>
+              The install docs cover macOS and Linux (Homebrew, npm, bun, and the curl installer).
+              Windows is not documented as supported.
+            </p>
+          </details>
+          <details>
+            <summary>Does it send telemetry? Does run data leave my machine?</summary>
+            <p>
+              The CLI does not import an analytics SDK or send usage data. Runs write browser state
+              and artifacts locally. Network calls come from what you configure or invoke, such as
+              your app, datasources, or <code>cairn publish</code>. This website uses Vercel Analytics for page views and CTA clicks.
+            </p>
+          </details>
+          <details>
+            <summary>What license is it under, and do I need an account?</summary>
+            <p>
+              MIT. There is no Cairntrace account. Local runs use your files and your browser.
+              Checkpoints that hold app logins are created by you with <code>cairn login</code>.
             </p>
           </details>
         </div>

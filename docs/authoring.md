@@ -12,31 +12,44 @@ Authoring a cairn spec is closer to authoring a contract than to authoring a tes
 Start every spec with `intent` and `outcomes`, never with steps. `intent` is one sentence describing what the user wants to happen. `outcomes` are the typed observables that confirm it did. Until both are written, the spec has no contract; running it just produces a transcript of whatever the steps happened to do.
 
 ```yaml
+version: 1
+name: search_spiced_chickpeas
 intent: Search for "spiced chickpeas", filter by category, and see exactly 7 results.
 outcomes:
-  - id: results-narrowed
-    count: { selector: "[data-testid='result-count']", equals: 7 }
-  - id: filter-applied
-    text: { contains: "category:baking" }
+  - id: results_narrowed
+    description: exactly 7 results are listed
+    verify:
+      count: { selector: "[data-testid='result-count']", equals: 7 }
+  - id: filter_applied
+    description: the baking category filter is shown
+    verify:
+      text: { contains: "category:baking" }
 steps:
   - open: { path: "/search?q=spiced+chickpeas" }
-  - click: { by: { role: checkbox, name: "Baking" } }
+  - click: { by: role, role: checkbox, name: Baking }
 ```
 
 If a colleague can delete every `step:` in the file and you can still describe what the spec should prove, the contract is right. If removing `step:` turns the spec into pure prose, the contract is not yet there.
 
 ## Outcomes are typed observables
 
-The verifier vocabulary is closed: `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process`. If you find yourself wanting a new verb, use `script` with a small JS expression and a `.raw.json` sidecar — never invent a new verifier type, because then every agent has to learn the new vocabulary.
+The verifier vocabulary is closed: the 17 kinds `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process`, `mongo`, `temporal`, `http`, `value`, `table` (see [Verifiers](/verifiers)). If you find yourself wanting a new verb, use `script` with a small JS expression and a `.raw.json` sidecar — never invent a new verifier type, because then every agent has to learn the new vocabulary.
 
-Each outcome must be enforceable from a single page state. Outcomes are not assertions-in-time; they are assertions-on-state. If you need a sequence ("after step 3 the cart is empty, after step 5 it has 3 items"), write two outcomes and pin them to their step.
+Each outcome must be enforceable from a single page state. Outcomes are not assertions-in-time; they are assertions-on-state. If you need a sequence ("after step 3 the cart is empty, after step 5 it has 3 items"), assert the intermediate state with an [`expect`](/steps#expect) step after step 3 and keep the final state as the outcome.
 
 ```yaml
+version: 1
+name: cart_clear_then_add
+intent: Clear the cart, then add three items and see the count reach three.
+steps:
+  - click: { by: role, role: button, name: Clear cart }
+  - expect: { id: cart_empty_after_clear, by: testid, testid: cart-count, text: { equals: "0" } }
+  - click: { by: role, role: button, name: Add three items }
 outcomes:
-  - id: cart-empty-after-clear
-    count: { selector: "[data-testid='cart-count']", equals: 0 }
-  - id: cart-three-after-add
-    count: { selector: "[data-testid='cart-count']", equals: 3 }
+  - id: cart_three_after_add
+    description: the cart holds three items after adding them
+    verify:
+      count: { selector: "[data-testid='cart-count']", equals: 3 }
 ```
 
 ## Steps are hints, not scripts
@@ -48,9 +61,9 @@ The same locator philosophy that drives `playwright` should drive cairn: prefer 
 ```yaml
 steps:
   - open: { path: "/settings" }
-  - click: { by: { role: tab, name: "API tokens" } }
-  - click: { by: { role: button, name: "Rotate token" } }
-  - click: { by: { role: button, name: "Yes, rotate" } }
+  - click: { by: role, role: tab, name: "API tokens" }
+  - click: { by: role, role: button, name: "Rotate token" }
+  - click: { by: role, role: button, name: "Yes, rotate" }
 ```
 
 ## Paths and environments

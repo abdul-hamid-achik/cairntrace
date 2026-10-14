@@ -1,0 +1,232 @@
+{
+  "$schema": "urn:cairntrace.dev:report:v1",
+  "version": "1",
+  "generatedAt": "2026-10-14T06:23:42.219Z",
+  "run": {
+    "runId": "2026-10-14T06-23-38-052Z_dashboard_nav_68a219",
+    "runDir": "run-dir",
+    "specName": "dashboard_nav",
+    "specPath": "examples/flows/01-dashboard-nav.yml",
+    "environment": "local",
+    "backend": "agent-browser",
+    "coldStart": true,
+    "status": "passed",
+    "startedAt": "2026-10-14T06:23:38.052Z",
+    "endedAt": "2026-10-14T06:23:42.210Z",
+    "durationMs": 4158,
+    "durationLabel": "4.2s",
+    "exitCode": 0
+  },
+  "summary": {
+    "outcomes": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "total": 3
+    },
+    "steps": {
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "total": 3
+    }
+  },
+  "outcomes": [
+    {
+      "id": "url_is_dashboard",
+      "status": "passed",
+      "evidence": "outcomes/url_is_dashboard.md"
+    },
+    {
+      "id": "dashboard_heading_visible",
+      "status": "passed",
+      "evidence": "outcomes/dashboard_heading_visible.md"
+    },
+    {
+      "id": "no_console_errors",
+      "status": "passed",
+      "evidence": "outcomes/no_console_errors.md"
+    }
+  ],
+  "steps": [
+    {
+      "id": "open_home",
+      "status": "passed",
+      "durationMs": 247,
+      "artifacts": [
+        "snapshots/001_open_home.txt"
+      ]
+    },
+    {
+      "id": "click_open_dashboard",
+      "status": "passed",
+      "durationMs": 875,
+      "artifacts": [
+        "snapshots/002_click_open_dashboard.txt"
+      ],
+      "resolved": {
+        "role": "link",
+        "name": "Open dashboard",
+        "ref": "e3"
+      }
+    },
+    {
+      "id": "wait_for_dashboard",
+      "status": "passed",
+      "durationMs": 201,
+      "artifacts": [
+        "snapshots/003_wait_for_dashboard.txt"
+      ]
+    }
+  ],
+  "artifacts": {
+    "report": "report.html",
+    "reportJson": "report.json",
+    "agentContext": "agent_context.md",
+    "events": "events.ndjson",
+    "console": "console/errors.ndjson",
+    "network": "network/failed_requests.ndjson",
+    "snapshots": [
+      "snapshots/003_wait_for_dashboard.txt"
+    ],
+    "replay": "replay.json",
+    "manifest": "artifact-manifest.json"
+  },
+  "artifactLinks": [
+    {
+      "label": "Run report",
+      "path": "report.html",
+      "kind": "report"
+    },
+    {
+      "label": "Report data",
+      "path": "report.json",
+      "kind": "report-json"
+    },
+    {
+      "label": "Agent context",
+      "path": "agent_context.md",
+      "kind": "context"
+    },
+    {
+      "label": "Events",
+      "path": "events.ndjson",
+      "kind": "events"
+    },
+    {
+      "label": "url_is_dashboard evidence",
+      "path": "outcomes/url_is_dashboard.md",
+      "kind": "outcome"
+    },
+    {
+      "label": "dashboard_heading_visible evidence",
+      "path": "outcomes/dashboard_heading_visible.md",
+      "kind": "outcome"
+    },
+    {
+      "label": "no_console_errors evidence",
+      "path": "outcomes/no_console_errors.md",
+      "kind": "outcome"
+    },
+    {
+      "label": "Console errors",
+      "path": "console/errors.ndjson",
+      "kind": "console"
+    },
+    {
+      "label": "Network failures",
+      "path": "network/failed_requests.ndjson",
+      "kind": "network"
+    },
+    {
+      "label": "003_wait_for_dashboard.txt",
+      "path": "snapshots/003_wait_for_dashboard.txt",
+      "kind": "snapshot"
+    }
+  ],
+  "theme": {
+    "selected": "cairn",
+    "label": "Cairn",
+    "tokens": "[redacted]",
+    "overrides": {},
+    "available": {
+      "cairn": {
+        "name": "cairn",
+        "label": "Cairn",
+        "colors": {
+          "background": "#e7f0ec",
+          "surface": "#fbfdf9",
+          "surfaceAlt": "#edf7f4",
+          "ink": "#10201f",
+          "muted": "#5d6c70",
+          "line": "#bfd4ce",
+          "accent": "#0f766e",
+          "accentText": "#ecfeff",
+          "success": "#16823a",
+          "warning": "#a45f12",
+          "danger": "#b42318",
+          "info": "#4f46e5",
+          "codeBg": "#dfeae6"
+        }
+      },
+      "slate": {
+        "name": "slate",
+        "label": "Slate",
+        "colors": {
+          "background": "#1d2224",
+          "surface": "#f3f5f2",
+          "surfaceAlt": "#e4ebe7",
+          "ink": "#161c1f",
+          "muted": "#59666b",
+          "line": "#bac7c2",
+          "accent": "#256f7d",
+          "accentText": "#f7fcfd",
+          "success": "#217a4a",
+          "warning": "#b7791f",
+          "danger": "#b83d36",
+          "info": "#5964d8",
+          "codeBg": "#dce4df"
+        }
+      },
+      "midnight": {
+        "name": "midnight",
+        "label": "Midnight",
+        "colors": {
+          "background": "#17151f",
+          "surface": "#252331",
+          "surfaceAlt": "#302d3f",
+          "ink": "#f2f4f8",
+          "muted": "#b9c2cf",
+          "line": "#4a435d",
+          "accent": "#43b8a7",
+          "accentText": "#071412",
+          "success": "#55c97b",
+          "warning": "#e0a33a",
+          "danger": "#ff6b5f",
+          "info": "#a49bff",
+          "codeBg": "#14131b"
+        }
+      },
+      "contrast": {
+        "name": "contrast",
+        "label": "Contrast",
+        "colors": {
+          "background": "#000000",
+          "surface": "#ffffff",
+          "surfaceAlt": "#f1f1f1",
+          "ink": "#000000",
+          "muted": "#343434",
+          "line": "#000000",
+          "accent": "#005fcc",
+          "accentText": "#ffffff",
+          "success": "#007a2f",
+          "warning": "#8a4b00",
+          "danger": "#c60000",
+          "info": "#3b2fc9",
+          "codeBg": "#eeeeee"
+        }
+      }
+    }
+  },
+  "reproduce": "cairn run examples/flows/01-dashboard-nav.yml --env local"
+}

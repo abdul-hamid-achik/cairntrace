@@ -1646,3 +1646,225 @@ body {
     padding: 16px !important;
   }
 }
+
+/* Landing: compatibility and trust rows under the hero CTAs */
+.ct-compat-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 28px !important;
+  color: var(--ct-ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ct-compat-row span {
+  color: var(--ct-faint);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ct-trust-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 14px !important;
+  color: var(--ct-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ct-trust-row li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ct-trust-row li::before {
+  width: 6px;
+  height: 6px;
+  content: "";
+  border-radius: 50%;
+  background: var(--ct-green-bright);
+}
+
+/* Landing: secondary text links stacked inside a section heading */
+.ct-text-link-second {
+  margin-top: 12px !important;
+  color: var(--ct-muted) !important;
+}
+
+/* Landing: beyond-the-click grid */
+.ct-beyond-section {
+  border-top: 1px solid var(--ct-line);
+}
+
+.ct-beyond-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 56px;
+}
+
+.ct-beyond-grid li {
+  display: flex;
+}
+
+.ct-beyond-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: clamp(26px, 3.4vw, 36px);
+  border: 1px solid var(--ct-line);
+  border-radius: 20px;
+  background: var(--ct-paper);
+  transition: border-color 180ms ease, transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ct-beyond-card:hover {
+  border-color: color-mix(in srgb, var(--ct-green) 45%, var(--ct-line));
+  transform: translateY(-2px);
+}
+
+.ct-beyond-card:focus-visible {
+  outline: 2px solid var(--ct-green-bright);
+  outline-offset: 4px;
+}
+
+.ct-beyond-card h3 {
+  font-size: clamp(22px, 2.2vw, 28px);
+  font-weight: 720;
+  letter-spacing: -0.04em;
+}
+
+.ct-beyond-card p {
+  color: var(--ct-muted);
+  font-size: 14px;
+}
+
+.ct-beyond-card code {
+  color: var(--ct-ink);
+  font-size: 12px;
+}
+
+.ct-beyond-link {
+  margin-top: auto;
+  display: inline-flex;
+  gap: 8px;
+  color: var(--ct-green);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+/* Landing: how it differs table */
+.ct-differs-section {
+  background: var(--ct-soft);
+}
+
+.ct-table-wrap {
+  margin-top: 56px;
+  overflow-x: auto;
+  border: 1px solid var(--ct-line);
+  border-radius: 18px;
+  background: var(--ct-paper);
+}
+
+.ct-table-wrap:focus-visible {
+  outline: 2px solid var(--ct-green-bright);
+  outline-offset: 4px;
+}
+
+.ct-compare-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 14px;
+  text-align: left;
+}
+
+.ct-compare-table th,
+.ct-compare-table td {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--ct-line);
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+.ct-compare-table tbody tr:last-child th,
+.ct-compare-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.ct-compare-table thead th {
+  color: var(--ct-faint);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ct-compare-table tbody th {
+  width: 22%;
+  color: var(--ct-ink);
+  font-weight: 700;
+}
+
+.ct-compare-table td {
+  color: var(--ct-muted);
+}
+
+.ct-compare-table code {
+  font-size: 12px;
+}
+
+.ct-compare-table .ct-compare-us {
+  color: var(--ct-ink);
+  background: var(--ct-green-pale);
+}
+
+.ct-differs-note {
+  max-width: 720px;
+  margin-top: 28px;
+  color: var(--ct-muted);
+  font-size: 15px;
+}
+
+.ct-differs-note .ct-text-link {
+  margin-top: 12px;
+}
+
+/* Landing: agent loop to CI */
+.ct-ci-code {
+  margin: 0 !important;
+  padding: 18px 20px !important;
+  border: 1px solid rgba(237, 245, 239, 0.1);
+  border-radius: 12px;
+  background: #0f2117 !important;
+}
+
+@media (max-width: 900px) {
+  .ct-beyond-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .ct-beyond-grid {
+    grid-template-columns: minmax(0, 1fr);
+    margin-top: 40px;
+  }
+
+  .ct-table-wrap {
+    margin-top: 40px;
+  }
+
+  .ct-compat-row {
+    font-size: 13px;
+  }
+}

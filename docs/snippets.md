@@ -31,6 +31,8 @@ The directory structure is convention only — `cairn` walks the spec root recur
 
 ```yaml
 # specs/flows/checkout.yml
+version: 1
+name: checkout_rotate_token
 imports:
   - actions/login-admin        # refers to specs/snippets/actions/login-admin.yml
   - actions/rotate-token
@@ -38,8 +40,10 @@ imports:
 
 intent: Sign in, rotate an API token, and confirm the new token works.
 outcomes:
-  - id: token-rotated
-    text: { contains: "Token rotated" }
+  - id: token_rotated
+    description: the rotated token is confirmed
+    verify:
+      text: { contains: "Token rotated" }
 steps:
   - use: login-admin            # uses the imported snippet
   - use: rotate-token
@@ -88,11 +92,16 @@ In early adoption, the term *action file* and *snippet* are interchangeable. The
 Snippets frequently need conditional behavior. The `when:` predicate makes a step opt-in:
 
 ```yaml
-- when: { env: FEATURE_BANNER, equals: "on" }
-- click: { by: { role: button, name: "Dismiss banner" } }
+vars:
+  FEATURE_BANNER: "${env.FEATURE_BANNER:-off}"
+steps:
+  - click: { by: role, role: button, name: "Dismiss banner" }
+    when: { var: FEATURE_BANNER, equals: "on" }
 ```
 
-Conditional steps are excellent snippet content because the snippet itself decides whether to run the step based on environment, harness capability, or run-time configuration. The harness consuming the snippet does not need to know.
+`when.var` reads a `vars:` value (the spec's, the config's or a `--var` override), not the process environment. Reach the environment through `${env.X}` in `vars:`, as above.
+
+Conditional steps are excellent snippet content because the snippet itself decides whether to run the step based on its vars, harness capability, or run-time configuration. The harness consuming the snippet does not need to know.
 
 ## Iteration
 
