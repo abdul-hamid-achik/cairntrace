@@ -74,7 +74,7 @@ bun install
 ./bin/cairn run examples/flows/01-dashboard-nav.yml --format md
 ```
 
-The canonical local gate is `bun run verify` (typecheck + lint + format check + knip + tests). There is no separate `dev` script that runs the spec suite with mock data — `bun run verify` is it.
+The canonical local gate is `bun run verify` (`audit:production` + typecheck + lint + format check + knip + tests). There is no separate `dev` script that runs the spec suite with mock data — `bun run verify` is it.
 
 ## Symlink-on-PATH convenience
 

@@ -16,10 +16,10 @@ A side-by-side for the two spec runners under [the-lacanians](https://www.thelac
 | **Behavior contract** | `intent + outcomes` in `spec.yml` | `intent + outcomes` in `spec.yml` |
 | **Repairable hints** | typed `steps:` vocabulary | typed `steps:` vocabulary |
 | **Agent interface** | CLI + MCP server + artifact pack | CLI + MCP server + artifact pack |
-| **Closed verifiers** | `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process` | same |
+| **Closed verifiers** | `text`, `notText`, `url`, `network`, `noFailedRequests`, `console`, `count`, `xlsx`, `file`, `httpJson`, `script`, `process`, plus datasource verifiers `mongo`, `temporal`, `http`, `value`, `table` | same core set |
 | **Cold-start contract** | required; login/checkpoint/preconditions | required; login/checkpoint/preconditions |
 | **Artifact format** | `run.{json,yaml,md}`, `report.html`, `outcomes/<id>.md`, `screenshots/`, `network/`, `console/`, `spec.resolved.yml` | its own run pack, including terminal-only `frames/frames.ndjson` and `raw/pty.raw.log` |
-| **MCP tools** | `cairn_*` mirrors every CLI verb | `glyph_*` mirrors every CLI verb |
+| **MCP tools** | `cairn_*` covers most CLI verbs; CLI-only: `diff`, `stats`, `clean`, `init`, `login`, `unpin`, `verifier` | `glyph_*` mirrors every CLI verb |
 
 ## Where they diverge
 

@@ -279,7 +279,7 @@ const discover = addFormatFlags(
     )
     .option(
       "--max-bytes <n>",
-      "cap the returned snapshot JSON at n bytes (default 16384)",
+      "cap the returned snapshot JSON at n bytes (default: no cap; MCP tools default to 16384)",
     ),
 ).action((url: string | undefined, opts) => discoverCommand(url, opts));
 

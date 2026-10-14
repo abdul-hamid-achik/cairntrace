@@ -94,6 +94,6 @@ Then re-run. If the app rotates sessions faster than you can re-capture, switch 
 
 ## See also
 
-- [Steps](/steps) — the `checkpoint` step (save state mid-flow) and `session: { resume }`
+- [Steps](/steps) — the step vocabulary; `session: { resume: <name> }` restores a checkpoint before the steps run
 - [Troubleshooting](/troubleshooting) — "Spec did not satisfy the cold-start contract"
 - [Authoring](/authoring) — the cold-start contract in detail

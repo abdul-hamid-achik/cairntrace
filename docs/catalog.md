@@ -24,7 +24,7 @@ MCP: the `cairn_catalog` tool takes the same inputs (`config`, `env`, `query`, `
 | `--config <path>` | explicit `cairntrace.config.yml` (default: discovered upward from the current directory) |
 | `--env <name>` | vars of that environment only; last runs in that environment; checkpoint origin checked against its `baseUrl`. An environment the config does not define, or `--env` with no config found, is an error (exit 4) |
 | `--query <text>` | rank rows by keyword and keep the ones that match |
-| `--kind <kinds>` | `actions`, `vars`, `verifiers`, `envs`, `flows`, `checkpoints`; repeatable or comma-separated (default: all) |
+| `--kind <kinds>` | `actions`, `vars`, `verifiers`, `envs`, `flows`, `checkpoints`, `fixtures`, `suites`; repeatable or comma-separated (default: all) |
 | `--limit <n>` | rows per kind (default 10 with `--query`, otherwise all); `totals` keeps the full count |
 | `--artifact-root <path>` | artifact root scanned for last runs (default: config `artifactRoot`, else `~/.cairntrace/runs`) |
 | `--format json\|yaml\|md` | output shape (`--json`, `--yaml`, `--md` shorthands) |
@@ -40,6 +40,8 @@ The JSON document is `urn:cairntrace.dev:catalog:v1`. Every `file` is relative t
 - **verifiers**: every `script.file` the specs reference, with its header doc comment, its fixtures contract and, per use, the fixture keys the outcome passes. `unknownKeys` are passed keys the contract does not list; `missingKeys` are contract keys marked required that the outcome does not pass.
 - **envs**: `baseUrl`, `policy` (`trait`, `mutations`, `description`), `services` (enabled and its phases) and the secrets provider with key names (never values).
 - **flows**: `name`, `intent`, `tags`, `requires`, `environment`, the actions it uses, its `session.resume` checkpoint, `draft` for `_`-prefixed files or folders, and `lastRun` (status and duration).
+- **fixtures**: the config `fixtures:` registry (kind, scope, datasource, verbs, needs, output keys, params, ttlMs) and the specs that list each one (`usedBy`).
+- **suites**: the config `suites:` registry (selectors as authored, parallel, bail, requires, seedSkip). Per environment, `envs` gives the resolved spec files in run order, or a `problem` (unknown spec, ambiguous name, empty selection, `requires` refusal), plus var names and hook counts. Values and commands are never listed. `cairn suites list` prints the same rows.
 - **checkpoints**: the checkpoints specs resume, and saved ones captured for an origin one of the configured environments uses, with `health` (`ok`, `expired`, `unscoped`, `missing`), `scope` (env, baseUrl, ttl, expiresAt) and, with `--env`, a `problem` when the checkpoint was captured for another origin. The checkpoint store is shared by every project, so the others are only counted (`scan.otherCheckpoints`); `cairn checkpoint list` shows them.
 
 Last runs are matched by the spec's own path. When no run in the scanned window recorded that path (a moved checkout), the newest run recorded under the spec's name is used and marked `matchedBy: "name"`: with the shared default artifact root it can come from a same-named spec of another project.

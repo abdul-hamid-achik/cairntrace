@@ -4,28 +4,30 @@ title: "Reusable Browser Test Snippets and Actions"
 
 # Reusable snippets
 
-The `imports:` block on a spec lets you split reusable parts across files and reference them by name. A snippet can be a single step, a sequence, or even an entire spec authored to be lifted into other specs.
+The `imports:` block on a spec lets you split reusable parts across files and call them by name. A snippet can be a single step or a sequence of steps, packaged as an action file.
 
 ## File layout
 
 ```text
 specs/
 ├── checks/
-│   ├── login-admin.yml
 │   └── assert-login-page.yml
 ├── flows/
 │   ├── checkout.yml
 │   └── checkout-success.yml
-├── snippets/
-│   ├── actions/
-│   │   ├── rotate-token.yml
-│   │   └── create-entity.yml
-│   └── conditional-steps/
-│       ├── dismiss-banner.yml
-│       └── env-conditional.yml
+└── snippets/
+    └── actions/
+        ├── login-admin.yml
+        ├── rotate-token.yml
+        ├── create-entity.yml
+        └── conditional/
+            ├── dismiss-banner.yml
+            └── env-conditional.yml
 ```
 
-The directory structure is convention only — `cairn` walks the spec root recursively, finds every `*.yml` file, and indexes them by `name`. The `name` is the spec's first comment or its filename minus `.yml`.
+The layout is convention only. Two rules matter: `cairn run <dir>` skips folders named `actions/` (and names starting with `_`), so keep reusable files under `actions/`; and an import is a file path, not a lookup by name.
+
+Each action file needs a snake_case `name:` (`^[a-z][a-z0-9_]*$`). `use:` calls the action by that name, not by its file name.
 
 ## Imports block
 
@@ -34,9 +36,9 @@ The directory structure is convention only — `cairn` walks the spec root recur
 version: 1
 name: checkout_rotate_token
 imports:
-  - actions/login-admin        # refers to specs/snippets/actions/login-admin.yml
-  - actions/rotate-token
-  - conditional-steps/dismiss-banner
+  - ../snippets/actions/login-admin.yml              # relative to this file; .yml required
+  - ../snippets/actions/rotate-token.yml
+  - ../snippets/actions/conditional/dismiss-banner.yml
 
 intent: Sign in, rotate an API token, and confirm the new token works.
 outcomes:
@@ -45,15 +47,17 @@ outcomes:
     verify:
       text: { contains: "Token rotated" }
 steps:
-  - use: login-admin            # uses the imported snippet
-  - use: rotate-token
-  - use: dismiss-banner
+  - use: login_admin            # uses the imported snippet
+  - use: rotate_token
+  - use: dismiss_banner
 ```
 
-`use:` invokes the imported snippet by name within the spec's `steps:`. An action file can declare its own `imports:` — paths relative to the action file — and `use:` them, so `login_as_supplier` reuses `login_base` instead of copying its steps:
+Each imported file declares its own name: `login-admin.yml` has `name: login_admin`, `rotate-token.yml` has `name: rotate_token`, and `dismiss-banner.yml` has `name: dismiss_banner`.
+
+`use:` invokes the imported snippet by name within the spec's `steps:`. Import paths are resolved relative to the file that imports them, and cairn does not add `.yml` or look for files by name, so a bare `actions/login-admin` fails with `ENOENT`. An action file can declare its own `imports:` (also relative to the action file) and `use:` them, so `login_as_supplier` reuses `login_base` instead of copying its steps:
 
 ```yaml
-# actions/roles/login_as_supplier.yml
+# snippets/actions/roles/login_as_supplier.yml
 version: 1
 name: login_as_supplier
 imports:
@@ -78,14 +82,14 @@ Do not lift things that are unique to one flow. The point of a snippet is to enc
 
 ## When you lift something to a snippet
 
-1. The contract (`intent + outcomes`) should still read sensibly without steps.
-2. The snippet's `intent` becomes "do the snippet's job" and `outcomes` becomes "snippet succeeded." The harness consuming the snippet measures success against its own outcomes, not the snippet's.
+1. Give the action a `description:` and declare what the caller must pass in `inputs:` (`required: true` when the action has no `vars:` default; an `inputs.<name>.default` must equal its `vars:` default), so its contract reads without opening the steps.
+2. Action files have no `intent:` or `outcomes:`. The calling spec's `outcomes:` decide whether the run succeeded, so a snippet's job is to leave the page in the state the next step expects.
 3. Refactor in two commits: the first introduces the snippet, the second swaps the inline steps for `use:`. This makes bisect readable.
 4. If multiple snippets need a shared precondition (e.g. "be on `/settings`"), put that precondition in a top-level login snippet — don't repeat it.
 
-## Snippet vs. action file
+## Snippet vs. top-level spec
 
-In early adoption, the term *action file* and *snippet* are interchangeable. There is no separate "action file" syntax — a snippet file is just a spec YAML with `intent + outcomes + steps`. The directory structure (`snippets/actions/`) is a convention so consumers can grep for them; the runner doesn't care.
+A snippet file is an action file: `version`, `name`, `steps`, and optionally `description`, `vars`, `inputs` and `imports`. It is validated strictly, so `intent` and `outcomes` are rejected in an action file (`unknown key(s) "intent", "outcomes"`). Only a top-level spec carries `intent` and `outcomes`. The directory structure (`snippets/actions/`) is a convention so consumers can grep for them; the runner doesn't care.
 
 ## Conditional steps
 
@@ -105,30 +109,27 @@ Conditional steps are excellent snippet content because the snippet itself decid
 
 ## Iteration
 
-When a snippet's contract changes — that's rare but it happens — the contract hash changes. Re-stamp:
+When a snippet changes, every spec that imports it changes behavior. Lint the specs that import it, then run them:
 
 ```bash
-cairn spec verify specs/snippets/actions/rotate-token.yml --stamp
-```
-
-Then run all specs that import that snippet to confirm the contract hash drift didn't break any consumer:
-
-```bash
+cairn spec lint specs/flows/checkout.yml
 cairn run specs --cold-start --format json
 ```
 
-Passing a directory (`cairn run specs/`) walks the spec tree recursively for `*.yml` in one shot — there is no separate `--recursive` flag.
+`cairn spec verify --stamp` writes a contract hash into top-level specs only; it rejects action files.
+
+Passing a directory (`cairn run specs/`) walks the spec tree recursively for `*.yml` in one shot, skipping `actions/` folders and `_`-prefixed names — there is no separate `--recursive` flag.
 
 ## Cookbook: building a snippet library
 
-A reasonable starting library for a SaaS-ish app:
+A reasonable starting library for a SaaS-ish app, under `specs/snippets/`:
 
 - `actions/login.yml` — sign in flow.
 - `actions/logout.yml` — sign out, defensively in case the test seeded a session.
 - `actions/rotate-token.yml`, `actions/revoke-token.yml` — token lifecycle.
 - `actions/seed-entity.yml`, `actions/delete-entity.yml` — entity lifecycle.
-- `conditional/dismiss-banner.yml`, `conditional/dismiss-cookie-banner.yml` — first-paint nags.
-- `conditional/env-prod-skip.yml` — short-circuit when running against prod.
+- `actions/conditional/dismiss-banner.yml`, `actions/conditional/dismiss-cookie-banner.yml` — first-paint nags.
+- `actions/conditional/env-prod-skip.yml` — short-circuit when running against prod.
 
 That set covers 80% of the import statements in the rest of the spec tree.
 
@@ -136,4 +137,4 @@ That set covers 80% of the import statements in the rest of the spec tree.
 
 - [Authoring](/authoring) — what makes a contract survive across months
 - [Steps](/steps) and [Verifiers](/verifiers) — the typed vocabularies
-- [Configuration](/configuration) — config keys, including snippet resolution paths
+- [Configuration](/configuration) — config keys

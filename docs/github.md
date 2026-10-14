@@ -47,7 +47,7 @@ A red CI on `main` is a P1. Open a revert PR before shipping the next fix. CI ru
 
 ## Releases
 
-Releases are SemVer tags mirrored to GitHub releases. Bump only `package.json`'s `version` in the release commit, then:
+Releases are SemVer tags mirrored to GitHub releases. Bump `version` in `package.json` and `desktop/package.json` (and nothing else) in the release commit, then:
 
 ```bash
 git tag -a vX.Y.Z -m "Release vX.Y.Z"

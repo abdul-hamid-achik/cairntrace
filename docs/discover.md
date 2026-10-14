@@ -81,7 +81,7 @@ The lighter variant: returns only the locator inventory (no accessibility tree).
 cairn snapshot https://app.com/login --testids --format md
 ```
 
-The flags match `discover` (without the setup flags). The report shape is the `inventory` object above plus `{ status, requestedUrl, url, backend }`.
+The flags match `discover` (without the setup flags, `--snapshot-mode` and `--max-bytes`, which `snapshot` does not accept). The report shape is the `inventory` object above plus `{ status, requestedUrl, url, backend }`.
 
 ## When to use which
 

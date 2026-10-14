@@ -91,7 +91,7 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
       timeoutMs: 60000
 ```
 
-`click.until` retries the click at most four times until `selectorGone`, `selector`, `text`, `notText`, or `url` (same matcher as `wait.url`) holds.
+`click.until` makes at most four attempts in total (the first click plus up to three re-clicks) until `selectorGone`, `selector`, `text`, `notText`, or `url` (same matcher as `wait.url`) holds.
 
 `near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Acme Corp, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `hasText: <str>` keeps only matches whose visible text contains that string (also whitespace-normalized, case-insensitive). Use it to pick `Yes` inside `[data-qa="…"]` without an eval:
 

@@ -5,7 +5,7 @@ description: Give Codex, Claude Code, Cursor, OpenCode, and other coding agents 
 
 # Agents
 
-Cairn is built for AI coding agents as much as for people. Every CLI command takes `--format json|yaml|md`, and every capability has a thin MCP tool that returns the same shape. The agent loop below is the recommended path for any harness that speaks MCP (Claude Code, Codex, Cursor, OpenCode, …) and the same loop works against the CLI for harnesses that don't.
+Cairn is built for AI coding agents as much as for people. Most CLI commands take `--format json|yaml|md` (exceptions are listed on [Commands](/commands)), and every capability has a thin MCP tool that returns the same shape. The agent loop below is the recommended path for any harness that speaks MCP (Claude Code, Codex, Cursor, OpenCode, …) and the same loop works against the CLI for harnesses that don't.
 
 To register the MCP server in your client, see [Connect your agent](/mcp#connect-your-agent).
 

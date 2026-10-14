@@ -48,9 +48,9 @@ A 4xx or 5xx in the network log tripped the always-on health check:
 
 If the failing request is a third party (analytics, telemetry), your spec is reporting on someone else's bug. Either fix the third party or accept the failure mode in the spec by relaxing `noFailedRequests: true` to a narrower outcome.
 
-## "Timeout: step exceeded 30000 ms"
+## A step timed out
 
-Step `timeoutMs` ceiling hit. Triage:
+A step hit its `timeoutMs` ceiling. Triage:
 
 - Is this the first step? Hydration waits. Use `open: { path: "/...", waitUntil: networkidle }` instead of a separate `wait:`.
 - Is this a form submission to a slow backend? Override per-step with `timeoutMs: 60000`.
@@ -101,9 +101,14 @@ The CLI couldn't connect to `agent-browser` or Playwright. Common causes:
 - The browser version doesn't match the Playwright version. Run `bunx playwright install chromium`.
 - The agent-browser service isn't running. Start it per its docs.
 
-## "Sealed environment: env X is reserved"
+## Reserved env name refused at config load
 
-You tried to override a reserved env var like `PATH` or `HOME`. The runner refuses. Workaround: rename the variable in your spec, e.g. `${env.MY_API_PATH}`.
+Config validation refuses reserved variables in two places:
+
+- A `services` export named `PATH`, `HOME`, `SHELL`, `NODE_OPTIONS`, or any `LD_*` / `DYLD_*` name: `"PATH" cannot be exported (it changes how every later process starts)`.
+- A suite `processEnv` name. The same process-start names are refused, plus `TVAULT_*`, `CAIRN_SUITE_VAR_*`, `CAIRN_MATRIX_*`, and cairn's own context variables (`CAIRN_SUITE`, `CAIRN_RUN_DIR`, `CAIRN_BASE_URL`, `CAIRN_CONFIG_DIR`, and the rest of that set): `"X" cannot be set by a suite (it changes how every process starts, or cairn sets it itself)`.
+
+Rename the export or the `processEnv` name. This check applies only to those config keys, not to `${env.X}` values in a spec.
 
 ## "My secret still appears in artifacts"
 
@@ -130,7 +135,7 @@ and rerun after hiding or replacing the sensitive UI/data.
   instead of `always`.
 - Too many screenshots? Set `artifacts.capture.screenshots: on-failure`.
 - Cold-start spinning up several services? Set `services.docker.reuseExisting: true`.
-- `wait: { load: networkidle }` waiting for an SPA with persistent polling? Switch to `load` and add `slowMo` per step.
+- `wait: { load: networkidle }` waiting for an SPA with persistent polling? Switch to `load`. `slowMo` is not a step key. To slow every action in a run for video capture, set `artifacts.video.slowMo` (ms); it applies only when video is captured.
 
 ## Behavior: the spec is flaky
 

@@ -3,6 +3,66 @@
 All notable changes to cairntrace are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.1] - 2026-10-14
+
+### Fixed
+
+- `cairn spec heal` no longer heals an empty or blank locator name onto an
+  arbitrary candidate (a blank name is a substring of nearly every name).
+- `cairn discover --help` states the real `--max-bytes` default.
+- The heal demo (`examples/flows/demos/_06-drifted-link.yml`, and the
+  `open_dashboard` action) now simulates a real rename, "Dashboard" →
+  "Open dashboard", which `cairn spec heal` proposes and `--verify` confirms.
+  The old demo asked for "Dashboard link", a reordered-words drift the healer
+  correctly refuses.
+- `open: { path }` accepts a missing `waitUntil` and defaults it to `load`.
+
+### Documentation
+
+- New site pages: `/examples` (real failing and passing runs with their
+  `report.html` and `agent_context.md`), `/compare`, `/ci`, `/exit-codes`;
+  `/github` is now Contributing.
+- Landing: Homebrew / npm / bun / curl install tabs, a "Connect your agent"
+  section for Claude Code, Cursor and Codex, and sections for agent
+  authoring, backend verifiers, suites, delegated runners and export.
+- Docs drift fixed across artifacts, annotate, authoring, catalog, checkpoint,
+  clip, commands, configuration, discover, distribution, glyphrun comparison,
+  services, snippets, steps, troubleshooting and verifiers; every YAML
+  example in `docs/` is now validated by a test.
+- `llms.txt` and `llms-full.txt` are generated at build; npm metadata gains a
+  description, keywords, homepage and `mcpName`, plus a `server.json` for the
+  MCP Registry.
+
+## [3.3.0] - 2026-10-13
+
+### Added
+
+- Critical cleanup for hooks: a suite `afterCritical: [...]` (also under
+  `env.<name>`) and `cairn run --after-critical <shell>` run right after
+  `after` on every exit path, a SIGINT/SIGTERM included; one that fails or
+  times out makes the run exit 8.
+- Service boot progress: `cairn services up` and the service boot of
+  `cairn run` stream redacted docker and provisioner `up` output on stderr
+  (rate-limited, secrets scrubbed across chunks) while stdout stays one
+  document.
+
+## [3.2.0] - 2026-10-12
+
+### Fixed
+
+- Export verify is honest: a skipped freshness gate is exit 3 (nothing
+  proven), never a pass, and a differential spec that compared nothing is
+  inconclusive.
+- Exported optional click/fill steps wait the runner's 750 ms presence window
+  instead of an immediate `isVisible()` check.
+- The glob fallback refuses extglob negation `!(...)` instead of inverting it.
+- A credential-named `${vars.X}` baked into a generated login is flagged as a
+  `credentialBaked` risk.
+- The exported table judge is shared with the runner instead of
+  reimplemented.
+- Dependencies: `@modelcontextprotocol/sdk` 1.32.1, `proxy-addr` 2.0.8; zod
+  pinned to one major for type checking, with knip keeping zod 4.
+
 ## [3.1.2] - 2026-10-05
 
 ### Fixed

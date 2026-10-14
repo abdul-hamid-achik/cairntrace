@@ -24,7 +24,7 @@ Passing run (`dashboard_nav`):
 - <a href="/examples/passing-run/agent_context.md" target="_self">Agent context (agent_context.md)</a>
 - <a href="/examples/passing-run/report.json" target="_self">Report data (report.json)</a>
 
-The trace file of the failing run (about 12 MB) is not published here, so the Trace link inside that report does not resolve.
+Traces and videos from the runs are not published here because of their size, so the Trace link inside the failing run's report does not resolve.
 
 ## Setup used
 

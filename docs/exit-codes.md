@@ -19,7 +19,7 @@ description: Stable exit codes for the cairn CLI, from success and outcome failu
 | 5    | heal made no progress                                                                     |
 | 6    | contract-hash mismatch                                                                    |
 | 7    | refused by the environment policy (nothing ran, or any refusal under `--strict-requires`) |
-| 8    | a critical teardown failed (`services.teardown` entry with `critical: true`); outranks every other code |
+| 8    | a critical teardown failed (`services.teardown` entry with `critical: true`, or the `services.provisioner` `down`); outranks every other code |
 | 9    | dirty state after the run (`run.verifyClean` found a survivor); outranks the run's own code except 8 |
 
 A delegated invocation (`environments.<n>.runner`) exits with its runner's code (0–9, or 130 / 143 when the remote side was interrupted) only when the evidence supports it: a 0 needs every planned run settled by a run directory of this invocation, consistent with the stream and the remote invocation's own summary; a 1 needs a run that failed. Otherwise it settles on 2 (or the code the evidence shows); see [Delegated runners](/delegate#exit-codes).

@@ -20,7 +20,9 @@ cairn clip latest --label "bug=0:12-0:18" --stash --tag regression
 
 Each `--label` is `name=start-end` in `MM:SS` (or `HH:MM:SS`). Vidtrace
 produces an MP4 for each label. Cairntrace moves the clips into
-`videos/clips/<label>.mp4` and writes `videos/clips/clips.json`. `--out`
+`videos/clips/<label>.mp4` and writes `videos/clips/clips.json`. In the file
+name, each run of characters outside `A-Z a-z 0-9 . _ -` becomes one `_` (so
+`login step` is written as `login_step.mp4`); `clips.json` keeps the label as given. `--out`
 controls vidtrace's working output location; the completed clips still join
 the run pack.
 

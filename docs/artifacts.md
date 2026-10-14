@@ -155,18 +155,17 @@ same data rendered as Markdown. `cairn context latest` prints
 
 When a run fails, the agent context is the post-mortem the next agent should read before touching anything. It contains, in order:
 
-1. The failing outcome and its expected-vs-actual evidence.
-2. The step that produced the state at failure (`<step-ordinal>: <kind> <summary>`).
-3. The last successful snapshot title (`Last good state`).
-4. The console and network errors in chronological order, capped at ~50 lines each.
-5. A diff against the most recent passing run of the same spec when one exists.
-6. After `cairn investigate`, ranked Code Matches as `file:line` pointers and
-   scores. Raw source snippets stay out of the compact handoff.
+1. `Run` and `Intent`: the spec, environment, backend, cold start, status, run id and the spec's intent.
+2. `Outcome results`: a `✓` or `✗` line per outcome, `·` for outcomes blocked by a failed step, and a note when no outcome was evaluated.
+3. `Last successful step`: the step id and its duration.
+4. `Failure evidence` (`Captured artifacts` when no outcome failed): paths relative to the run directory, starting with each failed outcome's evidence file (and its raw evidence when present) and a failed widget step's read-back, then the network and console logs, diagnostics, and trace or video. Paths only; the file contents are not inlined.
+5. `Reproduce`: a `cairn run` command for the spec, environment and `--headed`.
+6. `View the trace` and `View the video`, when those artifacts exist.
+7. `Brief (failed step)`: the brief for the failed step, when present.
+8. `Suggested next steps`: a next action for the outcome, plus a `cairn spec heal` hint in case the failure is UI drift.
+9. `Code Matches`, after `cairn investigate`: ranked `file:line` pointers with scores.
 
-The agent context is capped — kept under ~16 KB so it fits in any model
-context window. Detailed snapshots, per-step diagnostics, network/console
-streams, traces, and video remain in the run directory but not in
-`agent_context.md`.
+The file stays short because it points at evidence rather than copying it. Snapshots, per-step diagnostics, network and console streams, traces, and video remain in the run directory.
 
 ## `report.html`
 

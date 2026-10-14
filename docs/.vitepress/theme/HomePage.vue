@@ -235,7 +235,7 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <div class="ct-terminal-wrap ct-reveal ct-delay-2" aria-label="Example Cairntrace browser spec and passing run">
+        <div class="ct-terminal-wrap ct-reveal ct-delay-2" role="group" aria-label="Example Cairntrace browser spec and passing run">
           <div class="ct-terminal">
             <div class="ct-terminal-bar">
               <div class="ct-terminal-dots" aria-hidden="true">
@@ -244,7 +244,7 @@ onBeforeUnmount(() => {
               <span>examples/flows/01-dashboard-nav.yml</span>
               <span class="ct-terminal-status">example spec</span>
             </div>
-            <pre class="ct-code" aria-label="Cairntrace YAML example, excerpt from examples/flows/01-dashboard-nav.yml"><code><span class="ct-code-key">version:</span> <span class="ct-code-number">1</span>
+            <pre class="ct-code" role="group" aria-label="Cairntrace YAML example, excerpt from examples/flows/01-dashboard-nav.yml"><code><span class="ct-code-key">version:</span> <span class="ct-code-number">1</span>
 <span class="ct-code-key">name:</span> dashboard_nav
 <span class="ct-code-key">intent:</span> from the home page, follow "Open dashboard" and land on a working dashboard
 
@@ -503,7 +503,7 @@ onBeforeUnmount(() => {
               A contract hash covers <code>intent + outcomes</code>. Healing can rewrite drifted
               steps, but it cannot silently weaken what the spec promises.
             </p>
-            <div class="ct-hash" aria-label="Example contract hash">
+            <div class="ct-hash" role="group" aria-label="Example contract hash">
               <span>contractHash</span>
               <code>sha256:98b7…4a21</code>
               <strong>verified</strong>
@@ -523,7 +523,7 @@ onBeforeUnmount(() => {
           <article class="ct-mosaic-item ct-mosaic-evidence">
             <span class="ct-mosaic-label">Repair-ready evidence</span>
             <h3>Start with the answer, then drill into the trace.</h3>
-            <div class="ct-evidence-tree" aria-label="Run artifact structure">
+            <div class="ct-evidence-tree" role="group" aria-label="Run artifact structure">
               <span>run/checkout-2026…</span>
               <span>├─ <strong>agent_context.md</strong></span>
               <span>├─ <strong>report.html</strong></span>
@@ -540,7 +540,7 @@ onBeforeUnmount(() => {
               CLI commands support JSON, YAML, and Markdown. MCP tools mirror the same surface,
               so any capable coding agent can author, run, and read the same spec.
             </p>
-            <div class="ct-interface-row" aria-label="Supported interfaces">
+            <div class="ct-interface-row" role="group" aria-label="Supported interfaces">
               <span>CLI</span><span>MCP</span><span>JSON</span><span>YAML</span><span>MD</span>
             </div>
           </article>
@@ -687,7 +687,7 @@ onBeforeUnmount(() => {
           <a class="ct-text-link ct-text-link-second" href="/exit-codes">Exit codes <span aria-hidden="true">→</span></a>
         </div>
 
-        <pre class="ct-code ct-ci-code" aria-label="GitHub Actions step that runs a Cairntrace suite"><code># cairn is installed earlier in the job (see /ci)
+        <pre class="ct-code ct-ci-code" role="group" aria-label="GitHub Actions step that runs a Cairntrace suite"><code># cairn is installed earlier in the job (see /ci)
 - name: Browser acceptance
   run: cairn run --suite &lt;name&gt; --cold-start --junit cairn-junit.xml</code></pre>
       </div>

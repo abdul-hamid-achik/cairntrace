@@ -1,6 +1,6 @@
 {
   "name": "@thelacanians/cairntrace",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "Local-first browser testing for AI coding agents: write durable browser specs, replay them in a real browser, and get repair-ready evidence",
   "keywords": [
     "mcp",

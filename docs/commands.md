@@ -5,7 +5,7 @@ description: Reference Cairntrace commands for browser-spec discovery, verificat
 
 # Commands
 
-The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page below documents one command family — flags, flow, and when to reach for it. Every command supports `--format json|yaml|md` and has a stable JSON schema; no interactive prompts on `--json`/`--yaml` paths.
+The `cairn` CLI surface beyond the core run/spec/authoring commands. Each page below documents one command family — flags, flow, and when to reach for it. Most commands support `--format json|yaml|md` and have a stable JSON schema; `cairn login`, `cairn mcp`, `cairn context`, `cairn spec scaffold`, `cairn discover export`, `cairn discover sessions`, `cairn checkpoint delete` and `cairn checkpoint capture-from-session` take no `--format`. No interactive prompts on `--json`/`--yaml` paths.
 
 A command-line usage error (an unknown flag or command, a missing option value or required argument) exits `2`, on every command, and never `1`, which means a failed outcome: a typo cannot read as a red test. `--help` and `--version` exit `0`. See the [exit codes](/exit-codes) page for the full table.
 
@@ -21,7 +21,7 @@ A command-line usage error (an unknown flag or command, a missing option value o
 ## Authoring
 
 - [Project catalog](/catalog) — `cairn catalog --query` lists the actions, vars, verifiers, environments, flows and checkpoints a project already has.
-- [Author a spec from a request](/author-flow) — the recipe from a few sentences to a promoted spec; `cairn init agent-kit` writes a short version into your `AGENTS.md`.
+- [Author a spec from a request](/author-flow) — the recipe from a few sentences to a promoted spec; `cairn init agent-kit --write` writes a short version into your `AGENTS.md` (without `--write` it prints it).
 - [Lint, finish, promote](/authoring#lint-before-you-run) — `cairn spec lint [--fix]` gives fix-its before a run, `cairn spec finish` lints + runs cold + stamps when green, `cairn spec promote` moves a green draft out of `flows/_drafts`.
 
 ## Sessions

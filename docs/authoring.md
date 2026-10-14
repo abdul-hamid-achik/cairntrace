@@ -334,7 +334,7 @@ from a few sentences to a promoted spec.
 - `cairn spec lint my-spec.yml --format json` — fix-its before anything runs.
 - `cairn spec verify my-spec.yml --format json` — schema, contract hash, dead links, missing files, and the environments the spec may run in (`--env <name>` to check one).
 - `cairn spec finish my-spec.yml --format json` — lint, one golden run from a fresh browser, stamp when green. (`cairn run my-spec.yml --cold-start --format json` is the run on its own.)
-- `cairn docs snippets --format md` — to lift reusable `actions/*.yml` files.
+- `cairn catalog --kind actions --format md` — to list the reusable `actions/*.yml` files to lift.
 
 If `cairn spec finish` is green, paste the command into your project README. The next agent that touches that flow will thank you.
 

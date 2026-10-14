@@ -101,5 +101,6 @@ test("second", async ({ page }) => {
     const bad = await cairn(["import", "playwright-trace", "bad.zip"], dir);
     expect(bad.exitCode).toBe(2);
     expect(bad.stderr).toContain("cairn import playwright-trace:");
-  });
+    // Three CLI subprocesses: the 5s default flakes on a loaded machine.
+  }, 30_000);
 });

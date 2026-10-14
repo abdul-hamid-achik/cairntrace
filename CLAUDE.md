@@ -156,7 +156,7 @@ CAIRN_FORCE_TTY=1 ./bin/cairn run examples/flows/<spec>.yml --no-color
 ./bin/cairn spec verify examples/flows/<spec>.yml --stamp
 
 # heal a drifted spec end-to-end
-./bin/cairn spec heal examples/flows/06-drifted-link.yml --apply
+./bin/cairn spec heal examples/flows/demos/_06-drifted-link.yml --apply
 
 # one-shot page discovery (full a11y tree + locator inventory)
 ./bin/cairn discover /login --env local --format json

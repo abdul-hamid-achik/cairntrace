@@ -33,7 +33,7 @@ Cairntrace stores a browser behavior as a YAML spec: `intent` and `outcomes` are
 
 **Use Playwright test agents when** you want Playwright to plan, generate and repair `@playwright/test` files inside your project. The page describes a planner that writes a Markdown plan, a generator that writes test files and "verifies selectors and assertions live," and a healer that "executes the test suite and automatically repairs failing tests." That is a strong fit if you are already committed to Playwright Test.
 
-**Use Cairntrace when** you want the spec, not the generated test code, to be the source of truth. Cairntrace can export a spec to Playwright (`cairn export playwright`), and the contract hash keeps `intent` and `outcomes` fixed when heal runs. Be aware that Cairntrace's heal only edits locators in steps, so a locator inside an `expect` step can still be retargeted; `--verify` checks the rerun before a fix is kept.
+**Use Cairntrace when** you want the spec, not the generated test code, to be the source of truth. Cairntrace can export a spec to Playwright (`cairn export playwright`), and the contract hash keeps `intent` and `outcomes` fixed when heal runs. Be aware that Cairntrace's heal only patches locators on `click`, `hover`, `focus`, `fill`, `select`, `upload` and `download` steps, so a failing `expect` step is not healed and needs a manual fix; `--verify` checks the rerun before a fix is kept.
 
 ## Chrome DevTools MCP
 
