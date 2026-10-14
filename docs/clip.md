@@ -1,3 +1,7 @@
+---
+title: "Clip Browser Test Video Evidence"
+---
+
 # Clip
 
 `cairn clip` cuts named clips from a run's recorded video using [vidtrace](https://github.com/abdul-hamid-achik/vidtrace). Use it to extract the few seconds around a failure for a bug report, a PR review, or a regression reel — without re-running the spec. Vidtrace is optional (`cairn doctor` flags it); the command errors clearly when it is not on `$PATH`.

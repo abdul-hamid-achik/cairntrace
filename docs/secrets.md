@@ -1,3 +1,7 @@
+---
+title: "TinyVault Secrets for Browser Test Runs"
+---
+
 # Secrets
 
 `cairn secrets` checks the [TinyVault](https://github.com/abdul-hamid-achik/tinyvault) secrets provider and lists the secret keys a project exposes. It is the diagnostic for the `secrets.provider: tvault` config block — the command never prints secret *values*, only metadata.

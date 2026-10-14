@@ -1,3 +1,7 @@
+---
+title: "Doctor and Clean: Browser Test Environment Checks"
+---
+
 # Doctor & clean
 
 Two maintenance commands: `cairn doctor` checks that every external tool cairntrace talks to is reachable; `cairn clean` prunes old run directories so the artifact root does not fill the disk.

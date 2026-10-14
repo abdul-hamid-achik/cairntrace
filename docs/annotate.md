@@ -1,3 +1,7 @@
+---
+title: "Annotate Code Symbols with Browser Test Evidence"
+---
+
 # Annotate
 
 `cairn annotate` pins a note and/or opaque data to a code symbol via [codemap](https://github.com/abdul-hamid-achik/codemap). It is the bridge from a cairntrace finding ("this run failed like this") to a durable, searchable annotation on the code graph ("this symbol has a known failure mode"). Codemap is optional — the command reports a clear error and exits non-zero when it is not on `$PATH`.

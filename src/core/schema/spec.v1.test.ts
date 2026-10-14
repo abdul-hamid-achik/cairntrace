@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   LocatorSchema,
+  openPath,
+  type OpenStep,
   ReusableActionSchema,
   StepSchema,
   useActionName,
@@ -248,4 +250,35 @@ describe("network postconditions", () => {
       }
     },
   );
+});
+
+describe("open steps", () => {
+  it("accepts object-form open without waitUntil and defaults it to load", () => {
+    const parsed = StepSchema.parse({ open: { path: "/admin" } });
+    expect(parsed).toMatchObject({
+      open: { path: "/admin", waitUntil: "load" },
+    });
+    expect(openPath(parsed as OpenStep)).toBe("/admin");
+  });
+
+  it("keeps an explicit waitUntil and timeoutMs", () => {
+    expect(
+      StepSchema.parse({
+        open: { path: "/admin", waitUntil: "networkidle", timeoutMs: 45000 },
+      }),
+    ).toEqual({
+      open: { path: "/admin", waitUntil: "networkidle", timeoutMs: 45000 },
+    });
+  });
+
+  it("keeps the string form unchanged", () => {
+    expect(StepSchema.parse({ open: "/login" })).toEqual({ open: "/login" });
+  });
+
+  it("still rejects an unknown waitUntil value", () => {
+    expect(
+      StepSchema.safeParse({ open: { path: "/x", waitUntil: "commit" } })
+        .success,
+    ).toBe(false);
+  });
 });

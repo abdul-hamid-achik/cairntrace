@@ -1,7 +1,25 @@
 {
   "name": "@thelacanians/cairntrace",
   "version": "3.2.0",
-  "description": "Behavioral browser-spec layer for agent-in-session use",
+  "description": "Local-first browser testing for AI coding agents: write durable browser specs, replay them in a real browser, and get repair-ready evidence",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "claude-code",
+    "cursor",
+    "codex",
+    "e2e-testing",
+    "browser-testing",
+    "playwright",
+    "self-healing-tests",
+    "ai-agents",
+    "agent-browser"
+  ],
+  "homepage": "https://cairntrace.dev",
+  "bugs": {
+    "url": "https://github.com/abdul-hamid-achik/cairntrace/issues"
+  },
+  "mcpName": "io.github.abdul-hamid-achik/cairntrace",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -1,3 +1,7 @@
+---
+title: "Browser Login Checkpoints for E2E Test Specs"
+---
+
 # Checkpoints & login
 
 Browser-state checkpoints let a spec resume an already-authenticated session instead of replaying a login every run. `cairn login` captures a session by hand; `cairn checkpoint` manages the saved checkpoints. Together they satisfy the cold-start contract's "captured checkpoint" path.

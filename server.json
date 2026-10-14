@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.abdul-hamid-achik/cairntrace",
+  "description": "Browser testing for AI coding agents: durable browser specs, real-browser replay, repair-ready evidence",
+  "repository": {
+    "url": "https://github.com/abdul-hamid-achik/cairntrace",
+    "source": "github"
+  },
+  "version": "3.2.0",
+  "websiteUrl": "https://cairntrace.dev",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@thelacanians/cairntrace",
+      "version": "3.2.0",
+      "runtimeHint": "bunx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}

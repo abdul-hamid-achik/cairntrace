@@ -1,27 +1,142 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { track } from '@vercel/analytics'
 
-const installCommand =
-  'git clone https://github.com/abdul-hamid-achik/cairntrace && cd cairntrace && bun install'
+type InstallTab = 'brew' | 'npm' | 'bun' | 'curl'
+type InstallBox = 'hero' | 'final'
+type AgentTab = 'claude' | 'cursor' | 'codex'
 
-const copied = ref(false)
-let resetTimer: ReturnType<typeof setTimeout> | undefined
+const installOptions: { id: InstallTab; label: string; command: string }[] = [
+  {
+    id: 'brew',
+    label: 'Homebrew',
+    command: 'brew install abdul-hamid-achik/tap/cairntrace',
+  },
+  {
+    id: 'npm',
+    label: 'npm',
+    command: 'npm install -g @thelacanians/cairntrace',
+  },
+  {
+    id: 'bun',
+    label: 'bun',
+    command: 'bun add -g @thelacanians/cairntrace',
+  },
+  {
+    id: 'curl',
+    label: 'curl',
+    command:
+      'curl -fsSL https://raw.githubusercontent.com/abdul-hamid-achik/cairntrace/main/install.sh | bash',
+  },
+]
 
-async function copyInstallCommand() {
+const agentOptions: { id: AgentTab; label: string; file: string; code: string }[] = [
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    file: 'run in your terminal',
+    code: 'claude mcp add cairntrace -- cairn mcp',
+  },
+  {
+    id: 'cursor',
+    label: 'Cursor',
+    file: '.cursor/mcp.json',
+    code: `{
+  "mcpServers": {
+    "cairntrace": {
+      "command": "cairn",
+      "args": ["mcp"]
+    }
+  }
+}`,
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    file: '~/.codex/config.toml',
+    code: `[mcp_servers.cairntrace]
+command = "cairn"
+args = ["mcp"]`,
+  },
+]
+
+const installBoxes: InstallBox[] = ['hero', 'final']
+const activeInstall = reactive<Record<InstallBox, InstallTab>>({ hero: 'brew', final: 'brew' })
+const copied = reactive<Record<InstallBox, boolean>>({ hero: false, final: false })
+const resetTimers: Partial<Record<InstallBox, ReturnType<typeof setTimeout>>> = {}
+const activeAgent = ref<AgentTab>('claude')
+const activeAgentOption = computed(
+  () => agentOptions.find((option) => option.id === activeAgent.value) ?? agentOptions[0],
+)
+
+function installFor(box: InstallBox) {
+  return installOptions.find((option) => option.id === activeInstall[box]) ?? installOptions[0]
+}
+
+async function copyInstall(box: InstallBox) {
+  const option = installFor(box)
   try {
-    await navigator.clipboard.writeText(installCommand)
-    copied.value = true
-    if (resetTimer) clearTimeout(resetTimer)
-    resetTimer = setTimeout(() => {
-      copied.value = false
+    await navigator.clipboard.writeText(option.command)
+    copied[box] = true
+    track('install_copy', { location: box, method: option.id })
+    clearTimeout(resetTimers[box])
+    resetTimers[box] = setTimeout(() => {
+      copied[box] = false
     }, 1800)
   } catch {
-    copied.value = false
+    copied[box] = false
   }
 }
 
+// Roving-tabindex keyboard support for the tablists (WAI-ARIA tabs pattern).
+function moveTabFocus(
+  event: KeyboardEvent,
+  ids: string[],
+  current: string,
+  prefix: string,
+  select: (id: string) => void,
+) {
+  const index = ids.indexOf(current)
+  let next = -1
+  if (event.key === 'ArrowRight') next = (index + 1) % ids.length
+  else if (event.key === 'ArrowLeft') next = (index - 1 + ids.length) % ids.length
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = ids.length - 1
+  if (next < 0) return
+  event.preventDefault()
+  const id = ids[next]
+  select(id)
+  document.getElementById(`${prefix}-${id}`)?.focus()
+}
+
+function onInstallKeydown(event: KeyboardEvent, box: InstallBox) {
+  moveTabFocus(
+    event,
+    installOptions.map((option) => option.id),
+    activeInstall[box],
+    `ct-install-${box}-tab`,
+    (id) => {
+      activeInstall[box] = id as InstallTab
+    },
+  )
+}
+
+function onAgentKeydown(event: KeyboardEvent) {
+  moveTabFocus(
+    event,
+    agentOptions.map((option) => option.id),
+    activeAgent.value,
+    'ct-agent-tab',
+    (id) => {
+      activeAgent.value = id as AgentTab
+    },
+  )
+}
+
 onBeforeUnmount(() => {
-  if (resetTimer) clearTimeout(resetTimer)
+  for (const timer of Object.values(resetTimers)) {
+    if (timer) clearTimeout(timer)
+  }
 })
 </script>
 
@@ -42,24 +157,69 @@ onBeforeUnmount(() => {
           </p>
 
           <div class="ct-hero-actions ct-reveal ct-delay-3">
-            <a class="ct-button ct-button-primary" href="/quickstart">
+            <a
+              class="ct-button ct-button-primary"
+              href="/quickstart"
+              @click="track('cta_click', { cta: 'quickstart', location: 'hero' })"
+            >
               Run your first spec
               <span aria-hidden="true">→</span>
             </a>
-            <a class="ct-button ct-button-secondary" href="https://github.com/abdul-hamid-achik/cairntrace">View on GitHub</a>
+            <a
+              class="ct-button ct-button-secondary"
+              href="https://github.com/abdul-hamid-achik/cairntrace"
+              @click="track('cta_click', { cta: 'github', location: 'hero' })"
+            >View on GitHub</a>
           </div>
 
-          <div class="ct-install ct-reveal ct-delay-4" aria-label="Install Cairntrace from source">
-            <span class="ct-install-prompt" aria-hidden="true">$</span>
-            <code>{{ installCommand }}</code>
-            <button type="button" :aria-label="copied ? 'Install command copied' : 'Copy install command'" @click="copyInstallCommand">
-              {{ copied ? 'Copied' : 'Copy' }}
-            </button>
-            <span class="visually-hidden" aria-live="polite">{{ copied ? 'Install command copied to clipboard.' : '' }}</span>
+          <div class="ct-install-stack ct-reveal ct-delay-4" role="group" aria-label="Install Cairntrace">
+            <p class="ct-install-label"><span class="ct-install-step-number" aria-hidden="true">1</span> Install</p>
+            <div class="ct-install-tabs" role="tablist" aria-label="Install method">
+              <button
+                v-for="option in installOptions"
+                :id="`ct-install-hero-tab-${option.id}`"
+                :key="option.id"
+                type="button"
+                role="tab"
+                class="ct-install-tab"
+                :aria-selected="activeInstall.hero === option.id ? 'true' : 'false'"
+                :aria-controls="'ct-install-hero-panel'"
+                :tabindex="activeInstall.hero === option.id ? 0 : -1"
+                @click="activeInstall.hero = option.id"
+                @keydown="onInstallKeydown($event, 'hero')"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <div
+              id="ct-install-hero-panel"
+              class="ct-install"
+              role="tabpanel"
+              :aria-labelledby="`ct-install-hero-tab-${activeInstall.hero}`"
+            >
+              <span class="ct-install-prompt" aria-hidden="true">$</span>
+              <code>{{ installFor('hero').command }}</code>
+              <button
+                type="button"
+                :aria-label="copied.hero ? 'Install command copied' : 'Copy install command'"
+                @click="copyInstall('hero')"
+              >
+                {{ copied.hero ? 'Copied' : 'Copy' }}
+              </button>
+              <span class="visually-hidden" aria-live="polite">{{ copied.hero ? 'Install command copied to clipboard.' : '' }}</span>
+            </div>
+            <div class="ct-install-step">
+              <span class="ct-install-step-number" aria-hidden="true">2</span>
+              <span>Check the environment</span>
+              <code>cairn doctor</code>
+            </div>
           </div>
 
           <p class="ct-install-note ct-reveal ct-delay-4">
-            Open source. MIT licensed. Runs from source with Bun.
+            Needs Bun 1.3+ (Homebrew installs it) · browser: agent-browser or Playwright
+          </p>
+          <p class="ct-install-note ct-install-note-muted ct-reveal ct-delay-4">
+            Open source · MIT licensed · <a class="ct-inline-link" href="/distribution">Build from source</a>
           </p>
         </div>
 
@@ -69,31 +229,37 @@ onBeforeUnmount(() => {
               <div class="ct-terminal-dots" aria-hidden="true">
                 <span></span><span></span><span></span>
               </div>
-              <span>flows/orders.yml</span>
-              <span class="ct-terminal-status">contract locked</span>
+              <span>examples/flows/01-dashboard-nav.yml</span>
+              <span class="ct-terminal-status">example spec</span>
             </div>
-            <pre class="ct-code" aria-label="Cairntrace YAML example"><code><span class="ct-code-key">version:</span> <span class="ct-code-number">1</span>
-<span class="ct-code-key">name:</span> orders_filter
-<span class="ct-code-key">intent:</span> an admin can find failed orders
-
-<span class="ct-code-key">session:</span>
-  <span class="ct-code-key">resume:</span> admin
+            <pre class="ct-code" aria-label="Cairntrace YAML example, excerpt from examples/flows/01-dashboard-nav.yml"><code><span class="ct-code-key">version:</span> <span class="ct-code-number">1</span>
+<span class="ct-code-key">name:</span> dashboard_nav
+<span class="ct-code-key">intent:</span> from the home page, follow "Open dashboard" and land on a working dashboard
 
 <span class="ct-code-key">outcomes:</span>
-  - <span class="ct-code-key">id:</span> failed_orders_visible
-    <span class="ct-code-key">description:</span> only failed orders remain
+  - <span class="ct-code-key">id:</span> url_is_dashboard
     <span class="ct-code-key">verify:</span>
-      <span class="ct-code-key">text:</span> { <span class="ct-code-key">contains:</span> <span class="ct-code-string">"Payment failed"</span> }
+      <span class="ct-code-key">url:</span> { <span class="ct-code-key">endsWith:</span> /dashboard.html }
+  - <span class="ct-code-key">id:</span> dashboard_heading_visible
+    <span class="ct-code-key">verify:</span>
+      <span class="ct-code-key">text:</span> { <span class="ct-code-key">contains:</span> <span class="ct-code-string">Dashboard</span> }
+  - <span class="ct-code-key">id:</span> no_console_errors
+    <span class="ct-code-key">verify:</span>
+      <span class="ct-code-key">console:</span> { <span class="ct-code-key">errorsMax:</span> <span class="ct-code-number">0</span> }
 
 <span class="ct-code-key">steps:</span>
-  - <span class="ct-code-key">open:</span> { <span class="ct-code-key">path:</span> /orders, <span class="ct-code-key">waitUntil:</span> networkidle }
-  - <span class="ct-code-key">click:</span> { <span class="ct-code-key">by:</span> role, <span class="ct-code-key">role:</span> button, <span class="ct-code-key">name:</span> <span class="ct-code-string">"Failed"</span> }</code></pre>
+  - <span class="ct-code-key">id:</span> open_home
+    <span class="ct-code-key">open:</span> http://localhost:8787/
+  - <span class="ct-code-key">id:</span> click_open_dashboard
+    <span class="ct-code-key">click:</span> { <span class="ct-code-key">by:</span> role, <span class="ct-code-key">role:</span> link, <span class="ct-code-key">name:</span> <span class="ct-code-string">Open dashboard</span> }
+  - <span class="ct-code-key">id:</span> wait_for_dashboard
+    <span class="ct-code-key">wait:</span> { <span class="ct-code-key">text:</span> Dashboard, <span class="ct-code-key">timeoutMs:</span> <span class="ct-code-number">5000</span> }</code></pre>
             <div class="ct-run-result">
-              <div class="ct-run-command"><span aria-hidden="true">$</span> cairn run flows/orders.yml --cold-start --json</div>
+              <div class="ct-run-command"><span aria-hidden="true">$</span> cairn run examples/flows/01-dashboard-nav.yml --cold-start</div>
               <div class="ct-result-row">
                 <span class="ct-result-check" aria-hidden="true">✓</span>
                 <strong>passed</strong>
-                <span>1 outcome · 2 steps · 3.8s</span>
+                <span>3 outcomes · 3 steps</span>
               </div>
               <div class="ct-result-artifact">report.html · agent_context.md · outcomes/</div>
             </div>
@@ -212,6 +378,57 @@ onBeforeUnmount(() => {
             </div>
           </li>
         </ol>
+      </div>
+    </section>
+
+    <section class="ct-section ct-connect-section" aria-labelledby="ct-connect-title">
+      <div class="ct-shell ct-problem-grid ct-connect-grid">
+        <div class="ct-section-heading">
+          <p class="ct-kicker">Connect your agent</p>
+          <h2 id="ct-connect-title">Register one MCP server and your agent gets the browser as a tool.</h2>
+          <p>
+            Cairntrace runs as a stdio MCP server started with <code>cairn mcp</code>. Register it
+            once in your harness, then have the agent call <code>cairn_doctor</code> to verify the
+            setup, then <code>cairn_explain</code> once to read the tool surface.
+          </p>
+          <a
+            class="ct-text-link"
+            href="/mcp"
+            @click="track('cta_click', { cta: 'mcp_reference', location: 'connect' })"
+          >Full MCP reference <span aria-hidden="true">→</span></a>
+        </div>
+
+        <div class="ct-agent-tabs">
+          <div class="ct-agent-tablist" role="tablist" aria-label="Agent harness">
+            <button
+              v-for="option in agentOptions"
+              :id="`ct-agent-tab-${option.id}`"
+              :key="option.id"
+              type="button"
+              role="tab"
+              class="ct-agent-tab"
+              :aria-selected="activeAgent === option.id ? 'true' : 'false'"
+              aria-controls="ct-agent-panel"
+              :tabindex="activeAgent === option.id ? 0 : -1"
+              @click="activeAgent = option.id"
+              @keydown="onAgentKeydown"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <div
+            id="ct-agent-panel"
+            class="ct-agent-panel"
+            role="tabpanel"
+            :aria-labelledby="`ct-agent-tab-${activeAgent}`"
+            tabindex="0"
+          >
+            <p class="ct-agent-file">
+              <span>{{ activeAgentOption.file }}</span>
+            </p>
+            <pre class="ct-code ct-agent-code"><code>{{ activeAgentOption.code }}</code></pre>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -370,11 +587,56 @@ onBeforeUnmount(() => {
         <div>
           <p class="ct-kicker ct-kicker-light">The browser gets the final word</p>
           <h2>Turn “looks done” into evidence.</h2>
-          <p>Clone Cairntrace, run the demo flow, and give your next coding task a browser contract.</p>
+          <p>Install Cairntrace, run <code>cairn doctor</code>, and give your next coding task a browser contract.</p>
+
+          <div class="ct-install-stack ct-final-install" role="group" aria-label="Install Cairntrace">
+            <div class="ct-install-tabs" role="tablist" aria-label="Install method">
+              <button
+                v-for="option in installOptions"
+                :id="`ct-install-final-tab-${option.id}`"
+                :key="option.id"
+                type="button"
+                role="tab"
+                class="ct-install-tab"
+                :aria-selected="activeInstall.final === option.id ? 'true' : 'false'"
+                aria-controls="ct-install-final-panel"
+                :tabindex="activeInstall.final === option.id ? 0 : -1"
+                @click="activeInstall.final = option.id"
+                @keydown="onInstallKeydown($event, 'final')"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <div
+              id="ct-install-final-panel"
+              class="ct-install"
+              role="tabpanel"
+              :aria-labelledby="`ct-install-final-tab-${activeInstall.final}`"
+            >
+              <span class="ct-install-prompt" aria-hidden="true">$</span>
+              <code>{{ installFor('final').command }}</code>
+              <button
+                type="button"
+                :aria-label="copied.final ? 'Install command copied' : 'Copy install command'"
+                @click="copyInstall('final')"
+              >
+                {{ copied.final ? 'Copied' : 'Copy' }}
+              </button>
+              <span class="visually-hidden" aria-live="polite">{{ copied.final ? 'Install command copied to clipboard.' : '' }}</span>
+            </div>
+          </div>
         </div>
         <div class="ct-final-actions">
-          <a class="ct-button ct-button-light" href="/quickstart">Start the quickstart <span aria-hidden="true">→</span></a>
-          <a class="ct-button ct-button-ghost" href="/agents">Connect an agent</a>
+          <a
+            class="ct-button ct-button-light"
+            href="/quickstart"
+            @click="track('cta_click', { cta: 'quickstart', location: 'final' })"
+          >Start the quickstart <span aria-hidden="true">→</span></a>
+          <a
+            class="ct-button ct-button-ghost"
+            href="/mcp"
+            @click="track('cta_click', { cta: 'connect_agent', location: 'final' })"
+          >Connect an agent</a>
         </div>
       </div>
     </section>

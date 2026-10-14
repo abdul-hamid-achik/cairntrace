@@ -11,7 +11,7 @@ const pageDescriptions: Record<string, string> = {
   "overview.md":
     "Learn how Cairntrace turns intent and outcomes into durable behavioral browser specs for coding agents, with repairable steps and local-first evidence.",
   "quickstart.md":
-    "Install Cairntrace from source, write a typed browser spec, verify its contract, and run your first cold-start browser check.",
+    "Install Cairntrace with Homebrew or npm, add a browser driver, and run your first browser check that confirms a page behaves as a user expects.",
   "authoring.md":
     "Author durable Cairntrace browser specs with typed outcomes, repairable steps, contract hashes, semantic locators, and cold-start replay.",
   "steps.md":

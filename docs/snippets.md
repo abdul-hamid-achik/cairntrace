@@ -1,3 +1,7 @@
+---
+title: "Reusable Browser Test Snippets and Actions"
+---
+
 # Reusable snippets
 
 The `imports:` block on a spec lets you split reusable parts across files and reference them by name. A snippet can be a single step, a sequence, or even an entire spec authored to be lifted into other specs.

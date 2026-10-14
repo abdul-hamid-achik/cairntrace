@@ -7,6 +7,61 @@ description: Connect AI coding agents to Cairntrace MCP tools for browser-spec d
 
 `cairn mcp` runs the same runner as the CLI as a **stdio MCP server**. Every CLI surface that is reasonable for an agent has a matching `cairn_<name>` tool that returns the same JSON shape as the CLI's `--format json`. There are no per-agent code paths.
 
+## Connect your agent
+
+Install the CLI first (see [Distribution](/distribution)): `brew install abdul-hamid-achik/tap/cairntrace` or `npm install -g @thelacanians/cairntrace` (the npm package needs Bun >=1.3.0 on PATH; Homebrew installs it for you). Then register `cairn mcp` as a stdio server in your client:
+
+::: code-group
+
+```bash [Claude Code]
+claude mcp add cairntrace -- cairn mcp
+```
+
+```jsonc [Cursor]
+// .cursor/mcp.json
+{
+  "mcpServers": {
+    "cairntrace": {
+      "command": "cairn",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+```toml [Codex]
+# ~/.codex/config.toml
+[mcp_servers.cairntrace]
+command = "cairn"
+args = ["mcp"]
+```
+
+```json [Generic mcpServers]
+{
+  "mcpServers": {
+    "cairntrace": {
+      "command": "cairn",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+:::
+
+**Verify the connection.** Start a session in your client and ask the agent to call `cairn_doctor`. It runs the same environment health check as `cairn doctor` and reports the runtimes, browser backends and optional integrations it checked. Resolve any failing check before running specs. Then call `cairn_explain` once for the current tool surface.
+
+::: warning Opt-in flags
+Without flags, MCP tools that would start config services (`cairn_run`, `cairn_spec_finish`, `cairn_audit`) fail with exit 4 instead of starting them, `cairn_services_up` and `cairn_services_down` refuse outright, and a `cairn_run` request carrying `before`/`after` hooks is rejected. Both gates are opt-in:
+
+- `--allow-hooks` (or `CAIRN_MCP_ALLOW_HOOKS=1`) accepts `before`/`after` hooks in `cairn_run` requests; they run arbitrary shell.
+- `--allow-services` (or `CAIRN_MCP_ALLOW_SERVICES=1`) lets MCP tools start config services (docker, seed, tmux) and run their teardown: `cairn_run` / `cairn_spec_finish` / `cairn_audit` without `noServices`, and `cairn_services_up` / `cairn_services_down`. Never enable it where config services provision remote or paid infrastructure.
+
+Add them only for clients you trust with that. For example: `claude mcp add cairntrace -- cairn mcp --allow-services`. The full rules are under `cairn_run` in the tool surface below.
+:::
+
+To add a short section on authoring specs to your project's `AGENTS.md`, run `cairn init agent-kit --write`.
+
 ## Transport
 
 stdio JSON-RPC only. `cairn mcp` reads JSON-RPC from stdin, writes responses to stdout, and keeps its own logs on stderr (anything other than JSON-RPC on stdout would break the protocol). It is meant to be spawned by an MCP client.
@@ -198,22 +253,11 @@ to an untrusted MCP client.
 
 ## Cookbook: setting up an MCP client
 
-For Claude Code, Codex, Cursor, OpenCode, or any other MCP-aware harness, register the `cairn` binary on stdio:
+For Claude Code, Codex, Cursor, OpenCode, or any other MCP-aware harness, register `cairn mcp` on stdio as shown in [Connect your agent](#connect-your-agent).
 
-```json
-{
-  "mcpServers": {
-    "cairntrace": {
-      "command": "cairn",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+Add `--allow-hooks` / `--allow-services` to `args` only as described in the opt-in flags note in [Connect your agent](#connect-your-agent).
 
-Use `"args": ["mcp", "--allow-hooks"]` only for trusted clients that need `cairn_run` before/after hooks, and add `"--allow-services"` only where an agent may start and tear down the config services itself (never for environments whose services provision paid infrastructure).
-
-Pin the binary version in your setup script (`brew install abdul-hamid-achik/tap/cairntrace`, `npm install -g @thelacanians/cairntrace@3.0.0`, or `git checkout v3.0.0 && bun install`). A 3.x server starts config services only as `cairn mcp --allow-services` and runs `before`/`after` hooks only as `cairn mcp --allow-hooks`. The first `cairn_explain` call you make surfaces the current tool surface so the agent can bootstrap without guessing.
+Pin the binary version in your setup script, to the release you tested: a Homebrew formula version, an npm version (`npm install -g @thelacanians/cairntrace@<version>`), or a release tag (`git checkout v<version> && bun install`). Check `cairn --version` after install. A server starts config services only when launched with `--allow-services`, and accepts request-carried `before`/`after` hooks only with `--allow-hooks`. The first `cairn_explain` call you make surfaces the current tool surface so the agent can bootstrap without guessing.
 
 ## See also
 

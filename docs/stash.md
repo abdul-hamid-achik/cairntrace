@@ -1,3 +1,7 @@
+---
+title: "Stash and Publish Browser Test Run Artifacts"
+---
+
 # Stash, pin and publish
 
 `cairn stash` persists run artifact packs in the local [file.cheap](https://file.cheap) vault so they survive Cairntrace retention cleanup and remain searchable across runs on this machine. A stash is not uploaded or replicated automatically; `cairn publish` is the explicit way to send one run to the private file.cheap artifact service. file.cheap is optional to normal Cairntrace runs; stash commands return a clear error when it is unavailable (`cairn doctor` flags it).

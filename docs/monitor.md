@@ -1,3 +1,7 @@
+---
+title: "Browser Process CPU and Memory Monitoring for E2E Tests"
+---
+
 # Process monitoring
 
 `cairn run --monitor` samples the browser process tree (CPU/RSS) during a run via the external [monitor](https://github.com/abdul-hamid-achik/monitor) CLI. It turns "the spec got slow" into a measured, assertable fact. Monitor is optional and zero-cost when absent — every call degrades gracefully.
