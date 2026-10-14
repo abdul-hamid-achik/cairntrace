@@ -2565,12 +2565,13 @@ steps:
     expect(videoEvents[1]).toMatchObject({ action: "stop" });
   });
 
-  it("passes slowMo and speed to startVideo when configured", async () => {
+  it("primes the video viewport before trace and cold-start, preserving timing and the final resize", async () => {
     const specPath = await writeSpec(
       "video-slowmo",
       `version: 1
 name: video_slowmo
 intent: slowMo and speed should be passed to the backend
+viewport: { width: 1560, height: 1100 }
 artifacts:
   capture:
     video: always
@@ -2588,9 +2589,24 @@ steps:
 `,
     );
     const backend = new OrderedVideoMockBackend();
-    const result = await runSpec({ specPath, backend, artifactRoot });
+    const result = await runSpec({
+      specPath,
+      backend,
+      artifactRoot,
+      coldStart: true,
+    });
     expect(result.status).toBe("passed");
-    expect(backend.captureStartOrder).toEqual(["video", "trace"]);
+    expect(backend.captureStartOrder).toEqual([
+      "viewport",
+      "video",
+      "trace",
+      "cold-start",
+      "viewport",
+    ]);
+    expect(backend.viewportLog).toEqual([
+      { width: 1560, height: 1100 },
+      { width: 1560, height: 1100 },
+    ]);
     expect(backend.startVideoCalls).toBe(1);
     expect(backend.lastVideoOpts).toEqual({ slowMo: 500, speed: 0.5 });
 
@@ -3221,6 +3237,16 @@ class VideoMockBackend extends MockBrowserBackend {
 
 class OrderedVideoMockBackend extends VideoMockBackend {
   captureStartOrder: string[] = [];
+
+  override async setViewport(width: number, height: number): Promise<void> {
+    this.captureStartOrder.push("viewport");
+    await super.setViewport(width, height);
+  }
+
+  override async clearBrowserState(): Promise<void> {
+    this.captureStartOrder.push("cold-start");
+    await super.clearBrowserState();
+  }
 
   override async startVideo(opts?: {
     slowMo?: number;
