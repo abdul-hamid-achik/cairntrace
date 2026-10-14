@@ -90,8 +90,8 @@ describe("PlaywrightAdapter video", () => {
       const originalLaunch = chromium.launch.bind(chromium);
       const launch = vi
         .spyOn(chromium, "launch")
-        .mockImplementation(async (options) => {
-          const browser = await originalLaunch(options);
+        .mockImplementation(async (launchOptions) => {
+          const browser = await originalLaunch(launchOptions);
           const createContext = browser.newContext.bind(browser);
           vi.spyOn(browser, "newContext").mockImplementation(
             async (options) => {

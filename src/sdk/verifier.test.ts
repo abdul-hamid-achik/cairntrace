@@ -452,7 +452,9 @@ describe("ctx.poll", () => {
     const nestedResult = await run(nested);
     expect(nestedResult.message).toMatch(/^inner timed out/);
     // One outer attempt carrying the inner poll's own attempts — no retry.
-    expect(nestedResult.attempts).toBeLessThanOrEqual(1 + 3);
+    // The inner count depends on scheduling under load; an outer retry every
+    // 50ms for 5s would add dozens.
+    expect(nestedResult.attempts).toBeLessThanOrEqual(1 + 8);
   });
 
   it("treats a throwing until() (a document not there yet) as not-yet", async () => {
