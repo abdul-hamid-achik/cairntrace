@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -164,6 +165,8 @@ export class AgentBrowserAdapter implements BrowserBackend {
    * of each spending the full deadline again.
    */
   private screenshotTimeout: string | undefined;
+  /** Optional action deadline propagated to every child command in a step. */
+  private readonly stepDeadline = new AsyncLocalStorage<number>();
   /**
    * Set when a timed-out capture was still blocking the daemon's serial
    * queue after the drain window (see {@link drainAfterScreenshotTimeout}):
@@ -198,29 +201,31 @@ export class AgentBrowserAdapter implements BrowserBackend {
     if ("batch" in step) return this.runBatchStep(step);
     if ("download" in step) return this.runDownloadStep(step);
     if ("click" in step)
-      return this.runInteractiveStep(
-        clickLocator(step),
-        "click",
-        undefined,
-        step.settleMs,
+      return this.runWithStepTimeout(step.timeoutMs, () =>
+        this.runInteractiveStep(
+          clickLocator(step),
+          "click",
+          undefined,
+          step.settleMs,
+        ),
       );
     if ("hover" in step) return this.runInteractiveStep(step.hover, "hover");
     if ("focus" in step) return this.runInteractiveStep(step.focus, "focus");
     if ("fill" in step) {
-      return this.runInteractiveStep(
-        fillLocator(step),
-        "fill",
-        step.fill.value,
+      return this.runWithStepTimeout(step.timeoutMs, () =>
+        this.runInteractiveStep(fillLocator(step), "fill", step.fill.value),
       );
     }
     if ("type" in step) {
       const { value, delayMs, ...locator } = step.type;
-      return this.runInteractiveStep(
-        locator as Locator,
-        "type",
-        value,
-        undefined,
-        delayMs,
+      return this.runWithStepTimeout(step.timeoutMs, () =>
+        this.runInteractiveStep(
+          locator as Locator,
+          "type",
+          value,
+          undefined,
+          delayMs,
+        ),
       );
     }
     if ("select" in step) {
@@ -616,7 +621,10 @@ export class AgentBrowserAdapter implements BrowserBackend {
 
   /* ----- page info ----- */
 
-  async getUrl(): Promise<string> {
+  async getUrl(timeoutMs?: number): Promise<string> {
+    if (timeoutMs !== undefined) {
+      return this.runWithStepTimeout(timeoutMs, () => this.getUrl());
+    }
     const r = await this.invoke(["get", "url"]);
     return r.stdout.trim();
   }
@@ -626,7 +634,10 @@ export class AgentBrowserAdapter implements BrowserBackend {
     return r.stdout.trim();
   }
 
-  async getText(selector: string): Promise<string> {
+  async getText(selector: string, timeoutMs?: number): Promise<string> {
+    if (timeoutMs !== undefined) {
+      return this.runWithStepTimeout(timeoutMs, () => this.getText(selector));
+    }
     // The text verifier passes the special token "page" for whole-page text;
     // translate that to a real selector so agent-browser can resolve it.
     const real = selector === "page" ? "body" : selector;
@@ -672,7 +683,10 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
   }
 
-  async getCount(selector: string): Promise<number> {
+  async getCount(selector: string, timeoutMs?: number): Promise<number> {
+    if (timeoutMs !== undefined) {
+      return this.runWithStepTimeout(timeoutMs, () => this.getCount(selector));
+    }
     const r = await this.invoke(["get", "count", selector]);
     // A selector that legitimately matches nothing exits 0 with "0", so a
     // failed invocation is a real error — never 0, which `count: {equals: 0}`
@@ -699,7 +713,14 @@ export class AgentBrowserAdapter implements BrowserBackend {
     return n;
   }
 
-  async getValue(locator: Locator): Promise<string> {
+  async getValue(locator: Locator, timeoutMs?: number): Promise<string> {
+    if (timeoutMs === undefined) return this.getValueWithinDeadline(locator);
+    return this.runWithStepTimeout(timeoutMs, () =>
+      this.getValueWithinDeadline(locator),
+    );
+  }
+
+  private async getValueWithinDeadline(locator: Locator): Promise<string> {
     let target: string;
     if (locator.by === "selector") {
       target = locator.selector;
@@ -727,6 +748,32 @@ export class AgentBrowserAdapter implements BrowserBackend {
       );
     }
     return result.stdout;
+  }
+
+  private runWithStepTimeout<T>(
+    timeoutMs: number | undefined,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (timeoutMs === undefined) return operation();
+    const deadline = Date.now() + timeoutMs;
+    const parentDeadline = this.stepDeadline.getStore();
+    return this.stepDeadline.run(
+      parentDeadline === undefined
+        ? deadline
+        : Math.min(parentDeadline, deadline),
+      operation,
+    );
+  }
+
+  private stepTimedOut(): boolean {
+    const deadline = this.stepDeadline.getStore();
+    return deadline !== undefined && Date.now() >= deadline;
+  }
+
+  private stepTimeoutFailure(action: string, start: number): InvocationResult {
+    return this.unresolvedFailure(action, start, [
+      `step exceeded its authored timeout of ${Math.max(0, Date.now() - start)}ms`,
+    ]);
   }
 
   async waitForTimeout(timeoutMs: number): Promise<void> {
@@ -1229,8 +1276,15 @@ export class AgentBrowserAdapter implements BrowserBackend {
       if (needsPin) {
         // hasText/nth can miss mid-transition (invite fade, drawer slide).
         // Poll like semantic locators instead of failing on the first frame.
-        const deadline = start + this.locatorTimeoutMs();
+        const stepDeadline = this.stepDeadline.getStore();
+        const deadline = Math.min(
+          start + this.locatorTimeoutMs(),
+          stepDeadline ?? Number.POSITIVE_INFINITY,
+        );
         while (true) {
+          if (stepDeadline !== undefined && Date.now() >= deadline) {
+            return this.stepTimeoutFailure(action, start);
+          }
           pinned = await this.pinSelectorNth(locator);
           if (pinned.ok) break;
           if (Date.now() >= deadline) {
@@ -1244,6 +1298,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
           return this.unresolvedFailure(action, start, [pinned.detail]);
         }
       }
+      if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
       locator = { ...locator, selector: pinned.selector };
       // Selector locators skip snapshot resolution (agent-browser errors on
       // missing selectors already) but still get the scroll-into-view guard.
@@ -1260,11 +1315,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
       let settle: SelectorRectSettle | undefined;
       if (probeEnabled) {
         const p = await this.prepareLinkClickProbe(locator, locator.selector);
+        if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
         if (p.failure) return p.failure;
         prepared = p.prepared;
         settle = p.settle;
       } else if (action === "click") {
         settle = await this.scrollSelectorIntoViewForClick(locator.selector);
+        if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
       } else if (action === "fill") {
         // Date-ish inputs (<input type=date|time|datetime-local>) swallow
         // agent-browser's keystroke-simulation `fill` — it exits 0 while the
@@ -1279,9 +1336,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
           value ?? "",
           start,
         );
+        if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
         if (handled) return handled;
       } else {
         await this.scrollSelectorIntoView(locator.selector);
+        if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
       }
       if (action === "click") {
         // Same delivery guard the ref path gets from
@@ -1303,17 +1362,21 @@ export class AgentBrowserAdapter implements BrowserBackend {
       if (value !== undefined) argv.push(value);
       appendTypeDelay(argv, action, delayMs);
       const r = await this.invoke(argv);
+      if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
       if (!r.ok) {
         return await this.appendSelectorMatchDiagnostics(r, locator.selector);
       }
       if (action === "click") {
         const delivered = await this.verifyLinkClickDelivery(r, prepared);
-        return await this.verifyAndSettleAfterClick(
+        const settled = await this.verifyAndSettleAfterClick(
           delivered,
           locator,
           undefined,
           settleMsOverride,
         );
+        return this.stepTimedOut()
+          ? this.stepTimeoutFailure(action, start)
+          : settled;
       }
       return r;
     }
@@ -1324,15 +1387,18 @@ export class AgentBrowserAdapter implements BrowserBackend {
       action,
     );
     if (!resolved.ok) return resolved.result;
+    if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
 
     // Best-effort: a failed scroll shouldn't fail the step — the action
     // itself will surface a real problem.
     await this.invoke(["scrollintoview", `@${resolved.element.ref}`]);
+    if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
 
     if (action === "click") {
       const offViewport = await this.detectOffViewportAfterScroll(
         resolved.element.ref!,
       );
+      if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
       if (offViewport) {
         return {
           ...this.unresolvedFailure(action, start, [
@@ -1356,6 +1422,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
             resolved.element,
           )
         : undefined;
+    if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
     if (preparation?.failure) {
       return {
         ...preparation.failure,
@@ -1363,17 +1430,21 @@ export class AgentBrowserAdapter implements BrowserBackend {
       };
     }
     const r = await this.invoke(argv);
+    if (this.stepTimedOut()) return this.stepTimeoutFailure(action, start);
     if (action === "click") {
       const delivered = await this.verifyLinkClickDelivery(
         r,
         preparation?.prepared,
       );
-      return await this.verifyAndSettleAfterClick(
+      const settled = await this.verifyAndSettleAfterClick(
         delivered,
         locator,
         resolved.element,
         settleMsOverride,
       );
+      return this.stepTimedOut()
+        ? this.stepTimeoutFailure(action, start)
+        : settled;
     }
     return { ...r, resolvedElement: toResolvedElement(resolved.element) };
   }
@@ -1563,6 +1634,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
     const probe = prepared;
     const startedAt = Date.now();
     const first = await this.waitForLinkDelivery(probe);
+    if (this.stepTimedOut()) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click delivery exceeded the step timeout: ${first.stderr.trim()}`,
+        startedAt,
+      );
+    }
     if (first.ok) {
       return {
         ...clicked,
@@ -1585,6 +1663,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
 
     const point = await this.linkRetryPoint(probe.target);
+    if (this.stepTimedOut()) {
+      return linkDeliveryFailure(
+        clicked,
+        "link click delivery exceeded the step timeout; physical retry skipped",
+        startedAt,
+      );
+    }
     if (!point.ok) {
       return linkDeliveryFailure(
         clicked,
@@ -1601,6 +1686,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
       ],
       { bail: true },
     );
+    if (this.stepTimedOut()) {
+      return linkDeliveryFailure(
+        clicked,
+        "link click delivery exceeded the step timeout during physical retry",
+        startedAt,
+      );
+    }
     if (!retry.ok) {
       return linkDeliveryFailure(
         clicked,
@@ -1610,6 +1702,13 @@ export class AgentBrowserAdapter implements BrowserBackend {
     }
 
     const second = await this.waitForLinkDelivery(probe);
+    if (this.stepTimedOut()) {
+      return linkDeliveryFailure(
+        clicked,
+        `link click delivery exceeded the step timeout after physical retry: ${second.stderr.trim()}`,
+        startedAt,
+      );
+    }
     if (!second.ok) {
       return linkDeliveryFailure(
         clicked,
@@ -1857,8 +1956,12 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // first read; a genuinely unreachable target (position:fixed taller
     // than the viewport) pays the budget before failing, since re-scrolling
     // is a no-op there.
-    const deadline = Date.now() + OFF_VIEWPORT_SETTLE_MS;
+    const deadline = Math.min(
+      Date.now() + OFF_VIEWPORT_SETTLE_MS,
+      this.stepDeadline.getStore() ?? Number.POSITIVE_INFINITY,
+    );
     for (;;) {
+      if (Date.now() >= deadline) return "step timeout while checking viewport";
       const reason = await this.checkOffViewportOnce(ref);
       if (!reason) return undefined;
       if (Date.now() >= deadline) return reason;
@@ -2008,7 +2111,11 @@ export class AgentBrowserAdapter implements BrowserBackend {
     | { ok: false; result: InvocationResult }
   > {
     const start = Date.now();
-    const deadline = start + Math.max(0, timeoutMs);
+    const stepDeadline = this.stepDeadline.getStore();
+    const deadline = Math.min(
+      start + Math.max(0, timeoutMs),
+      stepDeadline ?? Number.POSITIVE_INFINITY,
+    );
     let lastSnapshot: { ok: boolean; stdout: string; stderr: string } = {
       ok: false,
       stdout: "",
@@ -2024,6 +2131,7 @@ export class AgentBrowserAdapter implements BrowserBackend {
       locator.by === "text" || Boolean("near" in locator && locator.near);
     const snapshotArgv = needsFullSnapshot ? ["snapshot"] : ["snapshot", "-i"];
     while (true) {
+      if (stepDeadline !== undefined && Date.now() >= deadline) break;
       const snapshot = await this.invoke(snapshotArgv);
       lastSnapshot = snapshot;
       if (snapshot.ok) {
@@ -2220,11 +2328,19 @@ export class AgentBrowserAdapter implements BrowserBackend {
       // a healthy-looking but really-unresponsive daemon would burn the
       // whole backoff window before the step surfaces as failed.
       if (result.ok || this.sawChildTimeout) break;
+      const deadline = this.stepDeadline.getStore();
+      const remainingMs =
+        deadline === undefined ? undefined : deadline - Date.now();
+      if (remainingMs !== undefined && remainingMs <= 0) break;
       // A soft deadline kill (screenshot) is not a busy daemon either: the
       // retry would queue behind the same stuck capture.
       if (invokeOpts.softTimeout && DEADLINE_KILL.test(result.stderr)) break;
       if (!isTransientDaemonError(result.stderr)) break;
-      await sleep(backoffMs);
+      await sleep(
+        remainingMs === undefined
+          ? backoffMs
+          : Math.min(backoffMs, remainingMs),
+      );
       result = await this.invokeOnce(argv, invokeOpts);
     }
     return result;
@@ -2245,10 +2361,28 @@ export class AgentBrowserAdapter implements BrowserBackend {
     // hang a run. Cairn owns the primary watchdog because package-manager
     // shims can spawn a native child without forwarding execa's SIGTERM; that
     // orphan keeps inherited pipes open and can double the observed timeout.
-    const timeoutMs =
+    const deadline = this.stepDeadline.getStore();
+    const remainingMs =
+      deadline === undefined ? undefined : deadline - Date.now();
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      return {
+        ok: false,
+        stdout: "",
+        stderr: `step timed out before \`${this.binary} ${describeArgv(argv)}\` could run`,
+        exitCode: -1,
+        durationMs: 0,
+        argv: fullArgv,
+      };
+    }
+    const requestedTimeoutMs =
       invokeOpts.timeoutMs ??
-      this.opts.defaultTimeoutMs ??
-      DEFAULT_COMMAND_TIMEOUT_MS;
+      (remainingMs !== undefined
+        ? remainingMs
+        : (this.opts.defaultTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS));
+    const timeoutMs =
+      remainingMs === undefined
+        ? requestedTimeoutMs
+        : Math.min(requestedTimeoutMs, remainingMs);
     const subprocess = execa(this.binary, fullArgv, {
       reject: false,
       cwd: this.opts.cwd,

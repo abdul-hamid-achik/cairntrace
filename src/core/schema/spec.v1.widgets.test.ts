@@ -139,6 +139,30 @@ describe("F15 widget steps", () => {
 });
 
 describe("F15 click and fill flags", () => {
+  it("accepts positive per-step action deadlines and rejects zero", () => {
+    expect(
+      ok({ click: { by: "selector", selector: "#save" }, timeoutMs: 5_000 }),
+    ).toBe(true);
+    expect(
+      ok({
+        fill: { by: "selector", selector: "#name", value: "Ada" },
+        timeoutMs: 5_000,
+      }),
+    ).toBe(true);
+    expect(
+      ok({
+        type: { by: "selector", selector: "#name", value: "Ada" },
+        timeoutMs: 5_000,
+      }),
+    ).toBe(true);
+    expect(
+      ok({
+        fill: { by: "selector", selector: "#name", value: "Ada" },
+        timeoutMs: 0,
+      }),
+    ).toBe(false);
+  });
+
   it("accepts optional / dispatch / fallback and strips them from the locator", () => {
     const step = StepSchema.parse({
       click: {

@@ -770,6 +770,8 @@ export const ClickStepSchema = z
   .object({
     ...stepCommon,
     click: clickTargetSchema,
+    /** Maximum wall-clock budget for this click, including adapter checks. */
+    timeoutMs: z.number().int().positive().optional(),
     /** Override post-click settling for this interaction. */
     settleMs: z.number().int().min(0).optional(),
   })
@@ -803,6 +805,8 @@ export const FillStepSchema = z
   .object({
     ...stepCommon,
     fill: fillTargetSchema,
+    /** Maximum wall-clock budget for filling and hydration verification. */
+    timeoutMs: z.number().int().positive().optional(),
     /**
      * Re-read the live input value after a short settle and retry a wiped
      * value up to three times. Default true; set false for intentionally
@@ -860,6 +864,8 @@ export const TypeStepSchema = z
   .object({
     ...stepCommon,
     type: typeTargetSchema,
+    /** Maximum wall-clock budget for typing and hydration verification. */
+    timeoutMs: z.number().int().positive().optional(),
     /** Same hydration-wipe guard as `fill`; default true. */
     verifyFill: z.boolean().optional(),
   })

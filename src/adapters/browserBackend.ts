@@ -159,12 +159,12 @@ export interface BrowserBackend {
   }): Promise<ScreenshotResult>;
 
   /* ----- page info (used by outcome verifiers) ----- */
-  getUrl(): Promise<string>;
+  getUrl(timeoutMs?: number): Promise<string>;
   getTitle(): Promise<string>;
-  getText(selector: string): Promise<string>;
-  getCount(selector: string): Promise<number>;
+  getText(selector: string, timeoutMs?: number): Promise<string>;
+  getCount(selector: string, timeoutMs?: number): Promise<number>;
   /** Read the live DOM value of a form control resolved by a spec locator. */
-  getValue(locator: Locator): Promise<string>;
+  getValue(locator: Locator, timeoutMs?: number): Promise<string>;
   /** Backend-native bounded delay; the mock implementation may resolve immediately. */
   waitForTimeout(timeoutMs: number): Promise<void>;
   /**

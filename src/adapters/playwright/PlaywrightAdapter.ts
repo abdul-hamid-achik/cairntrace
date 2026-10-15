@@ -190,6 +190,19 @@ export class PlaywrightAdapter implements BrowserBackend {
     }
     const start = Date.now();
     const page = await this.ensurePage();
+    const stepTimeout = (): number | undefined => {
+      if (
+        !("click" in step || "fill" in step || "type" in step) ||
+        step.timeoutMs === undefined
+      ) {
+        return this.opts.defaultTimeoutMs;
+      }
+      const remaining = step.timeoutMs - (Date.now() - start);
+      if (remaining <= 0) {
+        throw new Error(`browser step timed out after ${step.timeoutMs}ms`);
+      }
+      return remaining;
+    };
     try {
       if ("open" in step) {
         if (typeof step.open === "string") {
@@ -209,10 +222,26 @@ export class PlaywrightAdapter implements BrowserBackend {
         }
       } else if ("click" in step) {
         await this.resolveLocator(clickLocator(step)).click({
-          timeout: this.opts.defaultTimeoutMs,
+          timeout: stepTimeout(),
         });
         if (step.settleMs !== undefined && step.settleMs > 0) {
-          await this.waitForScaledNetworkIdle(page, step.settleMs);
+          const remainingMs =
+            step.timeoutMs === undefined
+              ? step.settleMs
+              : step.timeoutMs - (Date.now() - start);
+          if (remainingMs <= 0) {
+            throw new Error(`click step timed out after ${step.timeoutMs}ms`);
+          }
+          await this.waitForScaledNetworkIdle(
+            page,
+            Math.min(step.settleMs, remainingMs),
+          );
+          if (
+            step.timeoutMs !== undefined &&
+            Date.now() - start >= step.timeoutMs
+          ) {
+            throw new Error(`click step timed out after ${step.timeoutMs}ms`);
+          }
         }
       } else if ("hover" in step) {
         await this.resolveLocator(step.hover).hover({
@@ -230,7 +259,7 @@ export class PlaywrightAdapter implements BrowserBackend {
         // every fill on this call; rerouting date inputs would lose fill()'s
         // format validation ("Malformed value" on a bad date string).
         await this.resolveLocator(fillLocator(step)).fill(step.fill.value, {
-          timeout: this.opts.defaultTimeoutMs,
+          timeout: stepTimeout(),
         });
       } else if ("select" in step) {
         // selectOption matches strictly by value OR label per the authored
@@ -244,7 +273,7 @@ export class PlaywrightAdapter implements BrowserBackend {
       } else if ("type" in step) {
         const { value, delayMs, ...loc } = step.type;
         await this.resolveLocator(loc as Locator).pressSequentially(value, {
-          timeout: this.opts.defaultTimeoutMs,
+          timeout: stepTimeout(),
           ...(delayMs !== undefined ? { delay: delayMs } : {}),
         });
       } else if ("upload" in step) {
@@ -391,7 +420,8 @@ export class PlaywrightAdapter implements BrowserBackend {
     return this.pageOperationWedged;
   }
 
-  async getUrl(): Promise<string> {
+  async getUrl(timeoutMs?: number): Promise<string> {
+    assertReadBudget(timeoutMs, "URL read");
     const page = await this.ensurePage();
     return page.url();
   }
@@ -401,7 +431,8 @@ export class PlaywrightAdapter implements BrowserBackend {
     return page.title();
   }
 
-  async getText(selector: string): Promise<string> {
+  async getText(selector: string, timeoutMs?: number): Promise<string> {
+    assertReadBudget(timeoutMs, "text read");
     const page = await this.ensurePage();
     // Cairntrace's `text` verifier passes the sentinel "page" for whole-body text.
     const target = selector === "page" ? "body" : selector;
@@ -418,10 +449,20 @@ export class PlaywrightAdapter implements BrowserBackend {
       // innerText() does, so wait for the first match explicitly: without it a
       // region that simply hasn't hydrated yet would read as empty — the same
       // vacuous pass this method exists to prevent, in a new costume.
-      await locator
-        .first()
-        .waitFor({ state: "attached", timeout: this.opts.defaultTimeoutMs });
-      return (await locator.allInnerTexts()).join("\n");
+      const readText = async () => {
+        await locator.first().waitFor({
+          state: "attached",
+          timeout: timeoutMs ?? this.opts.defaultTimeoutMs,
+        });
+        return (await locator.allInnerTexts()).join("\n");
+      };
+      return timeoutMs === undefined
+        ? await readText()
+        : await this.hardBoundPageOperation(
+            readText,
+            timeoutMs,
+            `text read timed out after ${timeoutMs}ms`,
+          );
     } catch (e) {
       // Never degrade to "": `notText` reads an empty haystack as "confirmed
       // absent" and `when: notText:…` reads it as satisfied, so a region that
@@ -429,36 +470,40 @@ export class PlaywrightAdapter implements BrowserBackend {
       // exists but holds no text returns "" from innerText without throwing,
       // so only real failures (timeout, detached node, bad selector) land here.
       throw new Error(
-        `could not read text from ${JSON.stringify(selector)}: ${
-          (e as Error).message
-        }`,
+        `could not read text from ${JSON.stringify(selector)}: ${(e as Error).message}`,
         { cause: e },
       );
     }
   }
 
-  async getCount(selector: string): Promise<number> {
+  async getCount(selector: string, timeoutMs?: number): Promise<number> {
+    assertReadBudget(timeoutMs, "count read");
     const page = await this.ensurePage();
     try {
-      return await page.locator(selector).count();
+      const count = () => page.locator(selector).count();
+      return timeoutMs === undefined
+        ? await count()
+        : await this.hardBoundPageOperation(
+            count,
+            timeoutMs,
+            `count read timed out after ${timeoutMs}ms`,
+          );
     } catch (e) {
       // A selector that legitimately matches nothing resolves to 0 without
       // throwing, so anything landing here is malformed or unsupported — never
       // 0, which `count: {equals: 0}` and `atMost` read as a satisfied
       // assertion.
       throw new Error(
-        `could not count elements matching ${JSON.stringify(selector)}: ${
-          (e as Error).message
-        }`,
+        `could not count elements matching ${JSON.stringify(selector)}: ${(e as Error).message}`,
         { cause: e },
       );
     }
   }
 
-  async getValue(locator: Locator): Promise<string> {
+  async getValue(locator: Locator, timeoutMs?: number): Promise<string> {
     try {
       return await this.resolveLocator(locator).inputValue({
-        timeout: this.opts.defaultTimeoutMs,
+        timeout: timeoutMs ?? this.opts.defaultTimeoutMs,
       });
     } catch (e) {
       throw new Error(`could not read input value: ${(e as Error).message}`, {
@@ -1461,6 +1506,15 @@ const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
 const HARD_TIMEOUT_FLOOR_BUFFER_MS = 1_000;
 
 class TimeoutError extends Error {}
+
+function assertReadBudget(
+  timeoutMs: number | undefined,
+  operation: string,
+): void {
+  if (timeoutMs !== undefined && timeoutMs <= 0) {
+    throw new TimeoutError(`${operation} timed out before it started`);
+  }
+}
 
 function waitForContinuousRequestQuiet(
   page: Page,

@@ -92,6 +92,8 @@ Activate a locator. Semantic locators match accessible names (whole-name, case-i
 ```
 
 `click.until` makes at most four attempts in total (the first click plus up to three re-clicks) until `selectorGone`, `selector`, `text`, `notText`, or `url` (same matcher as `wait.url`) holds.
+An optional root-level `timeoutMs` caps the whole click action, including its
+locator checks; with `click.until`, the shorter of the two deadlines wins.
 
 `near: <text>` scopes a locator to the control nearest that visible copy — the Open button in the card titled Acme Corp, not the other two Opens on the page; the Delete in the confirm dialog, not the Delete on the form. Matching is whitespace-normalized and case-insensitive. `hasText: <str>` keeps only matches whose visible text contains that string (also whitespace-normalized, case-insensitive). Use it to pick `Yes` inside `[data-qa="…"]` without an eval:
 
@@ -149,6 +151,9 @@ controls that reveal dependent UI on focus.
 ### `fill`
 
 Set a field's value in one bulk operation.
+An optional root-level `timeoutMs` caps the fill, value readback, and all
+hydration retries together. `type` supports the same cap. The configured
+`waitScale` also scales this authored timeout.
 
 ```yaml
 - fill: { by: label, name: Email, value: "user@example.com" }

@@ -178,18 +178,18 @@ export class MockBrowserBackend implements BrowserBackend {
     return { ok: true, path: opts.path, durationMs: 0 };
   }
 
-  async getUrl(): Promise<string> {
+  async getUrl(_timeoutMs?: number): Promise<string> {
     return this.url;
   }
   async getTitle(): Promise<string> {
     return this.title;
   }
-  async getText(selector: string): Promise<string> {
+  async getText(selector: string, _timeoutMs?: number): Promise<string> {
     return (
       this.textByRegion.get(selector) ?? this.textByRegion.get("page") ?? ""
     );
   }
-  async getCount(selector: string): Promise<number> {
+  async getCount(selector: string, _timeoutMs?: number): Promise<number> {
     return this.countBySelector.get(selector) ?? 0;
   }
   async getValue(locator: Locator): Promise<string> {

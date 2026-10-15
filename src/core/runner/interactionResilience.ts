@@ -116,11 +116,19 @@ export function applyWaitScale(step: Step, waitScale: number): Step {
       },
     };
   }
-  if ("click" in step && step.settleMs !== undefined) {
+  if ("click" in step) {
     return {
       ...step,
-      settleMs: step.settleMs === 0 ? 0 : scale(step.settleMs),
+      ...(step.timeoutMs !== undefined
+        ? { timeoutMs: scale(step.timeoutMs) }
+        : {}),
+      ...(step.settleMs !== undefined
+        ? { settleMs: step.settleMs === 0 ? 0 : scale(step.settleMs) }
+        : {}),
     };
+  }
+  if (("fill" in step || "type" in step) && step.timeoutMs !== undefined) {
+    return { ...step, timeoutMs: scale(step.timeoutMs) } as Step;
   }
   if ("batch" in step) {
     return {
@@ -437,6 +445,9 @@ async function runVerifiedInputStep(
   backend: BrowserBackend,
   waitScale: number,
 ): Promise<InvocationResult> {
+  const startedAt = Date.now();
+  const deadline =
+    step.timeoutMs === undefined ? undefined : startedAt + step.timeoutMs;
   const expected = "fill" in step ? step.fill.value : step.type.value;
   const locator = inputLocator(step);
   let durationMs = 0;
@@ -446,27 +457,76 @@ async function runVerifiedInputStep(
   let readError: string | undefined;
 
   for (let attempt = 0; attempt <= FILL_VERIFY_RETRIES; attempt++) {
+    const remainingMs =
+      deadline === undefined ? undefined : deadline - Date.now();
+    if (remainingMs !== undefined && remainingMs <= 0) {
+      return inputStepTimeout(
+        step.timeoutMs!,
+        Date.now() - startedAt,
+        lastResult,
+      );
+    }
     if (attempt > 0 && "type" in step) {
-      const cleared = await backend.runStep(typeClearStep(step));
+      const cleared = await backend.runStep(typeClearStep(step, remainingMs));
       durationMs += cleared.durationMs;
       resolvedElement = cleared.resolvedElement ?? resolvedElement;
       if (!cleared.ok)
         return mergeInvocation(cleared, durationMs, resolvedElement);
+      if (deadline !== undefined && Date.now() >= deadline) {
+        return inputStepTimeout(
+          step.timeoutMs!,
+          Date.now() - startedAt,
+          cleared,
+        );
+      }
     }
 
-    const result = await backend.runStep(step);
+    const actionRemainingMs =
+      deadline === undefined ? undefined : deadline - Date.now();
+    if (actionRemainingMs !== undefined && actionRemainingMs <= 0) {
+      return inputStepTimeout(
+        step.timeoutMs!,
+        Date.now() - startedAt,
+        lastResult,
+      );
+    }
+    const attemptStep =
+      actionRemainingMs === undefined
+        ? step
+        : ({ ...step, timeoutMs: actionRemainingMs } as FillStep | TypeStep);
+    const result = await backend.runStep(attemptStep);
     durationMs += result.durationMs;
     lastResult = result;
     resolvedElement = result.resolvedElement ?? resolvedElement;
     if (!result.ok) return mergeInvocation(result, durationMs, resolvedElement);
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return inputStepTimeout(step.timeoutMs!, Date.now() - startedAt, result);
+    }
 
-    await waitForTimeout(
-      backend,
-      Math.max(1, Math.round(FILL_VERIFY_SETTLE_MS * waitScale)),
-    );
+    const settleMs = Math.max(1, Math.round(FILL_VERIFY_SETTLE_MS * waitScale));
+    const settleBudget =
+      deadline === undefined
+        ? settleMs
+        : Math.min(settleMs, Math.max(0, deadline - Date.now()));
+    if (settleBudget <= 0) {
+      return inputStepTimeout(step.timeoutMs!, Date.now() - startedAt, result);
+    }
+    await waitForTimeout(backend, settleBudget);
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return inputStepTimeout(step.timeoutMs!, Date.now() - startedAt, result);
+    }
     try {
-      actual = await backend.getValue(locator);
+      const valueBudget =
+        deadline === undefined ? undefined : Math.max(1, deadline - Date.now());
+      actual = await backend.getValue(locator, valueBudget);
       readError = undefined;
+      if (deadline !== undefined && Date.now() >= deadline) {
+        return inputStepTimeout(
+          step.timeoutMs!,
+          Date.now() - startedAt,
+          result,
+        );
+      }
       if (actual === expected) {
         return {
           ...result,
@@ -501,6 +561,24 @@ async function runVerifiedInputStep(
       `hydration wiped value after ${FILL_VERIFY_RETRIES + 1} attempts: ${detail}`,
     ),
     ...(resolvedElement ? { resolvedElement } : {}),
+  };
+}
+
+function inputStepTimeout(
+  timeoutMs: number,
+  durationMs: number,
+  lastResult?: InvocationResult,
+): InvocationResult {
+  const result = lastResult ?? emptyFailure();
+  return {
+    ...result,
+    ok: false,
+    exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+    durationMs,
+    stderr: appendDiagnostic(
+      result.stderr,
+      `input step timed out after ${timeoutMs}ms including hydration retries`,
+    ),
   };
 }
 
@@ -550,6 +628,7 @@ async function runPressUntilStep(
       until,
       waitBudgetMs,
       waitScale,
+      deadline,
     );
     lastObserved = observed.detail;
     if (observed.ok) {
@@ -588,10 +667,14 @@ async function runClickUntilStep(
   waitScale: number,
 ): Promise<InvocationResult> {
   const until = step.click.until!;
-  const timeoutMs = Math.max(
+  const untilTimeoutMs = Math.max(
     1,
     Math.round((until.timeoutMs ?? DEFAULT_CLICK_UNTIL_TIMEOUT_MS) * waitScale),
   );
+  const timeoutMs =
+    step.timeoutMs === undefined
+      ? untilTimeoutMs
+      : Math.min(step.timeoutMs, untilTimeoutMs);
   const deadline = Date.now() + timeoutMs;
   const baseStep: ClickStep = {
     ...step,
@@ -604,12 +687,19 @@ async function runClickUntilStep(
   let clickAttempts = 0;
 
   for (let attempt = 0; attempt < CLICK_UNTIL_MAX_ATTEMPTS; attempt++) {
-    const result = await backend.runStep(baseStep);
+    const remainingBeforeClick = Math.max(0, deadline - Date.now());
+    if (remainingBeforeClick <= 0) break;
+    const attemptStep =
+      step.timeoutMs === undefined
+        ? baseStep
+        : { ...baseStep, timeoutMs: remainingBeforeClick };
+    const result = await backend.runStep(attemptStep);
     clickAttempts++;
     durationMs += result.durationMs;
     lastResult = result;
     resolvedElement = result.resolvedElement ?? resolvedElement;
     if (!result.ok) return mergeInvocation(result, durationMs, resolvedElement);
+    if (Date.now() >= deadline) break;
 
     const remaining = Math.max(0, deadline - Date.now());
     const waitBudgetMs =
@@ -627,6 +717,7 @@ async function runClickUntilStep(
       until,
       waitBudgetMs,
       waitScale,
+      deadline,
     );
     lastObserved = observed.detail;
     if (observed.ok) {
@@ -666,48 +757,57 @@ async function waitForClickCondition(
   until: ClickUntil,
   waitBudgetMs: number,
   waitScale: number,
+  overallDeadline: number,
 ): Promise<{ ok: boolean; detail: string }> {
   let last = "condition not observed";
-  let remaining = waitBudgetMs;
+  const waitDeadline = Math.min(overallDeadline, Date.now() + waitBudgetMs);
   for (;;) {
+    const remaining = Math.max(0, waitDeadline - Date.now());
+    if (remaining <= 0) return { ok: false, detail: last };
     try {
-      const observed = await clickConditionHolds(backend, until);
+      const observed = await clickConditionHolds(backend, until, remaining);
       last = observed.detail;
+      if (Date.now() >= waitDeadline) {
+        return { ok: false, detail: `predicate timed out: ${last}` };
+      }
       if (observed.ok) return observed;
     } catch (error) {
       last = `condition read failed: ${(error as Error).message}`;
     }
-    if (remaining <= 0) return { ok: false, detail: last };
+    const afterReadRemaining = waitDeadline - Date.now();
+    if (afterReadRemaining <= 0) {
+      return { ok: false, detail: `predicate timed out: ${last}` };
+    }
     const delay = Math.min(
-      remaining,
+      afterReadRemaining,
       Math.max(1, Math.round(CONDITION_POLL_MS * waitScale)),
     );
     await waitForTimeout(backend, delay);
-    remaining -= delay;
   }
 }
 
 async function clickConditionHolds(
   backend: BrowserBackend,
   until: ClickUntil,
+  timeoutMs: number,
 ): Promise<{ ok: boolean; detail: string }> {
   if ("selectorGone" in until) {
-    const count = await backend.getCount(until.selectorGone);
+    const count = await backend.getCount(until.selectorGone, timeoutMs);
     return { ok: count === 0, detail: `selector count was ${count}` };
   }
   if ("selector" in until) {
-    const count = await backend.getCount(until.selector);
+    const count = await backend.getCount(until.selector, timeoutMs);
     return { ok: count > 0, detail: `selector count was ${count}` };
   }
   if ("url" in until) {
-    const url = await backend.getUrl();
+    const url = await backend.getUrl(timeoutMs);
     const ok = matchWaitUrl(url, until.url);
     return {
       ok,
       detail: `url ${ok ? "matched" : "was"} ${JSON.stringify(url)}`,
     };
   }
-  const text = await backend.getText("page");
+  const text = await backend.getText("page", timeoutMs);
   if ("text" in until) {
     const ok = textContains(text, until.text);
     return {
@@ -730,11 +830,12 @@ function inputLocator(step: FillStep | TypeStep): Locator {
   return locator as Locator;
 }
 
-function typeClearStep(step: TypeStep): FillStep {
+function typeClearStep(step: TypeStep, timeoutMs?: number): FillStep {
   const { value: _value, delayMs: _delayMs, ...locator } = step.type;
   return {
     fill: { ...locator, value: "" } as FillStep["fill"],
     verifyFill: false,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   };
 }
 

@@ -3000,9 +3000,9 @@ export function buildExplain(): ExplainResult {
         id: "click",
         kind: "interaction",
         summary:
-          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Agent-browser confirms same-tab link delivery by default without network-idle. Optional click.until retries at most four clicks until selectorGone|selector|text|notText|url holds. A positive sibling/spec settleMs or browser.postClickSettleMs opts into network-idle; click/spec values take precedence and 0 skips both the settle and link probe. Flags: optional: true skips (status skipped, skipReason absent) when no visible target exists; dispatch: true fires a DOM click (no pointer, no actionability wait; fails on a disabled target); fallback: dispatch hit-tests the target first and uses the DOM click when the pointer is blocked (detail `pointer blocked by <element>`) or the pointer click fails. run.json records via pointer|dispatch",
+          "Activate a locator. Semantic locators match accessible names (whole-name, case-insensitive; `exact: true` for case-sensitive), scroll into view first, fail loudly on zero or ambiguous matches (`nth` picks among several). Optional root-level timeoutMs caps the whole click step; with click.until, the shorter deadline wins. Agent-browser confirms same-tab link delivery by default without network-idle. Optional click.until retries at most four clicks until selectorGone|selector|text|notText|url holds. A positive sibling/spec settleMs or browser.postClickSettleMs opts into network-idle; click/spec values take precedence and 0 skips both the settle and link probe. Flags: optional: true skips (status skipped, skipReason absent) when no visible target exists; dispatch: true fires a DOM click (no pointer, no actionability wait; fails on a disabled target); fallback: dispatch hit-tests the target first and uses the DOM click when the pointer is blocked (detail `pointer blocked by <element>`) or the pointer click fails. run.json records via pointer|dispatch",
         yamlExample:
-          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: selector, selector: '.company-link', until: { url: { includes: '/connection/' }, timeoutMs: 60000 } }\n    settleMs: 0\n  - click: { by: role, role: button, name: Start task, optional: true }\n  - click: { by: role, role: button, name: Save draft, fallback: dispatch }",
+          "settleMs: 10000\nsteps:\n  - click: { by: role, role: button, name: Save, until: { selectorGone: '#editor', timeoutMs: 12000 } }\n  - click: { by: selector, selector: '.company-link', until: { url: { includes: '/connection/' }, timeoutMs: 60000 } }\n    settleMs: 0\n    timeoutMs: 15000\n  - click: { by: role, role: button, name: Start task, optional: true }\n  - click: { by: role, role: button, name: Save draft, fallback: dispatch }",
       },
       {
         id: "hover",
@@ -3023,15 +3023,15 @@ export function buildExplain(): ExplainResult {
         id: "fill",
         kind: "interaction",
         summary:
-          "Fill a locator with a string value, then re-read the live value after settling; retries three times when hydration wipes it. Set sibling verifyFill: false to opt out for transformed/masked controls. mode: set writes through the native value setter and fires input/change only (no focus, no keydown: an address or autocomplete overlay that opens on typing stays closed), read back the same way; optional: true skips when the control is absent",
+          "Fill a locator with a string value, then re-read the live value after settling; retries three times when hydration wipes it. Optional root-level timeoutMs caps the action, value readback and all hydration retries together. Set sibling verifyFill: false to opt out for transformed/masked controls. mode: set writes through the native value setter and fires input/change only (no focus, no keydown: an address or autocomplete overlay that opens on typing stays closed), read back the same way; optional: true skips when the control is absent",
         yamlExample:
-          "steps:\n  - fill: { by: label, name: Email, value: user@example.com }\n  - fill: { by: label, name: Masked ID, value: '1234' }\n    verifyFill: false\n  - fill: { by: label, name: Address line 1, value: '10 Main Street', mode: set }\n  - fill: { by: label, name: Referral code, value: SPRING, optional: true }",
+          "steps:\n  - fill: { by: label, name: Email, value: user@example.com }\n    timeoutMs: 15000\n  - fill: { by: label, name: Masked ID, value: '1234' }\n    verifyFill: false\n  - fill: { by: label, name: Address line 1, value: '10 Main Street', mode: set }\n  - fill: { by: label, name: Referral code, value: SPRING, optional: true }",
       },
       {
         id: "type",
         kind: "interaction",
         summary:
-          "Type text into a locator character-by-character as real keyboard events (value, optional delayMs per keystroke), then re-read and retry when hydration wipes it (sibling verifyFill: false opts out). Use instead of fill when an SPA framework listens for keydown/input events that fill's bulk value-set doesn't fire",
+          "Type text into a locator character-by-character as real keyboard events (value, optional delayMs per keystroke), then re-read and retry when hydration wipes it (sibling verifyFill: false opts out). Optional root-level timeoutMs caps the action and all hydration retries together. Use instead of fill when an SPA framework listens for keydown/input events that fill's bulk value-set doesn't fire",
         yamlExample:
           "steps:\n  - type: { by: label, name: Email, value: user@example.com }\n  - type: { by: label, name: Code, value: '1234', delayMs: 50 }",
       },

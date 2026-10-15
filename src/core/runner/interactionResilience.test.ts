@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Step } from "../schema/spec.v1";
 import { MockBrowserBackend } from "../../adapters/mock/MockBrowserBackend";
 import { PlaywrightAdapter } from "../../adapters/playwright/PlaywrightAdapter";
@@ -83,6 +83,96 @@ describe("runResilientBrowserStep", () => {
       },
       { type: { by: "selector", selector: "#name", value: "Ada" } },
     ]);
+  });
+
+  it("shares one fill timeout across hydration retries and verification", async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new MockBrowserBackend();
+      backend.enqueueValue("");
+      backend.enqueueValue("Ada");
+      const runStep = backend.runStep.bind(backend);
+      backend.runStep = async (step) => {
+        const result = await runStep(step);
+        vi.advanceTimersByTime(300);
+        return result;
+      };
+      backend.waitForTimeout = async (timeoutMs) => {
+        vi.advanceTimersByTime(timeoutMs);
+      };
+
+      const result = await runResilientBrowserStep(
+        {
+          fill: { by: "selector", selector: "#name", value: "Ada" },
+          timeoutMs: 1_000,
+        },
+        backend,
+        1,
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain(
+        "input step timed out after 1000ms including hydration retries",
+      );
+      expect(backend.stepLog).toHaveLength(2);
+      expect(backend.stepLog[0]).toMatchObject({ timeoutMs: 1_000 });
+      expect(backend.stepLog[1]).toMatchObject({ timeoutMs: 200 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the shorter of a click step deadline and click.until deadline", async () => {
+    const backend = new MockBrowserBackend();
+    const result = await runResilientBrowserStep(
+      {
+        click: {
+          by: "selector",
+          selector: "#save",
+          until: { selectorGone: "#editor", timeoutMs: 10_000 },
+        },
+        timeoutMs: 5_000,
+      },
+      backend,
+      1,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(backend.stepLog).toHaveLength(1);
+    expect(backend.stepLog[0]).toMatchObject({ timeoutMs: 5_000 });
+  });
+
+  it("bounds click.until reads and rejects a predicate that resolves late", async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = new ClickEffectBackend();
+      let receivedTimeout: number | undefined;
+      backend.getCount = async (_selector, timeoutMs) => {
+        receivedTimeout = timeoutMs;
+        vi.advanceTimersByTime((timeoutMs ?? 0) + 1);
+        return 0;
+      };
+
+      const result = await runResilientBrowserStep(
+        {
+          click: {
+            by: "selector",
+            selector: "#save",
+            until: { selectorGone: "#editor", timeoutMs: 1_000 },
+          },
+          timeoutMs: 100,
+        },
+        backend,
+        1,
+      );
+
+      expect(receivedTimeout).toBe(100);
+      expect(result.ok).toBe(false);
+      expect(result.stderr).toContain("predicate timed out");
+      expect(backend.clicks).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("honors verifyFill: false", async () => {
@@ -197,7 +287,7 @@ describe("runResilientBrowserStep", () => {
           by: "role",
           role: "button",
           name: "Save",
-          until: { selectorGone: "#editor", timeoutMs: 50 },
+          until: { selectorGone: "#editor", timeoutMs: 2_000 },
         },
       },
       backend,
@@ -278,7 +368,7 @@ describe("runResilientBrowserStep", () => {
         click: {
           by: "selector",
           selector: ".company-link",
-          until: { url: { includes: "/connection/" }, timeoutMs: 50 },
+          until: { url: { includes: "/connection/" }, timeoutMs: 2_000 },
         },
       },
       backend,
@@ -300,7 +390,7 @@ describe("runResilientBrowserStep", () => {
         click: {
           by: "selector",
           selector: "#save",
-          until: { text: "Saved", timeoutMs: 10 },
+          until: { text: "Saved", timeoutMs: 3_000 },
         },
       },
       backend,
@@ -309,7 +399,7 @@ describe("runResilientBrowserStep", () => {
 
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain(
-      "was not satisfied after 4 click attempts within 10ms",
+      "was not satisfied after 4 click attempts within 3000ms",
     );
     expect(backend.clicks).toBe(4);
   });
@@ -423,7 +513,9 @@ describe("wait scaling", () => {
   it("scales wait, open, settle, and batch wait budgets", () => {
     expect(
       applyWaitScale({ wait: { text: "Ready", timeoutMs: 1_000 } }, 3),
-    ).toEqual({ wait: { text: "Ready", timeoutMs: 3_000 } });
+    ).toEqual({
+      wait: { text: "Ready", timeoutMs: 3_000 },
+    });
     expect(
       applyWaitScale(
         {
@@ -475,6 +567,33 @@ describe("wait scaling", () => {
   it("preserves authored timing at scale 1", () => {
     const step: Step = { wait: { text: "Ready" } };
     expect(applyWaitScale(step, 1)).toBe(step);
+  });
+
+  it("scales authored click, fill, and type action timeouts", () => {
+    expect(
+      applyWaitScale(
+        { click: { by: "selector", selector: "#save" }, timeoutMs: 1_000 },
+        3,
+      ),
+    ).toMatchObject({ timeoutMs: 3_000 });
+    expect(
+      applyWaitScale(
+        {
+          fill: { by: "selector", selector: "#name", value: "Ada" },
+          timeoutMs: 1_000,
+        },
+        3,
+      ),
+    ).toMatchObject({ timeoutMs: 3_000 });
+    expect(
+      applyWaitScale(
+        {
+          type: { by: "selector", selector: "#name", value: "Ada" },
+          timeoutMs: 1_000,
+        },
+        3,
+      ),
+    ).toMatchObject({ timeoutMs: 3_000 });
   });
 });
 

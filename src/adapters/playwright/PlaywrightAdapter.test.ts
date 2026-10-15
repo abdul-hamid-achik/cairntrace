@@ -977,6 +977,67 @@ describe("PlaywrightAdapter wait", () => {
 });
 
 describe("PlaywrightAdapter type", () => {
+  it("forwards per-step deadlines to click, fill, and type", async () => {
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 60_000 });
+    const click = vi.fn((_options?: { timeout?: number }) => Promise.resolve());
+    const fill = vi.fn((_value: string, _options?: { timeout?: number }) =>
+      Promise.resolve(),
+    );
+    const pressSequentially = vi.fn(
+      (_value: string, _options?: { timeout?: number }) => Promise.resolve(),
+    );
+    installPage(adapter, {
+      locator: () => ({ click, fill, pressSequentially }),
+    });
+
+    expect(
+      await adapter.runStep({
+        click: { by: "selector", selector: "#save" },
+        timeoutMs: 123,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await adapter.runStep({
+        fill: { by: "selector", selector: "#name", value: "Ada" },
+        timeoutMs: 234,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await adapter.runStep({
+        type: { by: "selector", selector: "#name", value: "Ada" },
+        timeoutMs: 345,
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect(click.mock.calls[0]?.[0]?.timeout).toBeGreaterThan(0);
+    expect(click.mock.calls[0]?.[0]?.timeout).toBeLessThanOrEqual(123);
+    expect(fill.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
+    expect(fill.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(234);
+    expect(pressSequentially.mock.calls[0]?.[1]?.timeout).toBeGreaterThan(0);
+    expect(pressSequentially.mock.calls[0]?.[1]?.timeout).toBeLessThanOrEqual(
+      345,
+    );
+  });
+
+  it("bounds a click.until text predicate read with its remaining budget", async () => {
+    const waitFor = vi.fn(() => new Promise<void>(() => {}));
+    const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 60_000 });
+    installPage(adapter, {
+      locator: () => ({
+        first: () => ({ waitFor }),
+        allInnerTexts: vi.fn(() => new Promise<string[]>(() => {})),
+      }),
+    });
+
+    const startedAt = Date.now();
+    await expect(adapter.getText("page", 25)).rejects.toThrow(
+      /text read timed out after 25ms/,
+    );
+
+    expect(waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 25 });
+    expect(Date.now() - startedAt).toBeLessThan(250);
+  });
+
   it("types into a locator via pressSequentially (not a silent no-op)", async () => {
     const adapter = new PlaywrightAdapter({ defaultTimeoutMs: 1000 });
     const pressSequentially = vi.fn(() => Promise.resolve());

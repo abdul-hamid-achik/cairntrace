@@ -709,6 +709,26 @@ describe("strict semantic interaction resolution", () => {
     }
   });
 
+  it("takes the first locator snapshot when the implicit timeout is zero", async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: '- main\n  - button "Other" [ref=e1]\n',
+      stderr: "",
+    });
+    const adapter = new AgentBrowserAdapter({
+      session: "zero-locator-timeout",
+      locatorTimeoutMs: 0,
+    });
+
+    const result = await adapter.runStep({
+      click: { by: "role", role: "button", name: "Missing" },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(execaMock).toHaveBeenCalledTimes(1);
+    expect(execaMock.mock.calls[0]![1]).toContain("snapshot");
+  });
+
   it("matches accessible names case-insensitively as whole names", async () => {
     execaMock
       .mockResolvedValueOnce({
@@ -1449,7 +1469,10 @@ describe("screenshot timeout", () => {
       expect(step.stderr).not.toMatch(/timed out/i);
       expect(
         await adapter.screenshot({ path: "/nonexistent/later.png" }),
-      ).toMatchObject({ ok: false, durationMs: 0 });
+      ).toMatchObject({
+        ok: false,
+        durationMs: 0,
+      });
       expect(execaMock).toHaveBeenCalledTimes(2);
 
       const closed = await adapter.close();
@@ -1560,6 +1583,40 @@ describe("child timeout enforcement", () => {
       ["--session", "custom-deadline", "get", "url"],
       expect.objectContaining({ timeout: 10_000 }),
     );
+  });
+
+  it("caps every agent-browser command in an interactive step by timeoutMs", async () => {
+    execaMock
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: '{"dateish":false}',
+        stderr: "",
+      })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
+    const adapter = new AgentBrowserAdapter({
+      session: "step-deadline",
+      defaultTimeoutMs: 100,
+    });
+
+    const result = await adapter.runStep({
+      fill: { by: "selector", selector: "#name", value: "Ada" },
+      timeoutMs: 1_234,
+    });
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: "0",
+      stderr: "",
+    });
+    await expect(adapter.getCount("#editor", 1_000)).resolves.toBe(0);
+
+    expect(result.ok).toBe(true);
+    expect(execaMock).toHaveBeenCalledTimes(3);
+    for (const call of execaMock.mock.calls) {
+      const isCount = (call[1] as string[]).includes("count");
+      const childTimeout = (call[2] as { timeout: number }).timeout;
+      expect(childTimeout).toBeGreaterThan(5_000);
+      expect(childTimeout).toBeLessThanOrEqual(isCount ? 6_000 : 6_234);
+    }
   });
 });
 
